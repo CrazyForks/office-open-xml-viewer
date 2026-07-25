@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { computePages, renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
+import { renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
+import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import {
   segAdvanceWidth,
   segLetterSpacingPx,
@@ -11,8 +12,7 @@ import type {
   DocxTextRun,
   DocxDocumentModel,
   SectionProps,
-  PaginatedBodyElement,
-} from './types';
+  } from './types';
 
 // ECMA-376 §17.6.5 docGrid CHARACTER grid (字詰め). These tests guard the ONE
 // thing the feature must never break: the line-break MEASUREMENT and the draw
@@ -137,13 +137,10 @@ function doc(body: BodyElement[], sec: SectionProps): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
-const sliceOf = (el: PaginatedBodyElement) =>
-  (el as { lineSlice?: { start: number; end: number } }).lineSlice;
-
 /** Lines a paragraph occupies on its (single) page = number of line slices, or 1
  *  when the paragraph fits on one line (no slice tag). For these single-paragraph
  *  fixtures we count the rendered text runs per line instead by re-deriving from
- *  computePages line slices is fragile, so we render and count distinct baselines. */
+ *  retained continuation ranges is fragile, so we render and count distinct baselines. */
 async function renderRun(
   body: BodyElement[],
   sec: SectionProps,
@@ -378,16 +375,14 @@ describe('docGrid character grid — packs more chars per line (§17.6.5)', () =
   const ONE_LINE_PAGE = { pageHeight: 25 };
 
   const linesOf = (text: string, sec: SectionProps): number => {
-    const pages = computePages(
+    const layout = layoutBodyModel(
       [para(text)], sec,
       makeRecordingCanvas().canvas.getContext('2d') as CanvasRenderingContext2D,
     );
     let lines = 0;
-    for (const page of pages) {
-      for (const el of page) {
-        const sl = sliceOf(el);
-        if (sl) lines += sl.end - sl.start;
-        else if (el.type === 'paragraph') lines += 1;
+    for (const page of layout.pages) {
+      for (const node of page.layers.body) {
+        if (node.kind === 'paragraph') lines += node.lines.length;
       }
     }
     return lines;
@@ -430,11 +425,11 @@ describe('docGrid character grid — packs more chars per line (§17.6.5)', () =
       docGridLinePitch: 20,
     });
 
-    const pages = computePages(
+    const layout = layoutBodyModel(
       [bodyParagraph],
       sec,
       makeRecordingCanvas().canvas.getContext('2d') as CanvasRenderingContext2D,
     );
-    expect(pages).toHaveLength(1);
+    expect(layout.pages).toHaveLength(1);
   });
 });

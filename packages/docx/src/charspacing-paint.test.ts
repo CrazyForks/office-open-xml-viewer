@@ -62,6 +62,11 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[] }
       const w = [...s].length * p;
       return {
         width: w,
+        actualBoundingBoxLeft: 0,
+        // The punctuation fixture exposes a selected-glyph right ink edge at
+        // half its full-width cell. Other text fills its complete advance.
+        actualBoundingBoxRight:
+          [...s].length === 1 && /[、．：しない）]/u.test(s) ? p / 2 : w,
         fontBoundingBoxAscent: p * 0.8,
         fontBoundingBoxDescent: p * 0.2,
         actualBoundingBoxAscent: p * 0.8,
@@ -149,6 +154,100 @@ function glyphCenters(fills: FillCall[], chars: string[]): number[] {
 }
 
 describe('run charSpacing/charScale reach the painted glyphs on every branch', () => {
+  it('paints full-width punctuation with the same compressed advance used by layout', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const model = {
+      ...doc([para([
+        textRun('甲乙．', { charSpacing: -0.2 }),
+        textRun('次'),
+      ])], section()),
+      settings: { characterSpacingControl: 'compressPunctuation' },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    const punctuation = drawOf(fills, '甲乙．');
+    const following = drawOf(fills, '次');
+    // The synthetic selected glyph exposes a tight 10pt trailing sidebearing:
+    // (3 × 20) + (3 × -0.2) - 10 = 49.4pt. The compressed punctuation
+    // stays joined to its preceding text so the browser preserves contextual
+    // shaping at that boundary; only the retained trailing advance is trimmed.
+    expect(punctuation.letterSpacing).toBe('-0.2px');
+    expect(following.x - punctuation.x).toBeCloseTo(49.4, 5);
+  });
+
+  it('paints consecutive compressed kana and closing punctuation as one retained group', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const model = {
+      ...doc([para([
+        textRun('希望しない）'),
+        textRun('次'),
+      ])], section()),
+      settings: {
+        characterSpacingControl: 'compressPunctuationAndJapaneseKana',
+      },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    expect(drawOf(fills, 'しない）').letterSpacing).toBe('-10px');
+    expect(fills.some(({ text }) => text === '）')).toBe(false);
+    expect(drawOf(fills, '次').x).toBeCloseTo(80, 5);
+  });
+
+  it('paints a single internal punctuation compression at its retained cluster offsets', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const model = {
+      ...doc([para([textRun('甲、乙')])], section()),
+      settings: { characterSpacingControl: 'compressPunctuation' },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    const first = drawOf(fills, '甲');
+    const punctuation = drawOf(fills, '、');
+    const following = drawOf(fills, '乙');
+    expect(punctuation.letterSpacing).toBe('-10px');
+    expect(punctuation.x - first.x).toBeCloseTo(20, 5);
+    expect(following.x - first.x).toBeCloseTo(30, 5);
+  });
+
+  it('does not collapse middle-punctuation advance into the following glyph', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const model = {
+      ...doc([para([textRun('甲乙・丙丁')])], section()),
+      settings: { characterSpacingControl: 'compressPunctuation' },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    const textFills = fills.filter((fill) => /[甲乙・丙丁]/u.test(fill.text));
+    // `characterSpacingControl` is not a license to remove half an em from
+    // every punctuation cell. U+30FB remains outside the reviewed supported
+    // subset because the public sources do not define an exhaustive character
+    // set; splitting it without evidence would shift the following glyph left.
+    expect(textFills).toEqual([
+      expect.objectContaining({ text: '甲乙・丙丁', letterSpacing: '0px' }),
+    ]);
+  });
+
+  it('retains a full-width middle-punctuation cell before a following Latin run', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const model = {
+      ...doc([para([
+        textRun('E-mail：'),
+        textRun('kifu@example.test', { isLink: true }),
+      ])], section()),
+      settings: { characterSpacingControl: 'compressPunctuation' },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    const label = drawOf(fills, 'E-mail');
+    const address = drawOf(fills, 'kifu@example.test');
+    expect(address.x - label.x).toBeCloseTo(7 * FONT_PX, 5);
+  });
+
   it('horizontal common path: following run starts at the expanded right edge', async () => {
     // run1 4 cps × (20 natural + 2 spacing) = 88; run2 must start +88 from run1.
     const fills = await render([para([
@@ -181,11 +280,8 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
   it('justify path: charSpacing adds to the distributed pitch at the draw', async () => {
     // A justified ('both') CJK paragraph that wraps: line 1 carries run1 (25 cps,
     // w:spacing 2) + a 2-cp prefix of run2, with 10px of slack distributed over
-    // the inter-CJK gaps. The FULLY-distributed draw paints each segment with
-    // ctx.letterSpacing = distPerGap + its own charSpacing, so the two segments'
-    // recorded letterSpacing must differ by exactly the 2px charSpacing, and
-    // run1's pitch must exceed its bare charSpacing (distPerGap > 0 — justify
-    // actually engaged).
+    // the inter-CJK gaps. Acquisition retains contextual text and a uniform
+    // pitch. The two runs' recorded pitch differs by exactly the authored 2px.
     const fills = await render([para(
       [textRun('あ'.repeat(25), { charSpacing: 2 }), textRun('い'.repeat(10))],
       'both',
@@ -196,7 +292,7 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
     expect(r2, 'run2 first-line glyphs painted').toBeDefined();
     const p1 = parseFloat((r1 as FillCall).letterSpacing);
     const p2 = parseFloat((r2 as FillCall).letterSpacing);
-    expect(p1).toBeGreaterThan(2); // distPerGap > 0 on top of the 2px spacing
+    expect((r1 as FillCall).text).toBe('あ'.repeat(25));
     expect(p1 - p2).toBeCloseTo(2, 5); // the §17.3.2.35 component survives justify
   });
 

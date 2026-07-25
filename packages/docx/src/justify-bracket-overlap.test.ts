@@ -130,7 +130,10 @@ type DocRun = DocParagraph['runs'][number];
 
 function para(
   runs: DocxTextRun[],
-  opts: { alignment?: DocParagraph['alignment'] } = {},
+  opts: {
+    alignment?: DocParagraph['alignment'];
+    overflowPunct?: boolean;
+  } = {},
 ): BodyElement {
   const p: DocParagraph = {
     alignment: opts.alignment ?? 'left',
@@ -139,6 +142,7 @@ function para(
     runs: runs.map((r) => ({ type: 'text', ...r }) as DocRun),
     defaultFontSize: FONT_PX, defaultFontFamily: 'NotInMetrics',
     widowControl: false,
+    overflowPunct: opts.overflowPunct,
   };
   return { type: 'paragraph', ...p } as BodyElement;
 }
@@ -212,7 +216,7 @@ describe('justified paragraph (no docGrid) — 約物連続 brackets are drawn c
   //     many single-codepoint draws with letterSpacing '0px'.
   it('draws the fully-distributed justify line as a single contiguous fillText with letterSpacing=distPerGap', async () => {
     const { fillTextCalls } = await render(
-      [para([textRun(TEXT)], { alignment: 'both' })],
+      [para([textRun(TEXT)], { alignment: 'both', overflowPunct: false })],
       section({ pageWidth: PAGE_W }),
     );
     expect(fillTextCalls.length).toBeGreaterThan(0);
@@ -242,7 +246,7 @@ describe('justified paragraph (no docGrid) — 約物連続 brackets are drawn c
   //     and assert the bracket-overlap it produced is GONE.
   it('keeps the opening bracket from overlapping the next glyph (the 分⊂［ regression is gone)', async () => {
     const { runs, fillTextCalls } = await render(
-      [para([textRun(TEXT)], { alignment: 'both' })],
+      [para([textRun(TEXT)], { alignment: 'both', overflowPunct: false })],
       section({ pageWidth: PAGE_W }),
     );
 

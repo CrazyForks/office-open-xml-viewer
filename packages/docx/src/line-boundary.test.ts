@@ -240,6 +240,27 @@ function lineStructure(lines: LayoutLine[]) {
   }));
 }
 
+describe('resumed text segment geometry', () => {
+  it('rebases punctuation compressions after the pagination boundary', () => {
+    const resumed = layoutFixture({
+      name: 'compressed punctuation resume',
+      width: 100,
+      segs: () => [textSeg('甲、乙。丙', {
+        punctuationCompressions: [
+          { end: 2, adjustmentPt: -5 },
+          { end: 4, adjustmentPt: -5 },
+        ],
+      })],
+    }, { segIndex: 0, charOffset: 2 });
+    const first = resumed[0]?.segments[0];
+
+    expect(first && 'text' in first ? first.text : undefined).toBe('乙。丙');
+    expect(first && 'text' in first ? first.punctuationCompressions : undefined)
+      .toEqual([{ end: 2, adjustmentPt: -5 }]);
+    expect(first?.measuredWidth).toBeCloseTo(10, 5);
+  });
+});
+
 function textSequence(lines: LayoutLine[]): string[] {
   return lines.map((line) => line.segments
     .filter((segment): segment is LayoutTextSeg => 'text' in segment)
@@ -250,6 +271,28 @@ function textSequence(lines: LayoutLine[]): string[] {
 function isEnd(boundary: LineBoundary, segCount: number): boolean {
   return boundary.segIndex === segCount && boundary.charOffset === 0;
 }
+
+describe('strict tab-stop alignment aliases', () => {
+  const tabFixture = (alignment: TabStop['alignment']): Fixture => ({
+    name: alignment,
+    width: 100,
+    tabStops: [{ pos: 60, alignment, leader: 'none' }],
+    segs: () => [
+      textSeg('lead'),
+      { isTab: true, fontSize: 10, measuredWidth: 0 },
+      textSeg('tail'),
+    ],
+  });
+
+  it('maps start and num to leading, and end to trailing, in an LTR reading frame', () => {
+    const structure = (alignment: TabStop['alignment']) =>
+      lineStructure(layoutFixture(tabFixture(alignment)));
+
+    expect(structure('start')).toEqual(structure('left'));
+    expect(structure('num')).toEqual(structure('left'));
+    expect(structure('end')).toEqual(structure('right'));
+  });
+});
 
 describe('layoutLines consumed-content boundaries', () => {
   for (const fixture of fixtures) {

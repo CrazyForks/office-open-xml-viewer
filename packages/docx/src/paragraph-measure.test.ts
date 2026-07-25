@@ -9,6 +9,7 @@ import {
   type TextMeasurer,
   type WrapOracle,
 } from './paragraph-measure.js';
+import { measureParagraphIntrinsicWidth } from './layout/frame.js';
 import type { ParagraphLayoutContext } from './layout-context.js';
 import type { LayoutTextSeg } from './line-layout.js';
 import type { DocParagraph, DocxTextRun, FieldRun, ImageRun } from './types.js';
@@ -43,6 +44,7 @@ const environment = (
 ): ParagraphMeasurementEnvironment => ({
   pageIndex: 0,
   totalPages: 1,
+  pageWritingMode: 'horizontal-tb',
   documentHasEastAsianText: false,
   ...overrides,
 });
@@ -116,6 +118,124 @@ const measuredTextSequence = (
   .join(''));
 
 describe('measureParagraph', () => {
+  it('chooses the globally widest gap from one oracle containing every float', () => {
+    const float = (id: string, xLeft: number, xRight: number): FloatRect => ({
+      kind: 'shape', mode: 'square', imageKey: id,
+      imageX: xLeft, imageY: 0, imageW: xRight - xLeft, imageH: 20,
+      xLeft, xRight, yTop: 0, yBottom: 20,
+      side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
+      paraId: 0,
+    });
+    const oracle = createFloatWrapOracle([
+      float('A', 40, 60),
+      float('B', 0, 35),
+    ]);
+
+    expect(oracle.lineWindow({
+      topYPt: 0, minimumStartWidthPt: 1, probeHeightPt: 10,
+      paragraphXPt: 0, maximumWidthPt: 100,
+      columnXPt: 0, columnWidthPt: 100,
+    })).toEqual({ topYPt: 0, xOffsetPt: 60, maximumWidthPt: 40 });
+  });
+
+  it('snapshots compiled polygon geometry once at oracle acquisition', () => {
+    const points = [
+      { xPt: 10, yPt: 0 }, { xPt: 90, yPt: 0 },
+      { xPt: 90, yPt: 80 }, { xPt: 80, yPt: 80 },
+      { xPt: 80, yPt: 20 }, { xPt: 20, yPt: 20 },
+      { xPt: 20, yPt: 80 }, { xPt: 10, yPt: 80 },
+    ];
+    const oracle = createFloatWrapOracle([{
+      kind: 'shape', mode: 'square', authoredWrap: 'through', wrapPolygon: points,
+      imageKey: 'compiled-through', imageX: 10, imageY: 0, imageW: 80, imageH: 80,
+      xLeft: 10, xRight: 90, yTop: 0, yBottom: 80,
+      side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
+      paraId: 0,
+    }]);
+    const query = () => oracle.lineWindow({
+      topYPt: 30, minimumStartWidthPt: 1, probeHeightPt: 10,
+      paragraphXPt: 0, maximumWidthPt: 100,
+      columnXPt: 0, columnWidthPt: 100,
+    });
+    const acquired = query();
+
+    points[4]!.xPt = 50;
+    points[5]!.xPt = 50;
+
+    expect(query()).toEqual(acquired);
+    expect(acquired).toEqual({ topYPt: 30, xOffsetPt: 20, maximumWidthPt: 60 });
+  });
+
+  it('measures intrinsic width against the authored anchor band without a sentinel width', () => {
+    const doc = paragraph({
+      spaceBefore: 0,
+      spaceAfter: 0,
+      runs: [{ type: 'text', ...textRun('abc def') }],
+    });
+    const context = layoutContext({ spaceBeforePt: 0, spaceAfterPt: 0 });
+
+    expect(measureParagraphIntrinsicWidth(doc, context, 200, measurer, environment())).toBe(35);
+    // A normal 25pt layout wraps at the space into 15pt lines. Intrinsic mode
+    // keeps the 35pt natural line intact, then caps the preferred width to the
+    // real 25pt anchor band.
+    expect(measureParagraphIntrinsicWidth(doc, context, 25, measurer, environment())).toBe(25);
+  });
+
+  it('includes paragraph indents, hanging numbering space, tabs, bidi, and inline resources', () => {
+    const indented = layoutContext({
+      spaceBeforePt: 0, spaceAfterPt: 0,
+      physicalIndentLeftPt: 12, physicalIndentRightPt: 2, firstIndentPt: -6,
+    });
+    const numbered = paragraph({
+      spaceBefore: 0, spaceAfter: 0,
+      numbering: { numId: 1, level: 0, format: 'decimal', text: '1.', indentLeft: 12, tab: 6, suff: 'tab' } as never,
+      runs: [{ type: 'text', ...textRun('A') }],
+    });
+    // The 6pt hanging zone remains inside the 12pt physical left indent.
+    expect(measureParagraphIntrinsicWidth(numbered, indented, 100, measurer, environment())).toBe(13);
+
+    const tabbed = paragraph({
+      spaceBefore: 0, spaceAfter: 0,
+      tabStops: [{ pos: 30, alignment: 'left', leader: 'none' }],
+      runs: [{ type: 'text', ...textRun('A\tB') }],
+    });
+    expect(measureParagraphIntrinsicWidth(
+      tabbed,
+      layoutContext({
+        spaceBeforePt: 0, spaceAfterPt: 0,
+        tabStops: [{ pos: 30, alignment: 'left', leader: 'none' }],
+      }),
+      100,
+      measurer,
+      environment(),
+    )).toBe(35);
+    expect(measureParagraphIntrinsicWidth(
+      { ...tabbed, bidi: true },
+      layoutContext({
+        spaceBeforePt: 0, spaceAfterPt: 0, baseRtl: true,
+        tabStops: [{ pos: 50, alignment: 'left', leader: 'none' }],
+      }),
+      100,
+      measurer,
+      environment(),
+    )).toBe(55);
+
+    const image: ImageRun = {
+      imagePath: 'word/media/inline.png', mimeType: 'image/png',
+      widthPt: 20, heightPt: 10, anchor: false,
+    };
+    expect(measureParagraphIntrinsicWidth(
+      paragraph({ spaceBefore: 0, spaceAfter: 0, runs: [{ type: 'image', ...image }] }),
+      layoutContext({
+        spaceBeforePt: 0, spaceAfterPt: 0,
+        physicalIndentLeftPt: 3, physicalIndentRightPt: 4,
+      }),
+      100,
+      measurer,
+      environment(),
+    )).toBe(27);
+  });
+
   it('measures a no-float paragraph and excludes trailing spacing from contentEndYPt', () => {
     const result = measureParagraph(
       paragraph({ runs: [{ type: 'text', ...textRun('hello') }] }),
@@ -143,7 +263,7 @@ describe('measureParagraph', () => {
       imageX: 0, imageY: 10, imageW: 80, imageH: 30,
       xLeft: 0, xRight: 80, yTop: 10, yBottom: 40,
       side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
-      paraId: 1, drawn: false,
+      paraId: 1,
     };
 
     const result = measureParagraph(
@@ -215,6 +335,66 @@ describe('measureParagraph', () => {
     expect(paragraphOnlyMetrics.contentEndYPt).toBe(22);
   });
 
+  it('applies useFELayout grid-cell allocation to an empty paragraph mark', () => {
+    const tallMeasurer: TextMeasurer = {
+      context: makeContext(0.9, 0.2),
+      fontFamilyClasses: {},
+    };
+    const result = measureParagraph(
+      paragraph({ defaultFontSize: 20 }),
+      layoutContext({
+        lineGrid: { active: true, pitchPt: 20 },
+        spaceBeforePt: 0,
+      }),
+      placement({ startYPt: 0 }),
+      tallMeasurer,
+      environment({ documentHasEastAsianText: false, useFeLayout: true }),
+    );
+
+    // Office compatibility evidence: useFELayout makes the content-less mark
+    // participate in the same Far East whole-cell allocation as a CJK mark.
+    expect(result.markOnly).toBe(true);
+    expect(result.contentEndYPt).toBe(40);
+  });
+
+  it('matches observed Word spacing for an explicit atLeast line on a body grid', () => {
+    const designRatio = 3269 / 2048;
+    const designMeasurer: TextMeasurer = {
+      context: makeContext(designRatio * 0.8, designRatio * 0.2),
+      fontFamilyClasses: {},
+    };
+    const explicitAtLeast = { value: 0, rule: 'atLeast' as const, explicit: true };
+    const result = measureParagraph(
+      paragraph({
+        spaceBefore: 0,
+        spaceAfter: 0,
+        lineSpacing: explicitAtLeast,
+        runs: [
+          { type: 'text', ...textRun('あ', { fontSize: 14, fontFamilyEastAsia: 'Test CJK' }) },
+          { type: 'break', breakType: 'line' },
+          { type: 'text', ...textRun('い', { fontSize: 10, fontFamilyEastAsia: 'Test CJK' }) },
+        ],
+      }),
+      layoutContext({
+        lineGrid: { active: true, pitchPt: 20 },
+        lineSpacing: explicitAtLeast,
+        spaceBeforePt: 0,
+        spaceAfterPt: 0,
+        hasEastAsianText: true,
+      }),
+      placement({ startYPt: 0 }),
+      designMeasurer,
+      environment({ documentHasEastAsianText: true }),
+    );
+
+    // Windows Word leaves the first explicit-atLeast line at its raw 14pt
+    // design height (slightly over one pitch), then keeps the ordinary line at
+    // one 20pt pitch. This is a compatibility fixture, not a normative claim
+    // that §17.3.1.33 or §17.6.5 defines this exception.
+    expect(result.lines.map((line) => line.advancePt))
+      .toEqual([14 * designRatio, 20]);
+  });
+
   it('treats an anchor-only paragraph as a paragraph mark', () => {
     const anchor: ImageRun = {
       imagePath: 'word/media/anchor.png', mimeType: 'image/png',
@@ -247,7 +427,16 @@ describe('measureParagraph', () => {
     );
 
     expect(result.lines.length).toBeGreaterThan(1);
-    expect(new Set(result.lines.map((line) => line.advancePt))).toEqual(new Set([30]));
+    // Base ink is 8pt above/2pt below the baseline. The selected 8pt ruby face
+    // contributes its exact 1.6pt descent above that base ink, so the natural
+    // 10pt line plus the 9.6pt ruby reserve snaps once to the 10pt grid: 20pt.
+    const baseNaturalPt = 10;
+    const rubyReservePt = 8 + 1.6;
+    const gridPitchPt = 10;
+    const expectedAdvancePt = Math.ceil((baseNaturalPt + rubyReservePt) / gridPitchPt)
+      * gridPitchPt;
+    expect(new Set(result.lines.map((line) => line.advancePt)))
+      .toEqual(new Set([expectedAdvancePt]));
   });
 
   it('carries the paragraph-wide ruby advance through continuations', () => {

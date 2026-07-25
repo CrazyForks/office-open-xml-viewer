@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderTextBody } from './renderer.js';
-import { drawEaVertRun } from './vertical-text.js';
+import { drawEaVertRun, drawEaVertRunWithCapability } from './vertical-text.js';
 import type { TextBody, Paragraph } from './types';
 import type { TextRunData } from '@silurus/ooxml-core';
 
@@ -38,10 +38,11 @@ const TR_BRACKET_FE = String.fromCodePoint(0xfe35); // ︵
 const TU_COMMA = '、'; // vo=Tu → substitute U+FE11, upright
 const TU_COMMA_FE = String.fromCodePoint(0xfe11);
 const TR_ROTATE = 'ー'; // vo=Tr, no vertical form → rotate 90°
-// vo=Tr punctuation / white lenticular brackets with a U+FE1x form (issue #969).
+// vo=Tr white lenticular brackets with a U+FE1x form present in the substitute
+// fonts (issue #969) — still substituted upright. The fullwidth colon ： /
+// semicolon ； (FE13/FE14) were dropped from the substitute map (absent in most
+// render fonts) and take a geometric fallback instead — see their own tests below.
 const TR_VFORMS: Array<[string, string]> = [
-  ['：', String.fromCodePoint(0xfe13)], // fullwidth colon → ︓
-  ['；', String.fromCodePoint(0xfe14)], // fullwidth semicolon → ︔
   ['〖', String.fromCodePoint(0xfe17)], // left white lenticular → ︗
   ['〗', String.fromCodePoint(0xfe18)], // right white lenticular → ︘
 ];
@@ -55,6 +56,19 @@ interface DrawCall {
   /** Accumulated translate-x in effect at draw time — the along-column cell
    *  centre for an upright glyph (translate(cx, …) precedes its fillText). */
   tx: number;
+  /** Net scale-y in effect at draw time. −1 for a reflected Tr long-stroke mark
+   *  (ー 〜 ～ → `scale(1, -1)`); +1 otherwise. */
+  sy: number;
+  feature: string;
+}
+
+interface TransformMatrix {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+  e: number;
+  f: number;
 }
 
 /** Normalise an angle to (−π, π] so 0 (upright) and π/2 (sideways) compare cleanly. */
@@ -65,7 +79,11 @@ function norm(a: number): number {
 /** Recording 2D context that tracks the accumulated rotation through a
  *  save/restore stack, so each fillText records the NET rotation the glyph is
  *  painted under — 0 ≈ upright, +π/2 ≈ sideways/rotated. */
-function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
+function mockCtx(shearSlope?: number): {
+  ctx: CanvasRenderingContext2D;
+  calls: DrawCall[];
+  transforms: TransformMatrix[];
+} {
   let font = `${FONT_PX}px serif`;
   let fillStyle = '';
   let letterSpacing = '0px';
@@ -74,9 +92,33 @@ function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
   let textBaseline: CanvasTextBaseline = 'alphabetic';
   let rotation = 0;
   let tx = 0;
-  const stack: { rotation: number; tx: number }[] = [];
+  let sy = 1;
+  const stack: { rotation: number; tx: number; sy: number }[] = [];
   const px = (): number => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? String(FONT_PX));
   const calls: DrawCall[] = [];
+  const transforms: TransformMatrix[] = [];
+  const style = { fontFeatureSettings: 'normal' };
+  class ScratchCanvas {
+    width: number;
+    height: number;
+    style = style;
+    constructor(width: number, height: number) { this.width = width; this.height = height; }
+    getContext() {
+      const canvas = this;
+      return {
+        canvas, font: '', fillStyle: '#000', textAlign: 'center', textBaseline: 'middle',
+        clearRect() {}, fillText() {},
+        getImageData() {
+          const data = new Uint8ClampedArray(canvas.width * canvas.height * 4);
+          for (let x = 128; x <= 384; x += 1) {
+            const y = Math.round(256 + (shearSlope ?? 0) * (x - 256));
+            data[(y * canvas.width + x) * 4 + 3] = 255;
+          }
+          return { data };
+        },
+      };
+    }
+  }
   const metricsFor = (s: string): TextMetrics => {
     const p = px();
     // Full-width EA glyphs advance one em; ASCII ~half em.
@@ -91,6 +133,7 @@ function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
     } as TextMetrics;
   };
   const ctx = {
+    canvas: shearSlope === undefined ? { style } : new ScratchCanvas(1, 1),
     get font() { return font; }, set font(v: string) { font = v; },
     get fillStyle() { return fillStyle; }, set fillStyle(v: string) { fillStyle = v; },
     get letterSpacing() { return letterSpacing; }, set letterSpacing(v: string) { letterSpacing = v; },
@@ -98,19 +141,23 @@ function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
     get textAlign() { return textAlign; }, set textAlign(v: CanvasTextAlign) { textAlign = v; },
     get textBaseline() { return textBaseline; }, set textBaseline(v: CanvasTextBaseline) { textBaseline = v; },
     measureText: (s: string) => metricsFor(s),
-    fillText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, tx }),
-    strokeText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, tx }),
-    save: () => { stack.push({ rotation, tx }); },
-    restore: () => { const s = stack.pop(); if (s) { rotation = s.rotation; tx = s.tx; } },
+    fillText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, tx, sy, feature: style.fontFeatureSettings }),
+    strokeText: (t: string, x: number, y: number) => calls.push({ text: t, x, y, rot: rotation, tx, sy, feature: style.fontFeatureSettings }),
+    save: () => { stack.push({ rotation, tx, sy }); },
+    restore: () => { const s = stack.pop(); if (s) { rotation = s.rotation; tx = s.tx; sy = s.sy; } },
     translate: (x: number) => { tx += x; },
     rotate: (a: number) => { rotation += a; },
-    scale: () => {},
+    scale: (_sx: number, syArg: number) => { sy *= syArg; },
+    transform: (a: number, b: number, c: number, d: number, e: number, f: number) => {
+      transforms.push({ a, b, c, d, e, f });
+      sy *= d;
+    },
     beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, stroke: () => {},
     clip: () => {}, rect: () => {}, fillRect: () => {}, drawImage: () => {},
     setLineDash: () => {}, closePath: () => {}, arc: () => {},
     strokeStyle: '#000', lineWidth: 1, lineJoin: 'miter' as CanvasLineJoin,
   };
-  return { ctx: ctx as unknown as CanvasRenderingContext2D, calls };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, calls, transforms };
 }
 
 function run(text: string): TextRunData {
@@ -186,7 +233,7 @@ describe('pptx eaVert — UAX#50 per-glyph orientation (§20.1.10.83, issue #790
   });
 
   it.each(TR_VFORMS)(
-    'SUBSTITUTES the vo=Tr colon/semicolon/lenticular %s with its U+FE1x vertical form, drawn upright (issue #969)',
+    'SUBSTITUTES the vo=Tr white lenticular %s with its U+FE1x vertical form, drawn upright (issue #969)',
     (orig, fe) => {
       const calls = renderEaVert(orig);
       expect(calls.some((c) => c.text === orig), `original ${orig} is not painted`).toBe(false);
@@ -196,11 +243,41 @@ describe('pptx eaVert — UAX#50 per-glyph orientation (§20.1.10.83, issue #790
     },
   );
 
-  it('ROTATES a vo=Tr glyph with no vertical form (ー U+30FC) with the page (+90°)', () => {
-    const calls = renderEaVert(TR_ROTATE);
-    const mark = calls.filter((c) => c.text === TR_ROTATE);
-    expect(mark.length, 'ー is painted as its own glyph').toBe(1);
-    expect(norm(mark[0].rot), 'ー rotates 90° (the Tr fallback)').toBeCloseTo(SIDEWAYS, 5);
+  it('ROTATES the vo=Tr colon ： (geometric fallback → FE13 side-by-side dots) (issue #969)', () => {
+    // FE13 is absent from most render fonts, so the colon is NOT substituted; it
+    // rotates with the page like ー — a 90° rotation turns the base ：'s two
+    // vertically-stacked dots into FE13's side-by-side dots (Word-verified).
+    const calls = renderEaVert('：');
+    const mark = calls.filter((c) => c.text === '：');
+    expect(mark.length, '： is painted as its own glyph (not substituted)').toBe(1);
+    expect(norm(mark[0].rot), '： rotates 90° (the Tr fallback)').toBeCloseTo(SIDEWAYS, 5);
+  });
+
+  it('draws the vo=Tr semicolon ； UPRIGHT (geometric fallback → FE14 dot-over-comma) (issue #969)', () => {
+    // FE14 is an upright dot-over-comma, NOT a rotation, so the semicolon's fallback
+    // is UPRIGHT (Word/JIS-verified) rather than the generic Tr rotate.
+    const calls = renderEaVert('；');
+    const mark = calls.filter((c) => c.text === '；');
+    expect(mark.length, '； is painted as its own glyph (not substituted)').toBe(1);
+    expect(norm(mark[0].rot), '； stays upright (the FE14 fallback)').toBeCloseTo(UPRIGHT, 5);
+  });
+
+  it.each(['ー', '〜', '～'])(
+    'plain-rotates the unreachable vo=Tr long-stroke mark %s',
+    (mk) => {
+      const mark = renderEaVert(mk).filter((c) => c.text === mk);
+      expect(mark.length, `${mk} is painted as its own glyph`).toBe(1);
+      expect(norm(mark[0].rot), `${mk} rotates 90° (the Tr fallback)`).toBeCloseTo(SIDEWAYS, 5);
+      expect(mark[0].sy, `${mk} is not reflected`).toBe(1);
+    },
+  );
+
+  it('does NOT reflect the vo=Tr colon ： (rotation matches its designed vertical form)', () => {
+    // The colon's FE13 side-by-side dots fall out of the plain rotation (symmetric
+    // under the mirror), so it must NOT get the scale(1,-1) reflection.
+    const mark = renderEaVert('：').filter((c) => c.text === '：');
+    expect(mark.length).toBe(1);
+    expect(mark[0].sy, '： is not reflected (scale-y = +1)').toBe(1);
   });
 
   it('orients a mixed column: CJK upright, Latin sideways, bracket substituted, comma substituted, ー rotated', () => {
@@ -213,6 +290,7 @@ describe('pptx eaVert — UAX#50 per-glyph orientation (§20.1.10.83, issue #790
     expect(at(TU_COMMA_FE), 'comma substituted').toBeTruthy();
     expect(norm(at(TU_COMMA_FE)!.rot)).toBeCloseTo(UPRIGHT, 5);
     expect(norm(at(TR_ROTATE)!.rot)).toBeCloseTo(SIDEWAYS, 5);
+    expect(at(TR_ROTATE)!.sy, 'ー is not reflected in the mixed column').toBe(1);
   });
 });
 
@@ -245,6 +323,51 @@ describe('drawEaVertRun — per-glyph orientation helper', () => {
     drawEaVertRun(ctx, text, 0, 100, FONT_PX, 0, 'fill');
     return calls;
   }
+  it('uses vert only for long marks and keeps other glyphs on manual paths', () => {
+    const { ctx, calls } = mockCtx();
+    drawEaVertRunWithCapability(
+      ctx,
+      'ー〜～、。：；「」“”A',
+      0,
+      100,
+      FONT_PX,
+      0,
+      'fill',
+      () => true,
+    );
+    expect(calls.map((call) => call.text)).toEqual([
+      'ー', '〜', '～', '︑', '︒', '：', '；', '﹁', '﹂', '“', '”', 'A',
+    ]);
+    expect(calls.map((call) => call.feature)).toEqual([
+      '"vert" 1', '"vert" 1', '"vert" 1',
+      'normal', 'normal', 'normal', 'normal', 'normal', 'normal', 'normal', 'normal', 'normal',
+    ]);
+    expect(calls.slice(0, 5).every((call) => norm(call.rot) === -Math.PI / 2)).toBe(true);
+    expect(norm(calls[5].rot)).toBe(0);
+    expect(calls.slice(6, 9).every((call) => norm(call.rot) === -Math.PI / 2)).toBe(true);
+    expect(calls.slice(9).every((call) => norm(call.rot) === 0)).toBe(true);
+    expect(calls.every((call) => call.sy === 1)).toBe(true);
+  });
+  it('keeps a glyph without vert coverage on the plain geometric fallback', () => {
+    const { ctx, calls } = mockCtx();
+    drawEaVertRunWithCapability(
+      ctx,
+      'ー〜',
+      0,
+      100,
+      FONT_PX,
+      0,
+      'fill',
+      (cp) => cp === 0x30fc,
+    );
+    expect(calls.map((call) => call.feature)).toEqual(['"vert" 1', 'normal']);
+    expect(calls.map((call) => call.sy)).toEqual([1, 1]);
+  });
+  it('does not install a fallback mirror or shear matrix', () => {
+    const { ctx, transforms } = mockCtx(0.125);
+    drawEaVertRun(ctx, 'ー', 0, 100, FONT_PX, 0, 'fill');
+    expect(transforms).toEqual([]);
+  });
   it('counter-rotates vo=U glyphs by −90° (upright in the +90° page frame)', () => {
     const calls = runHelper(U_CJK);
     expect(norm(calls[0].rot)).toBeCloseTo(-Math.PI / 2, 5);
@@ -261,10 +384,11 @@ describe('drawEaVertRun — per-glyph orientation helper', () => {
     expect(runHelper(TU_COMMA)[0].text).toBe(TU_COMMA_FE);
     expect(norm(runHelper(TU_COMMA)[0].rot)).toBeCloseTo(-Math.PI / 2, 5);
   });
-  it('leaves vo=Tr ー rotated with the page (no counter-rotation, no substitution)', () => {
+  it('leaves vo=Tr ー plain-rotated with the page (no local transform or substitution)', () => {
     const calls = runHelper(TR_ROTATE);
     expect(calls[0].text).toBe(TR_ROTATE);
     expect(norm(calls[0].rot)).toBeCloseTo(0, 5);
+    expect(calls[0].sy, 'ー is not reflected').toBe(1);
   });
   it('advances each cell by measure + letterSpacingPx (the justification pitch)', () => {
     const { ctx: c0, calls: k0 } = mockCtx();

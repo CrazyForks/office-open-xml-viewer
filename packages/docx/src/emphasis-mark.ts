@@ -15,10 +15,10 @@
 // advance (they are an overlay, exactly like the ruby / highlight decorations),
 // so layout metrics are untouched. The one metric consequence — a tall mark can
 // reach into the previous line's descent region when the line box is tight — is
-// deliberately NOT compensated here: Word widens line spacing for emphasised
-// text, but the exact reservation is not specified, so we render the mark in the
-// existing line box and accept possible overlap on very tight leading. See the
-// module test + the renderer call site for the rationale.
+// deliberately NOT compensated here. Line-box reservation for a tall emphasis
+// mark is unsupported because ECMA-376 does not specify the geometry. The mark
+// remains in the existing line box, with possible overlap under very tight
+// leading. See the module test and renderer call site for the boundary.
 
 import type { EmphasisMark } from './types';
 

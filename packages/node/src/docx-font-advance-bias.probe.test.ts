@@ -3,7 +3,7 @@
  *
  * Layer 1 — ACCEPTANCE, font-present ground-truth parity: on a host that has a
  * document's fonts, wrap positions must match Word. This layer is enforced by
- * the demo/sample-1 fidelity ratchet (Playwright VRT; Georgia bias) and the
+ * the demo/sample-1 fidelity ratchet (Playwright VRT) and the
  * synthetic Word-verified §17.18.44 gates in
  * packages/docx/src/justify-shrink-overshoot.test.ts. It also covers behavior
  * that survives substitution, such as the non-justified drawable trailing-space
@@ -29,7 +29,11 @@ import {
   installOffscreenCanvasShim,
   type NodeCanvasFactory,
 } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import {
+  importForTests,
+  loadDocxRendererForTests,
+  loadSkiaForTests,
+} from './test-imports';
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
@@ -44,39 +48,26 @@ const factory: NodeCanvasFactory = {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
-const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
 const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
-const rendererMod = skia
-  ? await importForTests(() => import(RENDERER_PATH), 'packages/docx/src/renderer.ts')
-  : null;
+const rendererMod = skia ? await loadDocxRendererForTests() : null;
 
 const samplePath = (n: number) => resolve(ROOT, `packages/docx/public/private/sample-${n}.docx`);
 const have = (n: number) => existsSync(samplePath(n));
 
 interface Run { text: string; x: number; y: number; w: number; h: number; fontSize: number }
 
-interface RendererMod {
-  parseDocxAvailable?: boolean;
-  paginateDocument: (doc: unknown) => unknown[][];
-  renderDocumentToCanvas: (
-    doc: unknown,
-    canvas: unknown,
-    pageIndex: number,
-    opts: Record<string, unknown>,
-  ) => Promise<void>;
+function parse(n: number) {
+  return docxMod!.parseDocx(readFileSync(samplePath(n)));
 }
 
-function parse(n: number): unknown {
-  const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => unknown };
-  return parseDocx(readFileSync(samplePath(n)));
-}
-
-/** Page count via the pure paginator (needs the OffscreenCanvas shim). */
+/** Page count via retained layout (needs the OffscreenCanvas shim). */
 function pageCount(n: number, width = 595): number {
   const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
   try {
-    const { paginateDocument } = rendererMod as unknown as RendererMod;
-    return paginateDocument(parse(n)).length;
+    const { createLayoutServices, layoutDocument } = rendererMod!;
+    const doc = parse(n);
+    const layoutServices = createLayoutServices(doc);
+    return layoutDocument(doc, layoutServices, { currentDateMs: 0 }).pages.length;
   } finally {
     restore.forEach((r) => r());
   }
@@ -119,9 +110,9 @@ function recordingCtx(real: CanvasRenderingContext2D, sink: Run[]): CanvasRender
 async function pageLines(n: number, page: number, width = 595): Promise<string[]> {
   const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
   try {
-    const { paginateDocument, renderDocumentToCanvas } = rendererMod as unknown as RendererMod;
+    const { createLayoutServices, renderDocumentToCanvas } = rendererMod!;
     const doc = parse(n);
-    const pages = paginateDocument(doc);
+    const layoutServices = createLayoutServices(doc);
     const runs: Run[] = [];
     const canvas = new Canvas(Math.round(width * 1.5), Math.round(width * 2));
     const realCtx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
@@ -132,8 +123,9 @@ async function pageLines(n: number, page: number, width = 595): Promise<string[]
     await renderDocumentToCanvas(doc, canvas as unknown as never, page, {
       width,
       dpr: 1,
-      prebuiltPages: pages,
-      totalPages: pages.length,
+      layoutServices,
+      currentDate: 0,
+      defaultCurrentDateMs: 0,
     });
     // Column-aware line reconstruction: bucket by baseline y, then within a row
     // split into separate visual lines wherever x jumps by more than ~15% of the
@@ -195,9 +187,14 @@ describe.skipIf(!gate)('issue #794 — per-font advance-bias probes', () => {
   // draw, so it cannot be line-counted here; the synthetic gate +
   // demo/sample-1 VRT ratchet are its acceptance.
 
-  it.skipIf(!have(10))('ACCEPTANCE: sample-10 p1 centred title stays on one line', async () => {
+  it.skipIf(!have(10))('ACCEPTANCE: sample-10 p1 centred title stays on one line', async (context) => {
     const lines = await pageLines(10, 0, 595);
     const norm = (l: string) => l.replace(/\s+/g, '');
+    const title = '横幹連合コンファレンスサンプル原稿';
+    if (!norm(lines.join('')).includes(title)) {
+      context.skip('the installed local fixture is not the centred-title corpus');
+      return;
+    }
     // Word truth (sample-10.pdf p1): the centred main title is one line:
     //   「第 11 回横幹連合コンファレンスサンプル原稿」
     // A substituted MS Mincho over-measures the CJK title by ~+5.96px; Word keeps
@@ -205,7 +202,7 @@ describe.skipIf(!gate)('issue #794 — per-font advance-bias probes', () => {
     // trailing-space shrink budget, which absorbs the overflow — this pin guards
     // that retained path. Historical failure mode: the tail 「サンプル原稿」
     // wraps to a second line.
-    const titleLine = lines.find((l) => norm(l).includes('横幹連合コンファレンスサンプル原稿'));
+    const titleLine = lines.find((l) => norm(l).includes(title));
     // eslint-disable-next-line no-console
     console.log(`[#794 C3] sample-10 title one-line? ${!!titleLine}\n` +
       lines.slice(0, 8).map((l, i) => `  ${i}: ${JSON.stringify(l)}`).join('\n'));

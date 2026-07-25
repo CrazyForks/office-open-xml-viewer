@@ -1,11 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import {
   layoutLines,
+  lineBoxHeight,
   type LayoutSeg,
+  type LayoutImageSeg,
   type LayoutLine,
   type LayoutTextSeg,
   type WrapLayoutCtx,
 } from './line-layout.js';
+import { verticalRunInkExtraPx } from './vertical-text.js';
+import type { VerticalGlyphMeasurementService } from './layout/measurement-capabilities.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 4-1 B2 Stage 1 — scale-invariance characterization of `layoutLines`.
@@ -30,6 +34,38 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface MeasureCall { font: string; text: string; }
+
+function layoutVerticalTestLines(
+  ctx: CanvasRenderingContext2D,
+  segments: LayoutSeg[],
+  verticalGlyphMeasurement: VerticalGlyphMeasurementService = Object.freeze({
+    fingerprint: 'vertical:test-context',
+    measureRunInkExtra: (text: string) => verticalRunInkExtraPx(ctx, text),
+    planRun: () => [],
+  }),
+): LayoutLine[] {
+  return layoutLines(
+    ctx,
+    segments,
+    200,
+    0,
+    1,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    verticalGlyphMeasurement,
+  );
+}
 
 /** A recording 2D-context stub whose glyph advance is EXACTLY `perPx · px · n`
  *  (linear in the font px size). Font-metric ascent/descent are the fixed 0.8/0.2
@@ -89,6 +125,25 @@ function textSeg(text: string, fontSize = 10, extra: Partial<LayoutTextSeg> = {}
   } as LayoutSeg;
 }
 
+function inlineImageSeg(
+  heightPt: number,
+  imagePath = 'word/media/image1.png',
+  anchor = false,
+): LayoutImageSeg {
+  return {
+    imagePath,
+    mimeType: imagePath ? 'image/png' : '',
+    widthPt: 12,
+    heightPt,
+    anchor,
+    anchorXPt: 0,
+    anchorYPt: 0,
+    anchorXFromMargin: false,
+    anchorYFromPara: false,
+    measuredWidth: 0,
+  };
+}
+
 /** Deep-clone segs so a scale=1 call and a scale=s call never share the mutable
  *  `measuredWidth` fields layoutLines writes into the seg objects. */
 function cloneSegs(segs: LayoutSeg[]): LayoutSeg[] {
@@ -129,6 +184,110 @@ function assertScaleLinear(a: LayoutLine[], b: LayoutLine[], s: number, tol = 1e
 const SCALES = [1.5, 2, 3];
 
 describe('layoutLines scale-invariance (Phase 4-1 B2 Stage 1) — LINEAR font, the algorithm is scale-clean', () => {
+  it('fails closed when vertical text has no glyph measurement capability', () => {
+    const { ctx } = makeLinearCtx();
+
+    expect(() => layoutLines(
+      ctx,
+      [textSeg('縦書き', 10, { verticalRun: true })],
+      200,
+      0,
+      1,
+    )).toThrow(/vertical glyph measurement capability is required/i);
+  });
+
+  it('removes horizontal kern compression only for a vertical run', () => {
+    const text = '、。「」ー';
+    const makeCtx = (): CanvasRenderingContext2D => ({
+      font: '10px serif',
+      letterSpacing: '0px',
+      measureText(value: string) {
+        return {
+          width: value === text ? 40 : [...value].length * 10,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    }) as unknown as CanvasRenderingContext2D;
+
+    const horizontal = layoutLines(makeCtx(), [textSeg(text)], 200, 0, 1);
+    const vertical = layoutVerticalTestLines(
+      makeCtx(),
+      [textSeg(text, 10, { verticalRun: true })],
+    );
+    expect(horizontal[0].segments[0].measuredWidth).toBe(40);
+    expect(vertical[0].segments[0].measuredWidth).toBe(50);
+  });
+
+  it('measures a vertical cell sum under the run kerning state', () => {
+    const text = '、。「」ー';
+    let fontKerning: CanvasFontKerning = 'auto';
+    const ctx = {
+      font: '10px serif',
+      letterSpacing: '0px',
+      get fontKerning() { return fontKerning; },
+      set fontKerning(value: CanvasFontKerning) { fontKerning = value; },
+      measureText(value: string) {
+        const charCount = [...value].length;
+        return {
+          // Isolated glyph cells are 10px in every state. Only the contextual
+          // whole run changes: the inherited state compresses it more than the
+          // run's explicit `normal` kerning state.
+          width: charCount === 1 ? 10 : fontKerning === 'normal' ? 40 : 30,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+
+    const lines = layoutVerticalTestLines(
+      ctx,
+      [textSeg(text, 10, { verticalRun: true, kerning: 1 })],
+    );
+
+    expect(lines[0].segments[0].measuredWidth).toBe(50);
+    expect(ctx.fontKerning).toBe('auto');
+  });
+
+  it('measures a vertical run under its kerning state', () => {
+    const text = '、。「」ー';
+    let fontKerning: CanvasFontKerning = 'auto';
+    const measuredStates: CanvasFontKerning[] = [];
+    const ctx = {
+      font: '10px serif',
+      letterSpacing: '0px',
+      get fontKerning() { return fontKerning; },
+      set fontKerning(value: CanvasFontKerning) { fontKerning = value; },
+      measureText(value: string) {
+        measuredStates.push(fontKerning);
+        return {
+          width: [...value].length * 10,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const verticalGlyphMeasurement = Object.freeze({
+      fingerprint: 'vertical:test-context',
+      measureRunInkExtra: (value: string) => verticalRunInkExtraPx(ctx, value),
+      planRun: () => [],
+    }) satisfies VerticalGlyphMeasurementService;
+    layoutVerticalTestLines(
+      ctx,
+      [textSeg(text, 10, { verticalRun: true, kerning: 1 })],
+      verticalGlyphMeasurement,
+    );
+
+    expect(new Set(measuredStates)).toEqual(new Set<CanvasFontKerning>(['normal']));
+    expect(ctx.fontKerning).toBe('auto');
+  });
+
   it('plain Latin wrap: every px field scales ×s, structure invariant', () => {
     // 40 single-letter "words" so the breaker has many wrap points; W=100pt.
     const segs = () => [textSeg(Array.from({ length: 40 }, () => 'w').join(' '))];
@@ -292,5 +451,94 @@ describe('layoutLines scale-dependence under a NON-linear (real-font-like) advan
     // Fewer lines at the larger scale — the exact paginate/paint mismatch the
     // paint loop already guards (paintEnd = min(sliceEnd, lines.length)).
     expect(b.length).toBeLessThan(a.length);
+  });
+});
+
+describe('layoutLines inline-image line-box metrics', () => {
+  it('includes a tall inline image in mixed-line ascent and grid-count metrics', () => {
+    const imageHeightPt = 30;
+    const scale = 2;
+    const { ctx } = makeLinearCtx();
+    const [painted] = layoutLines(
+      ctx,
+      [textSeg('body', 10), inlineImageSeg(imageHeightPt)],
+      200 * scale,
+      0,
+      scale,
+    );
+
+    expect(painted.ascent).toBeCloseTo(imageHeightPt * scale, 8);
+    expect(painted.descent).toBeCloseTo(10 * 0.2 * scale, 8);
+    expect(painted.gridCountSingle).toBeCloseTo(imageHeightPt * scale, 8);
+  });
+
+  it('keeps a mixed text/chart-sentinel line box measure==paint on docGrid', () => {
+    const scale = 2;
+    const grid = { type: 'lines', linePitchPt: 10 };
+    const makeSegs = (): LayoutSeg[] => [textSeg('物', 10), inlineImageSeg(30, '')];
+    const { ctx } = makeLinearCtx();
+    const [measured] = layoutLines(
+      ctx,
+      makeSegs(),
+      200,
+      0,
+      1,
+    );
+    const { ctx: paintCtx } = makeLinearCtx();
+    const [painted] = layoutLines(paintCtx, makeSegs(), 200 * scale, 0, scale);
+
+    const measuredLineBox = lineBoxHeight(
+      null,
+      measured.ascent,
+      measured.descent,
+      1,
+      grid,
+      measured.hasRuby,
+      measured.intendedSingle,
+      measured.eastAsian,
+      measured.gridCountSingle,
+    );
+    const paintedLineBox = lineBoxHeight(
+      null,
+      painted.ascent,
+      painted.descent,
+      scale,
+      grid,
+      painted.hasRuby,
+      painted.intendedSingle,
+      painted.eastAsian,
+      painted.gridCountSingle,
+    );
+
+    expect(paintedLineBox).toBeCloseTo(measuredLineBox * scale, 8);
+  });
+
+  it('keeps image-only metrics scale-linear', () => {
+    const scale = 2;
+    const { ctx } = makeLinearCtx();
+    const [measured] = layoutLines(ctx, [inlineImageSeg(30)], 200, 0, 1);
+
+    const [painted] = layoutLines(ctx, [inlineImageSeg(30)], 200 * scale, 0, scale);
+
+    expect(painted.ascent).toBeCloseTo(measured.ascent * scale, 8);
+    expect(painted.descent).toBeCloseTo(measured.descent * scale, 8);
+    expect(painted.gridCountSingle).toBeCloseTo(measured.gridCountSingle * scale, 8);
+  });
+
+  it('keeps an anchored image out of inline metrics', () => {
+    const scale = 2;
+    const { ctx } = makeLinearCtx();
+    const [textOnlyPainted] = layoutLines(ctx, [textSeg('body', 10)], 200 * scale, 0, scale);
+    const [anchoredPainted] = layoutLines(
+      ctx,
+      [textSeg('body', 10), inlineImageSeg(100, 'word/media/anchor.png', true)],
+      200 * scale,
+      0,
+      scale,
+    );
+
+    expect(anchoredPainted.ascent).toBeCloseTo(textOnlyPainted.ascent, 8);
+    expect(anchoredPainted.descent).toBeCloseTo(textOnlyPainted.descent, 8);
+    expect(anchoredPainted.gridCountSingle).toBeCloseTo(textOnlyPainted.gridCountSingle, 8);
   });
 });

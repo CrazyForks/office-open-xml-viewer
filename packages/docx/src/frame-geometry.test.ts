@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { computeFrameBox, registerFrameFloat } from './frame-geometry.js';
+import {
+  computeFrameBox,
+  pushFloatRect,
+  registerFrameFloat,
+} from './frame-geometry.js';
 import type { FrameBox } from './frame-geometry.js';
 import type { FramePr } from './types.js';
 import type { FloatRect } from './float-layout.js';
@@ -12,14 +16,13 @@ import type { FloatRect } from './float-layout.js';
 // (xLeft/xRight/yTop/yBottom/mode/side), which is what resolveLineFloatWindow
 // consumes to wrap the following body text.
 //
-// Geometry is exercised at scale=1 so px == pt. A representative page:
+// Geometry is exercised directly in canonical points. A representative page:
 //   pageWidth=600, margins L/R/T/B = 100/100/72/72  ⇒ content band [100,500].
 //   A multi-column run would set a narrower contentX/contentW; we model a single
 //   column here as contentX=100, contentW=400 and assert hAnchor="text" snaps to
 //   it (the #513 column-relative contract).
 
 interface MinState {
-  scale: number;
   contentX: number;
   contentW: number;
   marginLeft: number;
@@ -34,7 +37,6 @@ interface MinState {
 
 function makeState(over: Partial<MinState> = {}): MinState {
   return {
-    scale: 1,
     contentX: 100,
     contentW: 400,
     marginLeft: 100,
@@ -65,7 +67,7 @@ function frame(over: Partial<FramePr> = {}): FramePr {
 }
 
 // Cast helper: computeFrameBox/registerFrameFloat read only the MinState subset
-// of RenderState exercised here.
+// of BodyAcquisitionState exercised here.
 const box = (fp: FramePr, st: MinState, paraTop: number, cW: number, cH: number, anchorH: number): FrameBox =>
   computeFrameBox(fp, st as never, paraTop, cW, cH, anchorH);
 const registerFloat = (b: FrameBox, fp: FramePr, st: MinState): void =>
@@ -106,6 +108,75 @@ describe('frame geometry (§17.3.1.11) — drop cap placement', () => {
     expect(f.xRight).toBe(100 + 42 + 8);
     expect(f.yTop).toBe(200);
     expect(f.yBottom).toBe(200 + 42); // h=3×14, vSpace=0
+  });
+});
+
+describe('legacy float transport facts', () => {
+  it('fails closed when a floating-table transport omits tblOverlap', () => {
+    const st = makeState();
+
+    expect(() => pushFloatRect(st as never, {
+      x: 0,
+      y: 0,
+      w: 10,
+      h: 10,
+      dl: 0,
+      dr: 0,
+      dt: 0,
+      db: 0,
+      kind: 'table',
+      mode: 'square',
+      side: 'bothSides',
+      imageKey: '',
+      paraId: 0,
+      avoidOverlap: true,
+    })).toThrow('Floating-table transport omitted tblOverlap');
+  });
+
+  it('keeps a displaced anchor wrap band within the page-right boundary', () => {
+    const st = makeState({
+      pageWidth: 100,
+      floats: [{
+        kind: 'frame',
+        mode: 'square',
+        imageKey: 'blocker',
+        imageX: 0,
+        imageY: 0,
+        imageW: 50,
+        imageH: 50,
+        xLeft: 0,
+        xRight: 50,
+        yTop: 0,
+        yBottom: 50,
+        side: 'bothSides',
+        distLeft: 0,
+        distRight: 0,
+        distTop: 0,
+        distBottom: 0,
+        paraId: 1,
+      }],
+    });
+
+    const placed = pushFloatRect(st as never, {
+      x: 20,
+      y: 10,
+      w: 45,
+      h: 10,
+      dl: 0,
+      dr: 8,
+      dt: 0,
+      db: 0,
+      kind: 'shape',
+      mode: 'square',
+      side: 'bothSides',
+      imageKey: 'moving',
+      paraId: 2,
+      allowOverlap: true,
+      avoidOverlap: true,
+    });
+
+    expect(placed).toMatchObject({ imageX: 20, imageY: 50 });
+    expect(placed.xRight).toBeLessThanOrEqual(100.5);
   });
 });
 

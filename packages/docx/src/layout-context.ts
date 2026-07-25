@@ -2,12 +2,13 @@ import {
   resolveKinsokuRules,
   type KinsokuRules,
 } from '@silurus/ooxml-core';
+import { EAST_ASIAN_RE } from './layout/text.js';
 import {
-  EAST_ASIAN_RE,
   resolveDefaultTabPt,
-  type DocGridCtx,
 } from './line-layout.js';
 import { jcIsFullyJustified, jcStretchesLastLine } from './bidi-line.js';
+import { prepareBodyFrameMetadata } from './layout/frame.js';
+import type { NumberingMarkerGeometry } from './layout/numbering-marker.js';
 import type {
   BodyElement,
   ColumnGeom,
@@ -44,8 +45,11 @@ export interface SectionGridContext {
 export interface SectionLayoutContext {
   readonly geometry: SectionGeom;
   readonly columns: readonly ColumnGeom[];
+  readonly columnSeparator: boolean;
   readonly grid: SectionGridContext;
   readonly textDirection: string;
+  /** Internal retention of §17.6.1 section-level column population direction. */
+  readonly sectionBidi?: boolean;
   readonly verticalAlignment: string;
   readonly lineNumbering?: LineNumbering;
 }
@@ -101,6 +105,13 @@ export interface ParagraphLayoutContext {
   readonly hasEastAsianText: boolean;
   readonly kinsoku: KinsokuRules;
   readonly defaultTabPt: number;
+  /** ECMA-376 §17.3.1.21 — omission on the source paragraph resolves true. */
+  readonly overflowPunct?: boolean;
+  /** Effective marker geometry acquired with the paragraph context and reused
+   * by retained layout instead of shaping the marker a second time. */
+  readonly numberingMarkerGeometry?: NumberingMarkerGeometry;
+  /** ECMA-376 §22.1.2.30 document-wide display-math justification. */
+  readonly mathDefJc?: string;
 }
 
 export interface RunLayoutContext {
@@ -138,6 +149,10 @@ export function documentHasEastAsianText(body: readonly BodyElement[]): boolean 
 export function resolveDocumentLayoutSettings(
   document: DocxDocumentModel,
 ): DocumentLayoutSettings {
+  // This document-level resolver is the session boundary shared by production
+  // and direct layout callers. Preparing source/frame adjacency here keeps
+  // the frozen pagination kernel free of migration setup and caller preconditions.
+  prepareBodyFrameMetadata(document.body);
   return {
     kinsoku: resolveKinsokuRules(document.settings),
     defaultTabPt: resolveDefaultTabPt(document.settings),
@@ -215,6 +230,7 @@ export function resolveSectionLayoutContext(
       footerDistance: section.footerDistance,
     },
     columns: computeSectionColumns(section),
+    columnSeparator: section.columns?.sep === true,
     grid: {
       kind: normalizeGridKind(section.docGridType),
       linePitchPt: section.docGridLinePitch ?? null,
@@ -222,19 +238,9 @@ export function resolveSectionLayoutContext(
         section.docGridCharSpace == null ? null : section.docGridCharSpace / 4096,
     },
     textDirection: section.textDirection ?? 'lrTb',
+    sectionBidi: false,
     verticalAlignment: section.vAlign ?? 'top',
     lineNumbering: section.lineNumbering ?? undefined,
-  };
-}
-
-/** Temporary bridge for call sites that still consume the legacy grid shape. */
-export function toLegacyDocGridContext(
-  section: SectionLayoutContext,
-): DocGridCtx {
-  return {
-    type: section.grid.kind === 'none' ? null : section.grid.kind,
-    linePitchPt: section.grid.linePitchPt,
-    charSpacePt: section.grid.charSpacePt,
   };
 }
 
@@ -313,6 +319,8 @@ export function resolveParagraphLayoutContext(
     hasEastAsianText: paragraphHasEastAsianText(paragraph),
     kinsoku: settings.kinsoku,
     defaultTabPt: settings.defaultTabPt,
+    overflowPunct: paragraph.overflowPunct !== false,
+    mathDefJc: settings.mathDefJc,
   };
 }
 

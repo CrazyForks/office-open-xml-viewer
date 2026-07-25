@@ -4360,6 +4360,76 @@ mod tests {
         );
     }
 
+    /// ECMA-376 §21.1.2.2.7 (`a:pPr@defTabSz`) — the default tab interval used by
+    /// the renderer's wrap-aware tab grid (issue #1006). An explicit value is
+    /// carried through as `def_tab_sz` (EMU); absent yields None (the renderer
+    /// then applies the 1-inch default).
+    #[test]
+    fn test_parse_paragraph_def_tab_sz() {
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let bytes = empty_zip_bytes();
+        let cursor = Cursor::new(bytes.clone());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+        let mut parse_para = |p_pr: &str| -> Paragraph {
+            let xml = format!(
+                r#"<txBody xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><p>{p_pr}<r><t>a</t></r></p></txBody>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let mut tb = parse_text_body(
+                doc.root_element(),
+                &theme,
+                &rels,
+                None,
+                [None; 9],
+                Default::default(),
+                &empty_level_bullets(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                ShapeKind::Sp,
+                &mut zip,
+            );
+            tb.paragraphs.remove(0)
+        };
+
+        // Explicit defTabSz="914400" (1 inch) → Some(914400).
+        assert_eq!(
+            parse_para(r#"<pPr algn="l" defTabSz="914400"/>"#).def_tab_sz,
+            Some(914400),
+            "defTabSz=\"914400\" should parse to Some(914400)"
+        );
+        // Absent → None (renderer supplies the 1-inch default).
+        assert_eq!(
+            parse_para("").def_tab_sz,
+            None,
+            "omitted defTabSz should yield None"
+        );
+        // A non-positive value is ignored (treated as absent).
+        assert_eq!(
+            parse_para(r#"<pPr defTabSz="0"/>"#).def_tab_sz,
+            None,
+            "defTabSz=\"0\" should be ignored"
+        );
+        // Serialized under the camelCase key "defTabSz"; omitted when None.
+        let json = serde_json::to_string(&parse_para(r#"<pPr defTabSz="457200"/>"#)).unwrap();
+        assert!(
+            json.contains("\"defTabSz\":457200"),
+            "expected defTabSz:457200 in JSON; got {json}"
+        );
+        let json_absent = serde_json::to_string(&parse_para("")).unwrap();
+        assert!(
+            !json_absent.contains("defTabSz"),
+            "absent defTabSz must be omitted from JSON; got {json_absent}"
+        );
+    }
+
     /// ECMA-376 §21.1.3.13 (`a:tblPr@rtl`): a right-to-left table sets `rtl=true`
     /// so the renderer can place column 0 at the right edge. Absent/false must be
     /// omitted from the serialized JSON (TableElement.rtl is optional in TS).

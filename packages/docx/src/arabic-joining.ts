@@ -9,6 +9,7 @@ import {
   KASHIDA_SEEN_PREV,
   KASHIDA_WAW_AIN_CUR,
 } from './arabic-joining.generated.js';
+import { wordKashidaFinalFormApplies } from './layout/script-compatibility.js';
 
 export type JoiningType = 'U' | 'C' | 'D' | 'L' | 'R' | 'T';
 
@@ -50,9 +51,9 @@ const TATWEEL = 0x0640;
  * Priority values follow usp10.h SCRIPT_JUSTIFY and Qt's qtextengine.cpp
  * JustificationClass ranking. Letter families follow the ArabicGroup aliases
  * in old HarfBuzz's harfbuzz-arabic.c getArabicProperties. Our class position
- * rules intentionally simplify Qt's shape-form conditions: they are validated
- * against Word's measured kashida output, where Qt's verbatim final-form rules
- * contradict Word. Keep final-letter classes gated by word position below.
+ * rules intentionally simplify Qt's shape-form conditions under
+ * `word-kashida-final-form-priority`. Keep final-letter classes gated by word
+ * position below.
  */
 const SEEN_FAMILY = new Set(KASHIDA_SEEN_PREV);
 const HAH_FAMILY = new Set(KASHIDA_HAH_PREV);
@@ -123,13 +124,15 @@ function candidatePriority(
   // Alef and Waw classes apply only to a word-final following letter. This
   // deliberately prevents a medial alef (for example in الكتابة) outranking a
   // later Normal join.
-  if (beforeCp === lastLetterCp && FINAL_ALEF_LAM_KAF.has(current)) {
+  if (wordKashidaFinalFormApplies(beforeCp, lastLetterCp)
+    && FINAL_ALEF_LAM_KAF.has(current)) {
     return JustificationPriority.Alef;
   }
   if (BEH_FAMILY.has(previous) && RAH_OR_YEH.has(current)) {
     return JustificationPriority.BaRa;
   }
-  if (beforeCp === lastLetterCp && FINAL_WAW.has(current)) {
+  if (wordKashidaFinalFormApplies(beforeCp, lastLetterCp)
+    && FINAL_WAW.has(current)) {
     return JustificationPriority.Waw;
   }
   return JustificationPriority.Normal;

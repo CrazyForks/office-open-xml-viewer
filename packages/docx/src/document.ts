@@ -3,6 +3,7 @@ import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
   unloadGoogleFonts,
+  unloadLocalFontMetrics,
   unregisterEmbeddedFonts,
   WorkerBridge,
   defaultDpr,
@@ -13,17 +14,28 @@ import {
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
-import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
-import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument, dropColorReplacedCache, physicalPageSizePt, type DocxTextRunInfo } from './renderer';
+import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
+import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
+import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
+import { loadDocxLocalFontMetrics } from './local-font-metrics';
+import {
+  attachDocumentLayoutRuntime,
+  documentLayoutRuntimeOf,
+  layoutVariantStoreOf,
+} from './layout/runtime-state.js';
+import type { DeepReadonly, DocumentLayout } from './layout/types.js';
 import type {
   DocumentMeta,
   RenderWorkerRequest,
   RenderWorkerResponse,
   WireRenderPageOptions,
 } from './worker-protocol';
+import { normalizeInternalDocumentModel } from './parser-model.js';
+import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
+import { textRunsForSelectedPage } from './text-run-projection.js';
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`) with the
@@ -39,8 +51,10 @@ export interface LoadOptions extends CoreLoadOptions {
    * 'main' (default): parse in a worker, render on the main thread (current
    * behaviour). 'worker': parse, paginate AND render inside the worker; use
    * {@link DocxDocument.renderPageToBitmap} and paint the returned ImageBitmap
-   * via an `ImageBitmapRenderingContext`. Requires OffscreenCanvas. The math
-   * engine is unavailable in this mode (equations are skipped).
+   * via an `ImageBitmapRenderingContext`. Requires OffscreenCanvas. Documents
+   * needing DOM-only OpenType vertical glyph selection transparently continue
+   * in main mode; {@link DocxDocument.mode} reports the effective mode. The math
+   * engine is unavailable only when the effective mode remains worker.
    */
   mode?: 'main' | 'worker';
 }
@@ -57,7 +71,6 @@ export type RenderPageToBitmapOptions = WireRenderPageOptions & {
 export class DocxDocument {
   private _document: DocxDocumentModel | null = null;
   private _meta: DocumentMeta | null = null;
-  private _pages: PaginatedBodyElement[][] | null = null;
   /** Lazily-built `bookmarkName → 0-based page index` map for internal hyperlink
    *  anchors (IX-nav). Built on first {@link getBookmarkPage} from the paginated
    *  pages (main) or the worker meta's `bookmarkPages` (worker). Nulled by
@@ -79,6 +92,8 @@ export class DocxDocument {
    *  shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in core,
    *  so a web font shared with another open document survives until both go). */
   private _googleFontFaces: FontFace[] = [];
+  /** Exact local faces used for version-adaptive Office line metrics. */
+  private _localMetricFontFaces: FontFace[] = [];
   /** One stable closure per instance: core's path-keyed SVG cache namespaces on
    *  this identity, so two open documents never swap a shared zip path (e.g.
    *  word/media/image1.svg). Reusing one reference also lets the SVG cache hit
@@ -86,12 +101,34 @@ export class DocxDocument {
   private readonly _fetchImage = (path: string, mime: string): Promise<Blob> =>
     this.getImage(path, mime);
 
-  private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
+  private constructor(
+    worker: Worker,
+    mode: 'main' | 'worker',
+    defaultCurrentDateMs: number,
+    wasmUrlOverride?: string | URL,
+  ) {
     this._worker = worker;
     this._mode = mode;
+    attachDocumentLayoutRuntime(this, defaultCurrentDateMs);
     this._bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this._worker, {
       correlate: (res) => res.id,
-      toError: (res) => (res.type === 'error' ? res.message : undefined),
+      toError: (res) => {
+        if (res.type !== 'error') return undefined;
+        return Object.assign(new Error(res.message), {
+          name: res.errorName ?? 'Error',
+          ...(res.code !== undefined ? { code: res.code } : {}),
+          ...(res.reason !== undefined ? { reason: res.reason } : {}),
+          ...(res.outgoingColumnIndex !== undefined
+            ? { outgoingColumnIndex: res.outgoingColumnIndex }
+            : {}),
+          ...(res.outgoingColumnCount !== undefined
+            ? { outgoingColumnCount: res.outgoingColumnCount }
+            : {}),
+          ...(res.incomingColumnCount !== undefined
+            ? { incomingColumnCount: res.incomingColumnCount }
+            : {}),
+        });
+      },
     });
     // Default: the parser WASM emitted next to this bundle, resolved relative to
     // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
@@ -101,6 +138,7 @@ export class DocxDocument {
   }
 
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<DocxDocument> {
+    const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
       throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
@@ -113,12 +151,9 @@ export class DocxDocument {
     } else {
       buffer = source;
     }
-    // Resolve the container on the main thread — before spinning up the worker.
-    // A normal ZIP passes through unchanged; an Agile-encrypted CFB is decrypted
-    // in place when `opts.password` is supplied ([MS-OFFCRYPTO]); a
-    // password-protected file without a password, or a legacy-binary / unknown
-    // CFB, becomes a typed OoxmlError (whose `instanceof` would not survive the
-    // worker boundary, hence the main-thread check).
+    // Resolve the container on the main thread before spinning up the worker.
+    // Container errors remain typed OoxmlError instances here; `instanceof`
+    // would not survive the worker boundary.
     buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
     // The render worker is reachable only through this dynamic import, so
     // main-mode bundles never pull in its (renderer-bearing) chunk.
@@ -126,42 +161,78 @@ export class DocxDocument {
       mode === 'worker'
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
-    const doc = new DocxDocument(worker, mode, opts.wasmUrl);
-    if (opts.math && mode === 'worker') {
-      console.warn(
-        "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
+    const doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
+    try {
+      // In worker mode the worker preloads fonts before paginating (pagination
+      // measures text), so the flag is forwarded; in main mode fonts are loaded
+      // here after parse, before the lazy first pagination.
+      await doc._parse(
+        buffer,
+        opts.maxZipEntryBytes,
+        mode === 'worker' ? !!opts.useGoogleFonts : false,
+        opts.workerTimeoutMs,
       );
+      if (mode === 'worker' && doc._mode === 'main') {
+        console.warn(
+          "[ooxml] mode: 'worker' fell back to main-thread rendering because this document requires DOM OpenType vertical glyph selection.",
+        );
+      }
+      if (opts.math && doc._mode === 'worker') {
+        console.warn(
+          "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
+        );
+      }
+      if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
+        doc._googleFontFaces = await preloadGoogleFonts(
+          docxFontPreloadNames(doc._document),
+          DOCX_GOOGLE_FONTS,
+        );
+      }
+      // ECMA-376 §17.8.1 / §17.8.3 — register the document's embedded fonts (via
+      // the worker's zip-entry extraction) before the lazy first pagination, so
+      // text measures/draws with the authored typeface. Worker mode does this
+      // inside the worker (before it paginates); here it runs on the main thread.
+      if (doc._mode === 'main' && doc._document?.embeddedFonts?.length) {
+        doc._embeddedFontFaces = await loadEmbeddedFonts(doc._document, (p) => doc.getFontBytes(p));
+      }
+      let localMetrics: Awaited<ReturnType<typeof loadDocxLocalFontMetrics>> | undefined;
+      if (doc._mode === 'main' && doc._document) {
+        localMetrics = await loadDocxLocalFontMetrics(doc._document);
+        doc._localMetricFontFaces = localMetrics.faces;
+      }
+      // Equations are converted + rasterized before pagination (which reads their
+      // extents synchronously). Requires the opt-in `math` engine; without it,
+      // equations are skipped (and the engine asset is never bundled). Math is
+      // main-mode only (the engine needs a DOM, absent in workers).
+      let preparedMath;
+      if (doc._mode === 'main' && opts.math && doc._document && documentHasMath(doc._document)) {
+        preparedMath = await prepareMathRuns(doc._document, opts.math);
+      }
+      if (doc._mode === 'main' && doc._document) {
+        const runtime = documentLayoutRuntimeOf(doc);
+        runtime.services = createLayoutServices(doc._document, {
+          localMetrics: localMetrics?.metrics,
+          useGoogleFonts: !!opts.useGoogleFonts,
+          embeddedFaces: doc._embeddedFontFaces,
+          googleFaces: doc._googleFontFaces,
+          mathResources: preparedMath?.records,
+          mathDrawables: preparedMath?.drawables,
+        });
+        const services = runtime.services;
+        const retained = retainRenderWorkerDocumentLayout(
+          doc._document,
+          services,
+          runtime.defaultCurrentDateMs,
+        );
+        // Worker mode must build this layout to return parsedMeta. Main mode does
+        // the same work here so layout failures reject load() in both modes.
+        retained.layoutVariants.defaultLayout;
+      }
+      return doc;
+    } catch (error) {
+      doc.destroy();
+      throw error;
     }
-    // In worker mode the worker preloads fonts before paginating (pagination
-    // measures text), so the flag is forwarded; in main mode fonts are loaded
-    // here after parse, before the lazy first pagination.
-    await doc._parse(
-      buffer,
-      opts.maxZipEntryBytes,
-      mode === 'worker' ? !!opts.useGoogleFonts : false,
-      opts.workerTimeoutMs,
-    );
-    if (mode === 'main' && opts.useGoogleFonts && doc._document) {
-      doc._googleFontFaces = await preloadGoogleFonts(
-        docxFontPreloadNames(doc._document),
-        DOCX_GOOGLE_FONTS,
-      );
-    }
-    // ECMA-376 §17.8.1 / §17.8.3 — register the document's embedded fonts (via
-    // the worker's zip-entry extraction) before the lazy first pagination, so
-    // text measures/draws with the authored typeface. Worker mode does this
-    // inside the worker (before it paginates); here it runs on the main thread.
-    if (mode === 'main' && doc._document?.embeddedFonts?.length) {
-      doc._embeddedFontFaces = await loadEmbeddedFonts(doc._document, (p) => doc.getFontBytes(p));
-    }
-    // Equations are converted + rasterized before pagination (which reads their
-    // extents synchronously). Requires the opt-in `math` engine; without it,
-    // equations are skipped (and the engine asset is never bundled). Math is
-    // main-mode only (the engine needs a DOM, absent in workers).
-    if (mode === 'main' && opts.math && doc._document && documentHasMath(doc._document.body)) {
-      await prepareMathRuns(doc._document.body, opts.math);
-    }
-    return doc;
   }
 
   private async _parse(
@@ -173,20 +244,30 @@ export class DocxDocument {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, maxZipEntryBytes, useGoogleFonts } satisfies RenderWorkerRequest)
+          ? ({ type: 'parse', id, data: buffer, maxZipEntryBytes, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs } satisfies RenderWorkerRequest)
           : ({ type: 'parse', id, data: buffer, maxZipEntryBytes } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
     );
     if (this._mode === 'worker') {
-      this._meta = (res as Extract<RenderWorkerResponse, { type: 'parsedMeta' }>).meta;
+      if (res.type === 'mainThreadVerticalFallback') {
+        const parsed = JSON.parse(
+          new TextDecoder().decode(new Uint8Array(res.documentJson)),
+        ) as DocxDocumentModel;
+        this._document = normalizeInternalDocumentModel(parsed).document;
+        this._meta = null;
+        this._mode = 'main';
+      } else {
+        this._meta = (res as Extract<RenderWorkerResponse, { type: 'parsedMeta' }>).meta;
+      }
     } else {
       // The model arrives as transferred UTF-8 JSON bytes; decode + parse once
       // here (the only serialization on the parse-mode path).
       const { documentJson } = res as Extract<WorkerResponse, { type: 'parsed' }>;
-      this._document = JSON.parse(
+      const parsed = JSON.parse(
         new TextDecoder().decode(new Uint8Array(documentJson)),
       ) as DocxDocumentModel;
+      this._document = normalizeInternalDocumentModel(parsed).document;
     }
   }
 
@@ -194,7 +275,7 @@ export class DocxDocument {
     this._bridge.terminate();
     this._document = null;
     this._meta = null;
-    this._pages = null;
+    documentLayoutRuntimeOf(this).services = null;
     this._bookmarkPages = null;
     this._imageCache.clear();
     // Release the embedded fonts this document added to the shared FontFaceSet
@@ -213,6 +294,10 @@ export class DocxDocument {
     if (this._googleFontFaces.length > 0) {
       unloadGoogleFonts(this._googleFontFaces);
       this._googleFontFaces = [];
+    }
+    if (this._localMetricFontFaces.length > 0) {
+      unloadLocalFontMetrics(this._localMetricFontFaces);
+      this._localMetricFontFaces = [];
     }
     // Release this document's three per-fetchImage image caches: the decoded
     // base raster bitmaps (GPU-backed, shared with pptx/xlsx), the a:clrChange
@@ -287,7 +372,7 @@ export class DocxDocument {
   get pageCount(): number {
     if (this._meta) return this._meta.pageCount;
     if (!this._document) return 0;
-    return this._getPages().length;
+    return this._getLayout()?.pages.length ?? 0;
   }
 
   /** The render mode this engine was loaded with ('main' | 'worker'). A fact for
@@ -315,8 +400,9 @@ export class DocxDocument {
   /**
    * ECMA-376 §17.13.4 — the document's comments (`word/comments.xml`), each with
    * id / author / initials / date / plain-text body. Comments are a data-only
-   * API: they are NOT drawn on the page (Word renders them in a margin pane /
-   * balloons, which this viewer does not reproduce). Use this to build a review
+   * API: they are NOT drawn on the page (authoring applications may display
+   * them in a margin pane / balloons, which this viewer does not reproduce).
+   * Use this to build a review
    * panel, export an annotation list, etc. Returns `[]` when the document has no
    * comments part. The same data is also reachable via `document.comments`.
    */
@@ -344,20 +430,26 @@ export class DocxDocument {
     return this._meta?.endnotes ?? this._document?.endnotes ?? [];
   }
 
-  private _getPages(): PaginatedBodyElement[][] {
-    if (this._pages) return this._pages;
-    if (!this._document) return [];
-    this._pages = paginateDocument(this._document);
-    return this._pages;
+  private _getLayout(): DeepReadonly<DocumentLayout> | null {
+    if (!this._document) return null;
+    const services = documentLayoutRuntimeOf(this).services;
+    if (!services) throw new Error('Document layout services are not initialized');
+    const store = layoutVariantStoreOf(services);
+    if (!store) throw new Error('Document layout variant store is not initialized');
+    return store.defaultLayout;
   }
 
   /** Lazily build (and cache) the `bookmarkName → page index` map from either
    *  the worker meta (worker mode) or the paginated pages (main mode). */
-  private _getBookmarkPages(): Map<string, number> {
+  private _getBookmarkPages(): Map<string, number> | null {
     if (this._bookmarkPages) return this._bookmarkPages;
-    this._bookmarkPages = this._meta
-      ? new Map(this._meta.bookmarkPages)
-      : buildBookmarkPageMap(this._getPages());
+    if (this._meta) {
+      this._bookmarkPages = new Map(this._meta.bookmarkPages);
+      return this._bookmarkPages;
+    }
+    const layout = this._getLayout();
+    if (!layout) return null;
+    this._bookmarkPages = buildBookmarkPageMap(layout);
     return this._bookmarkPages;
   }
 
@@ -375,7 +467,7 @@ export class DocxDocument {
    * meta, built from the same paginated pages as `pageSizes`).
    */
   getBookmarkPage(bookmarkName: string): number | undefined {
-    return this._getBookmarkPages().get(bookmarkName);
+    return this._getBookmarkPages()?.get(bookmarkName);
   }
 
   /**
@@ -399,17 +491,11 @@ export class DocxDocument {
       return s ? { widthPt: s.widthPt, heightPt: s.heightPt } : { widthPt: 0, heightPt: 0 };
     }
     if (!this._document) return { widthPt: 0, heightPt: 0 };
-    const pages = this._getPages();
-    const clamped = Math.max(0, Math.min(pageIndex, pages.length - 1));
-    const g = pages[clamped]?.[0]?.sectionGeom;
-    // The stamped `sectionGeom` is in LOGICAL dims for a vertical (tbRl) section
-    // (pagination runs on the swapped page); `physicalPageSizePt` un-swaps it so
-    // this reports the visible PHYSICAL page box (identity for horizontal docs).
-    return physicalPageSizePt(
-      this._document.section,
-      g?.pageWidth ?? this._document.section.pageWidth,
-      g?.pageHeight ?? this._document.section.pageHeight,
-    );
+    const layout = this._getLayout();
+    if (!layout || layout.pages.length === 0) return { widthPt: 0, heightPt: 0 };
+    const clamped = Math.max(0, Math.min(pageIndex, layout.pages.length - 1));
+    const geometry = layout.pages[clamped]!.geometry;
+    return { widthPt: geometry.widthPt, heightPt: geometry.heightPt };
   }
 
   renderPage(
@@ -423,14 +509,13 @@ export class DocxDocument {
       );
     }
     if (!this._document) throw new Error('Document not loaded');
-    const pages = this._getPages();
     return renderDocumentToCanvas(this._document, target, pageIndex, {
       ...opts,
-      totalPages: pages.length,
-      prebuiltPages: pages,
       // Lazy image bytes: the renderer fetches each embedded blip on demand by
       // zip path (decoded only when drawn) instead of reading inlined base64.
       fetchImage: this._fetchImage,
+      layoutServices: documentLayoutRuntimeOf(this).services ?? undefined,
+      defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
     });
   }
 
@@ -456,9 +541,8 @@ export class DocxDocument {
     const { onTextRun, ...wire } = opts;
     const wireOpts: WireRenderPageOptions = { ...wire, dpr: wire.dpr ?? defaultDpr() };
     if (this._mode === 'worker') {
-      if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= this.pageCount) {
-        throw new Error(`Page index ${pageIndex} out of range (count: ${this.pageCount})`);
-      }
+      // The selected date variant may have a different page count than default
+      // metadata, so the worker validates against the layout it actually paints.
       const res = await this._bridge.request(
         (id) => ({ type: 'renderPage', id, pageIndex, opts: wireOpts }) satisfies RenderWorkerRequest,
       );
@@ -472,12 +556,11 @@ export class DocxDocument {
   }
 
   /**
-   * IX6 — collect a page's text-run geometry (`DocxTextRunInfo[]`) without
-   * painting a visible canvas. Works in BOTH modes: worker mode renders the page
-   * off-thread and ships only the runs (no bitmap transfer); main mode renders
-   * to a throwaway offscreen canvas. Used by the find controller to scan every
-   * page for matches. The geometry is identical to a `renderPage` of the same
-   * page at the same width/dpr.
+   * Collect a page's text-run geometry (`DocxTextRunInfo[]`) directly from the
+   * retained layout. Works in BOTH modes without painting or constructing a
+   * Canvas; worker mode ships only the projected plain-data runs. Used by the
+   * find controller to scan every page. Geometry uses the same selected layout
+   * variant and width scale as `renderPage`; DPR does not change CSS pixels.
    */
   async collectPageRuns(
     pageIndex: number,
@@ -485,20 +568,19 @@ export class DocxDocument {
   ): Promise<DocxTextRunInfo[]> {
     const wireOpts: WireRenderPageOptions = { ...opts, dpr: opts.dpr ?? defaultDpr() };
     if (this._mode === 'worker') {
-      if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= this.pageCount) {
-        throw new Error(`Page index ${pageIndex} out of range (count: ${this.pageCount})`);
-      }
+      // Keep collection validation on the same selected worker layout as paint.
       const res = await this._bridge.request(
         (id) => ({ type: 'collectRuns', id, pageIndex, opts: wireOpts }) satisfies RenderWorkerRequest,
       );
       return (res as Extract<RenderWorkerResponse, { type: 'runsCollected' }>).runs;
     }
-    const runs: DocxTextRunInfo[] = [];
-    const off =
-      typeof OffscreenCanvas !== 'undefined'
-        ? new OffscreenCanvas(1, 1)
-        : (globalThis.document?.createElement('canvas') as HTMLCanvasElement);
-    await this.renderPage(off, pageIndex, { ...wireOpts, onTextRun: (r) => runs.push(r) });
-    return runs;
+    const runtime = documentLayoutRuntimeOf(this);
+    const services = runtime.services;
+    if (!services) throw new Error('Document layout services are not initialized');
+    return textRunsForSelectedPage(services, pageIndex, {
+      currentDate: wireOpts.currentDate,
+      defaultCurrentDateMs: runtime.defaultCurrentDateMs,
+      width: wireOpts.width,
+    });
   }
 }

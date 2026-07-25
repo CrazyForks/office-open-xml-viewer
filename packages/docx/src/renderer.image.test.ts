@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { decodeRaster, preloadImages, dropColorReplacedCache } from './renderer';
-import { dropBitmapCacheByPath } from '@silurus/ooxml-core';
+import { createLayoutServices } from './layout-runtime.js';
+import { decodeRaster, preloadImages } from './test-support/renderer-internals.test-support.js';
+import { dropColorReplacedCache } from './renderer';
+import * as core from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types';
 
 /**
@@ -90,6 +92,128 @@ describe('docx lazy image bytes', () => {
     expect((globalThis.createImageBitmap as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps authored occurrence order when registry key sorting would choose another SVG fallback', async () => {
+    const rasterPath = 'word/media/shared.png';
+    const earlySvgPath = 'word/media/early.svg';
+    const lateSvgPath = 'word/media/late.svg';
+    const paragraphs = Array.from({ length: 11 }, (_, index) => ({
+      type: 'paragraph',
+      runs: index === 2 || index === 10 ? [{
+        type: 'image',
+        imagePath: rasterPath,
+        mimeType: 'image/png',
+        svgImagePath: index === 2 ? earlySvgPath : lateSvgPath,
+        widthPt: 10,
+        heightPt: 10,
+      }] : [],
+    }));
+    const doc = {
+      section: {}, body: paragraphs, headers: {}, footers: {},
+    } as unknown as DocxDocumentModel;
+    const vector = { width: 2, height: 2 } as unknown as HTMLImageElement;
+    const svg = vi.spyOn(core, 'getCachedSvgImageByPath').mockResolvedValue(vector);
+    const fetchImage = vi.fn(async (_path: string, mime: string) => new Blob([], { type: mime }));
+
+    try {
+      const map = await preloadImages(doc, fetchImage);
+      expect(map.get(rasterPath)).toBe(vector);
+      expect(svg).toHaveBeenCalledTimes(1);
+      expect(svg).toHaveBeenCalledWith(earlySvgPath, fetchImage);
+    } finally {
+      svg.mockRestore();
+    }
+  });
+
+  it('uses resolved numbering marker metadata for no-extent picture-bullet decode size', async () => {
+    const path = 'word/media/bullet.wmf';
+    const paragraph = {
+      type: 'paragraph', alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: null, tabStops: [],
+      runs: [{ type: 'text', text: 'body', fontSize: 10 }],
+      numbering: {
+        numId: 1, level: 0, format: 'bullet', text: '', indentLeft: 0, tab: 18,
+        suff: 'tab', picBulletImagePath: path, picBulletMimeType: 'image/x-wmf',
+        fontFacts: { fontSize: 18 },
+      },
+    };
+    const doc = {
+      section: {}, body: [paragraph], headers: {}, footers: {},
+    } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(doc);
+    const bitmap = { width: 2, height: 2, close() {} } as unknown as ImageBitmap;
+    const raster = vi.spyOn(core, 'getCachedBitmapByPath').mockResolvedValue(bitmap);
+    const fetchImage = vi.fn(async (_path: string, mime: string) => new Blob([], { type: mime }));
+
+    try {
+      await preloadImages(doc, fetchImage, services);
+      expect(raster).toHaveBeenCalledWith(
+        path,
+        'image/x-wmf',
+        fetchImage,
+        expect.objectContaining({ widthPt: 18, heightPt: 18 }),
+      );
+    } finally {
+      raster.mockRestore();
+    }
+  });
+
+  it('uses the first text run size when picture-bullet metadata has no explicit font size', async () => {
+    const path = 'word/media/run-sized-bullet.wmf';
+    const paragraph = {
+      type: 'paragraph', alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: null, tabStops: [], defaultFontSize: 10,
+      runs: [{ type: 'text', text: 'body', fontSize: 16 }],
+      numbering: {
+        numId: 1, level: 0, format: 'bullet', text: '', indentLeft: 0, tab: 18,
+        suff: 'tab', picBulletImagePath: path, picBulletMimeType: 'image/x-wmf',
+        fontFacts: {},
+      },
+    };
+    const doc = {
+      section: {}, body: [paragraph], headers: {}, footers: {},
+    } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(doc);
+    const bitmap = { width: 2, height: 2, close() {} } as unknown as ImageBitmap;
+    const raster = vi.spyOn(core, 'getCachedBitmapByPath').mockResolvedValue(bitmap);
+    const fetchImage = vi.fn(async (_path: string, mime: string) => new Blob([], { type: mime }));
+
+    try {
+      await preloadImages(doc, fetchImage, services);
+      expect(raster).toHaveBeenCalledWith(
+        path,
+        'image/x-wmf',
+        fetchImage,
+        expect.objectContaining({ widthPt: 16, heightPt: 16 }),
+      );
+    } finally {
+      raster.mockRestore();
+    }
+  });
+
+  it('propagates a corrupt image decode and allows a later retry', async () => {
+    const path = 'word/media/corrupt.png';
+    const fetchImage = vi.fn(
+      async (_path: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }),
+    );
+    const doc = {
+      body: [{
+        type: 'paragraph',
+        runs: [{ type: 'image', imagePath: path, mimeType: 'image/png', widthPt: 10, heightPt: 10 }],
+      }],
+      headers: {},
+      footers: {},
+    } as unknown as DocxDocumentModel;
+    const decode = globalThis.createImageBitmap as ReturnType<typeof vi.fn>;
+    decode.mockRejectedValueOnce(new Error('corrupt PNG payload'));
+
+    await expect(preloadImages(doc, fetchImage)).rejects.toThrow('corrupt PNG payload');
+    await expect(preloadImages(doc, fetchImage)).resolves.toEqual(new Map([
+      [path, expect.any(Object)],
+    ]));
+    expect(fetchImage).toHaveBeenCalledTimes(2);
+    expect(decode).toHaveBeenCalledTimes(2);
+  });
+
   it('a recoloured ref reuses the shared base bitmap: distinct map key, ONE fetch/decode', async () => {
     // The colorReplaceFrom variant is a distinct cache key (its make-transparent
     // result differs), but its BASE bitmap now comes from the shared path-keyed
@@ -126,7 +250,7 @@ describe('docx lazy image bytes', () => {
       expect(map.get('word/media/image1.png')).not.toBe(map.get('word/media/image1.png|clr:FFFFFF'));
     } finally {
       dropColorReplacedCache(fetchImage);
-      dropBitmapCacheByPath(fetchImage);
+      core.dropBitmapCacheByPath(fetchImage);
     }
   });
 
@@ -145,7 +269,42 @@ describe('docx lazy image bytes', () => {
       expect((globalThis.createImageBitmap as ReturnType<typeof vi.fn>).mock.calls.length).toBe(decodesAfterFirst);
     } finally {
       dropColorReplacedCache(fetchImage);
-      dropBitmapCacheByPath(fetchImage);
+      core.dropBitmapCacheByPath(fetchImage);
+    }
+  });
+
+  it('defers closing a cached recolour until the active render lease is released', async () => {
+    stubOffscreen();
+    const base = { width: 2, height: 2, close: vi.fn() } as unknown as ImageBitmap;
+    const recoloured = { width: 2, height: 2, close: vi.fn() } as unknown as ImageBitmap;
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn()
+        .mockResolvedValueOnce(base)
+        .mockResolvedValueOnce(recoloured),
+    );
+    const fetchImage = vi.fn(
+      async (_path: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }),
+    );
+    const release = core.acquireBitmapCacheLease(fetchImage);
+
+    try {
+      expect(await decodeRaster(
+        'word/media/image1.png',
+        'image/png',
+        'FFFFFF',
+        fetchImage,
+      )).toBe(recoloured);
+      dropColorReplacedCache(fetchImage);
+      await Promise.resolve();
+      expect(recoloured.close).not.toHaveBeenCalled();
+
+      release();
+      await Promise.resolve();
+      expect(recoloured.close).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      core.dropBitmapCacheByPath(fetchImage);
     }
   });
 
@@ -166,7 +325,7 @@ describe('docx lazy image bytes', () => {
       expect((globalThis.createImageBitmap as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(2);
     } finally {
       dropColorReplacedCache(fetchImage);
-      dropBitmapCacheByPath(fetchImage);
+      core.dropBitmapCacheByPath(fetchImage);
     }
   });
 
@@ -205,7 +364,7 @@ describe('docx lazy image bytes', () => {
       expect(fetchImage).toHaveBeenCalledTimes(1);
     } finally {
       dropColorReplacedCache(fetchImage);
-      dropBitmapCacheByPath(fetchImage);
+      core.dropBitmapCacheByPath(fetchImage);
     }
   });
 

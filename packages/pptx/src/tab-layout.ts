@@ -30,13 +30,20 @@ export interface TabStopPx {
  * visual gap and the cumulative draw reproduces the mirrored stops.
  *
  * `dec` aligns like `r` (frac 1): true decimal-point splitting is not
- * implemented — the same approximation docx uses. DrawingML defines no
- * automatic tab grid (there is no `defTabSz` support in this parser), so a
- * tab with no reachable stop degrades to `noStopGap` (a space width,
- * preserving the pre-#916 behaviour). Two clamps mirror docx: a cell whose
- * far edge would cross `limit` (the trailing text-inset edge) is pinned to it
- * (#835 — Word never pushes a cell off the text area), and a tab never moves
- * the pen backwards.
+ * implemented — the same approximation docx uses. When a tab has no reachable
+ * explicit stop, the DrawingML default tab grid applies (§21.1.2.1.1 /
+ * §21.1.2.2.7 `defTabSz`, PowerPoint default 1 inch): `defTabSz > 0` synthesises
+ * a LEFT stop at the next grid multiple strictly past the pen. With `defTabSz`
+ * 0 (the pure default, e.g. the unit tests) the tab instead degrades to
+ * `noStopGap` (a space width, the pre-#916 behaviour). Two clamps mirror docx:
+ * a cell whose far edge would cross `limit` (the trailing text-inset edge) is
+ * pinned to it (#835 — Word never pushes a cell off the text area), and a tab
+ * never moves the pen backwards.
+ *
+ * `limit` is `+Infinity` when the caller wants the line's NATURAL extent (the
+ * wrap pass, issue #1006): the #835 clamp must not hide overflow from line
+ * breaking, so the layout measures the unclamped extent and the paint pass keeps
+ * the finite clamp.
  *
  * @returns one width per LOGICAL index (non-tabs keep their input width).
  */
@@ -46,6 +53,7 @@ export function resolveTabWidths(
   startPen: number,
   limit: number,
   noStopGap: number,
+  defTabSz = 0,
 ): number[] {
   const widths = items.map((item) => item.width);
   const followW = (from: number): number => {
@@ -70,9 +78,15 @@ export function resolveTabWidths(
       }
     }
     if (stop === null) {
-      widths[i] = noStopGap;
-      pen += noStopGap;
-      continue;
+      if (defTabSz > 0) {
+        // §21.1.2.1.1 default tab grid: jump to the next grid line strictly past
+        // the pen (a LEFT stop). Beyond the last explicit stop the grid resumes.
+        stop = { pos: (Math.floor(pen / defTabSz) + 1) * defTabSz, algn: 'l' };
+      } else {
+        widths[i] = noStopGap;
+        pen += noStopGap;
+        continue;
+      }
     }
 
     const followingWidth = followW(i + 1);

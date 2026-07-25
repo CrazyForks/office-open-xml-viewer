@@ -46,11 +46,12 @@ export function svgExtents(svg: string): { widthEm: number; ascentEm: number; de
   const w = parseFloat(m[3]);
   const h = parseFloat(m[4]);
   // The output's top <g> applies scale(1,-1): content rises to -minY above the
-  // baseline and falls to (minY + h) below it.
+  // baseline and falls to (minY + h) below it. A viewBox can sit wholly on one
+  // side of the baseline, so the opposite extent is zero rather than negative.
   return {
     widthEm: w / UNITS_PER_EM,
-    ascentEm: -minY / UNITS_PER_EM,
-    descentEm: (minY + h) / UNITS_PER_EM,
+    ascentEm: Math.max(0, -minY / UNITS_PER_EM),
+    descentEm: Math.max(0, (minY + h) / UNITS_PER_EM),
   };
 }
 

@@ -36,15 +36,17 @@ const FONT_PX = 20; // px advance per full-width CJK char in the stub (scale 1)
  *  canvas is deliberately metric-free of contextual shaping — the 縦中横 draw is a
  *  single fillText whose position we assert, and the along-column advance is
  *  pinned to one em by the layout regardless of natural width. */
-function makeRecordingCanvas(): {
+function makeRecordingCanvas(fontBoxHeightFactor = 1): {
   canvas: HTMLCanvasElement;
   fillTextCalls: { text: string; x: number; y: number }[];
+  scaleCalls: { x: number; y: number }[];
 } {
   let font = `${FONT_PX}px serif`;
   let textAlign = 'start';
   let textBaseline = 'alphabetic';
   let letterSpacing = '0px';
   const fillTextCalls: { text: string; x: number; y: number }[] = [];
+  const scaleCalls: { x: number; y: number }[] = [];
   const ctx = {
     get font() {
       return font;
@@ -78,7 +80,7 @@ function makeRecordingCanvas(): {
     restore() {},
     translate() {},
     rotate() {},
-    scale() {},
+    scale(x: number, y: number) { scaleCalls.push({ x, y }); },
     beginPath() {},
     closePath() {},
     moveTo() {},
@@ -101,8 +103,8 @@ function makeRecordingCanvas(): {
         width: [...s].length * per,
         actualBoundingBoxAscent: px * 0.8,
         actualBoundingBoxDescent: px * 0.2,
-        fontBoundingBoxAscent: px * 0.8,
-        fontBoundingBoxDescent: px * 0.2,
+        fontBoundingBoxAscent: px * 0.8 * fontBoxHeightFactor,
+        fontBoundingBoxDescent: px * 0.2 * fontBoxHeightFactor,
       } as TextMetrics;
     },
     fillText(text: string, x: number, y: number) {
@@ -116,7 +118,7 @@ function makeRecordingCanvas(): {
     style: {} as Record<string, string>,
     getContext: () => ctx,
   };
-  return { canvas: canvas as unknown as HTMLCanvasElement, fillTextCalls };
+  return { canvas: canvas as unknown as HTMLCanvasElement, fillTextCalls, scaleCalls };
 }
 
 function textRun(text: string, extra: Partial<DocxTextRun> = {}): DocxTextRun {
@@ -208,18 +210,20 @@ function doc(body: BodyElement[], sec: SectionProps): DocxDocumentModel {
 async function render(
   body: BodyElement[],
   sec: SectionProps,
+  fontBoxHeightFactor = 1,
 ): Promise<{
   runs: DocxTextRunInfo[];
   fillTextCalls: { text: string; x: number; y: number }[];
+  scaleCalls: { x: number; y: number }[];
 }> {
-  const { canvas, fillTextCalls } = makeRecordingCanvas();
+  const { canvas, fillTextCalls, scaleCalls } = makeRecordingCanvas(fontBoxHeightFactor);
   const runs: DocxTextRunInfo[] = [];
   await renderDocumentToCanvas(doc(body, sec), canvas, 0, {
     dpr: 1,
     width: sec.pageWidth,
     onTextRun: (r) => runs.push(r),
   });
-  return { runs, fillTextCalls };
+  return { runs, fillTextCalls, scaleCalls };
 }
 
 // The sample-26 date runs: ９ / 月 / ２９(vert+w:w=67) / 日. Full-width digits so
@@ -292,6 +296,24 @@ describe('§17.3.2.10 縦中横 (horizontal-in-vertical) — sample-26 "9月29�
     // "日" starts exactly ONE cell after "２９", which is one cell after "月":
     // "月" → "日" spans two 1-em cells ("２９" occupies exactly one of them).
     expect(nichi.y - getsu.y).toBeCloseTo(2 * FONT_PX, 6);
+  });
+
+  it('retains vertCompress from acquisition so tall font metrics fit the one-em cell', async () => {
+    const { runs, scaleCalls } = await render(
+      [
+        para([
+          textRun(TCY, { charScale: 0.67, eastAsianVert: true, eastAsianVertCompress: true }),
+          textRun(NICHI),
+        ]),
+      ],
+      verticalSection(),
+      1.25,
+    );
+
+    const tcy = runs.find((run) => run.text === TCY)!;
+    const following = runs.find((run) => run.text === NICHI)!;
+    expect(following.y - tcy.y).toBeCloseTo(FONT_PX, 6);
+    expect(scaleCalls).toContainEqual({ x: 0.67, y: 0.8 });
   });
 
   it('flags the 縦中横 run info with eastAsianVert so the overlays clamp it (#836)', async () => {

@@ -31,6 +31,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; strokes: StrokeSeg[
   let strokeStyle = '#000000';
   let fillStyle = '#000000';
   const ctx = {
+    canvas: { width: 1000, height: 1000 },
     get font() { return font; },
     set font(v: string) { font = v; },
     get lineWidth() { return lineWidth; },
@@ -110,7 +111,10 @@ function tableOf(rows: DocTableRow[], tableBorders: Partial<Edges> = {}): DocTab
 }
 
 function rowOf(cells: DocTableCell[]): DocTableRow {
-  return { cells, rowHeight: 20, rowHeightRule: 'atLeast', isHeader: false } as unknown as DocTableRow;
+  // Exact rows keep the border-conflict assertions pinned to y=20; non-exact
+  // rows intentionally reserve resolved border width and are covered by the
+  // table-row-height geometry tests.
+  return { cells, rowHeight: 20, rowHeightRule: 'exact', isHeader: false } as unknown as DocTableRow;
 }
 
 function docOf(t: DocTable): DocxDocumentModel {
@@ -149,6 +153,90 @@ function horizontalAt(strokes: StrokeSeg[], y: number): StrokeSeg[] {
 }
 
 describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () => {
+  it('§17.4.15: gridBefore starts the first cell after the skipped grid columns', async () => {
+    const middle = cell('middle', {
+      top: bs({ width: 1 }),
+      bottom: bs({ width: 1 }),
+      left: bs({ width: 1 }),
+      right: bs({ width: 1 }),
+    });
+    middle.widthPt = 40;
+    const shiftedRow = {
+      ...rowOf([middle]),
+      gridBefore: 1,
+      gridAfter: 1,
+    } as unknown as DocTableRow;
+    const t = tableOf([shiftedRow]);
+    t.colWidths = [20, 40, 60];
+    t.layout = 'fixed';
+    t.widthPt = 120;
+
+    const strokes = await render(t);
+    const top = horizontalAt(strokes, 0);
+
+    expect(top).toEqual(expect.arrayContaining([
+      expect.objectContaining({ x1: 20, x2: 60 }),
+    ]));
+    expect(top.some((s) => Math.min(s.x1, s.x2) < 20)).toBe(false);
+    expect(verticalAt(strokes, 20)).toHaveLength(1);
+  });
+
+  it('extends the inferred grid for a hand-built table without authored-grid metadata', async () => {
+    const first = cell('first', {
+      top: bs({ width: 1 }),
+      left: bs({ width: 1 }),
+    });
+    const shiftedRow = { ...rowOf([first]), gridBefore: 3 } as unknown as DocTableRow;
+    const t = tableOf([shiftedRow]);
+    t.colWidths = [20, 40];
+    t.layout = 'fixed';
+    t.widthPt = 60;
+
+    const strokes = await render(t);
+
+    // The stable hand-built DocTable contract cannot state whether colWidths
+    // came from an authored tblGrid. Only this compatibility path infers the
+    // missing tracks; parsed documents retain authored-grid presence and apply
+    // §17.4.15 before entering the solver.
+    expect(horizontalAt(strokes, 0)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ x1: 30, x2: 60 }),
+    ]));
+    expect(verticalAt(strokes, 30)).toHaveLength(1);
+  });
+
+  it('draws a cell top border where the row above omits that grid slot', async () => {
+    const upper = { ...rowOf([cell('upper')]), gridBefore: 1 } as unknown as DocTableRow;
+    const lower = rowOf([cell('lower', { top: bs({ width: 1 }) }), cell('right')]);
+    upper.cells[0]!.widthPt = 40;
+    lower.cells[0]!.widthPt = 20;
+    lower.cells[1]!.widthPt = 40;
+    const t = tableOf([upper, lower]);
+    t.colWidths = [20, 40];
+    t.layout = 'fixed';
+    t.widthPt = 60;
+
+    const strokes = await render(t);
+
+    expect(horizontalAt(strokes, 20)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ x1: 0, x2: 20 }),
+    ]));
+  });
+
+  it('draws the physical-right boundary beside gridBefore in a bidiVisual row', async () => {
+    const shifted = cell('shifted', { left: bs({ width: 1 }) });
+    shifted.widthPt = 40;
+    const shiftedRow = { ...rowOf([shifted]), gridBefore: 1 } as unknown as DocTableRow;
+    const t = tableOf([shiftedRow]);
+    t.colWidths = [20, 40, 60];
+    t.layout = 'fixed';
+    t.widthPt = 120;
+    t.bidiVisual = true;
+
+    const strokes = await render(t);
+
+    expect(verticalAt(strokes, 100)).toHaveLength(1);
+  });
+
   it('shared vertical gridline is drawn exactly ONCE (not once per cell)', async () => {
     // Both cells set their facing edge to the SAME single 1pt border. Previously
     // each cell drew it (two strokes at x=60); now it is drawn once.
@@ -161,11 +249,9 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
     expect(verticalAt(strokes, 60)).toHaveLength(1);
   });
 
-  it('heavier border wins the shared gridline (dashed beats single, ignoring width)', async () => {
-    // Left cell right = single 3pt; right cell left = dashed 1pt. §17.4.66 weight:
-    // single 1×1=1 vs dashed 1×5=5 ⇒ dashed wins DESPITE its smaller width (the
-    // spec weights style, not sz). Both are stroke-based so the mock reads the
-    // winner's colour directly.
+  it('uses Word border weights where dashed has a fixed weight of one', async () => {
+    // [MS-OI29500] 2.1.169 fixes dashed/dotted weight at one regardless of
+    // width. The 3pt single therefore outweighs the 1pt dashed border.
     const strokes = await render(tableOf([
       rowOf([
         cell('a', { right: bs({ style: 'single', width: 3, color: 'ff0000' }) }),
@@ -174,12 +260,11 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
     ]));
     const shared = verticalAt(strokes, 60);
     expect(shared.length).toBeGreaterThanOrEqual(1);
-    // The winner (dashed, blue) must appear at x=60; the loser (single, red) must not.
+    // The winner (single, red) must appear at x=60; the loser (dashed, blue) must not.
     const colors = shared.map((s) => s.color.toLowerCase());
-    expect(colors.some((c) => c.includes('0000ff'))).toBe(true);
-    expect(colors.some((c) => c.includes('ff0000'))).toBe(false);
-    // And the width drawn is the WINNER's (dashed 1pt), not the loser's 3pt.
-    expect(shared.every((s) => Math.abs(s.width - 1) < 0.5)).toBe(true);
+    expect(colors.some((c) => c.includes('ff0000'))).toBe(true);
+    expect(colors.some((c) => c.includes('0000ff'))).toBe(false);
+    expect(shared.every((s) => Math.abs(s.width - 3) < 0.5)).toBe(true);
   });
 
   it('a cell border beats a table-level inside border (rule #1)', async () => {
@@ -200,9 +285,9 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
     expect(colors.some((c) => c.includes('ff0000'))).toBe(false); // table thick loses
   });
 
-  it('nil on one side leaves the OTHER side visible (rule #0)', async () => {
-    // Left cell right = nil (suppress); right cell left = single 1pt. The opposing
-    // real border is displayed.
+  it('Word nil suppresses the shared edge even when the other side is visible', async () => {
+    // [MS-OI29500] 2.1.169 differs from the base ECMA rule: nil suppresses the
+    // complete shared edge, whereas none merely loses to the opposing border.
     const strokes = await render(tableOf([
       rowOf([
         cell('a', { right: bs({ style: 'nil' }) }),
@@ -210,8 +295,7 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
       ]),
     ]));
     const shared = verticalAt(strokes, 60);
-    expect(shared).toHaveLength(1);
-    expect(shared[0].color.toLowerCase()).toContain('112233');
+    expect(shared).toHaveLength(0);
   });
 
   it('nil on BOTH sides suppresses the shared gridline entirely', async () => {
@@ -224,9 +308,9 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
     expect(verticalAt(strokes, 60)).toHaveLength(0);
   });
 
-  it('shared HORIZONTAL gridline resolves between stacked rows (dashed beats thick)', async () => {
-    // Row0 cell bottom = thick 4pt; row1 cell top = dashed 1pt. Weight: thick
-    // 1×2=2 vs dashed 1×5=5 ⇒ dashed wins. Rows are 20pt tall ⇒ shared line at y=20.
+  it('shared horizontal gridline uses the same Word border weights', async () => {
+    // Thick uses width × Word border number, while dashed is fixed at one, so
+    // the 4pt thick border wins at the 20pt row boundary.
     const strokes = await render(tableOf([
       rowOf([cell('a', { bottom: bs({ style: 'thick', width: 4, color: 'ff0000' }) })]),
       rowOf([cell('b', { top: bs({ style: 'dashed', width: 1, color: '00ff00' }) })]),
@@ -234,8 +318,8 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
     const shared = horizontalAt(strokes, 20);
     expect(shared.length).toBeGreaterThanOrEqual(1);
     const colors = shared.map((s) => s.color.toLowerCase());
-    expect(colors.some((c) => c.includes('00ff00'))).toBe(true);  // dashed wins
-    expect(colors.some((c) => c.includes('ff0000'))).toBe(false); // thick loses
+    expect(colors.some((c) => c.includes('ff0000'))).toBe(true);
+    expect(colors.some((c) => c.includes('00ff00'))).toBe(false);
   });
 
   it('uses the winning below-cell top edge extent when the above cell spans wider', async () => {
@@ -326,5 +410,24 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
     const bot = seg.filter((s) => Math.max(s.y1, s.y2) > 30);
     expect(top.some((s) => s.color.toLowerCase().includes('111111'))).toBe(true);
     expect(bot.some((s) => s.color.toLowerCase().includes('222222'))).toBe(true);
+  });
+
+  it('uses the final continuation cell border at the bottom of a vertical merge', async () => {
+    // A vertical merge is represented by one restart cell followed by continuation
+    // cells. The boundary at the bottom of the merged region is therefore the
+    // continuation cell's bottom edge, not the restart cell's bottom edge. An
+    // explicit nil on that final continuation must suppress the table insideH
+    // fallback at the boundary below the merge.
+    const restart = cell('merged');
+    restart.vMerge = true;
+    const continuation = cell('', { bottom: bs({ style: 'nil' }) });
+    continuation.vMerge = false;
+    const below = cell('below', { top: bs({ style: 'nil' }) });
+    const strokes = await render(tableOf(
+      [rowOf([restart]), rowOf([continuation]), rowOf([below])],
+      { insideH: bs({ style: 'single', width: 1 }) },
+    ));
+
+    expect(horizontalAt(strokes, 40)).toHaveLength(0);
   });
 });

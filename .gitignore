@@ -17,6 +17,8 @@
 /spec
 spec/
 node_modules/
+# Per-worktree pnpm store used by sandboxed/local agent sessions.
+/.pnpm-store/
 .claude/
 dist/
 # WASM build output (regenerate with: npm run wasm)
@@ -39,6 +41,12 @@ packages/pptx/tests/visual/screenshots/
 packages/pptx/tests/visual/diffs/
 packages/pptx/tests/visual/report/
 packages/pptx/tests/visual/baseline/
+# The VRT specs use package-relative output paths. When Playwright is invoked
+# from the repository root, the same generated tree lands here instead.
+/tests/visual/screenshots/
+/tests/visual/diffs/
+/tests/visual/report/
+/tests/visual/baseline/
 # Playwright
 playwright-report/
 test-results/
@@ -62,6 +70,8 @@ package-lock.json
 # (docs/images/ stays tracked — it holds the README / extension screenshots.)
 docs/superpowers/
 docs/dev-notes/
+/.superpowers/
+/tmp/
 # Internal task list (Japanese dev notes); keep local, not for the public repo.
 TODO.md
 

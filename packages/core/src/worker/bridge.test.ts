@@ -98,6 +98,30 @@ describe('WorkerBridge', () => {
     await expect(p2).resolves.toMatchObject({ value: 'fine' });
   });
 
+  it('preserves a reconstructed Error returned by the response adapter', async () => {
+    const w = new FakeWorker();
+    const bridge = new WorkerBridge<Res>(w, {
+      correlate: (r) => r.id,
+      toError: (r) => {
+        if (r.kind !== 'error') return undefined;
+        return Object.assign(new Error(r.message), {
+          name: 'StructuredWorkerError',
+          code: 'WORKER_CODE',
+        });
+      },
+    });
+    const pending = bridge.request((id) => ({ kind: 'parse', id }));
+    const id = (w.posted[0] as { id: number }).id;
+
+    w.respond({ id, kind: 'error', message: 'boom' });
+
+    await expect(pending).rejects.toMatchObject({
+      name: 'StructuredWorkerError',
+      message: 'boom',
+      code: 'WORKER_CODE',
+    });
+  });
+
   it('does not resolve or hang the wrong request when an unknown id arrives', async () => {
     const w = new FakeWorker();
     const bridge = makeBridge(w);

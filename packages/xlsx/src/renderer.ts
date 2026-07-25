@@ -6,12 +6,12 @@ import type {
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
 import { placePhoneticRuns } from './phonetic.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, verticalTrLongMark, verticalVertGlyphReachable, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
-import { parseA1 } from './a1.js';
+import { formatA1, parseA1 } from './a1.js';
 import { drawStackedVerticalChar } from './vertical-text.js';
 
 /** Cache key for a decoded image in the shared `loadedImages` map. A plain
@@ -136,6 +136,17 @@ export const HEADER_H = 22;
  */
 export function rtlMirrorX(x: number, w: number, canvasW: number): number {
   return canvasW - x - w;
+}
+
+/** Map a logical-LTR anchored-object rectangle into sheet display space.
+ * Sheet RTL mirrors placement only; the object contents and width stay intact. */
+export function sheetAnchoredRectX(
+  x: number,
+  width: number,
+  canvasWidth: number,
+  rtl: boolean,
+): number {
+  return rtl ? rtlMirrorX(x, width, canvasWidth) : x;
 }
 
 // Thin line drawn between frozen and scrollable areas
@@ -2658,7 +2669,10 @@ function renderQuadrant(
           // UAX#50 per-glyph orientation (issue #790): CJK/Latin stay upright,
           // 、。 substitute their vertical form, fullwidth brackets substitute
           // their U+FE3x form, and ー rotates 90° to a vertical bar.
-          drawStackedVerticalChar(ctx, ch, cx + cellW / 2, charY, charH);
+          const cp = ch.codePointAt(0) ?? 0;
+          const vertCapable =
+            verticalTrLongMark(cp) && verticalVertGlyphReachable(ctx, cp);
+          drawStackedVerticalChar(ctx, ch, cx + cellW / 2, charY, charH, vertCapable);
           charY += charH;
         }
         ctx.restore();
@@ -2858,7 +2872,17 @@ function renderQuadrant(
       ctx.restore();
 
       if (text && rc.onTextRun) {
-        rc.onTextRun({ text, x: cx, y: cy, width: cellW, height: cellH, row: rowIndex, col: colIndex });
+        rc.onTextRun({
+          sheetName: rc.worksheet.name,
+          cellRef: formatA1(rowIndex, colIndex),
+          text,
+          x: cx,
+          y: cy,
+          width: cellW,
+          height: cellH,
+          row: rowIndex,
+          col: colIndex,
+        });
       }
       });
     }
@@ -3100,6 +3124,7 @@ export function renderViewport(
       scrollOffsetX, scrollOffsetY,
       scrollAreaX, scrollAreaY,
       scrollAreaW, scrollAreaH,
+      worksheet.rightToLeft === true, canvasW,
     );
   }
 
@@ -3112,6 +3137,7 @@ export function renderViewport(
       scrollAreaX, scrollAreaY,
       scrollAreaW, scrollAreaH,
       opts.loadedImages,
+      worksheet.rightToLeft === true, canvasW,
     );
   }
 
@@ -3123,6 +3149,7 @@ export function renderViewport(
       scrollOffsetX, scrollOffsetY,
       scrollAreaX, scrollAreaY,
       scrollAreaW, scrollAreaH,
+      worksheet.rightToLeft === true, canvasW,
     );
   }
 
@@ -3134,6 +3161,7 @@ export function renderViewport(
       scrollOffsetX, scrollOffsetY,
       scrollAreaX, scrollAreaY,
       scrollAreaW, scrollAreaH,
+      worksheet.rightToLeft === true, canvasW,
     );
   }
 
@@ -3433,6 +3461,8 @@ function renderImages(
   scrollAreaY: number,
   scrollAreaW: number,
   scrollAreaH: number,
+  rtl: boolean,
+  canvasW: number,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
 
@@ -3442,7 +3472,8 @@ function renderImages(
 
   ctx.save();
   ctx.beginPath();
-  ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+  const clipX = sheetAnchoredRectX(scrollAreaX, scrollAreaW, canvasW, rtl);
+  ctx.rect(clipX, scrollAreaY, scrollAreaW, scrollAreaH);
   ctx.clip();
 
   for (const anchor of ws.images) {
@@ -3484,11 +3515,12 @@ function renderImages(
     if (imgW <= 0 || imgH <= 0) continue;
 
     // Translate to canvas coordinates of the scrollable viewport
-    const canvasX = scrollAreaX + (imgSheetX1 - scrollOriginSheetX) - scrollOffsetX;
+    const logicalCanvasX = scrollAreaX + (imgSheetX1 - scrollOriginSheetX) - scrollOffsetX;
+    const canvasX = sheetAnchoredRectX(logicalCanvasX, imgW, canvasW, rtl);
     const canvasY = scrollAreaY + (imgSheetY1 - scrollOriginSheetY) - scrollOffsetY;
 
     // Early out when entirely off-screen
-    if (canvasX + imgW < scrollAreaX || canvasX > scrollAreaX + scrollAreaW) continue;
+    if (canvasX + imgW < clipX || canvasX > clipX + scrollAreaW) continue;
     if (canvasY + imgH < scrollAreaY || canvasY > scrollAreaY + scrollAreaH) continue;
 
     // ECMA-376 §20.1.8.6 `<a:alphaModFix>`: scale the picture's opacity so it
@@ -3519,7 +3551,9 @@ function renderShapeGroups(
   scrollAreaY: number,
   scrollAreaW: number,
   scrollAreaH: number,
-  loadedImages?: Map<string, CanvasImageSource | null>,
+  loadedImages: Map<string, CanvasImageSource | null> | undefined,
+  rtl: boolean,
+  canvasW: number,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
   const anchors = ws.shapeGroups;
@@ -3530,7 +3564,8 @@ function renderShapeGroups(
 
   ctx.save();
   ctx.beginPath();
-  ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+  const clipX = sheetAnchoredRectX(scrollAreaX, scrollAreaW, canvasW, rtl);
+  ctx.rect(clipX, scrollAreaY, scrollAreaW, scrollAreaH);
   ctx.clip();
 
   for (const anchor of anchors) {
@@ -3557,10 +3592,11 @@ function renderShapeGroups(
     }
     if (w <= 0 || h <= 0) continue;
 
-    const canvasX = scrollAreaX + (x1 - scrollOriginSheetX) - scrollOffsetX;
+    const logicalCanvasX = scrollAreaX + (x1 - scrollOriginSheetX) - scrollOffsetX;
+    const canvasX = sheetAnchoredRectX(logicalCanvasX, w, canvasW, rtl);
     const canvasY = scrollAreaY + (y1 - scrollOriginSheetY) - scrollOffsetY;
 
-    if (canvasX + w < scrollAreaX || canvasX > scrollAreaX + scrollAreaW) continue;
+    if (canvasX + w < clipX || canvasX > clipX + scrollAreaW) continue;
     if (canvasY + h < scrollAreaY || canvasY > scrollAreaY + scrollAreaH) continue;
 
     for (const shape of anchor.shapes) {
@@ -3584,9 +3620,10 @@ function drawShape(
   loadedImages?: Map<string, CanvasImageSource | null>,
 ): void {
   ctx.save();
-  if (shape.rot !== 0) {
+  if (shape.rot !== 0 || shape.flipH || shape.flipV) {
     ctx.translate(sx + sw / 2, sy + sh / 2);
     ctx.rotate((shape.rot * Math.PI) / 180);
+    ctx.scale(shape.flipH ? -1 : 1, shape.flipV ? -1 : 1);
     ctx.translate(-sw / 2, -sh / 2);
   } else {
     ctx.translate(sx, sy);
@@ -4456,11 +4493,14 @@ function renderCharts(
   scrollAreaY: number,
   scrollAreaW: number,
   scrollAreaH: number,
+  rtl: boolean,
+  canvasW: number,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
 
   const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
   const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+  const clipX = sheetAnchoredRectX(scrollAreaX, scrollAreaW, canvasW, rtl);
 
   for (const anchor of ws.charts) {
     const fromCol1 = anchor.fromCol + 1;
@@ -4477,15 +4517,16 @@ function renderCharts(
     const ch = shY2 - shY1;
     if (cw <= 0 || ch <= 0) continue;
 
-    const cx = scrollAreaX + (shX1 - scrollOriginSheetX) - scrollOffsetX;
+    const logicalCx = scrollAreaX + (shX1 - scrollOriginSheetX) - scrollOffsetX;
+    const cx = sheetAnchoredRectX(logicalCx, cw, canvasW, rtl);
     const cy = scrollAreaY + (shY1 - scrollOriginSheetY) - scrollOffsetY;
 
-    if (cx + cw < scrollAreaX || cx > scrollAreaX + scrollAreaW) continue;
+    if (cx + cw < clipX || cx > clipX + scrollAreaW) continue;
     if (cy + ch < scrollAreaY || cy > scrollAreaY + scrollAreaH) continue;
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+    ctx.rect(clipX, scrollAreaY, scrollAreaW, scrollAreaH);
     ctx.clip();
 
     // XLSX natural rendering is device-px at 96 DPI where 1pt = 4/3 px. Scale
@@ -4534,6 +4575,8 @@ function renderSlicers(
   scrollAreaY: number,
   scrollAreaW: number,
   scrollAreaH: number,
+  rtl: boolean,
+  canvasW: number,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
   const slicers = ws.slicers;
@@ -4541,6 +4584,7 @@ function renderSlicers(
 
   const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
   const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+  const clipX = sheetAnchoredRectX(scrollAreaX, scrollAreaW, canvasW, rtl);
 
   for (const anchor of slicers) {
     const fromCol1 = anchor.fromCol + 1;
@@ -4557,15 +4601,16 @@ function renderSlicers(
     const h = shY2 - shY1;
     if (w <= 0 || h <= 0) continue;
 
-    const x = scrollAreaX + (shX1 - scrollOriginSheetX) - scrollOffsetX;
+    const logicalX = scrollAreaX + (shX1 - scrollOriginSheetX) - scrollOffsetX;
+    const x = sheetAnchoredRectX(logicalX, w, canvasW, rtl);
     const y = scrollAreaY + (shY1 - scrollOriginSheetY) - scrollOffsetY;
 
-    if (x + w < scrollAreaX || x > scrollAreaX + scrollAreaW) continue;
+    if (x + w < clipX || x > clipX + scrollAreaW) continue;
     if (y + h < scrollAreaY || y > scrollAreaY + scrollAreaH) continue;
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+    ctx.rect(clipX, scrollAreaY, scrollAreaW, scrollAreaH);
     ctx.clip();
 
     drawSlicerFrame(ctx, anchor.caption, anchor.items, x, y, w, h, cs);

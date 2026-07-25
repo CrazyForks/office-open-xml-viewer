@@ -3,26 +3,35 @@
 //
 // The trHeight rule (exact / atLeast / auto), the auto/no-floor minimum, the
 // gridSpan column slicing, and the vMerge restart-span post-pass are pure
-// structural math that does NOT depend on whether the caller works in pt
-// (paginator) or px (paint) units. This module factors that skeleton out of
-// renderer.ts so the rule is expressed once: previously both
-// `computeTableRowHeights` (pt) and `computeTableLayout`/`calculateRowHeight`
-// (px) re-implemented it, and #523 had to patch the identical regression in two
-// places. The two callers still differ in HOW a cell's content height is
-// measured (the paginator's `estimateParagraphHeight` cursor-walk vs the paint
-// pass's `measureParaHeight`); that measurement is supplied as a callback and is
-// deliberately NOT unified here — see the note on `measureCellContentHeight`.
+// structural math that does NOT depend on whether the caller works in pt or
+// scaled device units. The caller supplies cell-content measurement, keeping
+// this compatibility kernel independent of paragraph acquisition details.
 //
 // Only DocTable/DocTableRow/DocTableCell types are imported (erased at runtime),
 // so there is no import cycle with renderer.ts.
 
 import type { DocTable, DocTableRow, DocTableCell } from './types.js';
+import { resolveBorderConflict, resolveCellEdges } from './cell-border-conflict.js';
+import { wordAuthoredAutoRowHeightUsesFloor } from './layout/table-compatibility.js';
 
 /** Minimum table-row height (pt) when no `w:trHeight` floor applies — i.e. an
  *  `auto` row, or `atLeast`/`exact` with no `@val`. ECMA-376 leaves the auto
  *  minimum implementation-defined; this is the floor an empty row collapses to
  *  before content (cell margins + measured content) expands it. */
 export const MIN_ROW_HEIGHT_PT = 10;
+
+/** ECMA-376 §17.4.15 — clamp the number of shared table-grid columns skipped
+ * before a row's first cell. Older parsed models omit the property, so zero is
+ * the compatibility default required by the specification. */
+export function rowGridBefore(row: DocTableRow, columnCount: number): number {
+  const raw = row.gridBefore ?? 0;
+  if (!Number.isFinite(raw)) return 0;
+  const value = Math.max(0, Math.trunc(raw));
+  const size = Math.max(0, Math.trunc(columnCount));
+  // §17.4.15: a value larger than tblGrid is ignored; it is not clamped to
+  // the trailing edge (which would collapse every real cell to zero width).
+  return value > size ? 0 : value;
+}
 
 /** Last row index covered by the vMerge span that starts at (`startRi`,
  *  `startCi`). A span continues through following rows whose cell anchored in the
@@ -32,7 +41,7 @@ export function findMergeEndRow(table: DocTable, startRi: number, startCi: numbe
   let endRi = startRi;
   for (let rj = startRi + 1; rj < table.rows.length; rj++) {
     const row = table.rows[rj];
-    let ci = 0;
+    let ci = rowGridBefore(row, table.colWidths.length);
     let matched = false;
     for (const cell of row.cells) {
       if (ci === startCi) {
@@ -48,16 +57,123 @@ export function findMergeEndRow(table: DocTable, startRi: number, startCi: numbe
   return endRi;
 }
 
-/** Measure the content height (already in the target units — px at `scale`, or
- *  pt at `scale=1`) of a single cell laid out at the given total cell width
- *  (`cellWidth`, the summed widths of the grid columns it spans). MUST include
- *  the cell's top/bottom margins. The two callers pass DIFFERENT measurers — the
- *  paginator mirrors `renderParagraph`'s float-aware cursor walk
- *  (`estimateParagraphHeight`); the paint pass uses the lighter `measureParaHeight`
- *  + explicit spaceBefore/After. They are not equivalent (e.g. an empty East
- *  Asian paragraph mark on a docGrid rounds to a different cell count), so this
- *  skeleton keeps each caller's measurer intact rather than choosing one. */
+/** Measure the content height (already in the target units — scaled device
+ *  units at `scale`, or pt at `scale=1`) of a single cell laid out at the given
+ *  total cell width (`cellWidth`, the summed widths of the grid columns it
+ *  spans). MUST include the cell's top/bottom margins. */
 export type MeasureCellContentHeight = (cell: DocTableCell, cellWidth: number) => number;
+
+interface TableGridOwner {
+  cell: DocTableCell;
+  ri: number;
+  lastRi: number;
+  ci: number;
+  span: number;
+}
+
+function cellAtGridColumn(
+  row: DocTableRow,
+  targetCi: number,
+  columnCount: number,
+): DocTableCell | null {
+  let ci = rowGridBefore(row, columnCount);
+  for (const cell of row.cells) {
+    if (targetCi >= ci && targetCi < ci + cell.colSpan) return cell;
+    ci += cell.colSpan;
+  }
+  return null;
+}
+
+function paintWidth(candidate: ReturnType<typeof resolveBorderConflict>): number {
+  const spec = candidate?.spec;
+  if (!spec || spec.style === 'none' || spec.style === 'nil') return 0;
+  return spec.width;
+}
+
+/** Width of each resolved horizontal table-grid boundary, from the outer top
+ * through every shared row boundary to the outer bottom. Adjacent-cell
+ * conflicts use the same §17.4.66 cascade as paint; a boundary inside one
+ * vertically merged owner contributes no rule. */
+export function resolvedHorizontalBoundaryWidths(table: DocTable): number[] {
+  const rowCount = table.rows.length;
+  const columnCount = table.colWidths.length;
+  const widths = new Array<number>(rowCount + 1).fill(0);
+  if (rowCount === 0 || columnCount === 0) return widths;
+
+  const owners: Array<Array<TableGridOwner | null>> = Array.from(
+    { length: rowCount },
+    () => new Array<TableGridOwner | null>(columnCount).fill(null),
+  );
+  for (let ri = 0; ri < rowCount; ri++) {
+    const row = table.rows[ri];
+    let ci = rowGridBefore(row, columnCount);
+    for (const cell of row.cells) {
+      const span = Math.min(cell.colSpan, columnCount - ci);
+      if (cell.vMerge !== false && span > 0) {
+        const lastRi = cell.vMerge === true ? findMergeEndRow(table, ri, ci) : ri;
+        const owner: TableGridOwner = { cell, ri, lastRi, ci, span };
+        for (let rj = ri; rj <= lastRi; rj++) {
+          for (let cj = ci; cj < ci + span; cj++) owners[rj][cj] = owner;
+        }
+      }
+      ci += span;
+    }
+  }
+
+  const edgesFor = (owner: TableGridOwner) => ({
+    topRow: owner.ri === 0,
+    bottomRow: owner.lastRi === rowCount - 1,
+    leftCol: owner.ci === 0,
+    rightCol: owner.ci + owner.span === columnCount,
+  });
+  const bottomCandidate = (owner: TableGridOwner) => {
+    const terminal = owner.lastRi > owner.ri
+      ? (cellAtGridColumn(table.rows[owner.lastRi], owner.ci, columnCount) ?? owner.cell)
+      : owner.cell;
+    return resolveCellEdges(terminal.borders, table.borders, edgesFor(owner), false).bottom;
+  };
+
+  for (let ci = 0; ci < columnCount; ci++) {
+    const topOwner = owners[0][ci];
+    if (topOwner) {
+      const top = resolveCellEdges(
+        topOwner.cell.borders,
+        table.borders,
+        edgesFor(topOwner),
+        false,
+      ).top;
+      widths[0] = Math.max(widths[0], paintWidth(resolveBorderConflict(top, null)));
+    }
+
+    for (let boundary = 1; boundary < rowCount; boundary++) {
+      // Runtime row pieces separated inside one emitted slice are one
+      // continuous source row. Paint deliberately leaves that internal cut
+      // open, so it has no footprint in either adjacent row box.
+      if ((table.rows[boundary - 1] as DocTableRow & { pageCutBottom?: boolean })
+        .pageCutBottom === true) continue;
+      const above = owners[boundary - 1][ci];
+      const below = owners[boundary][ci];
+      if (above && above === below) continue;
+      const aboveBottom = above ? bottomCandidate(above) : null;
+      const belowTop = below
+        ? resolveCellEdges(below.cell.borders, table.borders, edgesFor(below), false).top
+        : null;
+      widths[boundary] = Math.max(
+        widths[boundary],
+        paintWidth(resolveBorderConflict(aboveBottom, belowTop)),
+      );
+    }
+
+    const bottomOwner = owners[rowCount - 1][ci];
+    if (bottomOwner) {
+      widths[rowCount] = Math.max(
+        widths[rowCount],
+        paintWidth(resolveBorderConflict(bottomCandidate(bottomOwner), null)),
+      );
+    }
+  }
+  return widths;
+}
 
 /**
  * Resolve per-row heights for a table whose grid columns have widths
@@ -70,20 +186,10 @@ export type MeasureCellContentHeight = (cell: DocTableCell, cellWidth: number) =
  *       atLeast — `@val` (× `scale`) is a lower bound; content can grow the row.
  *       auto    — by the literal text of §17.4.80, `@val` is IGNORED ("no
  *                 predetermined minimum or maximum size", advisory layout cache
- *                 only). However, Word's own output PDFs show `@val` being
- *                 honored as a LOWER BOUND (atLeast-equivalent) when `hRule` is
- *                 omitted and `@val` is present: e.g. sample-11.docx's December
- *                 2007 calendar emits `<w:trHeight w:val="576"/>` (hRule
- *                 omitted; spec default = auto) on its date rows, and Word lays
- *                 each such row out at exactly 576 / 20 = 28.8 pt — `@val` as a
- *                 floor (pdftotext -bbox confirms the date glyph rows sit on a
- *                 28.8 pt pitch; the larger ~43.2 pt visual cadence per WEEK is
- *                 that 28.8 pt date row PLUS an unmarked auto spacer row below
- *                 it, not a single `@val` row). XML inspection confirms no other
- *                 height information exists, so `@val` is the only signal that
- *                 produces Word's geometry. We deliberately deviate from the
- *                 §17.4.80 literal to follow Word's behavior. With `@val`
- *                 absent, auto falls back to `MIN_ROW_HEIGHT_PT`.
+ *                 only). `word-authored-auto-row-height-floor` owns the
+ *                 compatibility deviation that treats an authored auto value as
+ *                 a lower bound. With `@val` absent, auto falls back to
+ *                 `MIN_ROW_HEIGHT_PT`.
  *   - gridSpan: a cell's width is the sum of the `cell.colSpan` columns it
  *     anchors (clamped to the remaining columns).
  *   - ECMA-376 §17.4.85 (vMerge): a `vMerge=restart` cell's content occupies the
@@ -101,15 +207,14 @@ export type MeasureCellContentHeight = (cell: DocTableCell, cellWidth: number) =
  * Height of ONE row (ECMA-376 §17.4.80 / §17.18.37 ST_HeightRule + gridSpan),
  * EXCLUDING the §17.4.85 vMerge span extension (the caller / the table-level
  * resolver applies that in a post-pass). `exact` returns exactly `@val × scale`;
- * `atLeast` floors at `@val × scale`; `auto` with `@val` present also floors at
- * `@val × scale` (intentional Word-compatible deviation from the §17.4.80
- * literal "ignored" — see the resolver docstring above for the rationale and
- * the sample-11.docx December calendar evidence). `auto` with no `@val` floors
+ * `atLeast` floors at `@val × scale`;
+ * `word-authored-auto-row-height-floor` gives an `auto` row with `@val` the
+ * same floor despite the §17.4.80 literal "ignored". `auto` with no `@val` floors
  * at `MIN_ROW_HEIGHT_PT × scale`. A `vMerge=restart` cell is excluded (its
  * content is distributed across the span, not absorbed by its first row) and a
  * `vMerge=continue` cell renders no content. This is the single source of the
- * trHeight rule, shared by {@link resolveTableRowHeights} and the exported
- * `calculateRowHeight`.
+ * trHeight rule, shared by {@link resolveTableRowHeights} and direct
+ * compatibility tests of a single row.
  */
 export function resolveSingleRowHeight(
   row: DocTableRow,
@@ -118,18 +223,18 @@ export function resolveSingleRowHeight(
   measureCellContentHeight: MeasureCellContentHeight,
 ): number {
   if (row.rowHeight != null && row.rowHeightRule === 'exact') return row.rowHeight * scale;
-  // §17.4.80 literal says `auto` ignores `@val`. Word's output PDFs disagree:
-  // when `hRule` is omitted and `@val` is present, Word treats `@val` as a
-  // lower bound (atLeast-equivalent). Deliberate deviation to match Word —
-  // ground truth is the Word output PDF (sample-11.docx calendar date rows
-  // measured at exactly `@val` 576 / 20 = 28.8 pt). With `@val` absent, auto
-  // still collapses to the implementation-defined minimum.
+  // `word-authored-auto-row-height-floor` owns the legacy-model deviation from
+  // §17.4.80's literal auto behavior. With `@val` absent, auto still collapses
+  // to the implementation-defined minimum.
   let rowH =
-    row.rowHeight != null && (row.rowHeightRule === 'atLeast' || row.rowHeightRule === 'auto')
+    row.rowHeight != null && (
+      row.rowHeightRule === 'atLeast'
+      || wordAuthoredAutoRowHeightUsesFloor(row.rowHeightRule, row.rowHeight)
+    )
       ? row.rowHeight * scale
       : MIN_ROW_HEIGHT_PT * scale;
 
-  let ci = 0;
+  let ci = rowGridBefore(row, colWidths.length);
   for (const cell of row.cells) {
     const span = Math.min(cell.colSpan, colWidths.length - ci);
     // vMerge=restart cells are sized by the span post-pass; vMerge=continue
@@ -144,7 +249,11 @@ export function resolveSingleRowHeight(
   return rowH;
 }
 
-export function resolveTableRowHeights(
+/** Resolve row content boxes, before page-local horizontal rule footprints are
+ * added. Keeping this geometry separate is essential for pagination: once a
+ * table is sliced, the first/last rows resolve against that slice's outer
+ * borders rather than the original table's interior boundaries. */
+export function resolveTableRowContentHeights(
   table: DocTable,
   colWidths: number[],
   scale: number,
@@ -157,8 +266,9 @@ export function resolveTableRowHeights(
   // §17.4.85 span extension: for each vMerge=restart cell, grow the span's last
   // row if the restart cell's full content is taller than the summed span rows.
   for (let ri = 0; ri < table.rows.length; ri++) {
-    let ci = 0;
-    for (const cell of table.rows[ri].cells) {
+    const row = table.rows[ri];
+    let ci = rowGridBefore(row, colWidths.length);
+    for (const cell of row.cells) {
       const span = Math.min(cell.colSpan, colWidths.length - ci);
       if (cell.vMerge === true) {
         const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
@@ -175,4 +285,34 @@ export function resolveTableRowHeights(
   }
 
   return rowHeights;
+}
+
+/** Add the horizontal rule footprint painted by this concrete table or page
+ * slice. Auto/atLeast row boxes run between rule centres; exact trHeight already
+ * defines the complete row box and is not expanded (§17.4.80). */
+export function applyTableRowBoundaryFootprints(
+  table: DocTable,
+  contentHeights: readonly number[],
+  scale: number,
+): number[] {
+  const horizontalBoundaries = resolvedHorizontalBoundaryWidths(table);
+  return contentHeights.map((contentHeight, ri) => {
+    if (table.rows[ri]?.rowHeightRule === 'exact') return contentHeight;
+    return contentHeight + (
+      (horizontalBoundaries[ri] ?? 0) + (horizontalBoundaries[ri + 1] ?? 0)
+    ) * scale / 2;
+  });
+}
+
+export function resolveTableRowHeights(
+  table: DocTable,
+  colWidths: number[],
+  scale: number,
+  measureCellContentHeight: MeasureCellContentHeight,
+): number[] {
+  return applyTableRowBoundaryFootprints(
+    table,
+    resolveTableRowContentHeights(table, colWidths, scale, measureCellContentHeight),
+    scale,
+  );
 }

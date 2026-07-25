@@ -1,12 +1,14 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import {
   WorkerBridge,
+  loadLocalFontMetrics,
   registerEmbeddedFonts,
   preloadGoogleFonts,
   type WorkerLike,
   type FontPreloadEntry,
 } from '@silurus/ooxml-core';
 import { DocxDocument } from './document';
+import { attachDocumentLayoutRuntime } from './layout/runtime-state.js';
 
 /**
  * `DocxDocument.destroy()` tears the parser worker down via
@@ -33,12 +35,19 @@ class SilentWorker implements WorkerLike {
 // ── Fake FontFaceSet so destroy()'s embedded-font / Google-Fonts release is
 // observable ──────────────────────────────────────────────────────────────
 const G = globalThis as Record<string, unknown>;
-const ORIG_FONTS = { document: G.document, self: G.self, fetch: G.fetch, FontFace: G.FontFace };
+const ORIG_FONTS = {
+  document: G.document,
+  self: G.self,
+  fetch: G.fetch,
+  FontFace: G.FontFace,
+  OffscreenCanvas: G.OffscreenCanvas,
+};
 afterEach(() => {
   G.document = ORIG_FONTS.document;
   G.self = ORIG_FONTS.self;
   G.fetch = ORIG_FONTS.fetch;
   G.FontFace = ORIG_FONTS.FontFace;
+  G.OffscreenCanvas = ORIG_FONTS.OffscreenCanvas;
 });
 
 interface FakeFace { family: string }
@@ -84,6 +93,45 @@ function installGoogleFontFaceSet(): { added: FakeFace[] } {
   delete G.self;
   return { added };
 }
+
+function installLocalMetricFontEnvironment(): { added: FakeFace[] } {
+  const added: FakeFace[] = [];
+  class FakeFontFace {
+    status: FontFaceLoadStatus = 'unloaded';
+    constructor(public family: string, public source: string) {}
+    load(): Promise<this> {
+      this.status = 'loaded';
+      return Promise.resolve(this);
+    }
+  }
+  const set = {
+    add: (face: FakeFace) => { added.push(face); },
+    delete: (face: FakeFace) => {
+      const index = added.indexOf(face);
+      if (index >= 0) added.splice(index, 1);
+      return index >= 0;
+    },
+  };
+  class FakeOffscreenCanvas {
+    getContext() {
+      return {
+        font: '',
+        measureText: () => ({
+          width: 50,
+          actualBoundingBoxAscent: 80,
+          actualBoundingBoxDescent: 20,
+          fontBoundingBoxAscent: 106,
+          fontBoundingBoxDescent: 44,
+        }),
+      };
+    }
+  }
+  G.FontFace = FakeFontFace;
+  G.document = { fonts: set };
+  G.OffscreenCanvas = FakeOffscreenCanvas;
+  delete G.self;
+  return { added };
+}
 const GOOGLE_FONT_MAP: Record<string, FontPreloadEntry> = {
   calibri: { url: 'https://fonts.googleapis.com/css2?family=Carlito', loadFamily: 'Carlito' },
 };
@@ -98,6 +146,7 @@ const validHeader = (): Uint8Array =>
 
 interface DestroyProbe {
   destroy(): void;
+  getBookmarkPage(bookmarkName: string): number | undefined;
 }
 
 describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
@@ -107,11 +156,13 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
       correlate: (r) => r.id,
     });
     const instance = Object.create(DocxDocument.prototype) as Record<string, unknown>;
+    attachDocumentLayoutRuntime(instance, 0);
     instance._bridge = bridge;
     // Fields destroy() clears after terminate(); undefined would throw.
     instance._imageCache = new Map();
     instance._embeddedFontFaces = [];
     instance._googleFontFaces = [];
+    instance._localMetricFontFaces = [];
     instance._fetchImage = () => Promise.resolve(new Blob());
     return { doc: instance as unknown as DestroyProbe, bridge, worker };
   }
@@ -129,6 +180,19 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     const { doc } = makeDocument();
     doc.destroy();
     expect(() => doc.destroy()).not.toThrow();
+  });
+
+  it('returns no bookmark before load or after destroy without poisoning loaded lookup', () => {
+    const { doc } = makeDocument();
+
+    expect(doc.getBookmarkPage('loaded')).toBeUndefined();
+    (doc as unknown as { _meta: { bookmarkPages: [string, number][] } })._meta = {
+      bookmarkPages: [['loaded', 3]],
+    };
+    expect(doc.getBookmarkPage('loaded')).toBe(3);
+
+    doc.destroy();
+    expect(doc.getBookmarkPage('loaded')).toBeUndefined();
   });
 
   // Wiring guard: destroy() must actually release the embedded fonts the document
@@ -175,5 +239,22 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     // left the FontFaceSet, and the held array was cleared.
     expect(added).toHaveLength(0);
     expect((doc as unknown as { _googleFontFaces: FontFace[] })._googleFontFaces).toHaveLength(0);
+  });
+
+  it('destroy() releases exact local metric faces from the FontFaceSet', async () => {
+    const { added } = installLocalMetricFontEnvironment();
+    const held = await loadLocalFontMetrics([{
+      family: 'Metric Face',
+      localNames: ['Metric Face'],
+      lineHeightMultiplier: 1.3,
+    }]);
+    expect(added).toHaveLength(1);
+
+    const { doc } = makeDocument();
+    (doc as unknown as { _localMetricFontFaces: FontFace[] })._localMetricFontFaces = held.faces;
+    doc.destroy();
+
+    expect(added).toHaveLength(0);
+    expect((doc as unknown as { _localMetricFontFaces: FontFace[] })._localMetricFontFaces).toHaveLength(0);
   });
 });

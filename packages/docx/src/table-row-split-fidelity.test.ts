@@ -1,9 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import {
-  __test_setFragmentPaintEnabled,
-  paginateDocument,
-  renderDocumentToCanvas,
-} from './renderer.js';
+import { layoutDocument } from './document-layout.js';
+import { paintLayoutPage } from './paint/canvas-page.js';
 import type {
   BodyElement,
   CellElement,
@@ -11,8 +8,7 @@ import type {
   DocTable,
   DocTableRow,
   DocxDocumentModel,
-  PaginatedBodyElement,
-  SectionProps,
+    SectionProps,
 } from './types';
 
 interface TextCall {
@@ -42,6 +38,8 @@ function makeRecordingCanvas(): {
   let lineWidth = 1;
   let strokeStyle = '#000000';
   let fillStyle = '#000000';
+  let translation = { x: 0, y: 0 };
+  const translations: Array<{ x: number; y: number }> = [];
   const texts: TextCall[] = [];
   const strokes: StrokeSegment[] = [];
   const fontPx = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
@@ -71,8 +69,14 @@ function makeRecordingCanvas(): {
         actualBoundingBoxDescent: px * 0.2,
       } as TextMetrics;
     },
-    save() {}, restore() {}, closePath() {}, fill() {}, fillRect() {}, strokeRect() {},
-    clip() {}, rect() {}, scale() {}, translate() {}, rotate() {}, setLineDash() {},
+    save() { translations.push({ ...translation }); },
+    restore() { translation = translations.pop() ?? { x: 0, y: 0 }; },
+    closePath() {}, fill() {}, fillRect() {}, strokeRect() {},
+    clip() {}, rect() {}, scale() {}, setTransform() { translation = { x: 0, y: 0 }; },
+    translate(x: number, y: number) {
+      translation = { x: translation.x + x, y: translation.y + y };
+    },
+    rotate() {}, setLineDash() {},
     clearRect() {}, arc() {}, quadraticCurveTo() {}, bezierCurveTo() {}, drawImage() {},
     createLinearGradient() { return { addColorStop() {} }; },
     beginPath() { pending = null; },
@@ -84,8 +88,12 @@ function makeRecordingCanvas(): {
     stroke() {
       if (pending) strokes.push(pending);
     },
-    fillText(text: string, x: number, y: number) { texts.push({ text, x, y, font }); },
-    strokeText(text: string, x: number, y: number) { texts.push({ text, x, y, font }); },
+    fillText(text: string, x: number, y: number) {
+      texts.push({ text, x: x + translation.x, y: y + translation.y, font });
+    },
+    strokeText(text: string, x: number, y: number) {
+      texts.push({ text, x: x + translation.x, y: y + translation.y, font });
+    },
   };
   const canvas = {
     width: 0,
@@ -172,31 +180,21 @@ function documentWithRow(tableRow: DocTableRow, pageHeight: number): DocxDocumen
 }
 
 async function renderPage(
-  model: DocxDocumentModel,
-  pages: PaginatedBodyElement[][],
+  layout: ReturnType<typeof layoutDocument>,
   pageIndex: number,
-  fragmentPaint: boolean,
 ) {
-  const previous = __test_setFragmentPaintEnabled(fragmentPaint);
   const recording = makeRecordingCanvas();
-  try {
-    await renderDocumentToCanvas(model, recording.canvas, pageIndex, {
-      dpr: 1,
-      width: 160,
-      prebuiltPages: pages,
-    });
-    return recording;
-  } finally {
-    __test_setFragmentPaintEnabled(previous);
-  }
+  await paintLayoutPage(layout, pageIndex, recording.canvas, { dpr: 1, scale: 1 });
+  return recording;
 }
 
-function firstSliceOnPage(pages: PaginatedBodyElement[][], pageIndex: number) {
-  const table = pages[pageIndex].find((element) => element.type === 'table') as
-    (PaginatedBodyElement & DocTable) | undefined;
-  const paragraph = table?.rows[0]?.cells[0]?.content[0] as
-    (CellElement & { lineSlice?: { start: number; end: number } }) | undefined;
-  return paragraph?.lineSlice;
+function firstSliceOnPage(layout: ReturnType<typeof layoutDocument>, pageIndex: number) {
+  const table = layout.pages[pageIndex]?.layers.body.find((node) => node.kind === 'table');
+  if (table?.kind !== 'table') return undefined;
+  const paragraph = table.rows[0]?.cells[0]?.blocks[0]?.layout;
+  if (paragraph?.kind !== 'paragraph') return undefined;
+  const continuation = paragraph.continuation;
+  return continuation ? { start: continuation.lineStart, end: continuation.lineEnd } : undefined;
 }
 
 const splitText =
@@ -206,31 +204,27 @@ const splitText =
   '丁'.repeat(16);
 
 describe('table row split fidelity — fragment-owned paint geometry', () => {
-  it.each([
-    ['fragment paint', true],
-    ['legacy fallback', false],
-  ])('paints only the continuation [k, n) line window with %s', async (_label, fragmentPaint) => {
+  it('paints only the retained continuation [k, n) line window', async () => {
     const model = documentWithRow(row(splitText, 'top'), 60);
-    const pages = paginateDocument(model);
-    expect(pages).toHaveLength(2);
-    expect(firstSliceOnPage(pages, 0)).toEqual({ start: 0, end: 3 });
-    expect(firstSliceOnPage(pages, 1)).toEqual({ start: 3, end: 4 });
+    const layout = layoutDocument(model);
+    expect(layout.pages).toHaveLength(2);
+    expect(firstSliceOnPage(layout, 0)).toEqual({ start: 0, end: 3 });
+    expect(firstSliceOnPage(layout, 1)).toEqual({ start: 3, end: 4 });
 
-    const page2 = await renderPage(model, pages, 1, fragmentPaint);
+    const page2 = await renderPage(layout, 1);
     const paintedText = page2.texts.map((call) => call.text).join('');
     expect(paintedText).toBe('丁'.repeat(16));
     expect(paintedText).not.toContain('甲');
     expect(paintedText).not.toContain('乙');
-    expect(paintedText).not.toContain('丙');
   });
 
   it('keeps every centered continuation baseline at or below its row-top rule', async () => {
     const model = documentWithRow(row(splitText, 'center'), 60);
-    const pages = paginateDocument(model);
-    expect(pages).toHaveLength(2);
-    expect(firstSliceOnPage(pages, 1)).toEqual({ start: 3, end: 4 });
+    const layout = layoutDocument(model);
+    expect(layout.pages).toHaveLength(2);
+    expect(firstSliceOnPage(layout, 1)).toEqual({ start: 3, end: 4 });
 
-    const page2 = await renderPage(model, pages, 1, true);
+    const page2 = await renderPage(layout, 1);
     const topRule = page2.strokes.find(
       (stroke) => Math.abs(stroke.y1 - stroke.y2) < 0.5 && Math.abs(stroke.x2 - stroke.x1) > 100,
     );
@@ -240,23 +234,18 @@ describe('table row split fidelity — fragment-owned paint geometry', () => {
     expect(minimumBaseline).toBeGreaterThanOrEqual(topRule?.y1 ?? 0);
   });
 
-  it('keeps an unsplit centered cell byte-identical between fragment and legacy paint', async () => {
-    // Design amendment (Finding-1 invariant, cell-height-scale-metrics.test.ts):
-    // vAlign centring must use the slice-aware REAL-SCALE measure — the height
-    // paint actually draws — not a scale-1 fragment sum × scale. Fragment paint
-    // therefore measures exactly like the legacy path for vAlign cells (equal
-    // measure counts); the fragment's contribution here is the slice-aware
-    // window + the piece geometry, pinned by the split cases above.
+  it('keeps an unsplit centered cell deterministic and measurement-free', async () => {
     const model = documentWithRow(row('CENTER', 'center', 60, 'exact'), 80);
-    const pages = paginateDocument(model);
-    expect(pages).toHaveLength(1);
+    const layout = layoutDocument(model);
+    expect(layout.pages).toHaveLength(1);
 
-    const fragment = await renderPage(model, pages, 0, true);
-    const legacy = await renderPage(model, pages, 0, false);
-    expect(fragment.texts).toEqual(legacy.texts);
-    expect(fragment.texts.map(({ text, x, y }) => ({ text, x, y }))).toEqual([
+    const first = await renderPage(layout, 0);
+    const second = await renderPage(layout, 0);
+    expect(second.texts).toEqual(first.texts);
+    expect(first.texts.map(({ text, x, y }) => ({ text, x, y }))).toEqual([
       { text: 'CENTER', x: 0, y: 36 },
     ]);
-    expect(fragment.measureCount()).toBe(legacy.measureCount());
+    expect(first.measureCount()).toBe(0);
+    expect(second.measureCount()).toBe(0);
   });
 });

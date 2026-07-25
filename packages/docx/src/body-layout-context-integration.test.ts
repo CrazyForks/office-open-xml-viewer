@@ -4,10 +4,9 @@ import {
   resolveDocumentLayoutSettings,
   resolveSectionLayoutContext,
 } from './layout-context.js';
-import {
-  computeColumns,
-  resolveBodyParagraphLayoutContext,
-} from './renderer.js';
+import { computeSectionColumns as computeColumns } from './layout-context.js';
+import { resolveBodyParagraphLayoutContext } from './layout/acquisition-state.js';
+import { bodyAcquisitionInputProjections } from './parser-model.js';
 import type {
   DocParagraph,
   DocxDocumentModel,
@@ -58,7 +57,7 @@ describe('body layout context integration', () => {
     const layoutSettings = resolveDocumentLayoutSettings(document);
     const sectionLayout = resolveSectionLayoutContext(layoutSettings, document.section);
     const context = resolveBodyParagraphLayoutContext(
-      { layoutSettings, sectionLayout },
+      { layoutSettings, sectionLayout, acquisitionInputs: bodyAcquisitionInputProjections },
       paragraph(),
     );
 

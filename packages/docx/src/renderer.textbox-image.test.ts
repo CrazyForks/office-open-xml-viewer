@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { measureShapeTextAutoFitHeight, preloadImages, renderShapeText } from './renderer';
+import { createLayoutServices } from './layout-runtime.js';
+import { preloadImages } from './test-support/renderer-internals.test-support.js';
+import {
+  acquireAndPaintShapeTextBox,
+  acquireShapeTextBoxForTest,
+  type ShapeAcquisitionTestState,
+} from './retained-shape-textbox.test-support.js';
 import type { DocxDocumentModel, ShapeRun, ShapeText, ShapeTextRun } from './types';
+import { canvasFontString } from '@silurus/ooxml-core';
 
 /**
  * Inline images living INSIDE a DOCX text box (`<wps:txbx>`) ride on the
@@ -9,7 +16,7 @@ import type { DocxDocumentModel, ShapeRun, ShapeText, ShapeTextRun } from './typ
  *   1. `collectImagePairs` (exercised through `preloadImages`, exactly as
  *      renderer.image.test.ts drives it) must surface those textbox images so
  *      their bytes reach the decode pipeline (WMF decoder included).
- *   2. `renderShapeText` must draw the decoded bitmap fitted to the inner
+ *   2. retained text-box paint must draw the decoded bitmap fitted to the inner
  *      width, and must NOT throw / draw when the bitmap is missing.
  */
 
@@ -26,15 +33,17 @@ function makeRecordingCtx(): {
   ctx: CanvasRenderingContext2D;
   drawImageCalls: DrawImageCall[];
   fillTextCalls: { text: string; x: number; y: number; font: string; fillStyle: string }[];
+  fontCalls: string[];
 } {
   let font = '10px serif';
   let fillStyle = '#000';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const drawImageCalls: DrawImageCall[] = [];
   const fillTextCalls: { text: string; x: number; y: number; font: string; fillStyle: string }[] = [];
+  const fontCalls: string[] = [];
   const ctx = {
     get font() { return font; },
-    set font(v: string) { font = v; },
+    set font(v: string) { font = v; fontCalls.push(v); },
     get fillStyle() { return fillStyle; },
     set fillStyle(v: string) { fillStyle = v; },
     measureText: (s: string) => {
@@ -59,12 +68,12 @@ function makeRecordingCtx(): {
     strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
   };
-  return { ctx: ctx as unknown as CanvasRenderingContext2D, drawImageCalls, fillTextCalls };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, drawImageCalls, fillTextCalls, fontCalls };
 }
 
 /** Build a shape (ShapeRun) carrying a single rich-text block whose `runs`
  *  describe per-run formatting. Insets default to 0 so layout math is easy; the
- *  box width is supplied by the renderShapeText `w` argument at each call. */
+ *  box width is supplied to retained text-box acquisition at each call. */
 function richTextbox(runs: ShapeTextRun[], alignment = 'left'): ShapeRun {
   const block: ShapeText = {
     text: runs.map((r) => r.text).join(''),
@@ -147,7 +156,7 @@ describe('textbox inline images — rendering', () => {
   // A bitmap-like stub: drawImage only needs width/height-bearing source.
   const fakeBmp = { width: 200, height: 100, close: () => {} } as unknown as ImageBitmap;
 
-  it('renderShapeText draws the bitmap fitted to the inner width', () => {
+  it('draws the bitmap fitted to the inner width', () => {
     const { ctx, drawImageCalls } = makeRecordingCtx();
     const shape = textboxWithImage(); // natural 100×50 pt
     const images = new Map<string, DecodedImage>([['word/media/image1.emf', fakeBmp]]);
@@ -155,7 +164,7 @@ describe('textbox inline images — rendering', () => {
     // Box: 80pt wide so the 100pt-wide image must scale DOWN to innerW=80,
     // height 50 × (80/100) = 40. scale=1 → px == pt.
     const scale = 1;
-    renderShapeText(shape, /*x*/ 0, /*y*/ 0, /*w*/ 80, /*h*/ 200, ctx, scale, {}, images);
+    acquireAndPaintShapeTextBox(shape, /*x*/ 0, /*y*/ 0, /*w*/ 80, /*h*/ 200, ctx, scale, {}, images);
 
     expect(drawImageCalls).toHaveLength(1);
     const call = drawImageCalls[0];
@@ -168,13 +177,13 @@ describe('textbox inline images — rendering', () => {
     expect(call.y).toBeCloseTo(0, 5);
   });
 
-  it('renderShapeText draws an image smaller than innerW at natural size, centered', () => {
+  it('draws an image smaller than innerW at natural size, centered', () => {
     const { ctx, drawImageCalls } = makeRecordingCtx();
     const shape = textboxWithImage(); // natural 100×50 pt
     const images = new Map<string, DecodedImage>([['word/media/image1.emf', fakeBmp]]);
 
     // innerW=200 > natural 100 ⇒ keep natural 100×50, centered ⇒ x=(200-100)/2=50.
-    renderShapeText(shape, 0, 0, 200, 200, ctx, 1, {}, images);
+    acquireAndPaintShapeTextBox(shape, 0, 0, 200, 200, ctx, 1, {}, images);
 
     expect(drawImageCalls).toHaveLength(1);
     expect(drawImageCalls[0].w).toBeCloseTo(100, 5);
@@ -182,12 +191,12 @@ describe('textbox inline images — rendering', () => {
     expect(drawImageCalls[0].x).toBeCloseTo(50, 5);
   });
 
-  it('renderShapeText with a missing bitmap draws nothing and does not throw', () => {
+  it('with a missing bitmap draws nothing and does not throw', () => {
     const { ctx, drawImageCalls, fillTextCalls } = makeRecordingCtx();
     const shape = textboxWithImage();
     const images = new Map<string, DecodedImage>(); // bitmap NOT present
 
-    expect(() => renderShapeText(shape, 0, 0, 80, 200, ctx, 1, {}, images)).not.toThrow();
+    expect(() => acquireAndPaintShapeTextBox(shape, 0, 0, 80, 200, ctx, 1, {}, images)).not.toThrow();
     // No image drawn …
     expect(drawImageCalls).toHaveLength(0);
     // … but the caption text block still renders (height was still reserved).
@@ -198,7 +207,7 @@ describe('textbox inline images — rendering', () => {
     expect(captionInk).toContain('Fig.1:Asamplefigure.');
   });
 
-  it('renderShapeText wraps a long text block to multiple lines within the inner width', () => {
+  it('wraps a long text block to multiple lines within the inner width', () => {
     const { ctx, fillTextCalls } = makeRecordingCtx();
     // Single text block (no image). At fontSizePt 10 / scale 1 the mock advance
     // is 10px per char, so a 100px-wide box holds ~10 chars per line.
@@ -208,7 +217,7 @@ describe('textbox inline images — rendering', () => {
       textAnchor: 't', textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
     } as unknown as ShapeRun;
 
-    renderShapeText(shape, 0, 0, 100, 400, ctx, 1, {}, new Map());
+    acquireAndPaintShapeTextBox(shape, 0, 0, 100, 400, ctx, 1, {}, new Map());
 
     // The 24-char run cannot fit on one 100px line ⇒ it wraps.
     expect(fillTextCalls.length).toBeGreaterThan(1);
@@ -230,12 +239,12 @@ describe('textbox inline images — rendering', () => {
       textAutofit: 'sp',
     } as unknown as ShapeRun;
 
-    renderShapeText(shape, 10, 0, 200, 400, ctx, 1, {}, new Map());
+    acquireAndPaintShapeTextBox(shape, 10, 0, 200, 400, ctx, 1, {}, new Map());
 
     expect(fillTextCalls[0]?.x).toBeCloseTo(17.2, 5);
   });
 
-  it('measureShapeTextAutoFitHeight returns content height plus bodyPr insets', () => {
+  it('retained spAutoFit acquisition returns content height plus bodyPr insets', () => {
     const { ctx } = makeRecordingCtx();
     const shape = {
       type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
@@ -244,13 +253,56 @@ describe('textbox inline images — rendering', () => {
       textAutofit: 'sp',
     } as unknown as ShapeRun;
 
-    const measured = measureShapeTextAutoFitHeight(shape, 200, ctx, 1, {}, new Map());
+    const layout = acquireShapeTextBoxForTest(shape, 0, 0, 200, 400, ctx, 1);
 
-    expect(measured).toBeCloseTo(17, 5);
+    expect(layout?.flowBounds.heightPt).toBeCloseTo(17, 5);
   });
 });
 
 describe('textbox rich text — per-run formatting', () => {
+  it('uses one byte-identical service route for auto-fit, line metrics, and paint', () => {
+    const { ctx, fontCalls } = makeRecordingCtx();
+    const doc = {
+      section: {
+        pageWidth: 612, pageHeight: 792,
+        marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+        headerDistance: 36, footerDistance: 36,
+        titlePage: false, evenAndOddHeaders: false,
+      },
+      body: [],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: { 'Roman Face': 'roman' },
+    } as DocxDocumentModel;
+    const services = createLayoutServices(doc, { measureContext: ctx });
+    const route = services.text.resolve({
+      fonts: { ascii: 'Roman Face', highAnsi: 'Roman Face' },
+      slot: 'ascii',
+    }).route;
+    const expected = canvasFontString(route, 10, 400, 'normal');
+    const state = {
+      pageIndex: 0,
+      totalPages: 1,
+      layoutServices: services,
+      resolvedLocalFonts: services.text.localMetrics,
+    } satisfies ShapeAcquisitionTestState;
+    const shape = richTextbox([{ text: 'route', fontSizePt: 10, fontFamily: 'Roman Face' }]);
+
+    fontCalls.length = 0;
+    acquireShapeTextBoxForTest(
+      shape, 0, 0, 200, 100, ctx, 1, doc.fontFamilyClasses, state,
+    );
+    expect(fontCalls.filter((font) => font.includes('Roman Face')))
+      .toEqual(expect.arrayContaining([expected]));
+    expect(fontCalls.filter((font) => font.includes('Roman Face')).every((font) => font === expected)).toBe(true);
+
+    fontCalls.length = 0;
+    acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, doc.fontFamilyClasses, new Map(), state);
+    expect(fontCalls.filter((font) => font.includes('Roman Face')))
+      .toEqual(expect.arrayContaining([expected]));
+    expect(fontCalls.filter((font) => font.includes('Roman Face')).every((font) => font === expected)).toBe(true);
+  });
+
   /** Tokens belonging to a substring, with the font each was drawn with. */
   function tokensFor(
     calls: { text: string; font: string }[],
@@ -274,7 +326,7 @@ describe('textbox rich text — per-run formatting', () => {
       { text: 'Abstract－ ', fontSizePt: 10, bold: true },
       { text: 'This document.', fontSizePt: 10, bold: false },
     ]);
-    renderShapeText(shape, 0, 0, 2000, 400, ctx, 1, {}, new Map());
+    acquireAndPaintShapeTextBox(shape, 0, 0, 2000, 400, ctx, 1, {}, new Map());
 
     // All ink preserved (wrap-point spaces aside).
     const ink = fillTextCalls.map((c) => c.text).join('').replace(/\s/g, '');
@@ -304,14 +356,14 @@ describe('textbox rich text — per-run formatting', () => {
       { text: '減', fontSizePt: 22, ruby: { text: 'げん', fontSizePt: 5 } },
     ]);
 
-    renderShapeText(shape, 0, 0, 500, 120, ctx, 1, {}, new Map());
+    acquireAndPaintShapeTextBox(shape, 0, 0, 500, 120, ctx, 1, {}, new Map());
 
     const root = fillTextCalls.find((c) => c.text === '根号');
-    const rootRuby = fillTextCalls.find((c) => c.text === 'こんごう');
+    const rootRuby = fillTextCalls.find((c) => c.text === 'こ');
     const add = fillTextCalls.find((c) => c.text === '加');
     const addRuby = fillTextCalls.find((c) => c.text === 'か');
     const sub = fillTextCalls.find((c) => c.text === '減');
-    const subRuby = fillTextCalls.find((c) => c.text === 'げん');
+    const subRuby = fillTextCalls.find((c) => c.text === 'げ');
 
     expect(root).toBeDefined();
     expect(rootRuby).toBeDefined();
@@ -323,6 +375,25 @@ describe('textbox rich text — per-run formatting', () => {
     expect(addRuby!.y).toBeLessThan(add!.y);
     expect(subRuby!.y).toBeLessThan(sub!.y);
     expect(fillTextCalls.map((c) => c.text).join('')).toBe('根号こんごうを含む式の加か減げん');
+  });
+
+  it('uses hpsRaise for the horizontal text-box ruby baseline and preserves zero', () => {
+    const distance = (hpsRaisePt: number): number => {
+      const { ctx, fillTextCalls } = makeRecordingCtx();
+      const shape = richTextbox([{
+        text: '漢', fontSizePt: 12, fontFamily: 'NotInMetrics',
+        ruby: { text: 'かん', fontSizePt: 8, hpsRaisePt },
+      }]);
+      acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 2, {}, new Map());
+      const base = fillTextCalls.find((call) => call.text === '漢');
+      const ruby = fillTextCalls.find((call) => /[かん]/.test(call.text));
+      expect(base, 'base glyph drawn').toBeDefined();
+      expect(ruby, 'ruby glyph drawn').toBeDefined();
+      return base!.y - ruby!.y;
+    };
+
+    expect(distance(14)).toBeCloseTo(28, 8);
+    expect(distance(0)).toBe(0);
   });
 
   it('draws a numbered marker for text-box paragraphs', () => {
@@ -344,7 +415,7 @@ describe('textbox rich text — per-run formatting', () => {
       fontFamilyEastAsia: 'MS Gothic',
     };
 
-    renderShapeText(shape, 0, 0, 260, 120, ctx, 1, {}, new Map());
+    acquireAndPaintShapeTextBox(shape, 0, 0, 260, 120, ctx, 1, {}, new Map());
 
     const marker = fillTextCalls.find((c) => c.text === '※');
     const body = fillTextCalls.find((c) => c.text.includes('加法'));
@@ -363,7 +434,7 @@ describe('textbox rich text — per-run formatting', () => {
       { text: 'aaaa ', fontSizePt: 10, bold: true },
       { text: 'bbbb cccc dddd eeee', fontSizePt: 10, bold: false },
     ]);
-    renderShapeText(shape, 0, 0, 100, 400, ctx, 1, {}, new Map());
+    acquireAndPaintShapeTextBox(shape, 0, 0, 100, 400, ctx, 1, {}, new Map());
 
     // It wrapped.
     expect(fillTextCalls.length).toBeGreaterThan(1);
@@ -386,7 +457,7 @@ describe('textbox rich text — per-run formatting', () => {
       { text: 'red ', fontSizePt: 10, color: 'ff0000' },
       { text: 'plain.', fontSizePt: 10 },
     ]);
-    renderShapeText(shape, 0, 0, 2000, 400, ctx, 1, {}, new Map());
+    acquireAndPaintShapeTextBox(shape, 0, 0, 2000, 400, ctx, 1, {}, new Map());
 
     const redToks = fillTextCalls.filter((c) => c.text.replace(/\s/g, '') === 'red');
     const plainToks = fillTextCalls.filter((c) => c.text.replace(/\s/g, '') === 'plain.');
@@ -409,7 +480,7 @@ describe('textbox rich text — per-run formatting', () => {
     const shape = richTextbox([
       { text: '第11回', fontSizePt: 10, fontFamily: 'Century', fontFamilyEastAsia: 'ＭＳ ゴシック' },
     ]);
-    renderShapeText(shape, 0, 0, 2000, 400, ctx, 1, fontFamilyClasses, new Map());
+    acquireAndPaintShapeTextBox(shape, 0, 0, 2000, 400, ctx, 1, fontFamilyClasses, new Map());
 
     // All ink preserved.
     const ink = fillTextCalls.map((c) => c.text).join('');
@@ -442,7 +513,7 @@ describe('textbox rich text — per-run formatting', () => {
     const shape = richTextbox([
       { text: '本文 text', fontSizePt: 10, fontFamily: 'Yu Mincho' },
     ]);
-    renderShapeText(shape, 0, 0, 2000, 400, ctx, 1, fontFamilyClasses, new Map());
+    acquireAndPaintShapeTextBox(shape, 0, 0, 2000, 400, ctx, 1, fontFamilyClasses, new Map());
 
     for (const c of fillTextCalls.filter((t) => t.text.trim().length > 0)) {
       expect(c.font).toContain('"Yu Mincho"');
@@ -455,7 +526,7 @@ describe('textbox rich text — per-run formatting', () => {
 // must be reordered by the UAX#9 visual pass (rule L2, the same one body
 // paragraphs use). Without it, RTL/mixed text drew in logical order and Word's
 // word order was reversed (sample-8's yellow text box).
-describe('renderShapeText — rich-text RTL visual reordering (UAX#9 L2)', () => {
+describe('retained text-box paint — rich-text RTL visual reordering (UAX#9 L2)', () => {
   const run = (text: string): ShapeTextRun =>
     ({ text, fontSizePt: 10 }) as unknown as ShapeTextRun;
   // Drawn texts sorted by x = visual left-to-right reading order.
@@ -467,7 +538,7 @@ describe('renderShapeText — rich-text RTL visual reordering (UAX#9 L2)', () =>
     // Logical Arabic "one two three"; under an RTL base the visual L→R order is
     // the reverse: three, two, one.
     const shape = richTextbox([run('واحد اثنان ثلاثة')], 'right');
-    renderShapeText(shape, 0, 0, 300, 100, ctx, 1);
+    acquireAndPaintShapeTextBox(shape, 0, 0, 300, 100, ctx, 1);
     expect(visualOrder(fillTextCalls)).toEqual(['ثلاثة', 'اثنان', 'واحد']);
   });
 
@@ -476,14 +547,14 @@ describe('renderShapeText — rich-text RTL visual reordering (UAX#9 L2)', () =>
     // "value 2025 end" in Arabic with an embedded number: words reverse, but the
     // number stays a single LTR island in the middle.
     const shape = richTextbox([run('قيمة 2025 نهاية')], 'right');
-    renderShapeText(shape, 0, 0, 300, 100, ctx, 1);
+    acquireAndPaintShapeTextBox(shape, 0, 0, 300, 100, ctx, 1);
     expect(visualOrder(fillTextCalls)).toEqual(['نهاية', '2025', 'قيمة']);
   });
 
   it('leaves pure-LTR rich text in logical order', () => {
     const { ctx, fillTextCalls } = makeRecordingCtx();
     const shape = richTextbox([run('alpha beta gamma')], 'left');
-    renderShapeText(shape, 0, 0, 300, 100, ctx, 1);
+    acquireAndPaintShapeTextBox(shape, 0, 0, 300, 100, ctx, 1);
     expect(visualOrder(fillTextCalls)).toEqual(['alpha', 'beta', 'gamma']);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { renderDocumentToCanvas, paginateDocument } from './renderer.js';
+import { layoutDocument } from './document-layout.js';
+import { paintLayoutPage } from './paint/canvas-page.js';
 import type {
   BodyElement,
   CellElement,
@@ -7,10 +8,10 @@ import type {
   DocTable,
   DocTableRow,
   DocxDocumentModel,
-  PaginatedBodyElement,
-  SectionProps,
+    SectionProps,
   BorderSpec,
 } from './types';
+import type { TableFragmentLayout } from './layout/table-pagination.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Split-edge border semantics for a MID-ROW page cut (fidelity round, agreed
@@ -61,7 +62,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; strokes: StrokeSeg[
     stroke() {
       if (pending) strokes.push({ ...pending, width: lineWidth, color: strokeStyle });
     },
-    fill() {}, fillRect() {}, strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {},
+    fill() {}, fillRect() {}, strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {}, setTransform() {},
     setLineDash() {}, drawImage() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     fillText() {}, strokeText() {},
@@ -131,37 +132,50 @@ const shortRow = (text: string): DocTableRow => ({
     content: [{ type: 'paragraph', ...para(text) } as unknown as CellElement],
     colSpan: 1, vMerge: null, borders: allEdges(), background: null, vAlign: 'top', widthPt: null,
   }],
-  rowHeight: null, rowHeightRule: 'auto', isHeader: false,
+  // This fixture isolates a page cut that lands exactly on a row boundary.
+  // `exact` makes 20pt the complete §17.4.80 row box; an auto row also reserves
+  // the resolved border footprint and therefore would not be a 20pt row.
+  rowHeight: 20, rowHeightRule: 'exact', isHeader: false,
 } as unknown as DocTableRow);
 
-async function renderPage(model: DocxDocumentModel, pages: PaginatedBodyElement[][], pageIndex: number): Promise<StrokeSeg[]> {
+async function renderPage(layout: ReturnType<typeof layoutDocument>, pageIndex: number): Promise<StrokeSeg[]> {
   const { canvas, strokes } = makeRecordingCanvas();
-  await renderDocumentToCanvas(model, canvas, pageIndex, { dpr: 1, width: 160, prebuiltPages: pages });
+  await paintLayoutPage(layout, pageIndex, canvas, { dpr: 1, scale: 1 });
   return strokes;
 }
 
 const horizontals = (strokes: StrokeSeg[]) =>
   strokes.filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && Math.abs(s.x2 - s.x1) > 10);
 
+function retainedTableOnPage(layout: ReturnType<typeof layoutDocument>, pageIndex: number) {
+  const table = layout.pages[pageIndex]?.layers.body.find((node) => node.kind === 'table');
+  if (table?.kind !== 'table') throw new Error('expected retained table geometry');
+  return table as TableFragmentLayout;
+}
+
 describe('mid-row page-cut border semantics (§17.4.66 conflict at the cut)', () => {
   it('draws the §17.4.66 winner at the page-1 cut and the continuation top on page 2', async () => {
-    // 4-line cell (80pt) into a 60pt page body: p.1 piece = 3 lines, cut at y=60.
+    // A 4-line cell (80pt) in a 60pt body also needs the page-local top/cut
+    // footprint. Two 20pt lines fit with the two half-rules; a third would make
+    // the complete slice overflow.
     const model = splitDoc([wrappingRow()], 60);
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1);
-    // Fixture sanity: the split really is MID-ROW (a lineSlice exists on p.1).
-    const p1Table = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable);
-    const p1Cut = (p1Table.rows[0].cells[0].content[0] as CellElement & { lineSlice?: unknown }).lineSlice;
-    expect(p1Cut).toBeDefined();
+    const layout = layoutDocument(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
+    const firstFragment = retainedTableOnPage(layout, 0);
+    expect(firstFragment.rows[0]?.cells[0]?.blocks[0]?.layout).toMatchObject({
+      continuation: { lineStart: 0, continuesOnNext: true },
+    });
 
-    const p1 = await renderPage(model, pages, 0);
-    const p2 = await renderPage(model, pages, 1);
+    const p1 = await renderPage(layout, 0);
+    const p2 = await renderPage(layout, 1);
 
     const p1H = horizontals(p1);
     // Top frame at y=0 present…
     expect(p1H.some((s) => Math.abs(s.y1 - 0) <= 1)).toBe(true);
-    // …and the cut draws the conflict winner (single ∨ single) at y=60, full width.
-    const cut = p1H.filter((s) => Math.abs(s.y1 - 60) <= 1);
+    // …and the cut draws the conflict winner (single ∨ single) at the
+    // retained page-local fragment bottom, including the hairline offset.
+    const expectedCutY = firstFragment.flowBounds.yPt + firstFragment.flowBounds.heightPt + 0.5;
+    const cut = p1H.filter((s) => Math.abs(s.y1 - expectedCutY) <= 0.1);
     expect(cut.length).toBe(1);
     expect(Math.min(cut[0].x1, cut[0].x2)).toBeLessThanOrEqual(1);
     expect(Math.max(cut[0].x1, cut[0].x2)).toBeGreaterThanOrEqual(159);
@@ -178,10 +192,12 @@ describe('mid-row page-cut border semantics (§17.4.66 conflict at the cut)', ()
     const row = wrappingRow();
     (row.cells[0].borders as { bottom: BorderSpec | null }).bottom = null;
     const model = splitDoc([row], 60);
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1);
-    const p1H = horizontals(await renderPage(model, pages, 0));
-    expect(p1H.filter((s) => Math.abs(s.y1 - 60) <= 1)).toHaveLength(1);
+    const layout = layoutDocument(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
+    const p1H = horizontals(await renderPage(layout, 0));
+    const firstFragment = retainedTableOnPage(layout, 0);
+    const expectedCutY = firstFragment.flowBounds.yPt + firstFragment.flowBounds.heightPt + 0.5;
+    expect(p1H.filter((s) => Math.abs(s.y1 - expectedCutY) <= 0.1)).toHaveLength(1);
   });
 
   it('draws NOTHING at the cut of a borderless table', async () => {
@@ -189,9 +205,9 @@ describe('mid-row page-cut border semantics (§17.4.66 conflict at the cut)', ()
     (row.cells[0] as { borders: unknown }).borders = { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null };
     const model = splitDoc([row], 60);
     (model.body[0] as unknown as DocTable).borders = { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null } as DocTable['borders'];
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1);
-    const p1H = horizontals(await renderPage(model, pages, 0));
+    const layout = layoutDocument(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
+    const p1H = horizontals(await renderPage(layout, 0));
     expect(p1H.filter((s) => Math.abs(s.y1 - 60) <= 1)).toHaveLength(0);
   });
 
@@ -201,14 +217,12 @@ describe('mid-row page-cut border semantics (§17.4.66 conflict at the cut)', ()
     // row-boundary edges draw today) must not change. Pin: a horizontal rule IS
     // drawn at the page-1 bottom (y=40) — the row's own boundary edge.
     const model = splitDoc([shortRow('a'), shortRow('b'), shortRow('c')], 40);
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1);
-    const p1Table = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable);
-    const sliced = p1Table.rows.some((r) => r.cells.some((c) =>
-      c.content.some((ce) => (ce as CellElement & { lineSlice?: unknown }).lineSlice !== undefined)));
-    expect(sliced).toBe(false);
+    const layout = layoutDocument(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
+    const firstFragment = retainedTableOnPage(layout, 0);
+    expect(firstFragment.rows.every((row) => row.fragmentIndex === 0)).toBe(true);
 
-    const p1 = await renderPage(model, pages, 0);
+    const p1 = await renderPage(layout, 0);
     const p1H = horizontals(p1);
     expect(p1H.filter((s) => Math.abs(s.y1 - 40) <= 1).length).toBeGreaterThan(0);
   });

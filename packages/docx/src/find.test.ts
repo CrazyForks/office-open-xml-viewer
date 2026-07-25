@@ -42,6 +42,21 @@ describe('DocxFindController.find', () => {
     expect(matches[0].text).toBe('Hello');
   });
 
+  it('matches the semantic host-to-text-box seam, not the former z-order seam', async () => {
+    // B4 sequence: header → host body text → anchored text box → note → footer.
+    // Presentation stacking may paint the text box behind the host, but must not
+    // reorder the search index.
+    const c = controllerFor([[
+      run('header '),
+      run('host'),
+      run(' textbox'),
+      run(' note'),
+      run(' footer'),
+    ]]);
+    await expect(c.find('host textbox')).resolves.toHaveLength(1);
+    await expect(c.find('textboxhost')).resolves.toHaveLength(0);
+  });
+
   it('is case-insensitive by default and reports original-case text', async () => {
     const c = controllerFor([[run('The FOO and foo')]]);
     const matches = await c.find('foo');

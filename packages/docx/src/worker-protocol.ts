@@ -10,8 +10,8 @@ export interface DocumentMeta {
   footnotes: DocNote[];
   endnotes: DocNote[];
   /** ECMA-376 §17.6.13 / §17.6.11 — per-page page size (pt), one entry per page,
-   *  index-aligned with `pageCount`. Built worker-side from the paginated pages'
-   *  `sectionGeom` so the main thread can lay out (e.g. a scroll viewer's spacer)
+   *  index-aligned with `pageCount`. Built worker-side from canonical page geometry
+   *  so the main thread can lay out (e.g. a scroll viewer's spacer)
    *  without the full model. Genuinely per-page for a mixed-geometry document. */
   pageSizes: { widthPt: number; heightPt: number }[];
   /** ECMA-376 §17.13.6.2 — `bookmarkName → 0-based page index` for internal
@@ -31,7 +31,7 @@ export type WireRenderPageOptions = Omit<RenderPageOptions, 'onTextRun'>;
 // `init` arm is copied verbatim from `WorkerRequest`.
 export type RenderWorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number; useGoogleFonts?: boolean }
+  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number; useGoogleFonts?: boolean; defaultCurrentDateMs: number }
   | { type: 'renderPage'; id: number; pageIndex: number; opts: WireRenderPageOptions }
   // IX6 — collect a page's text-run geometry WITHOUT transferring a bitmap. The
   // find controller scans every page for its runs; a bitmap per page would be
@@ -43,9 +43,12 @@ export type RenderWorkerRequest =
 export type RenderWorkerResponse =
   | Exclude<WorkerResponse, { type: 'parsed' }>
   | { type: 'parsedMeta'; id: number; meta: DocumentMeta }
-  // IX6 — the render worker collects each rendered page's `onTextRun` geometry
-  // (a plain, structured-clone-safe `DocxTextRunInfo[]`) and ships it beside the
-  // bitmap, so the main thread can build the text-selection / find-highlight
-  // overlay on the SAME code path as main mode (no second render).
+  // OffscreenCanvas cannot select/probe the OpenType `vert` feature. A render
+  // worker that parses vertical East-Asian content returns the normalized model
+  // so the proxy can continue through main-thread rendering instead of silently
+  // painting horizontal glyph forms.
+  | { type: 'mainThreadVerticalFallback'; id: number; documentJson: ArrayBuffer }
+  // The worker projects structured-clone-safe run geometry from the same
+  // retained layout variant it paints and ships it beside the bitmap.
   | { type: 'pageRendered'; id: number; bitmap: ImageBitmap; runs: DocxTextRunInfo[] }
   | { type: 'runsCollected'; id: number; runs: DocxTextRunInfo[] };

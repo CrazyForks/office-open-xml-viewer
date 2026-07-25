@@ -30,17 +30,16 @@ interface FontBiasProfile {
  * backend-agnostic by design; the committed Georgia value below is calibrated
  * on the Chromium VRT.
  *
- * Georgia: the tracked public demo's justified body face (issue #794). The
- * The Chromium VRT's Canvas-vs-Word accumulated excess measures at roughly
- * 0.1–0.3 px per glyph
- * at the demo's 10–11 px body em — an em-fraction band of ~0.009–0.028. The
- * committed value is fixed INSIDE that measured band by the public demo's
- * Word-reference wrap positions (demo/sample-1 fidelity ratchet, scanned at
- * 0.009/0.0105/0.0115/0.012/0.013/0.02): 0.009 under-admits words Word keeps
- * (pages 4–5 regress) and 0.012+ over-admits words Word wraps (pages 3/5);
- * 0.0105 reproduces every Word-verified wrap. Times New Roman (measures
- * ~0.03 px/glyph, effectively zero), CSS generics, and unknown families
- * intentionally fall through to zero.
+ * Georgia is the tracked public demo's justified body face (issue #794). The
+ * Chromium VRT's Canvas-vs-Word accumulated excess measures roughly 0.1–0.3px
+ * per glyph at the demo's 10–11px body em, an em-fraction band of
+ * approximately 0.009–0.028. The committed value was selected inside that
+ * measured band by the public Word-reference wrap positions (scanned at
+ * 0.009/0.0105/0.0115/0.012/0.013/0.02): 0.009 under-admits words Word keeps,
+ * while 0.012 and above over-admit words Word wraps. The 0.0105 profile
+ * reproduces those verified wraps. Times New Roman, CSS generics, and unknown
+ * families intentionally fall through to zero. Per-character font routing
+ * limits the profile to glyphs actually resolved through Georgia.
  */
 const FONT_BIAS_PROFILES: ReadonlyArray<FontBiasProfile> = [
   {

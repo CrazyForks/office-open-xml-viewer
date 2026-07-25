@@ -11,16 +11,26 @@ import init, { DocxArchive, reinit } from './wasm/docx_parser.js';
 import {
   decodeDataUrl,
   preloadGoogleFonts,
+  unloadLocalFontMetrics,
   WasmParserHost,
   dropBitmapCacheByPath,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
-import type { DocxDocumentModel, PaginatedBodyElement } from './types';
-import { paginateDocument, renderDocumentToCanvas, physicalPageSizePt, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
+import type { DocxDocumentModel } from './types';
+import { renderDocumentToCanvas, dropColorReplacedCache } from './renderer';
+import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
+import { loadDocxLocalFontMetrics } from './local-font-metrics';
 import type { RenderWorkerRequest, RenderWorkerResponse, DocumentMeta } from './worker-protocol';
+import { normalizeInternalDocumentModel } from './parser-model.js';
+import {
+  retainRenderWorkerDocumentLayout,
+  type RetainedRenderWorkerDocumentLayout,
+} from './render-worker-layout.js';
+import { textRunsForSelectedPage } from './text-run-projection.js';
+import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
 
 // RB6: self-poison + auto-respawn. A trap during parse (or an in-worker image /
 // embedded-font read) recycles the instance so the next document renders on
@@ -31,8 +41,8 @@ const host = new WasmParserHost<DocxArchive>(init, {
   // wasm-bindgen singleton). `reinit` forces fresh linear memory after a trap.
   reinit,
 });
-let doc: DocxDocumentModel | null = null;
-let pages: PaginatedBodyElement[][] | null = null;
+let doc: RetainedRenderWorkerDocumentLayout | null = null;
+let localMetricFontFaces: FontFace[] = [];
 const imageCache = new Map<string, Promise<Blob>>();
 
 const post = (msg: RenderWorkerResponse, transfer?: Transferable[]) =>
@@ -65,6 +75,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
   try {
     await host.ensureReady();
     if (req.type === 'parse') {
+      doc = null;
+      if (localMetricFontFaces.length > 0) {
+        unloadLocalFontMetrics(localMetricFontFaces);
+        localMetricFontFaces = [];
+      }
       // Cached blobs belong to the previous document; serving them after a
       // re-parse would silently return the wrong file's image.
       imageCache.clear();
@@ -90,87 +105,97 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // converts a graceful failure into an error response. Render mode consumes
       // the model in-worker, so decode + parse it here (one decode, no
       // passthrough).
-      doc = host.run(() => {
+      const parsedModel = host.run(() => {
         const archive = new DocxArchive(bytes, max);
         host.setArchive(archive);
         return JSON.parse(new TextDecoder().decode(archive.parse())) as DocxDocumentModel;
       });
+      const model = normalizeInternalDocumentModel(parsedModel).document;
+      if (documentRequiresDomVerticalGlyphLayout(model)) {
+        // The normalized public model deliberately omits parser-only sidecars
+        // such as unavailable-drawing geometry. Send the untouched parser wire
+        // to the main-thread fallback so its normalization boundary can rebuild
+        // those identity-owned acquisition facts without exposing them through
+        // `DocxDocument.document`.
+        const encoded = new TextEncoder().encode(JSON.stringify(parsedModel));
+        const documentJson = encoded.buffer.slice(
+          encoded.byteOffset,
+          encoded.byteOffset + encoded.byteLength,
+        ) as ArrayBuffer;
+        post({ type: 'mainThreadVerticalFallback', id, documentJson }, [documentJson]);
+        return;
+      }
+      let googleFaces: FontFace[] = [];
       if (req.useGoogleFonts) {
-        // Pagination measures text, so fonts must land BEFORE computePages —
+        // Pagination measures text, so fonts must land before canonical layout —
         // same ordering the main-mode load() guarantees.
-        await preloadGoogleFonts(
-          docxFontPreloadNames(doc),
+        googleFaces = await preloadGoogleFonts(
+          docxFontPreloadNames(model),
           DOCX_GOOGLE_FONTS,
         );
       }
       // ECMA-376 §17.8.1 / §17.8.3 — register embedded fonts into the worker's
       // FontFaceSet (self.fonts) before pagination measures text. Bytes are read
       // straight from the retained archive (extract_image reads any zip entry).
-      if (doc.embeddedFonts?.length) {
-        await loadEmbeddedFonts(doc, async (p) => {
+      let embeddedFaces: FontFace[] = [];
+      if (model.embeddedFonts?.length) {
+        embeddedFaces = await loadEmbeddedFonts(model, async (p) => {
           const loaded = host.archive;
           if (!loaded) throw new Error('No docx loaded');
           return new Uint8Array(host.run(() => loaded.extract_image(p))).slice();
         });
       }
-      pages = paginateDocument(doc);
-      // ECMA-376 §17.6.13 / §17.6.11 — per-page size from each page's first
-      // element's stamped `sectionGeom` (body-level fallback for an empty page).
-      const model = doc;
-      const pageSizes = pages.map((els) => {
-        const g = els[0]?.sectionGeom;
-        // A vertical (tbRl) section paginates on the SWAPPED logical geometry, so
-        // un-swap the stamped dims back to the PHYSICAL page box the meta reports
-        // (identity for horizontal docs).
-        return physicalPageSizePt(
-          model.section,
-          g?.pageWidth ?? model.section.pageWidth,
-          g?.pageHeight ?? model.section.pageHeight,
-        );
+      const localMetrics = await loadDocxLocalFontMetrics(model);
+      localMetricFontFaces = localMetrics.faces;
+      const layoutServices = createLayoutServices(model, {
+        localMetrics: localMetrics.metrics,
+        useGoogleFonts: !!req.useGoogleFonts,
+        embeddedFaces,
+        googleFaces,
       });
+      doc = retainRenderWorkerDocumentLayout(
+        model,
+        layoutServices,
+        req.defaultCurrentDateMs,
+      );
+      const layout = doc.layoutVariants.defaultLayout;
+      const pageSizes = layout.pages.map((page) => ({
+        widthPt: page.geometry.widthPt,
+        heightPt: page.geometry.heightPt,
+      }));
       const meta: DocumentMeta = {
-        pageCount: pages.length,
-        comments: doc.comments ?? [],
-        footnotes: doc.footnotes ?? [],
-        endnotes: doc.endnotes ?? [],
+        pageCount: layout.pages.length,
+        comments: model.comments ?? [],
+        footnotes: model.footnotes ?? [],
+        endnotes: model.endnotes ?? [],
         pageSizes,
-        bookmarkPages: [...buildBookmarkPageMap(pages)],
+        bookmarkPages: [...buildBookmarkPageMap(layout)],
       };
       post({ type: 'parsedMeta', id, meta });
       return;
     }
     if (req.type === 'renderPage') {
-      if (!doc || !pages) throw new Error('Document not loaded');
+      if (!doc) throw new Error('Document not loaded');
       const canvas = new OffscreenCanvas(1, 1); // renderer resizes it
-      // IX6 — collect the run geometry the same render emits so the main thread
-      // can build its selection / find overlay without a second render. The
-      // callback runs worker-side; only the resulting plain array crosses back.
-      const runs: DocxTextRunInfo[] = [];
-      await renderDocumentToCanvas(doc, canvas, req.pageIndex, {
+      await renderDocumentToCanvas(doc.model, canvas, req.pageIndex, {
         ...req.opts,
-        totalPages: pages.length,
-        prebuiltPages: pages,
         fetchImage: getImage,
-        onTextRun: (r) => runs.push(r),
+        layoutServices: doc.layoutServices,
+        defaultCurrentDateMs: doc.defaultCurrentDateMs,
+      });
+      const runs = textRunsForSelectedPage(doc.layoutServices, req.pageIndex, {
+        ...req.opts,
+        defaultCurrentDateMs: doc.defaultCurrentDateMs,
       });
       const bitmap = canvas.transferToImageBitmap();
       post({ type: 'pageRendered', id, bitmap, runs }, [bitmap]);
       return;
     }
     if (req.type === 'collectRuns') {
-      // IX6 — render a page purely to harvest its text-run geometry (find scans
-      // every page). The bitmap is discarded worker-side; only `runs` crosses
-      // the wire. Same renderer / prebuilt pagination as `renderPage`, so the
-      // geometry is identical to what a `renderPage` of the same page would draw.
-      if (!doc || !pages) throw new Error('Document not loaded');
-      const canvas = new OffscreenCanvas(1, 1);
-      const runs: DocxTextRunInfo[] = [];
-      await renderDocumentToCanvas(doc, canvas, req.pageIndex, {
+      if (!doc) throw new Error('Document not loaded');
+      const runs = textRunsForSelectedPage(doc.layoutServices, req.pageIndex, {
         ...req.opts,
-        totalPages: pages.length,
-        prebuiltPages: pages,
-        fetchImage: getImage,
-        onTextRun: (r) => runs.push(r),
+        defaultCurrentDateMs: doc.defaultCurrentDateMs,
       });
       post({ type: 'runsCollected', id, runs });
       return;
@@ -197,6 +222,30 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       return;
     }
   } catch (err) {
-    post({ type: 'error', id, message: err instanceof Error ? err.message : String(err) });
+    const error = err instanceof Error ? err : new Error(String(err));
+    const details = error as Error & {
+      code?: string;
+      reason?: string;
+      outgoingColumnIndex?: number;
+      outgoingColumnCount?: number;
+      incomingColumnCount?: number;
+    };
+    post({
+      type: 'error',
+      id,
+      message: error.message,
+      errorName: error.name,
+      ...(details.code !== undefined ? { code: details.code } : {}),
+      ...(details.reason !== undefined ? { reason: details.reason } : {}),
+      ...(details.outgoingColumnIndex !== undefined
+        ? { outgoingColumnIndex: details.outgoingColumnIndex }
+        : {}),
+      ...(details.outgoingColumnCount !== undefined
+        ? { outgoingColumnCount: details.outgoingColumnCount }
+        : {}),
+      ...(details.incomingColumnCount !== undefined
+        ? { incomingColumnCount: details.incomingColumnCount }
+        : {}),
+    });
   }
 };

@@ -60,11 +60,15 @@ function para(text: string, spaceBefore = 0, spaceAfter = 0): DocParagraph {
   } as unknown as DocParagraph;
 }
 
+const MATCHING_SECTION_GEOMETRY = {
+  pageWidth: 400, pageHeight: 600,
+  marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+  headerDistance: 4, footerDistance: 4,
+};
+
 function docOf(body: BodyElement[]): DocxDocumentModel {
   const section: SectionProps = {
-    pageWidth: 400, pageHeight: 600,
-    marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
-    headerDistance: 4, footerDistance: 4, titlePage: false, evenAndOddHeaders: false,
+    ...MATCHING_SECTION_GEOMETRY, titlePage: false, evenAndOddHeaders: false,
     // The final section (containing B) starts CONTINUOUS so the section break is
     // not a page break and B stays on page 0 (§17.6.22 — the break is governed by
     // the FOLLOWING section's start type).
@@ -95,7 +99,7 @@ describe('section-break spacer suppresses spacing-before (Word/LibreOffice inter
     const spacerBody: BodyElement[] = [
       para('A') as unknown as BodyElement,
       para('', SPACER_BEFORE) as unknown as BodyElement,
-      { type: 'sectionBreak', kind: 'continuous' } as unknown as BodyElement,
+      { type: 'sectionBreak', kind: 'continuous', geom: MATCHING_SECTION_GEOMETRY } as unknown as BodyElement,
       para('B') as unknown as BodyElement,
     ];
     // Control: same, but the empty paragraph is NOT followed by a section break,
@@ -128,7 +132,10 @@ describe('section-break spacer suppresses spacing-before (Word/LibreOffice inter
       para('A') as unknown as BodyElement,
       para('', SPACER_BEFORE) as unknown as BodyElement, // empty 1
       para('', SPACER_BEFORE) as unknown as BodyElement, // empty 2 = spacer
-      { type: 'sectionBreak', kind: 'nextPage' } as unknown as BodyElement, // marker says nextPage…
+      // Author the outgoing page box explicitly so this test isolates the
+      // resolved continuous boundary; §17.6.22 does not let a non-continuous
+      // section inherit omitted geometry from the following section.
+      { type: 'sectionBreak', kind: 'nextPage', geom: MATCHING_SECTION_GEOMETRY } as unknown as BodyElement,
       para('B') as unknown as BodyElement,
     ];
     const control: BodyElement[] = [
@@ -149,7 +156,7 @@ describe('section-break spacer suppresses spacing-before (Word/LibreOffice inter
     const withText: BodyElement[] = [
       para('A') as unknown as BodyElement,
       para('X', SPACER_BEFORE) as unknown as BodyElement,
-      { type: 'sectionBreak', kind: 'continuous' } as unknown as BodyElement,
+      { type: 'sectionBreak', kind: 'continuous', geom: MATCHING_SECTION_GEOMETRY } as unknown as BodyElement,
       para('B') as unknown as BodyElement,
     ];
     const control: BodyElement[] = [
@@ -173,13 +180,13 @@ describe('collapsed continuous-section spacer — Word section-mark collapse (sa
     const collapse: BodyElement[] = [
       para('A') as unknown as BodyElement,
       para('') as unknown as BodyElement, // spacer before=0 → collapses (no line box)
-      { type: 'sectionBreak', kind: 'continuous' } as unknown as BodyElement,
+      { type: 'sectionBreak', kind: 'continuous', geom: MATCHING_SECTION_GEOMETRY } as unknown as BodyElement,
       para('B') as unknown as BodyElement,
     ];
     const keepBox: BodyElement[] = [
       para('A') as unknown as BodyElement,
       para('', SPACER_BEFORE) as unknown as BodyElement, // spacer before>0 → keeps its line box
-      { type: 'sectionBreak', kind: 'continuous' } as unknown as BodyElement,
+      { type: 'sectionBreak', kind: 'continuous', geom: MATCHING_SECTION_GEOMETRY } as unknown as BodyElement,
       para('B') as unknown as BodyElement,
     ];
     const aCollapse = await baselineOf(collapse, 'A');
@@ -203,7 +210,7 @@ describe('collapsed continuous-section spacer — Word section-mark collapse (sa
       para('A', 0, aAfter) as unknown as BodyElement, // A carries a space-after
       para('') as unknown as BodyElement, // empty-run start (inkless), leads the spacer
       para('') as unknown as BodyElement, // spacer before=0 → collapses
-      { type: 'sectionBreak', kind: 'continuous' } as unknown as BodyElement,
+      { type: 'sectionBreak', kind: 'continuous', geom: MATCHING_SECTION_GEOMETRY } as unknown as BodyElement,
       para('B') as unknown as BodyElement,
     ];
     const bNoAfter = await baselineOf(mk(0), 'B');

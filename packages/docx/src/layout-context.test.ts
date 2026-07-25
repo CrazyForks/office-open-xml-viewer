@@ -11,7 +11,6 @@ import {
   resolveParagraphLayoutContext,
   resolveRunLayoutContext,
   resolveSectionLayoutContext,
-  toLegacyDocGridContext,
   type StoryContext,
 } from './layout-context.js';
 
@@ -82,6 +81,17 @@ const cellStory: StoryContext = {
 };
 
 describe('layout context resolvers', () => {
+  it('retains the section column separator fact', () => {
+    const settings = resolveDocumentLayoutSettings(documentModel());
+
+    expect(resolveSectionLayoutContext(settings, section({
+      columns: { count: 2, spacePt: 18, equalWidth: true, sep: true, cols: [] },
+    })).columnSeparator).toBe(true);
+    expect(resolveSectionLayoutContext(settings, section({
+      columns: { count: 2, spacePt: 18, equalWidth: true, sep: false, cols: [] },
+    })).columnSeparator).toBe(false);
+  });
+
   it('preserves nested table-cell container depth', () => {
     const outerCell = enterTableCellStoryContext(bodyStory);
     const innerCell = enterTableCellStoryContext(outerCell);
@@ -172,11 +182,6 @@ describe('layout context resolvers', () => {
     ]);
     expect(context.grid).toEqual({
       kind: 'snapToChars',
-      linePitchPt: 20,
-      charSpacePt: 1,
-    });
-    expect(toLegacyDocGridContext(context)).toEqual({
-      type: 'snapToChars',
       linePitchPt: 20,
       charSpacePt: 1,
     });

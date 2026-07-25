@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
 import { renderDocumentToCanvas } from './renderer.js';
 import type {
   DocxDocumentModel,
@@ -17,7 +19,7 @@ import type {
  *
  * These tests pin the physical x-origin the renderer resolves for each direction
  * by capturing every `moveTo`/`lineTo` x-coordinate (cell borders are stroked via
- * `strokeCrispSegment` → `moveTo`/`lineTo`) and reading the table's left/right
+ * retained border painter → `moveTo`/`lineTo`) and reading the table's left/right
  * extent from them. A vertical border is nudged ≤0.5 px by the crispness snap
  * (`crispOffset`), so the extent assertions allow a 0.75 px tolerance.
  */
@@ -32,7 +34,9 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; xs: number[] } {
   let font = '10px serif';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const xs: number[] = [];
-  const record = (x: number) => xs.push(x);
+  let transform = { scaleX: 1, translateX: 0 };
+  const transformStack: Array<typeof transform> = [];
+  const record = (x: number) => xs.push(transform.translateX + x * transform.scaleX);
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
@@ -47,10 +51,14 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; xs: number[] } {
         actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
     },
-    save() {}, restore() {}, beginPath() {}, closePath() {},
+    save() { transformStack.push({ ...transform }); },
+    restore() { transform = transformStack.pop() ?? { scaleX: 1, translateX: 0 }; },
+    beginPath() {}, closePath() {},
     moveTo(x: number) { record(x); }, lineTo(x: number) { record(x); },
     stroke() {}, fill() {}, fillRect() {}, strokeRect() {},
-    rect() {}, clip() {}, scale() {}, translate() {},
+    rect() {}, clip() {},
+    scale(x: number) { transform.scaleX *= x; },
+    translate(x: number) { transform.translateX += x * transform.scaleX; },
     setLineDash() {}, clearRect() {}, arc() {},
     quadraticCurveTo() {}, bezierCurveTo() {},
     createLinearGradient() { return { addColorStop() {} }; },
@@ -117,6 +125,23 @@ function tableDoc(colW: number, tblInd: number | undefined, bidiVisual: boolean)
 }
 
 describe('§17.4.50 tblInd — table indent from the leading margin', () => {
+  it('retains the signed leading-edge origin for both visual directions', () => {
+    const retained = (doc: DocxDocumentModel) => {
+      const recording = makeRecordingCanvas();
+      const services = createLayoutServices(doc, {
+        measureContext: recording.canvas.getContext('2d') as CanvasRenderingContext2D,
+      });
+      return layoutDocument(doc, services, { currentDateMs: 0 }).pages[0]?.layers.body[0];
+    };
+    const ltr = retained(tableDoc(160, -10, false));
+    const rtl = retained(tableDoc(160, -10, true));
+    if (ltr?.kind !== 'table' || rtl?.kind !== 'table') {
+      throw new Error('expected retained table geometry');
+    }
+    expect(ltr.flowBounds.xPt).toBeCloseTo(10, 6);
+    expect(rtl.flowBounds.xPt).toBeCloseTo(30, 6);
+  });
+
   it('LTR: negative tblInd pulls the LEFT origin outward past the left margin', async () => {
     // scale=1 (width 200 = pageWidth). content=[20,180]. colW=160 fits content.
     // No indent: left origin = contentX = 20. With tblInd=-10 → left origin = 10.
@@ -128,6 +153,50 @@ describe('§17.4.50 tblInd — table indent from the leading margin', () => {
     await renderDocumentToCanvas(tableDoc(160, -10, false), withInd.canvas, 0, { dpr: 1, width: 200 });
     expectNear(Math.min(...withInd.xs), 10, 'LTR left origin = contentX + tblInd = 20 + (-10)');
   });
+
+  it('preserves an authored width beyond the text band when the indented table fits the page', () => {
+    // §17.18.87 allows AutoFit to override the preferred table width until the
+    // table reaches the page width. The 180pt authored grid is wider than the
+    // 160pt text band, but tblInd=-10 places it wholly inside the 200pt page:
+    // [20 - 10, 20 - 10 + 180] = [10, 190]. It must not be pre-shrunk to the
+    // text band before §17.4.50 placement is applied.
+    const recording = makeRecordingCanvas();
+    const doc = tableDoc(180, -10, false);
+    const services = createLayoutServices(doc, {
+      measureContext: recording.canvas.getContext('2d') as CanvasRenderingContext2D,
+    });
+    const retained = layoutDocument(doc, services, { currentDateMs: 0 }).pages[0]?.layers.body[0];
+    if (retained?.kind !== 'table') throw new Error('expected retained table geometry');
+
+    expect(retained.flowBounds.xPt).toBeCloseTo(10, 6);
+    expect(retained.flowBounds.widthPt).toBeCloseTo(180, 6);
+    expect(retained.flowBounds.xPt + retained.flowBounds.widthPt).toBeCloseTo(190, 6);
+  });
+
+  it.each([
+    ['LTR', false, { xPt: 10, widthPt: 190 }],
+    ['RTL', true, { xPt: 0, widthPt: 190 }],
+  ] as const)(
+    '%s: caps AutoFit at the physical page edge after resolving a partial negative leading indent',
+    (_direction, bidiVisual, expected) => {
+      // The text band is [20, 180]. A -10pt leading indent moves the resolved
+      // leading edge halfway into its 20pt page margin. AutoFit may therefore
+      // use 190pt, but not the full 200pt page width: the latter would cross the
+      // opposite physical page edge by 10pt in either visual direction.
+      const recording = makeRecordingCanvas();
+      const doc = tableDoc(220, -10, bidiVisual);
+      const services = createLayoutServices(doc, {
+        measureContext: recording.canvas.getContext('2d') as CanvasRenderingContext2D,
+      });
+      const retained = layoutDocument(doc, services, { currentDateMs: 0 }).pages[0]?.layers.body[0];
+      if (retained?.kind !== 'table') throw new Error('expected retained table geometry');
+
+      expect(retained.flowBounds.xPt).toBeCloseTo(expected.xPt, 6);
+      expect(retained.flowBounds.widthPt).toBeCloseTo(expected.widthPt, 6);
+      expect(retained.flowBounds.xPt).toBeGreaterThanOrEqual(0);
+      expect(retained.flowBounds.xPt + retained.flowBounds.widthPt).toBeLessThanOrEqual(200);
+    },
+  );
 
   it('RTL (bidiVisual): negative tblInd pushes the RIGHT leading edge into the right margin', async () => {
     // No indent, bidiVisual, colW=160=content: table fills [20,180]; right edge 180.
@@ -144,13 +213,13 @@ describe('§17.4.50 tblInd — table indent from the leading margin', () => {
     expectNear(Math.min(...withInd.xs), 30, 'RTL left origin = rightEdge - tableW = 30');
   });
 
-  it('a positive tblInd only applies when jc resolves to left/leading (§17.4.50)', async () => {
-    // jc='right' → not leading → tblInd ignored. Table right-aligns to content.
+  it('applies positive tblInd after right alignment like Word ([MS-OI29500] 2.1.155)', async () => {
+    // ECMA-376 §17.4.50 says jc='right' ignores tblInd, but Word explicitly
+    // deviates: resolve right alignment first, then translate by the indent.
     const doc = tableDoc(100, 20, false);
     (doc.body[0] as unknown as DocTable).jc = 'right';
     const rec = makeRecordingCanvas();
     await renderDocumentToCanvas(doc, rec.canvas, 0, { dpr: 1, width: 200 });
-    // jc=right: right edge at contentRight (180), unaffected by the ignored indent.
-    expectNear(Math.max(...rec.xs), 180, 'jc=right ignores tblInd; right edge = contentRight');
+    expectNear(Math.max(...rec.xs), 200, 'Word shifts the right-aligned table by tblInd');
   });
 });

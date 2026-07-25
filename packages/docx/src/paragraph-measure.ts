@@ -1,10 +1,5 @@
 import type { ParagraphLayoutContext } from './layout-context.js';
 import {
-  resolveLineFloatWindow,
-  skipPastTopAndBottom,
-  type FloatRect,
-} from './float-layout.js';
-import {
   buildSegments,
   getDefaultFontSize,
   isGridLineRule,
@@ -19,81 +14,29 @@ import {
   type LineLayoutEnvironment,
   type WrapLayoutCtx,
 } from './line-layout.js';
+import type { ParagraphAcquisitionInput } from './layout/text.js';
 import type { DocParagraph } from './types.js';
+import type { WrapOracle } from './layout/float-wrap-oracle.js';
+import type { NumberingMarkerShapeInput, WritingMode } from './layout/types.js';
+import { wordEmptyMarkMinimumStartWidthPx } from './layout/compatibility.js';
+import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
 
 export type { LineLayoutEnvironment } from './line-layout.js';
+export { createFloatWrapOracle } from './layout/float-wrap-oracle.js';
+export type { WrapOracle } from './layout/float-wrap-oracle.js';
 
 export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
   readonly documentHasEastAsianText: boolean;
-}
-
-export interface WrapOracle {
-  lineWindow(input: {
-    readonly topYPt: number;
-    readonly minimumStartWidthPt: number;
-    readonly probeHeightPt: number;
-    readonly paragraphXPt: number;
-    readonly maximumWidthPt: number;
-    /** The paragraph's COLUMN band, scoping the topAndBottom gate (§20.4.2.20 /
-     *  §17.6.4) to the column the float is anchored in — NOT the indented text
-     *  band `paragraphXPt`/`maximumWidthPt` the square side-gap math uses. */
-    readonly columnXPt: number;
-    readonly columnWidthPt: number;
-  }): {
-    readonly topYPt: number;
-    readonly xOffsetPt: number;
-    readonly maximumWidthPt: number;
-  };
-  skipTopAndBottomBands(input: {
-    readonly yPt: number;
-    /** The paragraph's COLUMN band (colX()/colW()), used to scope a topAndBottom
-     *  float to the column it is anchored in (§20.4.2.20 / §17.6.4) — NOT the
-     *  indented text band `lineWindow` uses. */
-    readonly columnXPt: number;
-    readonly columnWidthPt: number;
-  }): number;
-}
-
-/** Adapt registered scale-1 float rectangles to the placement-aware paragraph
- * measurement boundary. Float discovery, registration, and compatibility
- * behavior remain owned by the renderer. */
-export function createFloatWrapOracle(floats: readonly FloatRect[]): WrapOracle {
-  const activeFloats = [...floats];
-  return {
-    lineWindow: ({
-      topYPt,
-      minimumStartWidthPt,
-      probeHeightPt,
-      paragraphXPt,
-      maximumWidthPt,
-      columnXPt,
-      columnWidthPt,
-    }) => {
-      const window = resolveLineFloatWindow(
-        topYPt,
-        minimumStartWidthPt,
-        probeHeightPt,
-        paragraphXPt,
-        maximumWidthPt,
-        activeFloats,
-        columnXPt,
-        columnXPt + columnWidthPt,
-      );
-      return {
-        topYPt: window.topY,
-        xOffsetPt: window.xOffset,
-        maximumWidthPt: window.maxWidth,
-      };
-    },
-    skipTopAndBottomBands: ({ yPt, columnXPt, columnWidthPt }) =>
-      skipPastTopAndBottom(yPt, activeFloats, columnXPt, columnXPt + columnWidthPt),
-  };
+  readonly paragraphMarkShapeInput?: NumberingMarkerShapeInput;
+  /** Canonical section writing mode used by retained page geometry. */
+  readonly pageWritingMode: WritingMode;
+  /** The paragraph is acquired in a section-logical frame that paint rotates
+   * into a vertical physical page. This is independent of glyph orientation. */
+  readonly verticalPageFrame?: boolean;
 }
 
 export interface TextMeasurer {
-  readonly context:
-    | CanvasRenderingContext2D
-    | OffscreenCanvasRenderingContext2D;
+  readonly context: MeasurementTextContext;
   readonly fontFamilyClasses: Readonly<Record<string, string>>;
 }
 
@@ -153,7 +96,7 @@ function snapParagraphLineToGrid(heightPt: number, grid: DocGridCtx): number {
 }
 
 export function measureParagraph(
-  paragraph: DocParagraph,
+  paragraph: DocParagraph | ParagraphAcquisitionInput,
   context: ParagraphLayoutContext,
   placement: ParagraphPlacement,
   measurer: TextMeasurer,
@@ -175,6 +118,13 @@ export function measureParagraph(
   const requestedSpaceAfterPt = context.spaceAfterPt;
   const recordedPlacement = Object.freeze({ ...placement });
   const fontFamilyClasses = measurer.fontFamilyClasses as Record<string, string>;
+  // The `w:useFELayout` compatibility projection applies the Far East docGrid
+  // allocation to an otherwise content-less paragraph mark as well as to its
+  // text lines. This matters when the mark's design height crosses a grid-cell
+  // boundary: a 16pt East Asian mark on an 18pt grid occupies two cells even
+  // when the document contains no literal CJK code point.
+  const markUsesEastAsianGrid = environment.documentHasEastAsianText === true
+    || environment.useFeLayout === true;
 
   let cursorPt = placement.startYPt
     + (placement.suppressSpaceBefore ? 0 : requestedSpaceBeforePt);
@@ -194,11 +144,28 @@ export function measureParagraph(
 
   const measureMarkOnly = (): MeasuredParagraph => {
     let markTopPt = cursorPt;
+    const markAdvancePt = paragraphMarkLineHeight(
+      paragraph,
+      1,
+      grid,
+      context.hasRuby,
+      markUsesEastAsianGrid,
+      measurer.context,
+      fontFamilyClasses,
+      context.lineSpacing,
+      environment.resolvedLocalFonts,
+      environment.layoutServices?.text,
+      environment.paragraphMarkShapeInput,
+    );
     if (placement.wrap) {
       markTopPt = placement.wrap.lineWindow({
         topYPt: markTopPt,
         minimumStartWidthPt: getDefaultFontSize(paragraph),
-        probeHeightPt: 10,
+        squareMinimumStartWidthPt: wordEmptyMarkMinimumStartWidthPx(
+          getDefaultFontSize(paragraph),
+          1,
+        ),
+        probeHeightPt: markAdvancePt,
         paragraphXPt,
         maximumWidthPt: paragraphWidthPt,
         // §20.4.2.20 / §17.6.4 column scope: the topAndBottom gate sees the raw
@@ -207,16 +174,6 @@ export function measureParagraph(
         columnWidthPt: placement.availableWidthPt,
       }).topYPt;
     }
-    const markAdvancePt = paragraphMarkLineHeight(
-      paragraph,
-      1,
-      grid,
-      context.hasRuby,
-      environment.documentHasEastAsianText === true,
-      measurer.context,
-      fontFamilyClasses,
-      context.lineSpacing,
-    );
     return {
       lines: [],
       markOnly: true,
@@ -229,10 +186,13 @@ export function measureParagraph(
         paragraph,
         grid,
         context.hasRuby,
-        environment.documentHasEastAsianText === true,
+        markUsesEastAsianGrid,
         measurer.context,
         fontFamilyClasses,
         context.lineSpacing,
+        environment.resolvedLocalFonts,
+        environment.layoutServices?.text,
+        environment.paragraphMarkShapeInput,
       ),
       placement: recordedPlacement,
     };
@@ -251,8 +211,12 @@ export function measureParagraph(
         columnXPt: placement.paragraphXPt,
         columnWidthPt: placement.availableWidthPt,
         floats: [],
+        paragraphMarkLineStartWidth: wordEmptyMarkMinimumStartWidthPx(
+          getDefaultFontSize(paragraph),
+          1,
+        ),
         lineWindow: (input) => placement.wrap!.lineWindow(input),
-        lineBoxH: (ascent, descent, _hasRuby, intendedSingle, emPx, eastAsian) => lineBoxHeight(
+        lineBoxH: (ascent, descent, _hasRuby, intendedSingle, eastAsian, gridCountSingle) => lineBoxHeight(
           context.lineSpacing,
           ascent,
           descent,
@@ -263,7 +227,7 @@ export function measureParagraph(
           // §17.6.5 cell rounding follows this line's script, matching text boxes;
           // ruby paragraphs retain their established uniform paragraph resolver.
           context.hasRuby ? context.hasEastAsianText : (eastAsian ?? false),
-          emPx,
+          gridCountSingle,
         ),
         pageH: placement.maximumYPt,
       }
@@ -288,6 +252,9 @@ export function measureParagraph(
     context.isJustified,
     context.stretchLastLine,
     continuation?.boundary,
+    undefined,
+    environment.verticalGlyphMeasurement,
+    context.overflowPunct !== false,
   );
   if (lines.length === 0) return measureMarkOnly();
 
@@ -302,7 +269,6 @@ export function measureParagraph(
           true,
           line.intendedSingle,
           context.hasEastAsianText,
-          line.height,
         ))),
         grid,
       )
@@ -331,7 +297,7 @@ export function measureParagraph(
           // §17.6.5 cell rounding is gated by the line's script; a Latin-only
           // line in a CJK paragraph keeps its natural height.
           line.eastAsian ?? false,
-          line.height,
+          line.gridCountSingle,
         );
     measuredLines.push({ layout: line, topYPt, advancePt });
     cursorPt = topYPt + advancePt;

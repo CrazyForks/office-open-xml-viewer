@@ -17,6 +17,52 @@ describe('fontWinLineHeightRatio', () => {
     expect(fontWinLineHeightRatio('meiryo ui')).toBeCloseTo(3269 / 2048, 5);
     expect(fontWinLineHeightRatio('MEIRYO')).toBeCloseTo(3269 / 2048, 5);
   });
+  it('returns the Word FE line-height ratio for EA lines in Yu Mincho / Yu Gothic (1.4327 em)', () => {
+    // Word's Far East single-line height for the Yu faces is 1.3 × the hhea
+    // glyph box: (ascent 1802 + |descent| 455) × 1.3 / 2048 = 1.43267 em.
+    // hhea values extracted from the Word-bundled yumin.ttf / YuGoth*.ttc
+    // (identical across Regular/Light/Demibold/Bold weights); the 1.3 Word FE
+    // factor is Word-PDF measured (sample-58 adjudication, issue #1013): the
+    // off-grid single-line pitch is 20.04 pt at 14 pt and 22.94 pt at 16 pt —
+    // 1.432 ± 0.002 em — and the same height reproduces all 15 docGrid cell
+    // counts. Neither the win sum (1.287 em) nor the hhea+lineGap box
+    // (1.602 em) matches Word.
+    const yu = (2257 * 1.3) / 2048;
+    expect(fontWinLineHeightRatio('Yu Mincho', true)).toBeCloseTo(yu, 5);
+    expect(fontWinLineHeightRatio('游明朝', true)).toBeCloseTo(yu, 5);
+    expect(fontWinLineHeightRatio('YuMincho', true)).toBeCloseTo(yu, 5);
+    expect(fontWinLineHeightRatio('Yu Mincho Light', true)).toBeCloseTo(yu, 5);
+    expect(fontWinLineHeightRatio('Yu Gothic', true)).toBeCloseTo(yu, 5);
+    expect(fontWinLineHeightRatio('游ゴシック', true)).toBeCloseTo(yu, 5);
+  });
+  it('hides the Yu FE entry from non-EA (Latin) lines — win-box behavior preserved', () => {
+    // Word gives the FE height to East Asian lines only: a pure-Latin line in
+    // the same Yu Mincho measures 13.44 pt at 10.5 pt (demo/sample-1 page-6
+    // footnote, Word PDF) = the win sum 1.28711 em, NOT 1.43267 em. Latin
+    // callers therefore see the family as untabled (substituted Canvas box).
+    expect(fontWinLineHeightRatio('Yu Mincho')).toBeNull();
+    expect(fontWinLineHeightRatio('游明朝', false)).toBeNull();
+    expect(intendedSingleLinePx('Yu Mincho', 96)).toBe(0);
+    const r = correctLineMetrics('Yu Mincho', 12, 15.38, 3.84);
+    expect(r).toEqual({ ascent: 15.38, descent: 3.84 });
+  });
+  it('does NOT catch Yu Gothic UI (different, unverified metrics)', () => {
+    expect(fontWinLineHeightRatio('Yu Gothic UI', true)).toBeNull();
+  });
+  it('keeps non-eaOnly entries visible to every script (Meiryo)', () => {
+    // Meiryo's usWin sum already encodes the FE height (1.3 × its hhea box),
+    // so the same value serves Latin and EA lines — sample-3 calibration.
+    expect(fontWinLineHeightRatio('Meiryo', true)).toBeCloseTo(3269 / 2048, 5);
+    expect(fontWinLineHeightRatio('Meiryo', false)).toBeCloseTo(3269 / 2048, 5);
+  });
+  it('shrinks an over-large substitute box to the Yu Mincho design box on EA lines', () => {
+    // Canvas reports the win-ish 1.602 em box for 游明朝 (asc 1.2817 + desc
+    // 0.32 em); Word's design box for a CJK line is 1.43267 em, so the
+    // measured metrics are replaced by the design ascent/descent.
+    const r = correctLineMetrics('游明朝', 12, 15.38, 3.84, true);
+    expect(r.ascent).toBeCloseTo(((1802 * 1.3) / 2048) * 12, 5);
+    expect(r.descent).toBeCloseTo(((455 * 1.3) / 2048) * 12, 5);
+  });
   it('returns the hhea single-line ratio for tabled Latin fonts (Times New Roman, Arial)', () => {
     // Word sizes a line from the hhea line height (ascent+|descent|+lineGap), not
     // the win sum Canvas reports. Times New Roman: (1825+443+87)/2048 = 1.1499 em;

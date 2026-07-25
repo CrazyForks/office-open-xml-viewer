@@ -1,0 +1,41 @@
+id: require-typed-docx-renderer-loader-in-node-tests
+language: TypeScript
+severity: error
+files:
+  - packages/node/src/docx*.test.ts
+rule:
+  any:
+    - all:
+        - kind: variable_declarator
+        - has:
+            field: name
+            regex: '^rendererMod$'
+        - not:
+            has:
+              pattern: loadDocxRendererForTests()
+              stopBy: end
+    - pattern: $CALL($LOADER, 'packages/docx/src/renderer.ts')
+    - kind: call_expression
+      has:
+        kind: string_fragment
+        regex: 'docx/src/renderer\.(ts|js)$'
+        stopBy: end
+    - kind: import_statement
+      has:
+        field: source
+        regex: 'docx/src/renderer\.(ts|js)[''\"]?$'
+    - kind: interface_declaration
+      has:
+        field: name
+        regex: '^RendererMod$'
+    - kind: type_alias_declaration
+      has:
+        field: name
+        regex: '^RendererMod$'
+    - pattern: rendererMod as $TYPE
+message: Node DOCX tests must use the exact shared DOCX renderer loader contract.
+note: |
+  A computed dynamic import erases the renderer module type, allowing a test to
+  recreate stale methods in a handwritten type without a compile error. Load
+  the renderer with loadDocxRendererForTests and use the inferred module; do not
+  re-import the DOCX renderer or cast rendererMod to a local contract.

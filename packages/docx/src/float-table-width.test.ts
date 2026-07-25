@@ -1,22 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import { bodyFragmentFor, computePages } from './renderer.js';
+import { layoutBodyModel } from './test-support/document-layout.test-support.js';
+import type { DocumentLayout } from './layout/types.js';
 import type {
   BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell,
-  DocxTextRun, SectionProps, TblpPr, PaginatedBodyElement,
-} from './types';
+  DocxTextRun, SectionProps, TblpPr, } from './types';
 
 // ECMA-376 §17.4.57 — a FLOATING table (`<w:tblpPr>`) is positioned absolutely
 // (out of flow) and is NOT confined to the text column: Word keeps its declared
 // `<w:tblW>`/`<w:tblGrid>` width even when that exceeds the column band, letting
-// the box extend into the page margins. sample-28's three page-anchored forms:
-//   • tblLayout=fixed, grid 10475 twips = 523.75pt — Word renders 524pt on a
-//     451.35pt text band (PDF p.15: box [35, 559] centered on the margin band);
-//   • autofit + preferred tblW=10440 dxa, grid = 522pt — Word renders 522pt
-//     (PDF p.17/18: box [36, 558]).
-// We previously scaled BOTH down to the 451.35pt band (the block-table overflow
-// caps in resolveColumnWidths), so every form rendered ~72pt too narrow. For a
-// floating table the overflow cap is the PAGE width (the physical constraint),
-// not the column band; block tables keep the band cap unchanged.
+// the box extend into the page margins. We previously scaled such tables down to
+// the text band via the block-table overflow cap. For a floating table the
+// overflow cap is the page width (the physical constraint), not the column band;
+// block tables keep the band cap unchanged.
 //
 // Deterministic stub canvas (glyph advance = charCount × fontPx). Copied from
 // float-table-page-fit.test.ts.
@@ -103,58 +98,55 @@ function table(
   return { type: 'table', ...t } as unknown as BodyElement;
 }
 
-const isTable = (e: PaginatedBodyElement): boolean => e.type === 'table';
-const resolvedWidth = (pages: PaginatedBodyElement[][]): number => {
-  const el = pages.flat().find(isTable);
-  expect(el).toBeDefined();
-  const placed = bodyFragmentFor(el as PaginatedBodyElement);
-  if (placed?.fragment.kind === 'table') {
-    return placed.fragment.columnWidthsPt.reduce((s, w) => s + w, 0);
-  }
-  return ((el as PaginatedBodyElement).tableColWidthsPt ?? []).reduce((s, w) => s + w, 0);
+const resolvedWidth = (layout: DocumentLayout): number => {
+  const table = layout.pages.flatMap((page) => page.layers.body).find((node) => node.kind === 'table');
+  expect(table).toBeDefined();
+  return table?.kind === 'table'
+    ? table.columnWidthsPt.reduce((sum, widthPt) => sum + widthPt, 0)
+    : 0;
 };
 
 describe('floating-table width cap (§17.4.57) — page width, not the column band', () => {
-  it('keeps a FIXED-layout floating table at its full tblGrid width past the column band (sample-28 p.15)', () => {
+  it('keeps a FIXED-layout floating table at its full tblGrid width past the column band', () => {
     // Grid 520 > band 450, < page 600 ⇒ stays 520 (was scaled to 450).
-    const pages = computePages(
+    const layout = layoutBodyModel(
       [table([200, 120, 200], { layout: 'fixed', float: true })],
       section(), makeCtx(),
     );
-    expect(resolvedWidth(pages)).toBeCloseTo(520, 1);
+    expect(resolvedWidth(layout)).toBeCloseTo(520, 1);
   });
 
-  it('keeps an AUTOFIT floating table with a preferred tblW at its full grid width (sample-28 p.17)', () => {
+  it('keeps an AUTOFIT floating table with a preferred tblW at its full grid width', () => {
     // Autofit + tblW=dxa (grid trusted): grid 520 > band 450 ⇒ stays 520.
-    const pages = computePages(
+    const layout = layoutBodyModel(
       [table([200, 120, 200], { widthPt: 520, float: true })],
       section(), makeCtx(),
     );
-    expect(resolvedWidth(pages)).toBeCloseTo(520, 1);
+    expect(resolvedWidth(layout)).toBeCloseTo(520, 1);
   });
 
   it('clamps a floating table wider than the PAGE to the page width', () => {
     // Grid 700 > page 600 ⇒ scaled to 600 (the float cannot exceed the paper).
-    const pages = computePages(
+    const layout = layoutBodyModel(
       [table([300, 100, 300], { layout: 'fixed', float: true })],
       section(), makeCtx(),
     );
-    expect(resolvedWidth(pages)).toBeCloseTo(600, 1);
+    expect(resolvedWidth(layout)).toBeCloseTo(600, 1);
   });
 
   it('still scales a NON-floating fixed table down to the column band (block-table cap unchanged)', () => {
-    const pages = computePages(
+    const layout = layoutBodyModel(
       [table([200, 120, 200], { layout: 'fixed' })],
       section(), makeCtx(),
     );
-    expect(resolvedWidth(pages)).toBeCloseTo(450, 1);
+    expect(resolvedWidth(layout)).toBeCloseTo(450, 1);
   });
 
   it('leaves a floating table narrower than the band untouched (cap never bites)', () => {
-    const pages = computePages(
+    const layout = layoutBodyModel(
       [table([100, 100], { layout: 'fixed', float: true })],
       section(), makeCtx(),
     );
-    expect(resolvedWidth(pages)).toBeCloseTo(200, 1);
+    expect(resolvedWidth(layout)).toBeCloseTo(200, 1);
   });
 });

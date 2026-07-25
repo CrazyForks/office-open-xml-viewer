@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
 import { renderDocumentToCanvas } from './renderer.js';
 import type {
   BodyElement,
   DocParagraph,
   DocxDocumentModel,
   DocxTextRun,
+  HeaderFooter,
   LineNumbering,
   PageBorders,
   SectionProps,
@@ -20,8 +23,8 @@ const TEST_FONT = 'Synthetic Untabled Serif';
 interface FillTextCall { text: string; x: number; y: number; font: string; align: string; }
 interface Seg { x1: number; y1: number; x2: number; y2: number; }
 
-// A crisp-snapped border stroke may be nudged by up to ~0.5 px perpendicular to
-// its direction (see strokeCrispSegment / crispOffset). Match a horizontal rule
+// A crisp-snapped retained stroke may be nudged by up to ~0.5 px perpendicular
+// to its direction. Match a horizontal rule
 // whose y is within 1 px of the target, and likewise a vertical rule's x.
 function hasHoriz(segs: Seg[], y: number): boolean {
   return segs.some((s) => Math.abs(s.y1 - s.y2) < 0.5 && Math.abs(s.y1 - y) <= 1);
@@ -41,6 +44,8 @@ function makeRecordingCanvas(): {
   const segments: Seg[] = [];
   let cur = { x: 0, y: 0 };
   let align: CanvasTextAlign = 'left';
+  let transform = { tx: 0, ty: 0, sx: 1, sy: 1 };
+  const stack: typeof transform[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
@@ -57,15 +62,27 @@ function makeRecordingCanvas(): {
         actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
     },
-    save() {}, restore() {}, beginPath() {}, closePath() {},
+    save() { stack.push({ ...transform }); },
+    restore() { transform = stack.pop() ?? transform; }, beginPath() {}, closePath() {},
     moveTo(x: number, y: number) { cur = { x, y }; },
     lineTo(x: number, y: number) { segments.push({ x1: cur.x, y1: cur.y, x2: x, y2: y }); cur = { x, y }; },
     stroke() {}, fill() {}, fillRect() {},
-    strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {},
+    strokeRect() {}, clip() {}, rect() {},
+    scale(x: number, y: number) { transform.sx *= x; transform.sy *= y; },
+    translate(x: number, y: number) {
+      transform.tx += x * transform.sx;
+      transform.ty += y * transform.sy;
+    },
     setLineDash() {}, drawImage() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     fillText(text: string, x: number, y: number) {
-      fillTextCalls.push({ text, x, y, font, align });
+      fillTextCalls.push({
+        text,
+        x: transform.tx + x * transform.sx,
+        y: transform.ty + y * transform.sy,
+        font,
+        align,
+      });
     },
     strokeText() {},
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
@@ -116,6 +133,44 @@ function docOf(body: BodyElement[], sec: SectionProps): DocxDocumentModel {
     section: sec,
     body,
     headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null },
+    fontFamilyClasses: { [TEST_FONT]: 'roman' },
+  } as unknown as DocxDocumentModel;
+}
+
+function header(...lines: string[]): HeaderFooter {
+  return { body: lines.map((line) => para(line)) };
+}
+
+function continuousTitlePageDoc(display: PageBorders['display']): DocxDocumentModel {
+  const pageBorders: PageBorders = {
+    offsetFrom: 'page', display, zOrder: 'front',
+    top: { style: 'single', color: 'ff0000', width: 1, space: 24 },
+  };
+  const finalSection = section({
+    sectionStart: 'continuous',
+    titlePage: true,
+    pageBorders,
+  });
+  return {
+    section: finalSection,
+    body: [
+      para('OUTGOING'),
+      {
+        type: 'sectionBreak', kind: 'nextPage', geom: section(),
+        headers: { default: null, first: null, even: null },
+        footers: { default: null, first: null, even: null },
+        titlePage: false,
+      } as BodyElement,
+      para('INCOMING_SHARED'),
+      { type: 'pageBreak' } as BodyElement,
+      para('INCOMING_NEXT'),
+    ],
+    headers: {
+      default: header('HEADER_DEFAULT'),
+      first: header('HEADER_FIRST_1', 'HEADER_FIRST_2', 'HEADER_FIRST_3'),
+      even: null,
+    },
     footers: { default: null, first: null, even: null },
     fontFamilyClasses: { [TEST_FONT]: 'roman' },
   } as unknown as DocxDocumentModel;
@@ -188,6 +243,34 @@ describe('§17.6.10 pgBorders — page border rectangle', () => {
     const { segments } = await render(docOf([para('body')], section()));
     // A plain paragraph draws no long axis-aligned rules at a border inset.
     expect(hasHoriz(segments, 24)).toBe(false);
+  });
+
+  it('uses the first section-owned page for title-page reserve, paint, and borders', async () => {
+    const firstPageBorderDoc = continuousTitlePageDoc('firstPage');
+    const measureCanvas = makeRecordingCanvas().canvas;
+    const services = createLayoutServices(firstPageBorderDoc, {
+      measureContext: measureCanvas.getContext('2d'),
+    });
+    const layout = layoutDocument(firstPageBorderDoc, services, { currentDateMs: 0 });
+
+    expect(layout.pages[0]?.sectionRegions).toHaveLength(2);
+    const incoming = layout.pages[0]?.sectionRegions[1]?.sectionOccurrenceId;
+    expect(layout.pages.map((page) => page.sectionOccurrenceId)).toEqual([
+      layout.pages[0]?.sectionOccurrenceId,
+      incoming,
+    ]);
+    // The shared page is owned by the outgoing section, so the incoming
+    // section's first owned page reserves its taller first-page header.
+    expect(layout.pages[1]?.geometry.contentTopPt).toBe(30);
+
+    const firstPagePaint = await render(firstPageBorderDoc, 1);
+    const firstPageTexts = firstPagePaint.fillTextCalls.map(({ text }) => text);
+    expect(firstPageTexts).toContain('HEADER_FIRST_1');
+    expect(firstPageTexts).not.toContain('HEADER_DEFAULT');
+    expect(hasHoriz(firstPagePaint.segments, 24)).toBe(true);
+
+    const notFirstPagePaint = await render(continuousTitlePageDoc('notFirstPage'), 1);
+    expect(hasHoriz(notFirstPagePaint.segments, 24)).toBe(false);
   });
 });
 

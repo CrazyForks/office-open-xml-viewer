@@ -5,10 +5,13 @@ import {
   verticalGlyphOffset,
   splitVerticalOrientationRuns,
   drawVerticalRun,
+  drawVerticalRunWithCapability,
   drawTateChuYokoRun,
   drawUprightBox,
+  planVerticalRunWithCapability,
   physicalToLogicalAnchorBox,
-  verticalTextLayerPlacement,
+  verticalRunInkExtraPx,
+  verticalRunInkExtraPxWithCapability,
 } from './vertical-text.js';
 
 // ECMA-376 §17.6.20 vertical writing (tbRl). These are the pure classification
@@ -35,6 +38,103 @@ describe('verticalDrawMode (UAX#50 vo → draw mode)', () => {
     for (const ch of ['A', 'z', '0', '5', '9', '@', '-', '.']) {
       expect(verticalDrawMode(cp(ch))).toBe('sideways');
     }
+  });
+});
+
+describe('planVerticalRunWithCapability (retained vertical paint geometry)', () => {
+  it('retains the font em-box cross-axis correction for a sideways phone number', () => {
+    const { ctx } = mockCtx({
+      fontBoundingBoxAscent: 10,
+      fontBoundingBoxDescent: 2,
+    });
+
+    const cells = planVerticalRunWithCapability(
+      ctx,
+      '電話03-1234-5678',
+      12,
+      0,
+      1,
+      false,
+      () => false,
+    );
+
+    expect(cells.map((cell) => ({
+      text: cell.text,
+      orientation: cell.orientation,
+      crossAxisOffsetPt: cell.drawOffsetPt.yPt,
+    }))).toEqual([
+      { text: '電', orientation: 'upright', crossAxisOffsetPt: 0 },
+      { text: '話', orientation: 'upright', crossAxisOffsetPt: 0 },
+      // Sideways text uses an alphabetic baseline. Retain the font-level
+      // (ascent - descent) / 2 correction so paint can share the same physical
+      // column centre as the upright cells without measuring the font again.
+      { text: '03-1234-5678', orientation: 'sideways', crossAxisOffsetPt: 4 },
+    ]);
+  });
+
+  it('retains UAX #50 Tr substitution and rotate fallbacks with original source ranges', () => {
+    const { ctx } = mockCtx();
+
+    const cells = planVerticalRunWithCapability(ctx, 'A（ー）B', 12, 0, 1, true, () => false);
+
+    expect(cells.map(({ text, orientation, range, verticalFeature }) => ({
+      text, orientation, range, verticalFeature,
+    }))).toEqual([
+      { text: 'A', orientation: 'sideways', range: { start: 0, end: 1 }, verticalFeature: false },
+      { text: '︵', orientation: 'upright', range: { start: 1, end: 2 }, verticalFeature: false },
+      { text: 'ー', orientation: 'rotate', range: { start: 2, end: 3 }, verticalFeature: false },
+      { text: '︶', orientation: 'upright', range: { start: 3, end: 4 }, verticalFeature: false },
+      { text: 'B', orientation: 'sideways', range: { start: 4, end: 5 }, verticalFeature: false },
+    ]);
+    // Unicode presentation-form fallbacks are ordinary centred Canvas glyphs.
+    // Feature-backed placement adjustments must not leak into this route.
+    expect(cells.map(({ drawOffsetPt }) => drawOffsetPt.xPt)).toEqual([0, 0, 0, 0, 0]);
+  });
+
+  it('retains original transform characters and projects their vertical origin into the cell', () => {
+    const { ctx } = mockCtx({
+      vert: {
+        '（': { width: 12, asc: 9, desc: 3 },
+        'ー': { width: 12, asc: 9, desc: 3 },
+        '）': { width: 12, asc: 9, desc: 3 },
+      },
+    });
+
+    const cells = planVerticalRunWithCapability(ctx, '（ー）', 12, 0, 1, true, () => true);
+
+    expect(cells.map(({ text, orientation, verticalFeature }) => ({
+      text, orientation, verticalFeature,
+    }))).toEqual([
+      { text: '（', orientation: 'upright', verticalFeature: true },
+      { text: 'ー', orientation: 'upright', verticalFeature: true },
+      { text: '）', orientation: 'upright', verticalFeature: true },
+    ]);
+    expect(cells.map(({ drawOffsetPt }) => drawOffsetPt.xPt)).toEqual([0, 0, 0]);
+  });
+
+  it('retains counter-rotated logical block ink after the upright glyph offset', () => {
+    const { ctx } = mockCtx({
+      inkLR: { '．': { left: 2, right: 6 } },
+    });
+
+    const [cell] = planVerticalRunWithCapability(
+      ctx,
+      '．',
+      10,
+      0,
+      0.5,
+      true,
+      () => false,
+    );
+
+    expect(cell).toMatchObject({
+      orientation: 'upright',
+      drawOffsetPt: { xPt: 4, yPt: -4 },
+      // Paint rotates the local x ink [4 - 2, 4 + 6] onto logical -y.
+      // vertical-rl w:w scales local y, so the 0.5 scale does not alter this
+      // block-axis interval.
+      blockAxisInkBounds: { startPt: -10, endPt: -2 },
+    });
   });
 });
 
@@ -115,7 +215,8 @@ type Op =
   | { op: 'translate'; x: number; y: number }
   | { op: 'rotate'; a: number }
   | { op: 'scale'; sx: number; sy: number }
-  | { op: 'fillText'; text: string; x: number; y: number; align: string; baseline: string }
+  | { op: 'transform'; a: number; b: number; c: number; d: number; e: number; f: number }
+  | { op: 'fillText'; text: string; x: number; y: number; align: string; baseline: string; feature: string }
   | { op: 'draw'; dx: number; dy: number; dw: number; dh: number };
 
 // Optional metrics the mock returns from `measureText`, keyed by the metric it
@@ -129,11 +230,52 @@ interface MockMetrics {
   fontBoundingBoxDescent?: number;
   // Per-glyph tight ink extent under a `middle` textBaseline, by draw glyph.
   inkMiddle?: Record<string, { asc: number; desc: number }>;
+  // Per-glyph HORIZONTAL tight ink bounds relative to the advance CENTRE (the
+  // values a `textAlign='center'` measureText reports as
+  // actualBoundingBoxLeft/Right), by glyph. Used by the vo=Tr rotate-fallback
+  // ink-overrun path (#1014): after the +90° page rotation the glyph's HORIZONTAL
+  // ink maps onto the along-column axis, so left+right is the along-column ink
+  // extent. Returned regardless of the current textAlign (the values are already
+  // centre-relative).
+  inkLR?: Record<string, { left: number; right: number }>;
+  // Metrics returned only while the composed OpenType `vert` feature is active.
+  // They model the original code point's feature-selected glyph and placement.
+  vert?: Record<string, { width?: number; asc: number; desc: number }>;
+  // Whole-run widths can include horizontal kern-pair compression even though
+  // vertical paint advances one independent glyph cell at a time.
+  wholeWidths?: Record<string, number>;
+  shearSlope?: number;
 }
 
 function mockCtx(metrics: MockMetrics = {}): { ctx: any; ops: Op[] } {
   const ops: Op[] = [];
+  const style = { fontFeatureSettings: 'normal' };
+  class ScratchCanvas {
+    width: number;
+    height: number;
+    style = style;
+    constructor(width: number, height: number) { this.width = width; this.height = height; }
+    getContext() {
+      const canvas = this;
+      return {
+        canvas,
+        font: '', fillStyle: '#000', textAlign: 'center', textBaseline: 'middle',
+        clearRect() {}, fillText() {},
+        getImageData() {
+          const data = new Uint8ClampedArray(canvas.width * canvas.height * 4);
+          const slope = metrics.shearSlope ?? 0;
+          for (let x = 128; x <= 384; x++) {
+            const y = Math.round(256 + slope * (x - 256));
+            data[(y * canvas.width + x) * 4 + 3] = 255;
+          }
+          return { data };
+        },
+      };
+    }
+  }
   const ctx: any = {
+    canvas: metrics.shearSlope === undefined ? { style } : new ScratchCanvas(1, 1),
+    font: '12px serif',
     textAlign: 'start',
     textBaseline: 'alphabetic',
     letterSpacing: '0px',
@@ -152,28 +294,89 @@ function mockCtx(metrics: MockMetrics = {}): { ctx: any; ops: Op[] } {
     scale(sx: number, sy: number) {
       ops.push({ op: 'scale', sx, sy });
     },
+    transform(a: number, b: number, c: number, d: number, e: number, f: number) {
+      ops.push({ op: 'transform', a, b, c, d, e, f });
+    },
     measureText(s: string) {
       // Every code point is 10px wide.
-      const m: Record<string, number> = { width: [...s].length * 10 };
+      const vert = style.fontFeatureSettings.includes('"vert" 1') ? metrics.vert?.[s] : undefined;
+      const m: Record<string, number> = {
+        width: vert?.width ?? metrics.wholeWidths?.[s] ?? [...s].length * 10,
+      };
       if (metrics.fontBoundingBoxAscent !== undefined) {
         m.fontBoundingBoxAscent = metrics.fontBoundingBoxAscent;
         m.fontBoundingBoxDescent = metrics.fontBoundingBoxDescent ?? 0;
       }
-      const ink = metrics.inkMiddle?.[s];
+      const ink = vert ?? metrics.inkMiddle?.[s];
       if (ink && this.textBaseline === 'middle') {
         m.actualBoundingBoxAscent = ink.asc;
         m.actualBoundingBoxDescent = ink.desc;
       }
+      const lr = metrics.inkLR?.[s];
+      if (lr) {
+        m.actualBoundingBoxLeft = lr.left;
+        m.actualBoundingBoxRight = lr.right;
+      }
       return m;
     },
     fillText(text: string, x: number, y: number) {
-      ops.push({ op: 'fillText', text, x, y, align: this.textAlign, baseline: this.textBaseline });
+      ops.push({
+        op: 'fillText', text, x, y, align: this.textAlign,
+        baseline: this.textBaseline, feature: style.fontFeatureSettings,
+      });
     },
   };
   return { ctx, ops };
 }
 
 describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin sideways)', () => {
+  it('uses the original code point under vert for every reachable Tu/Tr glyph', () => {
+    const { ctx, ops } = mockCtx();
+    drawVerticalRunWithCapability(
+      ctx,
+      'ー〜～、。：；「」“”A',
+      0,
+      0,
+      12,
+      0,
+      1,
+      true,
+      () => true,
+    );
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills.map((fill) => fill.text)).toEqual([
+      'ー', '〜', '～', '、', '。', '：', '；', '「', '」', '“', '”', 'A',
+    ]);
+    expect(fills.map((fill) => fill.feature)).toEqual([
+      ...Array.from({ length: 11 }, () => '"vert" 1'),
+      'normal',
+    ]);
+    const rotates = ops.filter((o): o is Extract<Op, { op: 'rotate' }> => o.op === 'rotate');
+    expect(rotates).toHaveLength(11);
+    expect(rotates.every((rotate) => rotate.a === -Math.PI / 2)).toBe(true);
+    expect(ops.some((op) => op.op === 'scale' && op.sy === -1)).toBe(false);
+  });
+
+  it('keeps every manual FE/upright fallback when vert is unreachable', () => {
+    const { ctx, ops } = mockCtx();
+    drawVerticalRunWithCapability(
+      ctx,
+      'ー〜～、。：；「」“”A',
+      0,
+      0,
+      12,
+      0,
+      1,
+      true,
+      () => false,
+    );
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills.map((fill) => fill.text)).toEqual([
+      'ー', '〜', '～', '︑', '︒', '：', '；', '﹁', '﹂', '“', '”', 'A',
+    ]);
+    expect(fills.every((fill) => fill.feature === 'normal')).toBe(true);
+  });
+
   it('counter-rotates every upright glyph −90° about its cell centre', () => {
     const { ctx, ops } = mockCtx();
     drawVerticalRun(ctx, '富士', 100, 200, 12, 0);
@@ -216,22 +419,55 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     expect(fill?.y).toBeCloseTo(215, 6);
   });
 
-  it('advances each glyph by measure + letterSpacing (measure == draw)', () => {
+  it('advances a shaped sideways piece by measure + per-glyph letterSpacing', () => {
     const { ctx, ops } = mockCtx();
-    drawVerticalRun(ctx, 'AB', 0, 0, 12, 4); // adv = 10 + 4 = 14 per glyph
+    drawVerticalRun(ctx, 'AB富', 0, 0, 12, 4);
     const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
-    expect(fills.map((f) => f.x)).toEqual([0, 14]);
+    // AB is one 20px shaped piece plus two 4px pitches. The following 10px CJK
+    // cell therefore centres at x=28 + (10 + 4)/2 = 35.
+    expect(fills.map((f) => [f.text, f.x])).toEqual([['AB', 0], ['富', 0]]);
+    const translate = ops.find(
+      (op): op is Extract<Op, { op: 'translate' }> => op.op === 'translate',
+    );
+    expect(translate).toEqual({ op: 'translate', x: 35, y: 0 });
   });
 
-  it('rotates a Tr glyph WITHOUT a vertical form (ー) with the page — centred, NOT counter-rotated', () => {
+  it('uses the plain page-frame rotation for an unreachable Tr long mark', () => {
     const { ctx, ops } = mockCtx();
     drawVerticalRun(ctx, 'ー', 100, 200, 12, 0);
-    // ー (U+30FC) has no U+FE3x vertical form, so it keeps the rotate fallback:
-    // the page rotation only (no −90° counter-rotation), centred on the column at
-    // the cell centre (105, 200) with center/middle alignment.
+    // The enclosing tbRl page transform supplies +90°. The unreachable fallback
+    // adds no counter-rotation, reflection, or shear.
     expect(ops.some((o) => o.op === 'rotate')).toBe(false);
+    expect(ops.some((o) => o.op === 'translate')).toBe(false);
+    expect(ops.some((o) => o.op === 'transform')).toBe(false);
     const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
     expect(fill).toMatchObject({ text: 'ー', x: 105, y: 200, align: 'center', baseline: 'middle' });
+  });
+
+  it('uses the same plain rotation fallback for wave dash and fullwidth tilde', () => {
+    for (const ch of ['〜', '～']) {
+      const { ctx, ops } = mockCtx();
+      drawVerticalRun(ctx, ch, 0, 0, 12, 0);
+      expect(ops.some((o) => o.op === 'rotate')).toBe(false);
+      expect(ops.some((o) => o.op === 'transform')).toBe(false);
+      const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+      expect(fill).toMatchObject({ text: ch, x: 5, y: 0, align: 'center', baseline: 'middle' });
+    }
+  });
+
+  it('does NOT reflect a Tr rotate glyph whose vertical form is a pure rotation (quotes “ ”)', () => {
+    // The double quotes are vo=Tr rotate-fallback, but their designed vertical form IS
+    // the +90° rotation (font-verified), so they must NOT reflect — they keep the plain
+    // fillText in the page frame at the cell centre, with NO scale and NO translate.
+    for (const ch of ['“', '”']) {
+      const { ctx, ops } = mockCtx();
+      drawVerticalRun(ctx, ch, 100, 200, 12, 0);
+      expect(ops.some((o) => o.op === 'rotate')).toBe(false);
+      expect(ops.some((o) => o.op === 'scale')).toBe(false);
+      expect(ops.some((o) => o.op === 'translate')).toBe(false);
+      const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+      expect(fill).toMatchObject({ text: ch, x: 105, y: 200, align: 'center', baseline: 'middle' });
+    }
   });
 
   it('substitutes a Tr bracket with its vertical form (（→︵, ）→︶) and draws it UPRIGHT', () => {
@@ -268,18 +504,25 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     expect(fills.every((f) => f.x === 0 && f.y === 0)).toBe(true);
   });
 
-  it('substitutes the vo=Tr colon/semicolon and white lenticular brackets, drawn UPRIGHT (issue #969)', () => {
-    // Word/PowerPoint ground truth (PDF-adjudicated): ：；〖〗 are vo=Tr with a
-    // U+FE1x vertical form, so they substitute-first and draw upright like the other
-    // brackets — NOT the rotate fallback (the semicolon staying an upright dot-over-
-    // comma is the proof; a rotation could not produce that).
+  it('gives the colon/semicolon a geometric fallback and substitutes the lenticular brackets (issue #969)', () => {
+    // FE13/FE14 (vertical colon/semicolon) are absent from most render fonts and a
+    // Canvas cannot invoke the font's `vert` feature, so unconditional substitution
+    // reached a mispositioned system-fallback glyph. They now take a GEOMETRIC
+    // fallback that reproduces each vertical form's design directly (Word-verified):
+    //   • colon ： → ROTATE (drawn as-is in the +90° page frame → FE13's side-by-side
+    //     dots); no local counter-rotation.
+    //   • semicolon ； → UPRIGHT (counter-rotated −90° → FE14's dot-over-comma; a
+    //     rotation could not produce that).
+    // The white lenticular brackets 〖〗 keep their FE17/FE18 substitute (present in
+    // the substitute fonts), drawn upright.
     const { ctx, ops } = mockCtx();
     drawVerticalRun(ctx, '：；〖〗', 0, 0, 12, 0);
     const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
-    expect(fills.map((f) => f.text)).toEqual(['︓', '︔', '︗', '︘']); // FE13/FE14/FE17/FE18
-    // All four are counter-rotated −90° (upright), centred on the column.
+    expect(fills.map((f) => f.text)).toEqual(['：', '；', '︗', '︘']); // colon/semicolon base; FE17/FE18
+    // Counter-rotations (−90°, upright): semicolon + both lenticular brackets = 3;
+    // the colon is NOT counter-rotated (it rides the +90° page rotation).
     const rotates = ops.filter((o): o is Extract<Op, { op: 'rotate' }> => o.op === 'rotate');
-    expect(rotates).toHaveLength(4);
+    expect(rotates).toHaveLength(3);
     expect(rotates.every((r) => Math.abs(r.a - -Math.PI / 2) < 1e-9)).toBe(true);
     expect(fills.every((f) => f.align === 'center' && f.baseline === 'middle')).toBe(true);
   });
@@ -333,6 +576,279 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     expect(rotates).toHaveLength(2);
     expect(fills.every((f) => f.align === 'center' && f.baseline === 'middle')).toBe(true);
     expect(fills.every((f) => f.x === 0 && f.y === 0)).toBe(true);
+  });
+});
+
+describe('reachable vert glyph cells (issue #1024 — feature-state measure == paint)', () => {
+  it('preserves contextual shaping across a consecutive sideways piece', () => {
+    const text = 'Word';
+    const { ctx } = mockCtx({ wholeWidths: { [text]: 35 } });
+
+    // A vo=R piece stays sideways in the rotated frame, so its vertical advance
+    // is the same contextually-shaped width as ordinary horizontal text. In
+    // particular, kerning must not be replaced by four independent glyph cells.
+    expect(verticalRunInkExtraPxWithCapability(ctx, text, () => false)).toBe(0);
+
+    const painted = mockCtx({ wholeWidths: { [text]: 35 } });
+    drawVerticalRunWithCapability(painted.ctx, text, 0, 0, 12, 0, 1, true, () => false);
+    const fills = painted.ops.filter(
+      (op): op is Extract<Op, { op: 'fillText' }> => op.op === 'fillText',
+    );
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({ text, x: 0, feature: 'normal' });
+  });
+
+  it('keeps the featured origin at half-advance and allows designed leading ink to poke', () => {
+    const { ctx, ops } = mockCtx({ vert: { 'ー': { asc: 8, desc: 5 } } });
+    expect(verticalRunInkExtraPxWithCapability(ctx, 'ーA', () => true)).toBe(0);
+
+    drawVerticalRunWithCapability(ctx, 'ーA', 0, 0, 12, 0, 1, true, () => true);
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    // Featured ink [5-8,5+5]=[-3,10] intentionally pokes before [0,10], but
+    // the font's origin stays at the nominal half-advance instead of shifting.
+    expect(translates[0]).toEqual({ op: 'translate', x: 5, y: 0 });
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills[0]).toMatchObject({ text: 'ー', x: 0, y: 0, feature: '"vert" 1' });
+    expect(fills[1]).toMatchObject({ text: 'A', x: 10, feature: 'normal' });
+  });
+
+  it('recovers a whole-run horizontal kern deficit with the per-glyph vertical cell sum', () => {
+    const text = '、。「」ー';
+    const { ctx } = mockCtx({ wholeWidths: { [text]: 40 } });
+    // Five independent 10px cells paint as 50px, while horizontal measureText
+    // compresses the whole string to 40px. The vertical delta restores 10px.
+    expect(verticalRunInkExtraPxWithCapability(ctx, text, () => true)).toBe(10);
+
+    const painted = mockCtx({ wholeWidths: { [text]: 40 } });
+    drawVerticalRunWithCapability(
+      painted.ctx,
+      `${text}c`,
+      0,
+      0,
+      12,
+      0,
+      1,
+      true,
+      (cp) => cp !== 'c'.codePointAt(0),
+    );
+    const latin = painted.ops
+      .filter((op): op is Extract<Op, { op: 'fillText' }> => op.op === 'fillText')
+      .at(-1);
+    expect(latin).toMatchObject({ text: 'c', x: 50, feature: 'normal' });
+  });
+
+  it('preserves complementary bracket A/D placement at one-em glyph origins', () => {
+    const { ctx, ops } = mockCtx({
+      vert: {
+        '「': { asc: -1, desc: 4 },
+        '」': { asc: 4, desc: -1 },
+      },
+    });
+    drawVerticalRunWithCapability(ctx, '「」', 0, 0, 12, 0, 1, true, () => true);
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translates).toEqual([
+      { op: 'translate', x: 5, y: 0 },
+      { op: 'translate', x: 15, y: 0 },
+    ]);
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills.map((fill) => [fill.text, fill.y, fill.feature])).toEqual([
+      ['「', 0, '"vert" 1'],
+      ['」', 0, '"vert" 1'],
+    ]);
+    // The renderer does not ink-centre either glyph: the paired ink centres are
+    // 0.5em apart even though their feature glyph origins remain 1em apart.
+    const firstInkCenter = translates[0].x + (4 - -1) / 2;
+    const secondInkCenter = translates[1].x + (-1 - 4) / 2;
+    expect(secondInkCenter - firstInkCenter).toBe(5);
+  });
+
+  it('keeps the feature-designed upper-right placement of 、。', () => {
+    const { ctx, ops } = mockCtx({
+      vert: {
+        '、': { asc: 9, desc: -4 },
+        '。': { asc: 9, desc: -4 },
+      },
+    });
+    drawVerticalRunWithCapability(ctx, '、。', 0, 0, 12, 0, 1, true, () => true);
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills.map((fill) => fill.text)).toEqual(['、', '。']);
+    expect(fills.every((fill) => fill.y === 0 && fill.feature === '"vert" 1')).toBe(true);
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translates.map((op) => op.x)).toEqual([5, 15]);
+  });
+
+  it('scales the featured cell and origin before adding letter spacing', () => {
+    const { ctx, ops } = mockCtx({ vert: { 'ー': { asc: 8, desc: 5 } } });
+    drawVerticalRunWithCapability(ctx, 'ーA', 0, 0, 12, 4, 0.5, true, () => true);
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translates[0]).toEqual({ op: 'translate', x: 2.5, y: 0 });
+    expect(translates[1]).toEqual({ op: 'translate', x: 9, y: 0 });
+    // 10px featured cell * 0.5 + 4px spacing precedes the Latin cell.
+    expect(ops).toContainEqual({ op: 'scale', sx: 1, sy: 0.5 });
+  });
+
+  it('does not route vo=U or vo=R through vert even when the capability says true', () => {
+    const { ctx, ops } = mockCtx();
+    drawVerticalRunWithCapability(ctx, '富A', 0, 0, 12, 0, 1, true, () => true);
+    const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills.map((fill) => fill.feature)).toEqual(['normal', 'normal']);
+  });
+});
+
+// issue #1014 — a vo=Tr rotate-fallback mark (ー, 〜, quotes, colon) whose
+// substitute font UNDER-REPORTS its advance via measureText draws with ink that
+// spills PAST the advance-sized cell into the following sideways run (Chrome).
+// The fix sizes the rotate cell to the along-column INK extent (a NO-OP unless
+// the ink exceeds the advance) and ink-centres the glyph in the grown cell, so
+// the mark stays inside its own cell and the next run clears it. measure==paint:
+// the SAME per-glyph deficit is added to the layout advance via
+// verticalRunInkExtraPx.
+describe('vo=Tr rotate-fallback ink overrun (#1014 — ink-sized cell + ink-centring)', () => {
+  // A `middle`/`center` measureText for ー reports advance 10 (mock: 1 cp × 10)
+  // but a HORIZONTAL ink of left+right = 5+24 = 29 > 10 — the under-report.
+  const underReport = { inkLR: { ー: { left: 5, right: 24 } } };
+
+  it('verticalRunInkExtraPx sums the per-glyph ink deficit over Tr rotate glyphs only', () => {
+    const { ctx } = mockCtx(underReport);
+    // ー: max(0, 29 − 10) = 19. Upright 話 and sideways A/space contribute 0.
+    expect(verticalRunInkExtraPx(ctx, 'ー')).toBeCloseTo(19, 6);
+    expect(verticalRunInkExtraPx(ctx, '話ー')).toBeCloseTo(19, 6);
+    expect(verticalRunInkExtraPx(ctx, '話A ')).toBe(0);
+  });
+
+  it('keeps quote/colon geometric growth when only the long mark is reachable', () => {
+    const { ctx } = mockCtx({
+      inkLR: {
+        'ー': { left: 5, right: 24 },
+        '“': { left: 5, right: 24 },
+        '：': { left: 5, right: 24 },
+      },
+    });
+    expect(
+      verticalRunInkExtraPxWithCapability(ctx, 'ー“：', (cp) => cp === 0x30fc),
+    ).toBeCloseTo(38, 6);
+  });
+
+  it('uses the same per-code-point vert gate for measurement and painting', () => {
+    const metrics = {
+      inkLR: {
+        'ー': { left: 5, right: 24 },
+        '〜': { left: 5, right: 24 },
+      },
+    };
+    const supported = (cp: number) => cp === 0x30fc;
+    const { ctx } = mockCtx(metrics);
+    expect(verticalRunInkExtraPxWithCapability(ctx, 'ー〜', supported)).toBeCloseTo(19, 6);
+
+    const painted = mockCtx(metrics);
+    drawVerticalRunWithCapability(painted.ctx, 'ー〜', 0, 0, 12, 0, 1, true, supported);
+    const fills = painted.ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills.map((fill) => fill.feature)).toEqual(['"vert" 1', 'normal']);
+    const transforms = painted.ops.filter(
+      (o): o is Extract<Op, { op: 'transform' }> => o.op === 'transform',
+    );
+    expect(transforms).toEqual([{ op: 'transform', a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }]);
+  });
+
+  it('applies the same per-glyph growth gate while painting', () => {
+    const { ctx, ops } = mockCtx({
+      inkLR: {
+        'ー': { left: 5, right: 24 },
+        '“': { left: 5, right: 24 },
+        '：': { left: 5, right: 24 },
+      },
+    });
+    drawVerticalRunWithCapability(
+      ctx,
+      'ー“：話',
+      0,
+      0,
+      12,
+      0,
+      1,
+      true,
+      (cp) => cp === 0x30fc,
+    );
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translates.map((op) => op.x)).toEqual([5, 24.5, -9.5, 53.5, -9.5, 73]);
+  });
+
+  it('verticalRunInkExtraPx is 0 when the ink fits the advance (all real fonts) or metrics are absent', () => {
+    const fits = mockCtx({ inkLR: { ー: { left: 3, right: 4 } } }); // extent 7 ≤ 10
+    expect(verticalRunInkExtraPx(fits.ctx, 'ー')).toBe(0);
+    const noMetrics = mockCtx(); // no actualBoundingBox* → graceful 0
+    expect(verticalRunInkExtraPx(noMetrics.ctx, 'ー')).toBe(0);
+  });
+
+  it('grows the ー cell to its ink extent so the FOLLOWING glyph clears the ink', () => {
+    const { ctx, ops } = mockCtx(underReport);
+    // ー (grown cell 29) then upright 話 (advance 10). Without the fix 話 would
+    // centre at 10 + 5 = 15 (inside the ー ink); with the ink-sized cell it
+    // centres at 29 + 5 = 34. `growTrRotateInk=true` = the body path (whose layout
+    // advance was grown by the same deficit — measure==paint).
+    drawVerticalRun(ctx, 'ー話', 0, 0, 12, 0, 1, true);
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    // First translate = ー cell centre (29/2 = 14.5); second is its separate
+    // output-axis ink shift; third = 話 cell centre 34.
+    expect(translates[0].x).toBeCloseTo(14.5, 6);
+    expect(translates[1].x).toBeCloseTo(-9.5, 6);
+    expect(translates[2].x).toBeCloseTo(34, 6);
+  });
+
+  it('ink-centres the grown ー (shift by (left − right)/2) so its ink fills the grown cell', () => {
+    const { ctx, ops } = mockCtx(underReport);
+    drawVerticalRun(ctx, 'ー', 0, 0, 12, 0, 1, true);
+    // Plain rotation path: translate to cell centre 14.5, then translate the
+    // output advance axis by (5 − 24)/2 = −9.5 before the identity scale matrix so
+    // the ink centres on the
+    // cell. Ink then spans [14.5 − 9.5 − 5, 14.5 − 9.5 + 24] = [0, 29] = the cell.
+    const translate = ops.find((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translate?.x).toBeCloseTo(14.5, 6);
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translates[1]?.x).toBeCloseTo(-9.5, 6);
+    const transform = ops.find((o): o is Extract<Op, { op: 'transform' }> => o.op === 'transform');
+    expect(transform).toEqual({ op: 'transform', a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
+    const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fill).toMatchObject({ text: 'ー', y: 0, align: 'center', baseline: 'middle' });
+    expect(fill?.x).toBe(0);
+  });
+
+  it('keeps charScale and rotateInkShiftPx without reflection or shear', () => {
+    const { ctx, ops } = mockCtx(underReport);
+    drawVerticalRun(ctx, 'ー', 0, 0, 12, 0, 0.5, true);
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translates).toEqual([
+      { op: 'translate', x: 7.25, y: 0 },
+      { op: 'translate', x: -4.75, y: 0 },
+    ]);
+    const transform = ops.find((o): o is Extract<Op, { op: 'transform' }> => o.op === 'transform');
+    expect(transform).toMatchObject({ a: 0.5, b: 0, c: 0, d: 1, e: 0, f: 0 });
+    const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fill).toMatchObject({ text: 'ー', x: 0, y: 0 });
+  });
+
+  it('is a NO-OP (byte-identical) when the ink fits the advance — no growth, no shift', () => {
+    // extent 7 ≤ advance 10 → the ー draws exactly as today even with grow enabled:
+    // cell 10, centre 5, plain fillText in the page frame.
+    const { ctx, ops } = mockCtx({ inkLR: { ー: { left: 3, right: 4 } } });
+    drawVerticalRun(ctx, 'ー', 100, 200, 12, 0, 1, true);
+    expect(ops.some((o) => o.op === 'translate')).toBe(false);
+    const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fill).toMatchObject({ text: 'ー', x: 105, y: 200 });
+  });
+
+  it('does NOT grow when growTrRotateInk is false (marker / unwired text box) — paint stays coupled to the measure', () => {
+    // The same under-reporting ー, but growTrRotateInk defaults to false: the cell
+    // stays advance-sized (10) and advance-centred (cx=5), byte-identical to the
+    // pre-#1014 draw. Callers whose LAYOUT advance was NOT grown (no s.verticalRun —
+    // list markers, eaVert text boxes) pass false so paint never exceeds measure.
+    const { ctx, ops } = mockCtx(underReport);
+    drawVerticalRun(ctx, 'ー話', 0, 0, 12, 0); // 7 args → growTrRotateInk = false
+    const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
+    expect(translates).toHaveLength(1);
+    expect(translates[0].x).toBeCloseTo(15, 6); // only upright 話 translates
+    const fill = ops.find((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fill?.x).toBe(5); // ー is plain-rotated at its advance centre
   });
 });
 
@@ -483,17 +999,5 @@ describe('physicalToLogicalAnchorBox (§17.6.20 + §20.4.3.x — physical anchor
     // Centroid matches Word / PDF ground truth.
     expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(492.4, 3);
     expect((Math.min(...ys) + Math.max(...ys)) / 2).toBeCloseTo(459.35, 3);
-  });
-});
-
-describe('verticalTextLayerPlacement (§17.6.20 — overlay span physical placement)', () => {
-  it('maps a logical run top-left to the physical rotated placement', () => {
-    // Logical run at (100, 200) on an 842px-wide physical page.
-    const place = verticalTextLayerPlacement(100, 200, 842, true);
-    expect(place).toEqual({ left: 842 - 200, top: 100, transform: 'rotate(90deg)' });
-  });
-
-  it('returns null on a horizontal page (span placed at logical x/y, no transform)', () => {
-    expect(verticalTextLayerPlacement(100, 200, 842, false)).toBeNull();
   });
 });

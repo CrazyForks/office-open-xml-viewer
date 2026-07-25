@@ -7,7 +7,11 @@ import {
   installOffscreenCanvasShim,
   type NodeCanvasFactory,
 } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import {
+  importForTests,
+  loadDocxRendererForTests,
+  loadSkiaForTests,
+} from './test-imports';
 
 // skia-canvas is a devDependency. Absent → skip cleanly (local), while
 // OOXML_REQUIRE_SKIA=1 makes its absence a hard failure for this probe.
@@ -24,12 +28,8 @@ const factory: NodeCanvasFactory = {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
-const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
-
 const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
-const rendererMod = skia
-  ? await importForTests(() => import(RENDERER_PATH), 'packages/docx/src/renderer.ts')
-  : null;
+const rendererMod = skia ? await loadDocxRendererForTests() : null;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -175,19 +175,15 @@ function collectRuns(body: Any[], type: string): Any[] {
 }
 
 async function renderPage(doc: Any): Promise<{ data: Uint8ClampedArray; w: number; h: number }> {
-  const { renderDocumentToCanvas } = rendererMod as {
-    renderDocumentToCanvas: (
-      doc: Any,
-      canvas: unknown,
-      pageIndex: number,
-      opts: { dpr: number; width: number },
-    ) => Promise<void>;
-  };
+  const { renderDocumentToCanvas } = rendererMod!;
   const canvas = new Canvas(doc.section.pageWidth, doc.section.pageHeight);
   const restoreImage = installImageBitmapShim(factory);
   const restoreOffscreen = installOffscreenCanvasShim(factory);
   try {
-    await renderDocumentToCanvas(doc, canvas, 0, { dpr: 1, width: doc.section.pageWidth });
+    await renderDocumentToCanvas(doc, canvas as unknown as OffscreenCanvas, 0, {
+      dpr: 1,
+      width: doc.section.pageWidth,
+    });
   } finally {
     restoreOffscreen();
     restoreImage();
@@ -225,12 +221,19 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
   () => {
     let doc: Any;
     let chart: Any;
+    let layout: Any;
     let rendered: { data: Uint8ClampedArray; w: number; h: number };
 
     beforeAll(async () => {
       const { parseDocx } = docxMod as { parseDocx: (bytes: Uint8Array) => Any };
       doc = parseDocx(makeDocx());
       [chart] = collectRuns(doc.body, 'chart');
+      const restoreOffscreen = installOffscreenCanvasShim(factory);
+      try {
+        layout = rendererMod!.layoutDocument(doc);
+      } finally {
+        restoreOffscreen();
+      }
       rendered = await renderPage(doc);
     });
 
@@ -246,6 +249,9 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
       expect(chart.anchorXAlign).toBe('right');
       expect(chart.anchorXRelativeFrom).toBe('margin');
       expect(chart.anchorYRelativeFrom).toBe('paragraph');
+      expect(chart.__anchorAcquisition?.vertical?.choice).toEqual({
+        kind: 'offset', valuePt: 0,
+      });
     });
 
     // Letter page, 72pt margins: right-aligned 216pt chart occupies x=324..540.
@@ -254,6 +260,37 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
     const chartRight = 540;
     const chartTop = 72;
     const chartBottom = 216;
+
+    it('retains one chart command at the exact margin/right paragraph frame', () => {
+      const paragraph = layout.pages[0]?.layers.body.find((node: Any) =>
+        node.kind === 'paragraph'
+        && node.source.story === 'body'
+        && node.source.storyInstance === 'body'
+        && node.source.path.length === 1
+        && node.source.path[0] === 0);
+      expect(paragraph, 'retained body paragraph at source path [0]').toBeDefined();
+      expect(paragraph.drawings).toHaveLength(1);
+      expect(paragraph.drawings[0]).toMatchObject({
+        flowBounds: {
+          xPt: chartLeft, yPt: chartTop,
+          widthPt: chartRight - chartLeft, heightPt: chartBottom - chartTop,
+        },
+        commands: [{
+          kind: 'resource', resourceKind: 'chart',
+          rect: {
+            xPt: chartLeft, yPt: chartTop,
+            widthPt: chartRight - chartLeft, heightPt: chartBottom - chartTop,
+          },
+        }],
+        anchorLayer: {
+          behindDoc: false, relativeHeight: 1,
+          horizontalOwnership: 'page', verticalOwnership: 'host',
+        },
+      });
+      expect(paragraph.resources).toContainEqual(expect.objectContaining({
+        kind: 'chart', resourceKey: paragraph.drawings[0].commands[0].resourceKey,
+      }));
+    });
 
     it('paints substantial chart ink in the right-aligned margin box', () => {
       const ink = nonWhiteInRect(

@@ -163,6 +163,29 @@ export function pptxPresetDashArray(style: string, lineW: number): number[] {
   return relative ? dashArray(relative, lineW) : [];
 }
 
+/**
+ * Shared shape-stroke dash resolver. Parsers normalize symbolic vocabularies
+ * (DrawingML presets, legacy VML names) to ST_PresetLineDashVal strings before
+ * they reach the shared {@link Stroke} contract. VML additionally permits a
+ * custom whitespace/comma-separated numeric sequence in line-width units
+ * (Part 4 §19.1.2.21); an unmatched final value is explicitly discarded.
+ */
+export function shapeStrokeDashArray(style: string, lineW: number): number[] {
+  const preset = pptxPresetDashArray(style, lineW);
+  if (preset.length > 0) return preset;
+
+  const numeric = style.trim().split(/[\s,]+/).map(Number);
+  if (
+    numeric.length >= 2 &&
+    numeric.every((value) => Number.isFinite(value) && value >= 0) &&
+    numeric.some((value) => value > 0)
+  ) {
+    if (numeric.length % 2 !== 0) numeric.pop();
+    return dashArray(numeric, lineW);
+  }
+  return [];
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // pptx — ECMA-376 §20.1.10.82 ST_TextUnderlineType (run underlines, lineW-relative)
 // ─────────────────────────────────────────────────────────────────────────────

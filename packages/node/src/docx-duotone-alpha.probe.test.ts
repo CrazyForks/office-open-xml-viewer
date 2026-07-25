@@ -11,16 +11,13 @@ import { describe, it, expect } from 'vitest';
 import { crc32 } from 'node:zlib';
 import { installImageBitmapShim, installOffscreenCanvasShim } from './render.ts';
 import type { NodeCanvasFactory } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import { importForTests, loadDocxRendererForTests, loadSkiaForTests } from './test-imports';
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas, loadImage } = (skia ?? {}) as Skia;
 const docxMod = await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)');
-const rendererMod = await importForTests(
-  () => import('./../../docx/src/renderer.ts'),
-  'packages/docx/src/renderer.ts',
-);
+const rendererMod = await loadDocxRendererForTests();
 
 const factory: NodeCanvasFactory = {
   createCanvas: (w, h) =>
@@ -144,29 +141,16 @@ interface Rendered {
 }
 
 async function render(docxBytes: Uint8Array, pngBytes: Uint8Array): Promise<Rendered> {
-  const { parseDocx } = docxMod as {
-    parseDocx: (b: Uint8Array) => { section: { pageWidth: number; pageHeight: number } };
-  };
+  const { parseDocx } = docxMod!;
   const doc = parseDocx(docxBytes);
-  const { renderDocumentToCanvas } = rendererMod as {
-    renderDocumentToCanvas: (
-      doc: unknown,
-      canvas: unknown,
-      pageIndex: number,
-      opts: {
-        dpr: number;
-        width: number;
-        fetchImage: (path: string, mime: string) => Promise<Blob>;
-      },
-    ) => Promise<void>;
-  };
+  const { renderDocumentToCanvas } = rendererMod!;
   const widthPx = doc.section.pageWidth;
   const heightPx = doc.section.pageHeight;
   const canvas = new Canvas(Math.round(widthPx), Math.round(heightPx));
   const restoreImg = installImageBitmapShim(factory);
   const restoreOff = installOffscreenCanvasShim(factory);
   try {
-    await renderDocumentToCanvas(doc, canvas, 0, {
+    await renderDocumentToCanvas(doc, canvas as unknown as OffscreenCanvas, 0, {
       dpr: 1,
       width: widthPx,
       fetchImage: async (_path: string, mime: string) =>

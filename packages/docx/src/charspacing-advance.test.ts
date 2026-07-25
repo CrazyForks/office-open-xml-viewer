@@ -1,24 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import {
   layoutLines,
-  rescaleLayoutLines,
   charSpacingDeltaPx,
   segAdvanceWidth,
   type LayoutSeg,
-  type LayoutLine,
   type LayoutTextSeg,
 } from './line-layout.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ECMA-376 §17.3.2.35 `<w:spacing>` — run character-spacing pitch must be part of
-// a segment's laid-out ADVANCE at the PAINT scale, not only at the scale-1 stamp.
+// a segment's laid-out ADVANCE at every viewport scale.
 //
 // `layoutLines` (the scale-1 paginator stamp) derives each segment's measuredWidth
 // from `segAdvanceWidth`, which adds `cpCount × (w:spacing pt × scale)` on top of
-// the natural `measureText` width. The paint pass, however, does NOT re-run
-// `layoutLines` at the device scale — it reuses the scale-1 stamp through
-// `rescaleLayoutLines`, whose docstring promises the result is "identical to a
-// fresh paint-scale layout of the SAME partition" so that measure == paint.
+// the natural `measureText` width. Retained paint consumes this canonical
+// geometry under a viewport transform and must not remeasure it.
 //
 // This pins the observed sample-34 defect ("氏名又は名称", where the run bearing
 // `<w:spacing w:val="96"/>` = 4.8 pt is followed by another run): at the paint
@@ -28,10 +24,7 @@ import {
 // (= charSpacing) inside the run, the run visually widens but the neighbour never
 // gets pushed right → overlap.
 //
-// The width model itself (`segAdvanceWidth`, `charSpacingDeltaPx`) is already
-// correct and unit-tested (run-char-metrics.test.ts). This file instead exercises
-// the PAINT-SCALE reuse path (`rescaleLayoutLines`) end-to-end, which is where the
-// advance loses the spacing.
+// This file exercises the live line-layout authority directly at multiple scales.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** A recording 2D-context stub whose glyph advance is EXACTLY `0.5 · px · n`
@@ -105,11 +98,10 @@ describe('§17.3.2.35 run charSpacing survives into the paint-scale advance', ()
     expect(segs[0].measuredWidth).toBeCloseTo(natural1 + 4 * charSpacingDeltaPx(segs[0], 1), 6);
   });
 
-  it('rescaleLayoutLines keeps charSpacing in the advance at the paint scale', () => {
+  it('layoutLines keeps charSpacing in the advance at scale 2', () => {
     const scale = 2;
     const ctx = makeLinearCtx();
-    const stamp = layoutLines(ctx, makeSegs(), WIDE, 0, 1);
-    const painted = rescaleLayoutLines(stamp, scale, ctx, {}, 0);
+    const painted = layoutLines(ctx, makeSegs(), WIDE * scale, 0, scale);
 
     expect(painted).toHaveLength(1);
     const segs = painted[0].segments.filter(isText);
@@ -142,8 +134,7 @@ describe('§17.3.2.35 run charSpacing survives into the paint-scale advance', ()
     // pen must land where the glyphs end) or run2 is painted over run1's tail.
     const scale = 2;
     const ctx = makeLinearCtx();
-    const stamp = layoutLines(ctx, makeSegs(), WIDE, 0, 1);
-    const painted = rescaleLayoutLines(stamp, scale, ctx, {}, 0);
+    const painted = layoutLines(ctx, makeSegs(), WIDE * scale, 0, scale);
     const segs = painted[0].segments.filter(isText);
 
     const run2StartX = segs[0].measuredWidth; // run1 is first on the line
@@ -153,17 +144,14 @@ describe('§17.3.2.35 run charSpacing survives into the paint-scale advance', ()
   });
 
   it('§17.3.2.43 w:w (charScale) also survives into the paint-scale advance', () => {
-    // The same reuse path dropped `w:w` too (it multiplies the natural width, so
-    // a 200%-stretched run collapsed back to its natural advance at the paint
-    // scale). Pin it alongside charSpacing: the consolidation must route BOTH
-    // run character metrics through the one advance authority.
+    // Pin w:w alongside charSpacing: both run character metrics must flow
+    // through the one advance authority.
     const scale = 2;
     const ctx = makeLinearCtx();
-    const stamp = layoutLines(ctx, [
+    const painted = layoutLines(ctx, [
       textSeg('wide', { charScale: 2 }),
       textSeg('after'),
-    ], WIDE, 0, 1);
-    const painted = rescaleLayoutLines(stamp, scale, ctx, {}, 0);
+    ], WIDE * scale, 0, scale);
     const segs = painted[0].segments.filter(isText);
     expect(segs).toHaveLength(2);
     // "wide" = 4 cps: natural(scale 2) = 4 × (12·2 × 0.5) = 48 px, × w:w 2 = 96 px.
@@ -172,23 +160,16 @@ describe('§17.3.2.35 run charSpacing survives into the paint-scale advance', ()
     expect(segs[1].measuredWidth).toBeCloseTo(60, 6);
   });
 
-  it('the reuse path matches a fresh paint-scale layout of the same partition', () => {
-    // rescaleLayoutLines' contract: "identical to a fresh paint-scale layout of the
-    // SAME partition". A direct layoutLines call at the paint scale uses
-    // segAdvanceWidth (charSpacing included), so every segment advance must agree.
+  it('fresh segment objects produce the same scaled advances', () => {
     const scale = 2;
-    const stampCtx = makeLinearCtx();
-    const stamp = layoutLines(stampCtx, makeSegs(), WIDE, 0, 1);
-    const reused = rescaleLayoutLines(stamp, scale, makeLinearCtx(), {}, 0);
+    const first = layoutLines(makeLinearCtx(), makeSegs(), WIDE * scale, 0, scale);
+    const second = layoutLines(makeLinearCtx(), cloneSegs(makeSegs()), WIDE * scale, 0, scale);
 
-    const freshCtx = makeLinearCtx();
-    const fresh = layoutLines(freshCtx, cloneSegs(makeSegs()), WIDE * scale, 0, scale);
-
-    const reusedSegs = reused[0].segments.filter(isText);
-    const freshSegs = (fresh[0] as LayoutLine).segments.filter(isText);
-    expect(reusedSegs).toHaveLength(freshSegs.length);
-    for (let i = 0; i < reusedSegs.length; i++) {
-      expect(reusedSegs[i].measuredWidth).toBeCloseTo(freshSegs[i].measuredWidth, 6);
+    const firstSegs = first[0].segments.filter(isText);
+    const secondSegs = second[0].segments.filter(isText);
+    expect(firstSegs).toHaveLength(secondSegs.length);
+    for (let i = 0; i < firstSegs.length; i++) {
+      expect(firstSegs[i].measuredWidth).toBeCloseTo(secondSegs[i].measuredWidth, 6);
     }
   });
 });

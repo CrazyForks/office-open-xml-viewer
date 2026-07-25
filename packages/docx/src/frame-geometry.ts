@@ -1,7 +1,7 @@
 // Text-frame / drop-cap placement geometry (ECMA-376 §17.3.1.11 `<w:framePr>`).
 //
 // Pure placement math: given a `<w:framePr>` and the section geometry on
-// `RenderState`, resolve the frame box (canvas px) and the wrap-exclusion
+// `AnchorGeometryContext`, resolve the frame box (points) and the wrap-exclusion
 // FloatRect it pushes onto `state.floats`. Extracted from renderer.ts so the
 // resolve logic can be unit-reasoned in isolation (see frame-geometry.test.ts /
 // measure-column-geometry.test.ts).
@@ -10,14 +10,25 @@
 // (float-table-geometry.ts), which reuses frameXContainer / frameYContainer /
 // resolveAlignedPosH / resolveAlignedPosV (the anchor/alignment semantics line
 // up 1:1 between a text frame and a floating table) and pushFloatRect (the
-// single source of exclusion-rect construction). Only `RenderState` is imported
-// as a type (erased at runtime), so there is no import cycle with renderer.ts.
+// single source of exclusion-rect construction).
 
 import type { FramePr } from './types.js';
-import type { RenderState } from './renderer.js';
-import { type FloatRect, resolveFloatOverlap } from './float-layout.js';
+import type {
+  AnchorGeometryContext,
+  FloatRegistrationState,
+} from './layout/acquisition-context.js';
+import type { FloatRect } from './float-layout.js';
+import {
+  FLOAT_OVERLAP_EPS,
+  FLOAT_PAGE_RIGHT_SLACK,
+  drawingMLAvoidance,
+  floatRectParticipant,
+  floatingTableAvoidance,
+  resolveFloatPlacement,
+  type FloatPlacementParticipant,
+} from './layout/floats.js';
 
-/** Resolved geometry (canvas px) of a `<w:framePr>` text frame. Exported for
+/** Resolved point-space geometry of a `<w:framePr>` text frame. Exported for
  *  unit tests only (the table-driven frame-geometry assertions) — not part of
  *  the package API. */
 export interface FrameBox {
@@ -32,6 +43,10 @@ export interface FrameBox {
   exRight: number;
   exTop: number;
   exBottom: number;
+  /** False for non-owning paragraphs in one grouped frame. */
+  registerExclusion?: boolean;
+  /** Stable retained identity for the group's one wrap exclusion. */
+  exclusionId?: string;
 }
 
 /**
@@ -43,15 +58,17 @@ export interface FrameBox {
  *                inside its own newspaper column (#513 per-section columns).
  *   - "margin" → the page content margin (marginLeft..pageWidth-marginRight).
  *   - "page"   → the physical page edges (0..pageWidth).
- * All values in canvas px.
+ * All values are in points.
  */
-export function frameXContainer(hAnchor: string, state: RenderState): { left: number; right: number } {
-  const sc = state.scale;
+export function frameXContainer(
+  hAnchor: string,
+  state: AnchorGeometryContext,
+): { left: number; right: number } {
   switch (hAnchor) {
     case 'margin':
-      return { left: state.marginLeft * sc, right: (state.pageWidth - state.marginRight) * sc };
+      return { left: state.marginLeft, right: state.pageWidth - state.marginRight };
     case 'page':
-      return { left: 0, right: state.pageWidth * sc };
+      return { left: 0, right: state.pageWidth };
     case 'text':
     case 'column':
     default:
@@ -66,9 +83,9 @@ export function frameXContainer(hAnchor: string, state: RenderState): { left: nu
  * §17.18.100). Symmetric with {@link frameXContainer}: ST_YAlign positions the
  * frame relative to the ANCHOR OBJECT (this band), not the physical page
  * (§22.9.2.20: "this relative position is specified relative to the vertical
- * anchor"). All values in canvas px (state.pageH is already px; margins are pt
- * and scaled here). `paraTop` is the anchor paragraph's text-area top (px) and
- * `contentH` its frame-content height (px), used only for the "text" band end.
+ * anchor"). `paraTop` is the anchor paragraph's point-space text-area top and
+ * `contentH` its point-space frame-content height, used only for the "text"
+ * band end.
  *   - "page"   → [0, pageH]: the physical page edges (§17.18.100 page = "the
  *                location of the edge of the page").
  *   - "margin" → [marginTop, pageH−marginBottom]: the text margins (§17.18.100
@@ -78,17 +95,17 @@ export function frameXContainer(hAnchor: string, state: RenderState): { left: nu
  *                anchor paragraph"). Relative positioning (yAlign) is not
  *                allowed for "text" (§17.3.1.11 yAlign), so only `start` is ever
  *                consumed (as the base for the absolute y offset).
+ * All values are in points.
  */
 export function frameYContainer(
   vAnchor: string,
   paraTop: number,
   contentH: number,
-  state: RenderState,
+  state: AnchorGeometryContext,
 ): { start: number; end: number } {
-  const sc = state.scale;
   switch (vAnchor) {
     case 'margin':
-      return { start: state.marginTop * sc, end: state.pageH - state.marginBottom * sc };
+      return { start: state.marginTop, end: state.pageH - state.marginBottom };
     case 'page':
       return { start: 0, end: state.pageH };
     case 'text':
@@ -98,7 +115,7 @@ export function frameYContainer(
 }
 
 /**
- * Resolve a horizontal aligned position (canvas px) for a frame (xAlign,
+ * Resolve a horizontal aligned position in points for a frame (xAlign,
  * §17.3.1.11) or a floating table (tblpXSpec, §17.4.57). Both use the same
  * ST_XAlign vocabulary against a container band [containerLeft, containerRight]:
  *   center          → box centred in the band
@@ -127,7 +144,7 @@ export function resolveAlignedPosH(
 }
 
 /**
- * Resolve a vertical aligned position (canvas px) for a frame (yAlign,
+ * Resolve a vertical aligned position in points for a frame (yAlign,
  * §17.3.1.11) or a floating table (tblpYSpec, §17.4.57). Both use the same
  * ST_YAlign vocabulary, measured against the vAnchor BAND `[band.start,
  * band.end]` (the anchor object, §22.9.2.20) — symmetric with
@@ -159,28 +176,23 @@ export function resolveAlignedPosV(
 }
 
 /**
- * Clamp an absolutely-positioned (vAnchor=page/margin) box so it stays inside its
- * vertical container band — Word ground truth (sample-17 Sec B frame,
- * sample-18 Sec B floating table): a `vAnchor="page"` box requesting a `y` that
- * would push its BOTTOM past the physical page edge is shifted UP so its bottom
- * sits exactly on the page bottom (measured 741.9pt = 841.9 − 100 for a 100pt
- * box), NOT left overflowing. This is the frame / floating-table analogue of the
- * pagination keep-with-anchor that a vAnchor="text" box gets instead (moving the
- * anchor cursor); page/margin boxes have an ABSOLUTE in-page y that pagination
- * cannot help, so the geometry clamps them here.
+ * Implementation-defined overflow policy for an absolutely positioned
+ * vAnchor=page/margin box: shift an overflowing bottom edge back into its
+ * vertical container. ECMA-376 does not define this clamp. Unlike a text-anchored
+ * box, an absolute page/margin position cannot be repaired by moving the flow
+ * cursor, so this local geometry policy keeps the full box reachable.
  *
  *   y = max(containerStart, containerEnd − boxH)
  *
  * The floor is `containerStart` (container top): a box TALLER than its container
  * pins to the top and is allowed to overflow the bottom (clamping to
  * `end − boxH < start` would push it ABOVE the container top, which is worse). For
- * vAnchor="page" the container is the physical page [0, pageH], matching the
- * sample-17/18 physical-bottom measurements. For vAnchor="margin" the clamp
- * target (container end = the bottom text margin) is NOT independently observed —
- * no fixture pins where Word clamps a margin-anchored overflow — so it is ASSUMED
- * to be the container's own end (the margin band bottom), symmetric with the page
- * case. Callers pass the SAME `frameYContainer(vAnchor,…)` band the placement was
- * resolved against, so the clamp target always matches the anchor semantics.
+ * vAnchor="page" the container is the physical page [0, pageH]. The
+ * vAnchor="margin" target is explicitly implementation-defined because
+ * ECMA-376 does not specify the overflow clamp: use the owning margin band's
+ * end, symmetric with the page case. Callers pass the same
+ * `frameYContainer(vAnchor,…)` band used for placement, so the target remains
+ * consistent with the anchor semantics.
  *
  * Only meaningful for vAnchor=page/margin: the caller gates on that (vAnchor=text
  * is handled by pagination, and its band start/end ride the flow cursor, so this
@@ -196,22 +208,21 @@ export function clampAbsBoxIntoContainer(
 }
 
 /**
- * Resolve a frame's box in canvas px. `paraTop` is the in-flow top of the frame
+ * Resolve a frame's box in points. `paraTop` is the in-flow top of the frame
  * paragraph (post-spaceBefore). `contentW`/`contentH` are the frame content's
- * measured natural size (px); `anchorLineHpx` is one line height of the
+ * measured natural size (points); `anchorLineHPt` is one line height of the
  * following non-frame (anchor) paragraph, used to size a drop cap by `lines`.
  *
  * Exported for unit tests only (frame-geometry table) — not package API.
  */
 export function computeFrameBox(
   fp: FramePr,
-  state: RenderState,
+  state: AnchorGeometryContext,
   paraTop: number,
   contentW: number,
   contentH: number,
-  anchorLineHpx: number,
+  anchorLineHPt: number,
 ): FrameBox {
-  const sc = state.scale;
   const isDropCap = fp.dropCap === 'drop' || fp.dropCap === 'margin';
 
   const hx = frameXContainer(fp.hAnchor, state);
@@ -221,7 +232,7 @@ export function computeFrameBox(
   const vBand = frameYContainer(fp.vAnchor, paraTop, contentH, state);
 
   // Frame width: explicit `w` (exact) else natural content width (§17.3.1.11 w).
-  const frameW = fp.w != null ? fp.w * sc : contentW;
+  const frameW = fp.w != null ? fp.w : contentW;
 
   // Frame height. For a drop cap the height is `lines` × the anchor paragraph's
   // line height (§17.3.1.11 lines: "the height of the drop cap is the first N
@@ -229,14 +240,14 @@ export function computeFrameBox(
   // hRule gates h: exact = h, atLeast = max(h, content), auto = content.
   let frameH: number;
   if (isDropCap) {
-    frameH = Math.max(1, fp.lines) * anchorLineHpx;
+    frameH = Math.max(1, fp.lines) * anchorLineHPt;
   } else {
-    const hPx = fp.h != null ? fp.h * sc : 0;
+    const hPt = fp.h ?? 0;
     frameH =
       fp.hRule === 'exact'
-        ? hPx
+        ? hPt
         : fp.hRule === 'atLeast'
-          ? Math.max(hPx, contentH)
+          ? Math.max(hPt, contentH)
           : contentH;
   }
 
@@ -254,7 +265,7 @@ export function computeFrameBox(
     frameX = resolveAlignedPosH(fp.xAlign, hx.left, hx.right, frameW);
   } else {
     // §17.3.1.11 x: absolute signed offset from the hAnchor left edge.
-    frameX = hx.left + (fp.x != null ? fp.x * sc : 0);
+    frameX = hx.left + (fp.x ?? 0);
   }
 
   // Vertical placement. For a drop cap, y/yAlign are ignored: the cap sits at
@@ -268,38 +279,35 @@ export function computeFrameBox(
     frameY = resolveAlignedPosV(fp.yAlign, vBand, frameH);
   } else {
     // §17.3.1.11 y: absolute signed offset from the vAnchor band start.
-    frameY = vBand.start + (fp.y != null ? fp.y * sc : 0);
+    frameY = vBand.start + (fp.y ?? 0);
   }
 
-  // Word ground truth (sample-17 Sec B): a vAnchor=page/margin frame whose bottom
-  // would fall past its container is shifted UP to sit flush on the container
-  // bottom (physical page edge for page-anchored), not left overflowing. A
-  // vAnchor="text" frame is excluded — its overflow is handled by the paginator's
-  // keep-with-anchor (moving the anchor cursor), and its band rides the flow, so
-  // clamping here would be wrong. See clampAbsBoxIntoContainer.
+  // Apply the implementation-defined absolute-box overflow policy. A
+  // vAnchor="text" frame is excluded: its band moves with flow and pagination
+  // owns keep-with-anchor behavior. See clampAbsBoxIntoContainer.
   if (fp.vAnchor === 'page' || fp.vAnchor === 'margin') {
     frameY = clampAbsBoxIntoContainer(frameY, frameH, vBand);
   }
 
   // Exclusion padding: hSpace L/R applies only with wrap="around" (§17.3.1.11
   // hSpace); vSpace top/bottom always.
-  const hSpacePx = fp.wrap === 'around' || fp.wrap === 'auto' ? fp.hSpace * sc : 0;
-  const vSpacePx = fp.vSpace * sc;
+  const hSpacePt = fp.wrap === 'around' || fp.wrap === 'auto' ? fp.hSpace : 0;
+  const vSpacePt = fp.vSpace;
 
   return {
     x: frameX,
     y: frameY,
     w: frameW,
     h: frameH,
-    exLeft: frameX - hSpacePx,
-    exRight: frameX + frameW + hSpacePx,
-    exTop: frameY - vSpacePx,
-    exBottom: frameY + frameH + vSpacePx,
+    exLeft: frameX - hSpacePt,
+    exRight: frameX + frameW + hSpacePt,
+    exTop: frameY - vSpacePt,
+    exBottom: frameY + frameH + vSpacePt,
   };
 }
 
-/** Options for {@link pushFloatRect}: the resolved image/float box (x,y,w,h),
- *  its dist* padding (dl,dr,dt,db, all px), and the FloatRect descriptors. */
+/** Options for {@link pushFloatRect}: the resolved point-space image/float box
+ *  (x,y,w,h), its dist* padding (dl,dr,dt,db), and the FloatRect descriptors. */
 export interface PushFloatOpts {
   x: number;
   y: number;
@@ -309,22 +317,16 @@ export interface PushFloatOpts {
   dr: number;
   dt: number;
   db: number;
-  /** What reserved this float — scopes overlap avoidance (§17.4.56). See
-   *  {@link FloatRect.kind}. */
-  kind: FloatRect['kind'];
   mode: 'square' | 'topAndBottom';
   side: string;
   imageKey: string;
-  drawn: boolean;
   paraId: number;
-  /** Run §20.4.2.3 / §17.4.56 overlap avoidance before fixing the rect. When
-   *  false (frame floats) the box is used as-is. */
-  avoidOverlap: boolean;
-  /** allowOverlap arg passed to resolveFloatOverlap when avoidOverlap is true
-   *  (true ⇒ only avoid OTHER paragraphs' floats; false ⇒ spec-mandated
-   *  avoidance, scoped by `kind`: a table avoids only other tables, §17.4.56).
-   *  Ignored when avoidOverlap is false. */
+  kind: FloatRect['kind'];
+  /** Required at runtime for table entries; the resulting FloatRect and typed
+   * placement participant make the fact structurally mandatory. */
+  tableOverlap?: 'never' | 'overlap';
   allowOverlap?: boolean;
+  avoidOverlap: boolean;
 }
 
 /**
@@ -334,21 +336,44 @@ export interface PushFloatOpts {
  * yTop = y − dt, yBottom = y + h + db` exclusion-rect construction shared by
  * registerFrameFloat / registerTableFloat / registerImageFloat /
  * registerShapeFloat (the `dist*` fields carry dl/dr/dt/db verbatim for
- * re-seating). The returned ref lets the image path flip `drawn` after painting.
+ * re-seating). The returned ref exposes the exact registered transport record
+ * to acquisition callers that need its overlap-resolved position.
  */
-export function pushFloatRect(state: RenderState, o: PushFloatOpts): FloatRect {
+export function pushFloatRect(state: FloatRegistrationState, o: PushFloatOpts): FloatRect {
+  if (o.kind === 'table' && o.tableOverlap === undefined) {
+    throw new Error('Floating-table transport omitted tblOverlap');
+  }
   let px = o.x;
   let py = o.y;
   if (o.avoidOverlap) {
-    const resolved = resolveFloatOverlap(
-      px, py, o.w, o.h, o.dl, o.dr, o.dt, o.db, o.paraId, o.allowOverlap ?? true,
-      o.kind, state.pageWidth * state.scale, state.floats,
-    );
-    px = resolved.x;
-    py = resolved.y;
+    const core = {
+      occurrenceId: 'display-moving-float',
+      paragraphId: o.paraId,
+      bounds: { xPt: px, yPt: py, widthPt: o.w, heightPt: o.h },
+      exclusionBounds: {
+        xPt: px - o.dl,
+        yPt: py - o.dt,
+        widthPt: o.w + o.dl + o.dr,
+        heightPt: o.h + o.dt + o.db,
+      },
+    };
+    const moving: FloatPlacementParticipant = o.kind === 'table'
+      ? { ...core, kind: 'table', tableOverlap: o.tableOverlap! }
+      : { ...core, kind: o.kind === 'frame' ? 'frame' : 'drawingml' };
+    const resolved = resolveFloatPlacement({
+      moving,
+      blockers: state.floats.map(floatRectParticipant),
+      avoidance: o.kind === 'table'
+        ? floatingTableAvoidance(o.tableOverlap!, o.paraId)
+        : drawingMLAvoidance(o.allowOverlap ?? true, o.paraId),
+      rightBoundaryPt: state.pageWidth,
+      overlapEpsilonPt: FLOAT_OVERLAP_EPS,
+      rightBoundarySlackPt: FLOAT_PAGE_RIGHT_SLACK,
+    });
+    px = resolved.bounds.xPt;
+    py = resolved.bounds.yPt;
   }
-  const rect: FloatRect = {
-    kind: o.kind,
+  const core = {
     mode: o.mode,
     imageKey: o.imageKey,
     imageX: px,
@@ -365,8 +390,10 @@ export function pushFloatRect(state: RenderState, o: PushFloatOpts): FloatRect {
     distTop: o.dt,
     distBottom: o.db,
     paraId: o.paraId,
-    drawn: o.drawn,
   };
+  const rect: FloatRect = o.kind === 'table'
+    ? { ...core, kind: 'table', tableOverlap: o.tableOverlap! }
+    : { ...core, kind: o.kind };
   state.floats.push(rect);
   return rect;
 }
@@ -384,14 +411,15 @@ export function pushFloatRect(state: RenderState, o: PushFloatOpts): FloatRect {
  *   none      → no exclusion (text may overlap; the frame is drawn absolutely
  *               and following text starts at its normal Y).
  *   notBeside → topAndBottom (text never sits beside the frame).
- *   around / auto → square side wrap. "auto" is Word's application-defined
- *               default, effectively "around" in Word, so treated as around.
+ *   around / auto → square side wrap. `word-frame-auto-wrap-around` records
+ *               the application-defined mapping of auto to around.
  *   tight / through → a frame is a rectangle, so contour wrapping collapses to
  *               a square wrap (no contour follow for a rectangular frame).
  *
  * Exported for unit tests only (frame-geometry table) — not package API.
  */
-export function registerFrameFloat(box: FrameBox, fp: FramePr, state: RenderState): void {
+export function registerFrameFloat(box: FrameBox, fp: FramePr, state: FloatRegistrationState): void {
+  if (box.registerExclusion === false) return;
   if (fp.wrap === 'none') return;
   if (box.w <= 0 || box.h <= 0) return;
 
@@ -414,8 +442,7 @@ export function registerFrameFloat(box: FrameBox, fp: FramePr, state: RenderStat
     // RIGHT. A generic frame may sit anywhere, so text wraps on both sides
     // (resolveLineFloatWindow then takes the widest free gap around it).
     side: fp.dropCap === 'drop' || fp.dropCap === 'margin' ? 'right' : 'bothSides',
-    imageKey: '', // non-image float: the frame is painted above, not deferred.
-    drawn: true, // painted by renderFrameParagraph; deferred path must skip it.
+    imageKey: box.exclusionId ?? '',
     paraId,
     avoidOverlap: false, // frames opt out of overlap re-seating.
   });

@@ -1,39 +1,23 @@
 import { describe, it, expect } from 'vitest';
-import type { PaginatedBodyElement } from './types';
+import type { DocumentLayout } from './layout/types.js';
 import { buildBookmarkPageMap, resolveBookmarkPage } from './bookmark-nav';
 
 /** Minimal paginated paragraph carrying the given bookmark names. Only the
  *  fields the map builder reads (`type`, `bookmarks`) matter; the rest are
  *  filled to satisfy the type without affecting resolution. */
-function para(bookmarks: string[]): PaginatedBodyElement {
+function layout(bookmarksByPage: readonly (readonly string[])[]): DocumentLayout {
   return {
-    type: 'paragraph',
-    alignment: 'left',
-    indentLeft: 0,
-    indentRight: 0,
-    indentFirst: 0,
-    spaceBefore: 0,
-    spaceAfter: 0,
-    lineSpacing: null,
-    numbering: null,
-    tabStops: [],
-    runs: [],
-    bookmarks,
-  } as unknown as PaginatedBodyElement;
-}
-
-/** A paragraph with no bookmarks (page filler). */
-function plain(): PaginatedBodyElement {
-  return para([]);
+    pages: bookmarksByPage.map((names, pageIndex) => ({
+      pageIndex,
+      bookmarkStarts: names.map((name) => ({ name })),
+    })),
+    diagnostics: [],
+  } as unknown as DocumentLayout;
 }
 
 describe('buildBookmarkPageMap', () => {
   it('maps a bookmark to the 0-based index of the page carrying it', () => {
-    const pages: PaginatedBodyElement[][] = [
-      [plain(), para(['_Toc_intro'])], // page 0
-      [para(['_Toc_methods']), plain()], // page 1
-      [para(['_Toc_results'])], // page 2
-    ];
+    const pages = layout([['_Toc_intro'], ['_Toc_methods'], ['_Toc_results']]);
     const map = buildBookmarkPageMap(pages);
     expect(map.get('_Toc_intro')).toBe(0);
     expect(map.get('_Toc_methods')).toBe(1);
@@ -41,7 +25,7 @@ describe('buildBookmarkPageMap', () => {
   });
 
   it('maps multiple bookmarks that share a paragraph to the same page', () => {
-    const pages: PaginatedBodyElement[][] = [[plain()], [para(['a', 'b', 'c'])]];
+    const pages = layout([[], ['a', 'b', 'c']]);
     const map = buildBookmarkPageMap(pages);
     expect(map.get('a')).toBe(1);
     expect(map.get('b')).toBe(1);
@@ -49,42 +33,30 @@ describe('buildBookmarkPageMap', () => {
   });
 
   it('resolves a name repeated across pages to the FIRST (earliest) page', () => {
-    // A paragraph split across a page break carries its bookmark on both slices;
-    // the destination is where the paragraph begins.
-    const pages: PaginatedBodyElement[][] = [
-      [para(['dup'])], // page 0 — earliest wins
-      [para(['dup'])], // page 1
-    ];
+    // Malformed/duplicated document names still resolve in document order.
+    const pages = layout([['dup'], ['dup']]);
     expect(buildBookmarkPageMap(pages).get('dup')).toBe(0);
   });
 
   it('returns undefined for a name that appears in no paragraph', () => {
-    const map = buildBookmarkPageMap([[para(['known'])]]);
+    const map = buildBookmarkPageMap(layout([['known']]));
     expect(map.get('missing')).toBeUndefined();
   });
 
   it('honors bookmarks nested in a table cell paragraph', () => {
-    const table = {
-      type: 'table',
-      rows: [
-        {
-          cells: [{ content: [para(['cellmark'])] }],
-        },
-      ],
-    } as unknown as PaginatedBodyElement;
-    const pages: PaginatedBodyElement[][] = [[plain()], [table]];
+    const pages = layout([[], ['cellmark']]);
     expect(buildBookmarkPageMap(pages).get('cellmark')).toBe(1);
   });
 
   it('ignores empty-string bookmark names', () => {
-    const map = buildBookmarkPageMap([[para([''])]]);
+    const map = buildBookmarkPageMap(layout([['']]));
     expect(map.size).toBe(0);
   });
 });
 
 describe('resolveBookmarkPage', () => {
   it('is a thin lookup over the built map', () => {
-    const map = buildBookmarkPageMap([[plain()], [para(['x'])]]);
+    const map = buildBookmarkPageMap(layout([[], ['x']]));
     expect(resolveBookmarkPage(map, 'x')).toBe(1);
     expect(resolveBookmarkPage(map, 'nope')).toBeUndefined();
   });
@@ -98,16 +70,11 @@ describe('resolveBookmarkPage', () => {
 // mode only. Pin that the serialized-then-reconstructed map equals the directly
 // built map, entry-for-entry.
 describe('bookmark map — main/worker serialization equivalence (M2)', () => {
-  const pages: PaginatedBodyElement[][] = [
-    [plain(), para(['_Toc_intro'])],
-    [para(['_Toc_methods', 'alias']), plain()],
-    [
-      {
-        type: 'table',
-        rows: [{ cells: [{ content: [para(['cellmark'])] }] }],
-      } as unknown as PaginatedBodyElement,
-    ],
-  ];
+  const pages = layout([
+    ['_Toc_intro'],
+    ['_Toc_methods', 'alias'],
+    ['cellmark'],
+  ]);
 
   it('round-trips the map through the worker-meta [name, page][] wire form unchanged', () => {
     const mainMap = buildBookmarkPageMap(pages); // main mode

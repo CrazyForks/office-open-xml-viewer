@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveFieldText } from './line-layout.js';
-import type { RenderState } from './renderer.js';
+import { resolveFieldText, type LineLayoutEnvironment } from './line-layout.js';
 import type { FieldRun } from './types';
 
 // ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — resolveFieldText formats the
@@ -9,8 +8,8 @@ import type { FieldRun } from './types';
 // token. Reference instant: Tue Jan 3 2006 17:28:34 (matches the spec example).
 const REF_MS = new Date(2006, 0, 3, 17, 28, 34).getTime();
 
-function state(currentDateMs?: number): RenderState {
-  return { currentDateMs, totalPages: 1, pageIndex: 0 } as unknown as RenderState;
+function state(currentDateMs?: number): LineLayoutEnvironment {
+  return { currentDateMs, totalPages: 1, pageIndex: 0 };
 }
 
 function field(fieldType: string, instruction: string, fallbackText = ''): FieldRun {

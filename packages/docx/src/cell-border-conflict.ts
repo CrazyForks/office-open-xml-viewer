@@ -1,21 +1,27 @@
-import type { BorderSpec } from './types';
+import type { BorderSpec, CellBorders, TableBorders } from './types';
+import {
+  wordNilBorderSuppressesSharedEdge,
+  WORD_TABLE_BORDER_STYLE_PRECEDENCE,
+  wordTableBorderWeight,
+} from './layout/table-compatibility.js';
 
 /**
  * ECMA-376 §17.4.66 (tcBorders) — adjacent table cell border conflict resolution.
  *
  * When cell spacing is zero, two cells that share an interior gridline each
- * contribute a border for that edge. Word displays exactly ONE of them, chosen
- * by the following rules (applied in order); this module is the pure kernel that
- * decides the winner. The renderer ({@link drawTableRows}) supplies the two
- * candidates for each shared edge and draws only the returned winner, so a
- * gridline is drawn once with the correct spec (no more "last cell painted wins").
+ * contribute a border for that edge. This module displays exactly ONE of them,
+ * chosen by the following rules (applied in order), and is the pure kernel that
+ * decides the winner. Canonical table border acquisition supplies the two
+ * candidates for each shared edge and retains only the returned winner, so a
+ * gridline is painted once with the correct spec (no more "last cell wins").
  *
- * Rules (§17.4.66):
- *   0. If either border is `nil`/`none` (no border), the OTHER is displayed. If
- *      both are nil/none ⇒ nothing (`null`).
+ * Rules (ECMA-376 §17.4.66 plus the registered table-border compatibility
+ * rules):
+ *   0. `none` loses to the opposing border;
+ *      `word-nil-table-border-suppression` suppresses the shared edge.
  *   1. A CELL border always beats a TABLE(-level or table-style) border.
- *   2. Weight = (# of lines in the border) × (the style's "border number"); the
- *      larger weight wins.
+ *   2. `word-table-border-weight-precedence` supplies the border-number weight;
+ *      dotted and dashed have weight 1 regardless of width.
  *   3. Equal weight ⇒ the style higher on the precedence list wins.
  *   4. Identical style ⇒ the darker colour wins, by three successive brightness
  *      formulas: R+B+2G, then B+2G, then G (smaller value wins each).
@@ -30,87 +36,70 @@ export interface BorderCandidate {
   source: 'cell' | 'table';
 }
 
-/** ECMA-376 §17.4.66 — the "border number" rank of each ST_Border style. The
- *  larger the rank, the heavier the style (before the line-count multiplier).
- *  Unknown / art styles are treated as rank 0 (they never out-weigh a real line
- *  style; art borders are unsupported anyway). */
-const BORDER_NUMBER: Record<string, number> = {
-  single: 1,
-  thick: 2,
-  double: 3,
-  dotted: 4,
-  dashed: 5,
-  dotDash: 6,
-  dotDotDash: 7,
-  triple: 8,
-  thinThickSmallGap: 9,
-  thickThinSmallGap: 10,
-  thinThickThinSmallGap: 11,
-  thinThickMediumGap: 12,
-  thickThinMediumGap: 13,
-  thinThickThinMediumGap: 14,
-  thinThickLargeGap: 15,
-  thickThinLargeGap: 16,
-  thinThickThinLargeGap: 17,
-  wave: 18,
-  doubleWave: 19,
-  dashSmallGap: 20,
-  dashDotStroked: 21,
-  threeDEmboss: 22,
-  threeDEngrave: 23,
-  outset: 24,
-  inset: 25,
-};
-
-/** ECMA-376 §17.18.2 — the number of parallel lines each ST_Border style draws,
- *  the first factor of the §17.4.66 weight. A single rule is 1; a `double` is 2;
- *  a `triple` and the "thinThickThin" families are 3; the two-band "thinThick" /
- *  "thickThin" families and `doubleWave` are 2. All dash / dot / wave / 3D /
- *  outset / inset single-stroke styles are 1. Unknown styles default to 1. */
-const BORDER_LINES: Record<string, number> = {
-  double: 2,
-  triple: 3,
-  thinThickSmallGap: 2,
-  thickThinSmallGap: 2,
-  thinThickThinSmallGap: 3,
-  thinThickMediumGap: 2,
-  thickThinMediumGap: 2,
-  thinThickThinMediumGap: 3,
-  thinThickLargeGap: 2,
-  thickThinLargeGap: 2,
-  thinThickThinLargeGap: 3,
-  doubleWave: 2,
-};
-
-/** §17.4.66 rule #3 precedence list — index 0 is the highest priority. Identical
- *  to the BORDER_NUMBER ordering (single first … inset last); a smaller index
- *  wins a weight tie. */
-const PRECEDENCE: string[] = [
-  'single', 'thick', 'double', 'dotted', 'dashed', 'dotDash', 'dotDotDash', 'triple',
-  'thinThickSmallGap', 'thickThinSmallGap', 'thinThickThinSmallGap', 'thinThickMediumGap',
-  'thickThinMediumGap', 'thinThickThinMediumGap', 'thinThickLargeGap', 'thickThinLargeGap',
-  'thinThickThinLargeGap', 'wave', 'doubleWave', 'dashSmallGap', 'dashDotStroked',
-  'threeDEmboss', 'threeDEngrave', 'outset', 'inset',
-];
-
-function borderNumber(style: string): number {
-  return BORDER_NUMBER[style] ?? 0;
+/** Structural location of a cell in the table grid. The same edge cascade is
+ * consumed by both border paint and row-footprint measurement. */
+export interface CellEdgeFlags {
+  topRow: boolean;
+  bottomRow: boolean;
+  leftCol: boolean;
+  rightCol: boolean;
 }
-function borderLines(style: string): number {
-  return BORDER_LINES[style] ?? 1;
+
+/** Cell/table cascade result before an adjacent-cell conflict is resolved. */
+export interface ResolvedCellEdges {
+  top: BorderCandidate | null;
+  bottom: BorderCandidate | null;
+  left: BorderCandidate | null;
+  right: BorderCandidate | null;
 }
-function borderWeight(style: string): number {
-  return borderLines(style) * borderNumber(style);
+
+/** ECMA-376 §17.4.38/§17.4.39/§17.4.66 — resolve one cell's own, inside,
+ * and outer table border cascade. `mirror` maps logical left/right to physical
+ * sides for `bidiVisual`; horizontal edges are unchanged. */
+export function resolveCellEdges(
+  cell: CellBorders,
+  table: TableBorders,
+  edges: CellEdgeFlags,
+  mirror: boolean,
+): ResolvedCellEdges {
+  const horizontal = (
+    own: BorderSpec | null,
+    outer: boolean,
+    tableOuter: BorderSpec | null,
+  ): BorderCandidate | null => {
+    if (own) return { spec: own, source: 'cell' };
+    const inherited = outer ? tableOuter : (cell.insideH ?? table.insideH);
+    return inherited ? { spec: inherited, source: 'table' } : null;
+  };
+  const vertical = (
+    own: BorderSpec | null,
+    outer: boolean,
+    tableOuter: BorderSpec | null,
+  ): BorderCandidate | null => {
+    if (own) return { spec: own, source: 'cell' };
+    const inherited = outer ? tableOuter : (cell.insideV ?? table.insideV);
+    return inherited ? { spec: inherited, source: 'table' } : null;
+  };
+
+  const top = horizontal(cell.top, edges.topRow, table.top);
+  const bottom = horizontal(cell.bottom, edges.bottomRow, table.bottom);
+  const left = mirror
+    ? vertical(cell.right, edges.rightCol, table.right)
+    : vertical(cell.left, edges.leftCol, table.left);
+  const right = mirror
+    ? vertical(cell.left, edges.leftCol, table.left)
+    : vertical(cell.right, edges.rightCol, table.right);
+  return { top, bottom, left, right };
+}
+
+function borderWeight(spec: BorderSpec): number {
+  return wordTableBorderWeight(spec.style, spec.width);
 }
 function precedenceIndex(style: string): number {
-  const i = PRECEDENCE.indexOf(style);
-  return i === -1 ? PRECEDENCE.length : i; // unknown ⇒ lowest priority
-}
-
-/** True for a border that draws no ink (`nil`/`none`), which §17.4.66 rule #0
- *  treats as "no border". */
-function isNil(spec: BorderSpec): boolean {
-  return spec.style === 'nil' || spec.style === 'none';
+  const i = WORD_TABLE_BORDER_STYLE_PRECEDENCE.indexOf(
+    style as (typeof WORD_TABLE_BORDER_STYLE_PRECEDENCE)[number],
+  );
+  return i === -1 ? WORD_TABLE_BORDER_STYLE_PRECEDENCE.length : i;
 }
 
 /** Parse a 6-hex colour to (r,g,b). `null`/auto ⇒ black (0,0,0): §17.4.66's
@@ -153,9 +142,11 @@ export function resolveBorderConflict(
   a: BorderCandidate | null,
   b: BorderCandidate | null,
 ): BorderCandidate | null {
-  // Rule #0 — nil/none (or absent) contributes nothing.
-  const av = a && !isNil(a.spec) ? a : null;
-  const bv = b && !isNil(b.spec) ? b : null;
+  // `word-nil-table-border-suppression`: nil suppresses the shared edge, while
+  // none merely contributes no competing border.
+  if (wordNilBorderSuppressesSharedEdge(a?.spec.style, b?.spec.style)) return null;
+  const av = a && a.spec.style !== 'none' ? a : null;
+  const bv = b && b.spec.style !== 'none' ? b : null;
   if (!av && !bv) return null;
   if (!av) return bv;
   if (!bv) return av;
@@ -165,8 +156,8 @@ export function resolveBorderConflict(
   if (bv.source === 'cell' && av.source === 'table') return bv;
 
   // Rule #2 — heavier weight wins.
-  const wa = borderWeight(av.spec.style);
-  const wb = borderWeight(bv.spec.style);
+  const wa = borderWeight(av.spec);
+  const wb = borderWeight(bv.spec);
   if (wa !== wb) return wa > wb ? av : bv;
 
   // Rule #3 — equal weight ⇒ higher on the precedence list (smaller index).

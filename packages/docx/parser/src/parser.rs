@@ -3,7 +3,8 @@ use ooxml_common::blip::{
     svg_blip_rid, Duotone,
 };
 use ooxml_common::depth::{parse_guarded, DepthGuard};
-use ooxml_common::ns::{attr_ns, is_w_ns, math, relationships, wordprocessingml};
+use ooxml_common::drawing::{parse_xsd_bool, DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
+use ooxml_common::ns::{attr_ns, is_w_ns, is_wp_ns, math, relationships, wordprocessingml};
 use ooxml_common::zip::read_zip_string;
 // Production parses go through `ooxml_common::depth::parse_guarded` (depth-guarded
 // before roxmltree's recursive tree builder). The `XmlDoc` alias survives only for
@@ -13,10 +14,11 @@ use roxmltree::Document as XmlDoc;
 use std::collections::{BTreeMap, HashMap};
 use zip::ZipArchive;
 
-use crate::numbering::NumberingMap;
+use crate::drawing_compatibility::apply_word_direct_group_rect;
+use crate::numbering::{LevelDef, NumberingMap};
 use crate::styles::{
-    apply_para, apply_run, merge_cond_layers, merge_tab_stops, parse_para_fmt, parse_run_fmt,
-    CondFmt, EdgeBorder, RawTblBorders, RunFmt, StyleMap,
+    apply_para, apply_run, merge_cond_layers, merge_tab_stops, merge_table_margin_layer,
+    parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder, ParaFmt, RawTblBorders, RunFmt, StyleMap,
 };
 use crate::types::*;
 use crate::xml_util::*;
@@ -37,6 +39,408 @@ pub(crate) type Zip = ZipArchive<std::io::Cursor<Vec<u8>>>;
 struct SectionRefs {
     headers: HashMap<String, String>,
     footers: HashMap<String, String>,
+}
+
+#[cfg(test)]
+mod private_typography_wire_tests {
+    use super::*;
+    use crate::xml_util::W_NS;
+
+    fn parse_p(inner: &str, styles: &StyleMap) -> DocParagraph {
+        let xml = format!(r#"<w:p xmlns:w="{W_NS}">{inner}</w:p>"#);
+        let doc = roxmltree::Document::parse(&xml).expect("paragraph XML");
+        let mut num_map = NumberingMap::default();
+        let media = HashMap::new();
+        let relationships = HashMap::new();
+        let theme = ThemeColors::default();
+        let mut field = FieldState::default();
+        parse_paragraph(
+            doc.root_element(),
+            styles,
+            &mut num_map,
+            &media,
+            &HashMap::new(),
+            &relationships,
+            &theme,
+            None,
+            &mut field,
+        )
+    }
+
+    fn first_run_json(paragraph: &DocParagraph, kind: &str) -> serde_json::Value {
+        let run = paragraph
+            .runs
+            .iter()
+            .find(|run| {
+                matches!(
+                    (kind, run),
+                    ("text", DocRun::Text(_)) | ("field", DocRun::Field(_))
+                )
+            })
+            .expect("requested run");
+        serde_json::to_value(run).expect("run serializes")
+    }
+
+    #[test]
+    fn private_run_typography_is_identical_for_text_and_field_results() {
+        let rpr = r#"<w:rPr>
+          <w:u w:val="words" w:color="FF0000" w:themeColor="accent2" w:themeTint="20"/>
+          <w:strike/><w:dstrike w:val="0"/><w:caps/><w:smallCaps w:val="0"/>
+          <w:vertAlign w:val="superscript"/><w:position w:val="4"/>
+          <w:color w:val="auto"/><w:snapToGrid w:val="0"/><w:spacing w:val="20"/>
+          <w:w w:val="80"/><w:fitText w:val="2400" w:id="-7"/><w:kern w:val="24"/>
+          <w:em w:val="dot"/><w:lang w:eastAsia="ja-JP" w:bidi="ar-SA"/>
+          <w:eastAsianLayout w:vert="1" w:vertCompress="0" w:combine="1" w:combineBrackets="round"/>
+          <w:bdr w:val="double" w:color="Auto" w:themeColor="accent1"
+                 w:themeTint="80" w:themeShade="40" w:sz="24" w:space="2"
+                 w:shadow="1" w:frame="0"/>
+        </w:rPr>"#;
+        let styles = StyleMap::parse("");
+        let text = parse_p(&format!(r#"<w:r>{rpr}<w:t>ABC</w:t></w:r>"#), &styles);
+        let field = parse_p(
+            &format!(r#"<w:fldSimple w:instr="PAGE"><w:r>{rpr}<w:t>ABC</w:t></w:r></w:fldSimple>"#),
+            &styles,
+        );
+
+        let text_wire = first_run_json(&text, "text")["__typographyAcquisition"].clone();
+        let field_wire = first_run_json(&field, "field")["__typographyAcquisition"].clone();
+
+        assert_eq!(
+            field_wire, text_wire,
+            "field results must retain every text typography axis"
+        );
+        assert_eq!(text_wire["underline"]["val"]["value"], "words");
+        assert_eq!(text_wire["underline"]["themeTint"]["value"], "20");
+        assert_eq!(text_wire["border"]["sizePt"]["value"], 3.0);
+        assert_eq!(text_wire["border"]["shadow"]["value"], true);
+        assert_eq!(text_wire["verticalAlign"]["value"], "super");
+        assert_eq!(text_wire["positionPt"]["value"], 2.0);
+        assert_eq!(text_wire["colorAuto"], true);
+        assert_eq!(text_wire["snapToGrid"], false);
+        assert_eq!(text_wire["characterSpacingPt"], 1.0);
+        assert_eq!(text_wire["characterScale"], 0.8);
+        assert_eq!(text_wire["fitText"]["valTwips"], 2400.0);
+        assert_eq!(text_wire["fitText"]["id"], "-7");
+        assert_eq!(text_wire["kerningThresholdPt"], 12.0);
+        assert_eq!(text_wire["languages"]["eastAsia"], "ja-jp");
+        assert_eq!(
+            text_wire["eastAsianLayout"]["combineBrackets"]["value"],
+            "round"
+        );
+    }
+
+    #[test]
+    fn complex_ref_result_preserves_boundaries_and_hyperlink_semantics() {
+        let paragraph = parse_p(
+            r#"
+              <w:r><w:t>before</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> REF DestinationBookmark \h </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:t>cached </w:t></w:r>
+              <w:r><w:t>result</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+              <w:r><w:t>after</w:t></w:r>
+            "#,
+            &StyleMap::parse(""),
+        );
+
+        let wire = serde_json::to_value(&paragraph).expect("paragraph serializes");
+        assert_eq!(
+            wire["__complexFieldBoundaries"],
+            serde_json::json!([
+                {
+                    "occurrenceId": 0,
+                    "boundary": "start",
+                    "runIndex": 1,
+                    "fieldType": "ref",
+                    "instruction": "REF DestinationBookmark \\h",
+                    "hyperlinkAnchor": "DestinationBookmark"
+                },
+                {
+                    "occurrenceId": 0,
+                    "boundary": "end",
+                    "runIndex": 3,
+                    "fieldType": "ref",
+                    "instruction": "REF DestinationBookmark \\h",
+                    "hyperlinkAnchor": "DestinationBookmark"
+                }
+            ]),
+            "the parser must retain the exact cached-result interval without adding flow runs",
+        );
+
+        let result_runs = paragraph.runs.iter().filter_map(|run| match run {
+            DocRun::Text(text) if text.text == "cached " || text.text == "result" => Some(text),
+            _ => None,
+        });
+        for result in result_runs {
+            assert!(result.is_link, "REF \\h result is a navigation link");
+            assert_eq!(
+                result.hyperlink_anchor.as_deref(),
+                Some("DestinationBookmark"),
+                "ECMA-376 §17.16.5.51 \\h targets the referenced bookmark",
+            );
+        }
+    }
+
+    #[test]
+    fn complex_pageref_hyperlink_and_plain_ref_boundaries_are_distinct() {
+        let pageref = parse_p(
+            r#"
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> PAGEREF PageBookmark \h </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:t>7</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            "#,
+            &StyleMap::parse(""),
+        );
+        let pageref_wire = serde_json::to_value(&pageref).expect("PAGEREF serializes");
+        assert_eq!(
+            pageref_wire["__complexFieldBoundaries"][0]["fieldType"],
+            "pageRef"
+        );
+        assert_eq!(
+            pageref_wire["__complexFieldBoundaries"][0]["hyperlinkAnchor"],
+            "PageBookmark",
+        );
+        let page_number = first_run_json(&pageref, "text");
+        assert_eq!(page_number["isLink"], true);
+        assert_eq!(page_number["hyperlinkAnchor"], "PageBookmark");
+
+        let plain_ref = parse_p(
+            r#"
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> REF PlainBookmark </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:t>plain result</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            "#,
+            &StyleMap::parse(""),
+        );
+        let plain_wire = serde_json::to_value(&plain_ref).expect("plain REF serializes");
+        assert_eq!(
+            plain_wire["__complexFieldBoundaries"][0]["fieldType"],
+            "ref"
+        );
+        assert!(
+            plain_wire["__complexFieldBoundaries"][0]
+                .get("hyperlinkAnchor")
+                .is_none(),
+            "REF without \\h is not a hyperlink",
+        );
+        let result = first_run_json(&plain_ref, "text");
+        assert_eq!(result["isLink"], false);
+        assert!(result.get("hyperlinkAnchor").is_none());
+    }
+
+    #[test]
+    fn complex_field_boundaries_follow_paragraph_break_splitting() {
+        let paragraph = parse_p(
+            r#"
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> REF DestinationBookmark \h </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:t>before break</w:t></w:r>
+              <w:r><w:br w:type="page"/></w:r>
+              <w:r><w:lastRenderedPageBreak/></w:r>
+              <w:r><w:t>after break</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            "#,
+            &StyleMap::parse(""),
+        );
+
+        let pieces = split_para_on_page_breaks(paragraph);
+        let paragraphs: Vec<&DocParagraph> = pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                ParaPiece::Para(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paragraphs.len(), 2);
+        assert_eq!(
+            paragraphs[0].complex_field_boundaries,
+            vec![ComplexFieldBoundaryWire {
+                occurrence_id: 0,
+                boundary: "start".to_string(),
+                run_index: 0,
+                field_type: "ref".to_string(),
+                instruction: "REF DestinationBookmark \\h".to_string(),
+                hyperlink_anchor: Some("DestinationBookmark".to_string()),
+            }],
+        );
+        assert_eq!(
+            paragraphs[1].complex_field_boundaries,
+            vec![ComplexFieldBoundaryWire {
+                occurrence_id: 0,
+                boundary: "end".to_string(),
+                run_index: 1,
+                field_type: "ref".to_string(),
+                instruction: "REF DestinationBookmark \\h".to_string(),
+                hyperlink_anchor: Some("DestinationBookmark".to_string()),
+            }],
+            "the ignored lastRenderedPageBreak must not leave a stale boundary index",
+        );
+    }
+
+    #[test]
+    fn complex_field_start_moves_to_visible_chunk_after_leading_page_break() {
+        let paragraph = parse_p(
+            r#"
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> REF DestinationBookmark \h </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:br w:type="page"/></w:r>
+              <w:r><w:t>cached result</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            "#,
+            &StyleMap::parse(""),
+        );
+
+        let pieces = split_para_on_page_breaks(paragraph);
+        assert!(matches!(pieces.first(), Some(ParaPiece::PageBreak { .. })));
+        let visible = pieces
+            .iter()
+            .find_map(|piece| match piece {
+                ParaPiece::Para(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .expect("visible paragraph after the leading page break");
+        assert_eq!(
+            visible.complex_field_boundaries,
+            vec![
+                ComplexFieldBoundaryWire {
+                    occurrence_id: 0,
+                    boundary: "start".to_string(),
+                    run_index: 0,
+                    field_type: "ref".to_string(),
+                    instruction: "REF DestinationBookmark \\h".to_string(),
+                    hyperlink_anchor: Some("DestinationBookmark".to_string()),
+                },
+                ComplexFieldBoundaryWire {
+                    occurrence_id: 0,
+                    boundary: "end".to_string(),
+                    run_index: 1,
+                    field_type: "ref".to_string(),
+                    instruction: "REF DestinationBookmark \\h".to_string(),
+                    hyperlink_anchor: Some("DestinationBookmark".to_string()),
+                },
+            ],
+            "dropping the empty leading chunk must not orphan its complex-field start",
+        );
+    }
+
+    #[test]
+    fn private_run_typography_inherits_complete_underline_and_border_facts() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{W_NS}">
+              <w:style w:type="character" w:styleId="Typographic">
+                <w:rPr>
+                  <w:u w:val="wave" w:themeColor="accent3" w:themeShade="55"/>
+                  <w:bdr w:val="single" w:sz="8" w:space="0" w:color="auto" w:frame="1"/>
+                </w:rPr>
+              </w:style>
+            </w:styles>"#,
+        ));
+        let paragraph = parse_p(
+            r#"<w:r><w:rPr><w:rStyle w:val="Typographic"/></w:rPr><w:t>x</w:t></w:r>"#,
+            &styles,
+        );
+        let wire = &first_run_json(&paragraph, "text")["__typographyAcquisition"];
+
+        assert_eq!(wire["underline"]["val"]["value"], "wave");
+        assert_eq!(wire["underline"]["themeColor"]["value"], "accent3");
+        assert_eq!(wire["border"]["val"]["value"], "single");
+        assert_eq!(wire["border"]["frame"]["value"], true);
+    }
+
+    #[test]
+    fn malformed_required_and_enum_values_are_not_guessed() {
+        let styles = StyleMap::parse("");
+        let paragraph = parse_p(
+            r#"<w:ins w:author="A"><w:r><w:rPr><w:u w:val="bogus"/><w:bdr w:sz="8"/></w:rPr><w:t>x</w:t></w:r></w:ins>"#,
+            &styles,
+        );
+        let wire = &first_run_json(&paragraph, "text")["__typographyAcquisition"];
+
+        assert_eq!(wire["underline"]["val"]["status"], "invalid");
+        assert_eq!(wire["underline"]["val"]["raw"], "bogus");
+        assert!(wire["underline"]["val"]["value"].is_null());
+        assert_eq!(wire["border"]["val"]["status"], "missing");
+        assert_eq!(wire["revision"]["id"]["status"], "missing");
+    }
+
+    #[test]
+    fn invalid_ct_border_enums_remain_diagnostic_facts() {
+        let styles = StyleMap::parse("");
+        let paragraph = parse_p(
+            r#"<w:r><w:rPr><w:bdr w:val="notABorder" w:themeColor="notATheme"/></w:rPr><w:t>x</w:t></w:r>"#,
+            &styles,
+        );
+        let border = &first_run_json(&paragraph, "text")["__typographyAcquisition"]["border"];
+
+        assert_eq!(border["val"]["status"], "invalid");
+        assert_eq!(border["val"]["raw"], "notABorder");
+        assert!(border["val"]["value"].is_null());
+        assert_eq!(border["themeColor"]["status"], "invalid");
+        assert_eq!(border["themeColor"]["raw"], "notATheme");
+        assert!(border["themeColor"]["value"].is_null());
+    }
+
+    #[test]
+    fn ruby_private_wire_retains_alignment_metrics_language_and_rich_guide_runs() {
+        let styles = StyleMap::parse("");
+        let paragraph = parse_p(
+            r#"<w:r><w:ruby>
+              <w:rubyPr>
+                <w:rubyAlign w:val="distributeSpace"/><w:hps w:val="12"/>
+                <w:hpsBaseText w:val="24"/><w:hpsRaise w:val="10"/><w:lid w:val="ja-JP"/>
+              </w:rubyPr>
+              <w:rt><w:r><w:rPr><w:rFonts w:ascii="Yu Gothic"/><w:sz w:val="12"/>
+                <w:b/><w:i/><w:color w:val="112233"/><w:lang w:val="ja-JP"/></w:rPr><w:t>かん</w:t></w:r></w:rt>
+              <w:rubyBase><w:r><w:t>漢</w:t></w:r></w:rubyBase>
+            </w:ruby></w:r>"#,
+            &styles,
+        );
+        let ruby = &first_run_json(&paragraph, "text")["__typographyAcquisition"]["ruby"];
+
+        assert_eq!(ruby["align"]["value"], "distributeSpace");
+        assert_eq!(ruby["baseFontSizePt"]["value"], 12.0);
+        assert_eq!(ruby["raisePt"]["value"], 5.0);
+        assert_eq!(ruby["language"]["value"], "ja-jp");
+        assert_eq!(ruby["guideRuns"][0]["text"], "かん");
+        assert_eq!(ruby["guideRuns"][0]["fontFamily"], "Yu Gothic");
+        assert_eq!(ruby["guideRuns"][0]["fontSizePt"], 6.0);
+        assert_eq!(ruby["guideRuns"][0]["bold"], true);
+        assert_eq!(ruby["guideRuns"][0]["italic"], true);
+        assert_eq!(ruby["guideRuns"][0]["color"], "112233");
+    }
+
+    #[test]
+    fn paragraph_private_wire_retains_bar_and_complete_ct_border_attributes() {
+        let styles = StyleMap::parse("");
+        let paragraph = parse_p(
+            r#"<w:pPr><w:pBdr>
+              <w:top w:val="single" w:sz="8"/>
+              <w:between w:val="dashed" w:space="3"/>
+              <w:bar w:val="double" w:color="Auto" w:themeColor="accent4"
+                     w:themeTint="44" w:themeShade="22" w:sz="16" w:space="1"
+                     w:shadow="1" w:frame="0"/>
+            </w:pBdr></w:pPr><w:r><w:t>x</w:t></w:r>"#,
+            &styles,
+        );
+        let json = serde_json::to_value(paragraph).expect("paragraph serializes");
+        let borders = &json["__paragraphTypographyAcquisition"]["borders"];
+
+        assert_eq!(borders["top"]["val"]["value"], "single");
+        assert_eq!(borders["between"]["spacePt"]["value"], 3.0);
+        assert_eq!(borders["bar"]["val"]["value"], "double");
+        assert_eq!(borders["bar"]["themeTint"]["value"], "44");
+        assert_eq!(borders["bar"]["themeShade"]["value"], "22");
+        assert_eq!(borders["bar"]["sizePt"]["value"], 2.0);
+        assert_eq!(borders["bar"]["shadow"]["value"], true);
+    }
 }
 
 /// A section's effective header/footer set + its own `<w:titlePg>` flag, ready to
@@ -202,6 +606,8 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         })
         .unwrap_or_else(|| "word/settings.xml".to_string());
     let mut document_settings: Option<crate::types::DocumentSettings> = None;
+    let mut page_layout_settings: Option<crate::types::PageLayoutSettingsWire> = None;
+    let mut note_layout_settings: Option<crate::types::NoteLayoutSettingsWire> = None;
     // §17.10.1 even/odd headers is a settings.xml flag (not a sectPr property), so
     // capture it here and stamp it onto the section below.
     let mut even_and_odd_headers = false;
@@ -210,6 +616,8 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
             theme.apply_theme_font_langs(&langs);
         }
         document_settings = parse_document_settings(&settings_xml);
+        page_layout_settings = parse_page_layout_settings(&settings_xml);
+        note_layout_settings = parse_note_layout_settings(&settings_xml);
         even_and_odd_headers = parse_even_and_odd_headers(&settings_xml);
     }
 
@@ -316,7 +724,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         }
     }
 
-    let body = parse_body_elements(
+    let (body, diagnostics) = parse_body_elements_with_diagnostics(
         body_node,
         &style_map,
         &mut num_map,
@@ -326,6 +734,14 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         &theme,
         &section_hf,
     );
+    let final_section_ordinal = body
+        .iter()
+        .filter(|element| matches!(element, BodyElement::SectionBreak { .. }))
+        .count();
+    section.section_placement = Some(Box::new(section_placement_wire(
+        sect_pr,
+        format!("section:{final_section_ordinal}"),
+    )));
 
     let headers = body_headers;
     let footers = body_footers;
@@ -346,7 +762,8 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         })
         .unwrap_or_else(|| "word/fontTable.xml".to_string());
     let font_table_xml = read_zip_string(zip, &font_table_path).unwrap_or_default();
-    let (font_family_classes, font_family_pitches) = parse_font_table(&font_table_xml);
+    let (font_family_classes, font_family_pitches, font_family_charsets) =
+        parse_font_table(&font_table_xml);
     // ECMA-376 §17.8.3.3-.6 — embedded fonts. The `<w:embed*>` r:ids resolve
     // through the fontTable part's OWN relationships (`word/_rels/fontTable.xml.rels`
     // when the part is `word/fontTable.xml`): insert `_rels/` before the filename
@@ -413,12 +830,16 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         minor_font,
         font_family_classes,
         font_family_pitches,
+        font_family_charsets,
         embedded_fonts,
         revisions,
         comments,
         footnotes,
         endnotes,
         settings: document_settings,
+        page_layout_settings,
+        note_layout_settings,
+        diagnostics,
         // Healthy document: no degradation (RB7). Only `degraded_document` sets this.
         parse_error: None,
     })
@@ -592,7 +1013,7 @@ fn parse_notes(
             continue;
         }
         // Footnote/endnote bodies carry no nested sections; pass an empty map.
-        let content = parse_body_elements(
+        let content = parse_body_elements_in_story(
             n,
             style_map,
             num_map,
@@ -601,6 +1022,8 @@ fn parse_notes(
             &local_rel_map,
             theme,
             &HashMap::new(),
+            TablePositioningContext::IgnoredStory,
+            None,
         );
         out.push(crate::types::DocxNote { id, content });
     }
@@ -894,6 +1317,122 @@ fn parse_even_and_odd_headers(settings_xml: &str) -> bool {
     bool_prop(doc.root_element(), "evenAndOddHeaders").unwrap_or(false)
 }
 
+fn parse_page_layout_settings(settings_xml: &str) -> Option<crate::types::PageLayoutSettingsWire> {
+    let doc = parse_guarded(settings_xml).ok()?;
+    let root = doc.root_element();
+    let result = crate::types::PageLayoutSettingsWire {
+        mirror_margins: bool_prop(root, "mirrorMargins"),
+        gutter_at_top: bool_prop(root, "gutterAtTop"),
+        book_fold_printing: bool_prop(root, "bookFoldPrinting"),
+        book_fold_rev_printing: bool_prop(root, "bookFoldRevPrinting"),
+        print_two_on_one: bool_prop(root, "printTwoOnOne"),
+    };
+    if result.mirror_margins.is_none()
+        && result.gutter_at_top.is_none()
+        && result.book_fold_printing.is_none()
+        && result.book_fold_rev_printing.is_none()
+        && result.print_two_on_one.is_none()
+    {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+fn parse_note_layout_settings(settings_xml: &str) -> Option<crate::types::NoteLayoutSettingsWire> {
+    let doc = parse_guarded(settings_xml).ok()?;
+    let root = doc.root_element();
+    let position = |properties: &str| {
+        child_w(root, properties)
+            .and_then(|node| child_w(node, "pos"))
+            .and_then(|node| attr_w(node, "val"))
+    };
+    let result = crate::types::NoteLayoutSettingsWire {
+        footnote_position: position("footnotePr"),
+        endnote_position: position("endnotePr"),
+    };
+    if result.footnote_position.is_none() && result.endnote_position.is_none() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+#[cfg(test)]
+mod page_layout_settings_tests {
+    use super::*;
+    use ooxml_common::ns::wordprocessingml;
+
+    #[test]
+    fn reads_only_direct_wordprocessingml_settings_children() {
+        for namespace in [wordprocessingml::TRANSITIONAL, wordprocessingml::STRICT] {
+            let xml = format!(
+                r#"<w:settings xmlns:w="{namespace}" xmlns:x="urn:foreign">
+                     <w:mirrorMargins/>
+                     <w:gutterAtTop w:val="0"/>
+                     <x:bookFoldPrinting/>
+                     <w:compat><w:bookFoldRevPrinting/></w:compat>
+                   </w:settings>"#,
+            );
+
+            let settings = parse_page_layout_settings(&xml).expect("authored page settings");
+            assert_eq!(settings.mirror_margins, Some(true));
+            assert_eq!(settings.gutter_at_top, Some(false));
+            assert_eq!(settings.book_fold_printing, None);
+            assert_eq!(settings.book_fold_rev_printing, None);
+            assert_eq!(settings.print_two_on_one, None);
+        }
+    }
+
+    #[test]
+    fn ignores_foreign_settings_with_normative_local_names() {
+        let xml = r#"<w:settings
+                       xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                       xmlns:x="urn:foreign">
+                     <x:mirrorMargins/>
+                     <x:gutterAtTop x:val="1"/>
+                   </w:settings>"#;
+
+        assert!(parse_page_layout_settings(xml).is_none());
+    }
+}
+
+#[cfg(test)]
+mod note_layout_settings_tests {
+    use super::*;
+    use ooxml_common::ns::wordprocessingml;
+
+    #[test]
+    fn preserves_document_wide_note_positions_for_layout_diagnostics() {
+        for namespace in [wordprocessingml::TRANSITIONAL, wordprocessingml::STRICT] {
+            let xml = format!(
+                r#"<w:settings xmlns:w="{namespace}">
+                     <w:footnotePr><w:pos w:val="beneathText"/></w:footnotePr>
+                     <w:endnotePr><w:pos w:val="sectEnd"/></w:endnotePr>
+                   </w:settings>"#,
+            );
+
+            let settings = parse_note_layout_settings(&xml).expect("authored note settings");
+            assert_eq!(settings.footnote_position.as_deref(), Some("beneathText"));
+            assert_eq!(settings.endnote_position.as_deref(), Some("sectEnd"));
+        }
+    }
+
+    #[test]
+    fn ignores_foreign_or_nested_note_position_elements() {
+        let xml = r#"<w:settings
+                       xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                       xmlns:x="urn:foreign">
+                     <x:footnotePr><x:pos x:val="beneathText"/></x:footnotePr>
+                     <w:compat>
+                       <w:endnotePr><w:pos w:val="sectEnd"/></w:endnotePr>
+                     </w:compat>
+                   </w:settings>"#;
+
+        assert!(parse_note_layout_settings(xml).is_none());
+    }
+}
+
 /// Parse the typography settings the renderer needs from `word/settings.xml`.
 ///
 /// - §17.15.1.58 `w:kinsoku` — East-Asian line-breaking toggle (ST_OnOff;
@@ -1031,11 +1570,18 @@ fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
 /// (§17.18.66) is `fixed` (Fixed Width), `variable` (Proportional Width), or
 /// `default` (no pitch information). An omitted `<w:pitch>` is assumed to be
 /// `default`, so only explicitly declared pitch values are added to the map.
-fn parse_font_table(xml: &str) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+fn parse_font_table(
+    xml: &str,
+) -> (
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+) {
     let mut classes = BTreeMap::new();
     let mut pitches = BTreeMap::new();
+    let mut charsets = BTreeMap::new();
     let Ok(doc) = parse_guarded(xml) else {
-        return (classes, pitches);
+        return (classes, pitches, charsets);
     };
     for font in doc.root_element().descendants().filter(|n| {
         n.is_element() && n.tag_name().name() == "font" && is_w_ns(n.tag_name().namespace())
@@ -1084,8 +1630,26 @@ fn parse_font_table(xml: &str) -> (BTreeMap<String, String>, BTreeMap<String, St
         if let Some(p) = pitch {
             pitches.insert(name.to_string(), p.to_string());
         }
+        let charset = font
+            .children()
+            .find(|n| {
+                n.is_element()
+                    && n.tag_name().name() == "charset"
+                    && is_w_ns(n.tag_name().namespace())
+            })
+            .and_then(|n| {
+                attr_ns(
+                    &n,
+                    wordprocessingml::TRANSITIONAL,
+                    wordprocessingml::STRICT,
+                    "val",
+                )
+            });
+        if let Some(value) = charset {
+            charsets.insert(name.to_string(), value.to_uppercase());
+        }
     }
-    (classes, pitches)
+    (classes, pitches, charsets)
 }
 
 #[cfg(test)]
@@ -1100,6 +1664,7 @@ mod font_table_tests {
                  <w:font w:name="Meiryo UI">
                    <w:family w:val="modern"/>
                    <w:pitch w:val="variable"/>
+                   <w:charset w:val="86"/>
                  </w:font>
                  <w:font w:name="No Pitch">
                    <w:family w:val="modern"/>
@@ -1107,7 +1672,7 @@ mod font_table_tests {
                </w:fonts>"#,
         );
 
-        let (classes, pitches) = parse_font_table(&xml);
+        let (classes, pitches, charsets) = parse_font_table(&xml);
 
         assert_eq!(classes.get("Meiryo UI").map(String::as_str), Some("modern"));
         assert_eq!(
@@ -1115,6 +1680,7 @@ mod font_table_tests {
             Some("variable")
         );
         assert!(!pitches.contains_key("No Pitch"));
+        assert_eq!(charsets.get("Meiryo UI").map(String::as_str), Some("86"));
     }
 }
 
@@ -1242,7 +1808,199 @@ fn parse_body_elements(
     theme: &ThemeColors,
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
 ) -> Vec<BodyElement> {
+    parse_body_elements_in_story(
+        body_node,
+        style_map,
+        num_map,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
+        section_hf,
+        TablePositioningContext::Normal,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_body_elements_with_diagnostics(
+    body_node: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
+) -> (Vec<BodyElement>, Vec<ParseDiagnostic>) {
+    let mut diagnostics = Vec::new();
+    let body = parse_body_elements_in_story(
+        body_node,
+        style_map,
+        num_map,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
+        section_hf,
+        TablePositioningContext::Normal,
+        Some(&mut diagnostics),
+    );
+    (body, diagnostics)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LogicalTableSequenceContext {
+    /// Parser-owned identity for one §17.4.37 logical table. The source byte
+    /// offset is deterministic within the XML part and survives serde/worker
+    /// boundaries without exposing parser-node objects.
+    sequence_id: usize,
+    /// Zero-based authored-row ordinal within the logical table formed by
+    /// adjacent source `<w:tbl>` elements.
+    ///
+    /// Only the row axis is shared here. §17.4.37 does not define how distinct
+    /// tblGrid, justification, or bidiVisual values on adjacent source tables
+    /// are reconciled, while §17.4.8 defines column membership against the
+    /// parent table's grid. Keep each source grid authoritative rather than
+    /// making a parser-time physical-grid compatibility guess.
+    row_offset: usize,
+    total_rows: usize,
+    /// Whether the logical table's FIRST member activates `w:tblLook@firstRow`.
+    /// §17.7.6.7 horizontal-band parity origins from the logical table's own
+    /// first row, so the band offset is owned by the sequence, not by each
+    /// member's local tblLook. `is_first_row`/`lastRow` and each member's
+    /// `noHBand` gate remain local because those are per-source-table facts.
+    sequence_first_row_flag: bool,
+}
+
+impl LogicalTableSequenceContext {
+    fn standalone(node: roxmltree::Node) -> Self {
+        Self {
+            sequence_id: node.range().start,
+            row_offset: 0,
+            total_rows: table_row_count(node),
+            sequence_first_row_flag: tbl_look_flag(child_w(node, "tblPr"), "firstRow", 0x0020),
+        }
+    }
+}
+
+/// Resolve ECMA-376 Part 1 §17.4.37 logical-table membership before parsing
+/// individual source tables. Conditional table formatting is defined over the
+/// resulting logical row sequence, but authored table/row identity remains
+/// intact in the parser model; consequently this prepass supplies ordinals to
+/// `parse_table` rather than manufacturing a merged table or a runtime stamp.
+fn logical_table_sequence_contexts(
+    children: &[(roxmltree::Node, bool)],
+    style_map: &StyleMap,
+    positioning_context: TablePositioningContext,
+) -> HashMap<roxmltree::NodeId, LogicalTableSequenceContext> {
+    struct TableSequenceFact {
+        node_id: roxmltree::NodeId,
+        source_offset: usize,
+        effective_style_id: String,
+        row_count: usize,
+        first_row_flag: bool,
+    }
+
+    let mut contexts = HashMap::new();
+    let mut group: Vec<TableSequenceFact> = Vec::new();
+    let flush_group =
+        |group: &mut Vec<TableSequenceFact>,
+         contexts: &mut HashMap<roxmltree::NodeId, LogicalTableSequenceContext>| {
+            let total_rows = group
+                .iter()
+                .map(|fact| fact.row_count)
+                .fold(0usize, usize::saturating_add);
+            let sequence_id = group.first().map_or(0, |fact| fact.source_offset);
+            // §17.7.6.7: the band parity origin belongs to the logical table's
+            // first member, so every member shares that member's firstRow flag.
+            let sequence_first_row_flag = group.first().is_some_and(|fact| fact.first_row_flag);
+            let mut row_offset = 0usize;
+            for fact in group.drain(..) {
+                contexts.insert(
+                    fact.node_id,
+                    LogicalTableSequenceContext {
+                        sequence_id,
+                        row_offset,
+                        total_rows,
+                        sequence_first_row_flag,
+                    },
+                );
+                row_offset = row_offset.saturating_add(fact.row_count);
+            }
+        };
+
+    for (node, cover_break_after) in children {
+        match node.tag_name().name() {
+            // §17.4.37 names an intervening paragraph as the separator. Range
+            // markup and other non-paragraph wrapper facts are transparent. A
+            // hidden/vanished paragraph is still a paragraph and still breaks
+            // adjacency.
+            "p" => flush_group(&mut group, &mut contexts),
+            "tbl" => {
+                let tbl_pr = child_w(*node, "tblPr");
+                let ordinary_flow = table_is_ordinary_flow(
+                    tbl_pr.and_then(|properties| child_w(properties, "tblpPr")),
+                    positioning_context,
+                );
+                // A table joins a logical sequence only with a valid effective
+                // table-style identity while it participates in ordinary flow;
+                // an effective float or an unresolved/non-table style is a
+                // standalone §17.4.37 barrier.
+                match effective_table_style_id(*node, style_map) {
+                    Some(effective_style_id) if ordinary_flow => {
+                        if group
+                            .first()
+                            .is_some_and(|first| first.effective_style_id != effective_style_id)
+                        {
+                            flush_group(&mut group, &mut contexts);
+                        }
+                        group.push(TableSequenceFact {
+                            node_id: node.id(),
+                            source_offset: node.range().start,
+                            effective_style_id,
+                            row_count: table_row_count(*node),
+                            first_row_flag: tbl_look_flag(tbl_pr, "firstRow", 0x0020),
+                        });
+                    }
+                    _ => {
+                        flush_group(&mut group, &mut contexts);
+                        contexts.insert(node.id(), LogicalTableSequenceContext::standalone(*node));
+                    }
+                }
+            }
+            // A body-level or mid-body `<w:sectPr>` is a §17.6.1 section
+            // boundary; two tables cannot be one logical table across it.
+            "sectPr" => flush_group(&mut group, &mut contexts),
+            _ => {}
+        }
+
+        // The cover-building-block pass emits a real page break at this
+        // boundary, so conditional table geometry cannot span across it.
+        if *cover_break_after {
+            flush_group(&mut group, &mut contexts);
+        }
+    }
+    flush_group(&mut group, &mut contexts);
+
+    contexts
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_body_elements_in_story(
+    body_node: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
+    table_positioning_context: TablePositioningContext,
+    mut diagnostics: Option<&mut Vec<ParseDiagnostic>>,
+) -> Vec<BodyElement> {
     let mut body: Vec<BodyElement> = Vec::new();
+    let mut section_ordinal = 0usize;
     // The body-level sectPr (the last element) defines the final section and
     // is not a page break. Mid-body sectPrs (nested in pPr) DO imply a page break.
     // The walk also flags the end of any "Cover Pages" building block so the
@@ -1265,12 +2023,25 @@ fn parse_body_elements(
     // below) when the cover is already followed by a page-advancing construct.
     let mut cover_break_positions: Vec<usize> = Vec::new();
 
+    let logical_table_sequences =
+        logical_table_sequence_contexts(&body_children, style_map, table_positioning_context);
+
     for (child, cover_break_after) in body_children {
+        let source_body_index = body.len();
+        let mut child_diagnostics = Vec::new();
         match child.tag_name().name() {
             "p" => {
-                let result = parse_paragraph(
-                    child, style_map, num_map, media_map, chart_map, rel_map, theme, None,
+                let result = parse_paragraph_with_diagnostics(
+                    child,
+                    style_map,
+                    num_map,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    None,
                     &mut field,
+                    &mut child_diagnostics,
                 );
                 let lone_break = if result.runs.len() == 1 {
                     match &result.runs[0] {
@@ -1292,7 +2063,10 @@ fn parse_body_elements(
                 // still needs the synthetic page break; a final hard page break is
                 // deduplicated by apply_cover_page_breaks.)
                 match lone_break {
-                    Some(BreakType::Page) => body.push(BodyElement::PageBreak { parity: None }),
+                    Some(BreakType::Page) => body.push(BodyElement::PageBreak {
+                        parity: None,
+                        same_paragraph_as_previous: None,
+                    }),
                     Some(BreakType::Column) => body.push(BodyElement::ColumnBreak),
                     _ => {
                         // Mid-paragraph page / column breaks come from
@@ -1303,10 +2077,16 @@ fn parse_body_elements(
                         // continues correctly after the break.
                         for piece in split_para_on_page_breaks(result) {
                             match piece {
-                                ParaPiece::Para(p) => body.push(BodyElement::Paragraph(p)),
-                                ParaPiece::PageBreak => {
-                                    body.push(BodyElement::PageBreak { parity: None })
+                                ParaPiece::Para(p) => {
+                                    body.push(BodyElement::Paragraph(Box::new(p)))
                                 }
+                                ParaPiece::PageBreak {
+                                    same_paragraph_as_previous,
+                                } => body.push(BodyElement::PageBreak {
+                                    parity: None,
+                                    same_paragraph_as_previous: same_paragraph_as_previous
+                                        .then_some(true),
+                                }),
                                 ParaPiece::ColumnBreak => body.push(BodyElement::ColumnBreak),
                             }
                         }
@@ -1323,13 +2103,18 @@ fn parse_body_elements(
                         if let Some(sect_pr) =
                             child_w(child, "pPr").and_then(|ppr| child_w(ppr, "sectPr"))
                         {
-                            body.push(section_break_element(sect_pr, section_hf));
+                            body.push(section_break_element(
+                                sect_pr,
+                                section_hf,
+                                format!("section:{section_ordinal}"),
+                            ));
+                            section_ordinal += 1;
                         }
                     }
                 }
             }
             "tbl" => {
-                let tbl = parse_table(
+                let tbl = parse_table_with_diagnostics(
                     child,
                     style_map,
                     num_map,
@@ -1338,28 +2123,174 @@ fn parse_body_elements(
                     rel_map,
                     theme,
                     DepthGuard::root(),
+                    table_positioning_context,
+                    logical_table_sequences
+                        .get(&child.id())
+                        .copied()
+                        .unwrap_or_else(|| LogicalTableSequenceContext::standalone(child)),
+                    &mut child_diagnostics,
                 );
-                body.push(BodyElement::Table(tbl));
+                body.push(BodyElement::Table(Box::new(tbl)));
             }
             // Mid-body loose sectPr (rare) defines the section that ENDS here.
             // Emit a SectionBreak carrying its columns + break kind (see the
             // pPr-nested case above). The final body-level sectPr only defines
             // section settings (surfaced on Document.section) — skip it.
             "sectPr" if Some(child.id()) != body_level_sect_id => {
-                body.push(section_break_element(child, section_hf));
+                body.push(section_break_element(
+                    child,
+                    section_hf,
+                    format!("section:{section_ordinal}"),
+                ));
+                section_ordinal += 1;
             }
             _ => {}
+        }
+        // Source paths are owned by the same cursor that built the serialized
+        // body, not raw XML sibling ordinals. Paragraph splitting, unwrapped
+        // content controls, loose section markers, and zero-yield children can
+        // all change that cursor. Pending facts were emitted only by the real
+        // paragraph/table parse paths after their visibility and MCE gates.
+        if body.len() > source_body_index {
+            if let Some(out) = diagnostics.as_deref_mut() {
+                commit_pending_parse_diagnostics(child_diagnostics, &[source_body_index], out);
+            }
         }
         // ECMA-376 §17.5.2: a "Cover Pages" building block occupies its own page
         // in Word — the following content (even a "continuous" section) starts on
         // the next page. Emit the page break after the cover's content.
         if cover_break_after {
             cover_break_positions.push(body.len());
-            body.push(BodyElement::PageBreak { parity: None });
+            body.push(BodyElement::PageBreak {
+                parity: None,
+                same_paragraph_as_previous: None,
+            });
         }
     }
 
-    apply_cover_page_breaks(body, cover_break_positions)
+    apply_cover_page_breaks(body, cover_break_positions, diagnostics)
+}
+
+const DOCUMENT_PART: &str = "word/document.xml";
+const MAX_POSITIVE_COORDINATE: i64 = 27_273_042_316_900;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct PendingParseDiagnostic {
+    code: &'static str,
+    severity: DiagnosticSeverity,
+}
+
+fn push_pending_parse_diagnostic(
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
+    code: &'static str,
+    severity: DiagnosticSeverity,
+) {
+    if diagnostics.iter().any(|diagnostic| diagnostic.code == code) {
+        return;
+    }
+    diagnostics.push(PendingParseDiagnostic { code, severity });
+}
+
+fn push_parse_diagnostic(
+    diagnostics: &mut Vec<ParseDiagnostic>,
+    code: &'static str,
+    severity: DiagnosticSeverity,
+    path: &[usize],
+) {
+    // The emitted-body cursor increases monotonically across commits, and each
+    // pending set is already deduplicated by code. Therefore `(code, path)` is
+    // unique by construction; a global linear scan here would turn N
+    // diagnostic-bearing body children into O(N²) hostile-input work.
+    diagnostics.push(ParseDiagnostic {
+        code: code.to_string(),
+        severity,
+        part: DOCUMENT_PART.to_string(),
+        path: path.to_vec(),
+    });
+}
+
+fn commit_pending_parse_diagnostics(
+    pending: Vec<PendingParseDiagnostic>,
+    path: &[usize],
+    diagnostics: &mut Vec<ParseDiagnostic>,
+) {
+    for diagnostic in pending {
+        push_parse_diagnostic(diagnostics, diagnostic.code, diagnostic.severity, path);
+    }
+}
+
+fn is_supported_text_effect(value: &str) -> bool {
+    matches!(
+        value,
+        "blinkBackground" | "lights" | "antsBlack" | "antsRed" | "shimmer" | "sparkle" | "none"
+    )
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DrawingExtent {
+    Missing,
+    Invalid,
+    Valid { cx: i64, cy: i64 },
+}
+
+/// Parse the exact `wp:extent` contract used by both drawing acquisition and
+/// parser diagnostics. ECMA-376 `CT_PositiveSize2D` requires both attributes;
+/// `ST_PositiveCoordinate` derives from `xsd:long`, whose whitespace facet
+/// collapses leading/trailing XML whitespace, and is bounded to
+/// `0..=27273042316900`. Keeping one decision function prevents diagnostics
+/// from claiming that a drawing was omitted when the parser actually retained
+/// it (or missing an omission the parser actually made).
+fn drawing_extent(container: roxmltree::Node) -> DrawingExtent {
+    let Some(extent) = container.descendants().find(|node| {
+        node.is_element()
+            && is_wp_ns(node.tag_name().namespace())
+            && node.tag_name().name() == "extent"
+    }) else {
+        return DrawingExtent::Missing;
+    };
+    let Some((cx, cy)) = extent.attribute("cx").zip(extent.attribute("cy")) else {
+        return DrawingExtent::Missing;
+    };
+    let parse = |value: &str| {
+        value
+            .trim_matches(|character| matches!(character, '\t' | '\n' | '\r' | ' '))
+            .parse::<i64>()
+            .ok()
+            .filter(|coordinate| (0..=MAX_POSITIVE_COORDINATE).contains(coordinate))
+    };
+    match (parse(cx), parse(cy)) {
+        (Some(cx), Some(cy)) => DrawingExtent::Valid { cx, cy },
+        _ => DrawingExtent::Invalid,
+    }
+}
+
+fn drawing_extent_points(container: roxmltree::Node) -> Option<(f64, f64)> {
+    match drawing_extent(container) {
+        DrawingExtent::Valid { cx, cy } => Some((cx as f64 / 12700.0, cy as f64 / 12700.0)),
+        DrawingExtent::Missing | DrawingExtent::Invalid => None,
+    }
+}
+
+fn collect_text_effect_diagnostic(
+    run_properties: Option<roxmltree::Node>,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
+) {
+    let Some(effect) = run_properties.and_then(|properties| child_w(properties, "effect")) else {
+        return;
+    };
+    match attr_w(effect, "val").as_deref() {
+        Some("none") => {}
+        Some(value) if is_supported_text_effect(value) => push_pending_parse_diagnostic(
+            diagnostics,
+            PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_TEXT_EFFECT,
+            PARSE_DIAGNOSTIC_SEVERITY_UNSUPPORTED_TEXT_EFFECT,
+        ),
+        _ => push_pending_parse_diagnostic(
+            diagnostics,
+            PARSE_DIAGNOSTIC_CODE_INVALID_TEXT_EFFECT_VALUE,
+            PARSE_DIAGNOSTIC_SEVERITY_INVALID_TEXT_EFFECT_VALUE,
+        ),
+    }
 }
 
 /// Drop a cover's synthetic page break (emitted at `cover_break_positions` by the
@@ -1384,6 +2315,7 @@ fn parse_body_elements(
 fn apply_cover_page_breaks(
     body: Vec<BodyElement>,
     cover_break_positions: Vec<usize>,
+    diagnostics: Option<&mut Vec<ParseDiagnostic>>,
 ) -> Vec<BodyElement> {
     if cover_break_positions.is_empty() {
         return body;
@@ -1405,6 +2337,18 @@ fn apply_cover_page_breaks(
     if drop.is_empty() {
         return body;
     }
+    if let Some(diagnostics) = diagnostics {
+        for diagnostic in diagnostics {
+            let Some(source_index) = diagnostic.path.first_mut() else {
+                continue;
+            };
+            let removed_before = drop
+                .iter()
+                .filter(|&&removed| removed < *source_index)
+                .count();
+            *source_index = source_index.saturating_sub(removed_before);
+        }
+    }
     body.into_iter()
         .enumerate()
         .filter(|(i, _)| !drop.contains(i))
@@ -1418,7 +2362,7 @@ fn apply_cover_page_breaks(
 #[allow(clippy::large_enum_variant)]
 enum ParaPiece {
     Para(DocParagraph),
-    PageBreak,
+    PageBreak { same_paragraph_as_previous: bool },
     ColumnBreak,
 }
 
@@ -1468,6 +2412,21 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     if !has_break {
         // Strip the (ignored) RenderedPage runs so they don't pollute layout.
         let mut p = para;
+        for boundary in &mut p.complex_field_boundaries {
+            boundary.run_index = p
+                .runs
+                .iter()
+                .take(boundary.run_index)
+                .filter(|run| {
+                    !matches!(
+                        run,
+                        DocRun::Break {
+                            break_type: BreakType::RenderedPage
+                        }
+                    )
+                })
+                .count();
+        }
         p.runs.retain(|r| {
             !matches!(
                 r,
@@ -1483,19 +2442,35 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     // dropped. `seps` records the break kind that separates chunk[i] from
     // chunk[i+1] so we can interleave the matching ParaPiece below.
     let mut chunks: Vec<Vec<DocRun>> = vec![Vec::new()];
+    let mut boundary_chunks: Vec<Vec<ComplexFieldBoundaryWire>> = vec![Vec::new()];
     let mut seps: Vec<ParaPiece> = Vec::new();
-    for run in para.runs.iter().cloned() {
+    for (original_index, run) in para.runs.iter().cloned().enumerate() {
+        for boundary in para
+            .complex_field_boundaries
+            .iter()
+            .filter(|boundary| boundary.run_index == original_index)
+        {
+            let mut boundary = boundary.clone();
+            boundary.run_index = chunks.last().map(Vec::len).unwrap_or(0);
+            // Seeded and pushed in lock-step with `chunks`.
+            // ast-grep-ignore: no-unwrap-in-parser-production
+            boundary_chunks.last_mut().unwrap().push(boundary);
+        }
         match &run {
             DocRun::Break {
                 break_type: BreakType::Page,
             } => {
                 chunks.push(Vec::new());
-                seps.push(ParaPiece::PageBreak);
+                boundary_chunks.push(Vec::new());
+                seps.push(ParaPiece::PageBreak {
+                    same_paragraph_as_previous: false,
+                });
             }
             DocRun::Break {
                 break_type: BreakType::Column,
             } => {
                 chunks.push(Vec::new());
+                boundary_chunks.push(Vec::new());
                 seps.push(ParaPiece::ColumnBreak);
             }
             DocRun::Break {
@@ -1507,12 +2482,26 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
             _ => chunks.last_mut().unwrap().push(run),
         }
     }
+    for boundary in para
+        .complex_field_boundaries
+        .iter()
+        .filter(|boundary| boundary.run_index == para.runs.len())
+    {
+        let mut boundary = boundary.clone();
+        boundary.run_index = chunks.last().map(Vec::len).unwrap_or(0);
+        // Seeded and pushed in lock-step with `chunks`.
+        // ast-grep-ignore: no-unwrap-in-parser-production
+        boundary_chunks.last_mut().unwrap().push(boundary);
+    }
 
     let has_visible = |runs: &Vec<DocRun>| {
         runs.iter().any(|r| {
             matches!(r,
             DocRun::Text(t) if !t.text.trim().is_empty())
-                || matches!(r, DocRun::Field(_) | DocRun::Image(_) | DocRun::Shape(_))
+                || matches!(
+                    r,
+                    DocRun::Field(_) | DocRun::Image(_) | DocRun::Chart(_) | DocRun::Shape(_)
+                )
         })
     };
 
@@ -1521,12 +2510,27 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     // (Word's anchored shapes paragraph at the cover commonly does this
     // to force the cover onto its own page; the trailing empty chunk
     // would otherwise emit an extra blank paragraph + page break).
-    let (chunks, seps, trailing_seps): (Vec<Vec<DocRun>>, Vec<ParaPiece>, Vec<ParaPiece>) = {
+    type SplitParagraphChunks = (
+        Vec<Vec<DocRun>>,
+        Vec<Vec<ComplexFieldBoundaryWire>>,
+        Vec<ParaPiece>,
+        Vec<ParaPiece>,
+    );
+    let (chunks, mut boundary_chunks, seps, trailing_seps): SplitParagraphChunks = {
         let mut c = chunks;
+        let mut b = boundary_chunks;
         let mut s = seps;
         let mut trailing = Vec::new();
         while c.last().map(|r| !has_visible(r)).unwrap_or(false) && c.len() > 1 {
             c.pop();
+            let removed_boundaries = b.pop().unwrap_or_default();
+            if let Some(previous) = b.last_mut() {
+                let end_index = c.last().map(Vec::len).unwrap_or(0);
+                previous.extend(removed_boundaries.into_iter().map(|mut boundary| {
+                    boundary.run_index = end_index;
+                    boundary
+                }));
+            }
             // Each pop removes the empty chunk produced AFTER a hard break at
             // the paragraph end, but the break itself remains authoritative:
             // Para(visible), PageBreak is exactly how Word authors anchored
@@ -1536,9 +2540,31 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
                 trailing.push(sep);
             }
         }
-        (c, s, trailing)
+        (c, b, s, trailing)
     };
 
+    // A complex-field result may start immediately before a hard break. In
+    // that case the first chunk has no visible runs and is intentionally
+    // omitted below, but its start event still owns the cached result in the
+    // following chunk (ECMA-376 §17.16). Move every structural event from that
+    // discarded chunk to the first retained run boundary, preserving event
+    // order ahead of boundaries authored in the following chunk itself.
+    if chunks
+        .first()
+        .map(|runs| !has_visible(runs))
+        .unwrap_or(false)
+        && boundary_chunks.len() > 1
+    {
+        let mut migrated = std::mem::take(&mut boundary_chunks[0]);
+        for boundary in &mut migrated {
+            boundary.run_index = 0;
+        }
+        let following = std::mem::take(&mut boundary_chunks[1]);
+        migrated.extend(following);
+        boundary_chunks[1] = migrated;
+    }
+
+    let chunk_visibility: Vec<bool> = chunks.iter().map(has_visible).collect();
     let mut out: Vec<ParaPiece> = Vec::new();
     for (i, runs) in chunks.into_iter().enumerate() {
         // Drop the leading chunk when it carries no visible content — this
@@ -1564,17 +2590,25 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
         if i > 0 {
             out.push(match seps.get(i - 1) {
                 Some(ParaPiece::ColumnBreak) => ParaPiece::ColumnBreak,
-                _ => ParaPiece::PageBreak,
+                _ => ParaPiece::PageBreak {
+                    same_paragraph_as_previous: chunk_visibility
+                        .get(i - 1)
+                        .copied()
+                        .unwrap_or(false),
+                },
             });
         }
         let mut chunk = para.clone();
         chunk.runs = runs;
+        chunk.complex_field_boundaries = boundary_chunks.get(i).cloned().unwrap_or_default();
         out.push(ParaPiece::Para(chunk));
     }
     for sep in trailing_seps.into_iter().rev() {
         out.push(match sep {
             ParaPiece::ColumnBreak => ParaPiece::ColumnBreak,
-            _ => ParaPiece::PageBreak,
+            _ => ParaPiece::PageBreak {
+                same_paragraph_as_previous: true,
+            },
         });
     }
     if out.is_empty() {
@@ -1591,6 +2625,25 @@ fn read_section_break_type(sect_pr: roxmltree::Node) -> Option<String> {
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "type")
         .find_map(|n| attr_w(n, "val"))
+}
+
+/// ECMA-376 §17.6.20 `<w:textDirection w:val>` — read a sectPr's flow direction.
+/// Word writes the TRANSITIONAL ST_TextDirection enum (Part 4 §14.11.7):
+/// `lrTb`|`tbRl`|`btLr`|`lrTbV`|`tbLrV`|`tbRlV` — NOT the Part 1 §17.18.93
+/// Strict set (`tb`|`rl`|`lr`|…). The default "lrTb" (horizontal, left→right /
+/// top→bottom) is dropped to `None` so horizontal documents serialize exactly
+/// as before (both carriers are `skip_serializing_if = "Option::is_none"`);
+/// any other value (most commonly "tbRl" for vertical Japanese) is carried
+/// through verbatim so the renderer decides which are vertical (see
+/// `isVerticalSection`). The parser does not validate the enum — an unknown
+/// value is carried and the renderer treats it as horizontal, the safe
+/// default. Single extraction source for BOTH the body-level
+/// `SectionProps.text_direction` and the per-terminating-section
+/// `SectionBreak.text_direction` (issue #1000).
+fn read_text_direction(sect_pr: roxmltree::Node) -> Option<String> {
+    child_w(sect_pr, "textDirection")
+        .and_then(|n| attr_w(n, "val"))
+        .filter(|td| td != "lrTb")
 }
 
 /// ECMA-376 §17.6.12 `<w:pgNumType>` — parse a section's page-numbering settings.
@@ -1760,21 +2813,108 @@ fn section_geom(sect_pr: roxmltree::Node) -> Option<SectionGeom> {
     Some(geom)
 }
 
+fn section_page_geometry_wire(sect_pr: roxmltree::Node) -> Option<SectionPageGeometryWire> {
+    let page_size = child_w(sect_pr, "pgSz");
+    let margins = child_w(sect_pr, "pgMar");
+    if page_size.is_none() && margins.is_none() {
+        return None;
+    }
+    Some(SectionPageGeometryWire {
+        page_width: page_size
+            .and_then(|node| attr_w(node, "w"))
+            .map(|value| twips_to_pt(&value)),
+        page_height: page_size
+            .and_then(|node| attr_w(node, "h"))
+            .map(|value| twips_to_pt(&value)),
+        margin_top: margins
+            .and_then(|node| attr_w(node, "top"))
+            .map(|value| twips_to_pt(&value)),
+        margin_right: margins
+            .and_then(|node| attr_w(node, "right"))
+            .map(|value| twips_to_pt(&value)),
+        margin_bottom: margins
+            .and_then(|node| attr_w(node, "bottom"))
+            .map(|value| twips_to_pt(&value)),
+        margin_left: margins
+            .and_then(|node| attr_w(node, "left"))
+            .map(|value| twips_to_pt(&value)),
+        header_distance: margins
+            .and_then(|node| attr_w(node, "header"))
+            .map(|value| twips_to_pt(&value)),
+        footer_distance: margins
+            .and_then(|node| attr_w(node, "footer"))
+            .map(|value| twips_to_pt(&value)),
+    })
+}
+
+fn section_placement_wire(
+    sect_pr: Option<roxmltree::Node>,
+    section_id: String,
+) -> SectionPlacementWire {
+    let Some(sect_pr) = sect_pr else {
+        return SectionPlacementWire {
+            section_id,
+            section_bidi: false,
+            v_align: None,
+            line_numbering: None,
+            doc_grid_type: None,
+            doc_grid_line_pitch: None,
+            doc_grid_char_space: None,
+            gutter_pt: None,
+            rtl_gutter: None,
+            page_borders_authored: None,
+            page_borders: None,
+            page_geometry: None,
+        };
+    };
+    SectionPlacementWire {
+        section_id,
+        section_bidi: child_w(sect_pr, "bidi").is_some_and(|node| {
+            attr_w(node, "val")
+                .as_deref()
+                .and_then(parse_on_off)
+                .unwrap_or(true)
+        }),
+        v_align: child_w(sect_pr, "vAlign")
+            .and_then(|node| attr_w(node, "val"))
+            .filter(|value| value != "top"),
+        line_numbering: parse_line_numbering(sect_pr),
+        doc_grid_type: child_w(sect_pr, "docGrid").and_then(|node| attr_w(node, "type")),
+        doc_grid_line_pitch: child_w(sect_pr, "docGrid")
+            .and_then(|node| attr_w(node, "linePitch"))
+            .map(|value| twips_to_pt(&value)),
+        doc_grid_char_space: child_w(sect_pr, "docGrid")
+            .and_then(|node| attr_w(node, "charSpace"))
+            .and_then(|value| value.parse::<f64>().ok()),
+        gutter_pt: child_w(sect_pr, "pgMar")
+            .and_then(|node| attr_w(node, "gutter"))
+            .map(|value| twips_to_pt(&value)),
+        rtl_gutter: child_w(sect_pr, "rtlGutter").map(|node| {
+            attr_w(node, "val")
+                .as_deref()
+                .and_then(parse_on_off)
+                .unwrap_or(true)
+        }),
+        page_borders_authored: child_w(sect_pr, "pgBorders").map(|_| true),
+        page_borders: parse_page_borders(sect_pr),
+        page_geometry: section_page_geometry_wire(sect_pr).map(Box::new),
+    }
+}
+
 /// Build a `BodyElement::SectionBreak` for a sectPr that ENDS a section
 /// (ECMA-376 §17.6.x). Carries the section's `<w:cols>` (§17.6.4, via
 /// `parse_columns` ⇒ `None` for a single column) and its ST_SectionMark kind
 /// (§17.18.79), normalized: an absent/unknown `<w:type>` ⇒ "nextPage" (the spec
-/// default). `nextColumn` is normalized to "nextPage" — a section-level
-/// nextColumn break is not modeled distinctly (column breaks within a section
-/// come from `<w:br w:type="column"/>` ⇒ `ColumnBreak`); the renderer would
-/// otherwise have no defined column geometry to advance into across a section
-/// boundary.
+/// default). `nextColumn` remains distinct because §17.18.77 starts the incoming
+/// section in the following physical column on the current page.
 fn section_break_element(
     sect_pr: roxmltree::Node,
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
+    section_id: String,
 ) -> BodyElement {
     let kind = match read_section_break_type(sect_pr).as_deref() {
         Some("continuous") => "continuous",
+        Some("nextColumn") => "nextColumn",
         Some("oddPage") => "oddPage",
         Some("evenPage") => "evenPage",
         _ => "nextPage",
@@ -1787,13 +2927,17 @@ fn section_break_element(
     BodyElement::SectionBreak {
         kind,
         columns: parse_columns(sect_pr),
-        headers: resolved.headers,
-        footers: resolved.footers,
+        headers: Box::new(resolved.headers),
+        footers: Box::new(resolved.footers),
         title_page: resolved.title_page,
         // ECMA-376 §17.6.13 / §17.6.11 — this ending section's page geometry.
-        geom: section_geom(sect_pr),
+        geom: section_geom(sect_pr).map(Box::new),
         // ECMA-376 §17.6.12 — this ending section's page-numbering restart/format.
         page_num_type: parse_pgnum_type(sect_pr),
+        // ECMA-376 §17.6.20 — this ending section's flow direction (issue #1000
+        // per-section mixing); lrTb/absent ⇒ None, others verbatim.
+        text_direction: read_text_direction(sect_pr),
+        section_placement: Box::new(section_placement_wire(Some(sect_pr), section_id)),
     }
 }
 
@@ -2058,6 +3202,7 @@ fn parse_section(
         page_borders: None,
         line_numbering: None,
         v_align: None,
+        section_placement: None,
     };
 
     let Some(sp) = sect_pr else {
@@ -2085,21 +3230,10 @@ fn parse_section(
     // paginator needs the final section's here to resolve the boundary INTO it.
     props.section_start = read_section_break_type(sp);
 
-    // ECMA-376 §17.6.20 `<w:textDirection w:val>`. Word writes the TRANSITIONAL
-    // ST_TextDirection enum (Part 4 §14.11.7): `lrTb`|`tbRl`|`btLr`|`lrTbV`|
-    // `tbLrV`|`tbRlV` — NOT the Part 1 §17.18.93 Strict set (`tb`|`rl`|`lr`|…).
-    // The default "lrTb" (horizontal, left→right / top→bottom) is dropped to
-    // `None` so horizontal documents serialize exactly as before (the field is
-    // `skip_serializing_if = "Option::is_none"`); any other value (most commonly
-    // "tbRl" for vertical Japanese) is carried through verbatim so the renderer
-    // decides which are vertical (see `isVerticalSection`). The parser does not
-    // validate the enum — an unknown value is carried and the renderer treats it
-    // as horizontal, which is the safe default.
-    if let Some(td) = child_w(sp, "textDirection").and_then(|n| attr_w(n, "val")) {
-        if td != "lrTb" {
-            props.text_direction = Some(td);
-        }
-    }
+    // ECMA-376 §17.6.20 `<w:textDirection w:val>` — shared extraction (see
+    // `read_text_direction`); also carried per-terminating-section on the
+    // `SectionBreak` marker (issue #1000 per-section mixing).
+    props.text_direction = read_text_direction(sp);
 
     // ECMA-376 §17.6.5 w:docGrid. When @type=lines|linesAndChars with a
     // linePitch, Word renders each line of text at intervals of linePitch
@@ -2203,6 +3337,7 @@ fn merge_section_refs(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn parse_paragraph(
     node: roxmltree::Node,
@@ -2215,7 +3350,35 @@ fn parse_paragraph(
     table_style_id: Option<&str>,
     field: &mut FieldState,
 ) -> DocParagraph {
-    parse_paragraph_cond(
+    let mut ignored_diagnostics = Vec::new();
+    parse_paragraph_with_diagnostics(
+        node,
+        style_map,
+        num_map,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
+        table_style_id,
+        field,
+        &mut ignored_diagnostics,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_paragraph_with_diagnostics(
+    node: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    table_style_id: Option<&str>,
+    field: &mut FieldState,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
+) -> DocParagraph {
+    parse_paragraph_cond_at_depth_with_diagnostics(
         node,
         style_map,
         num_map,
@@ -2226,6 +3389,8 @@ fn parse_paragraph(
         table_style_id,
         None,
         field,
+        DepthGuard::root(),
+        diagnostics,
     )
 }
 
@@ -2233,7 +3398,7 @@ fn parse_paragraph(
 /// formatting (§17.7.6, threaded from `parse_table`) as a base below the
 /// paragraph/character styles and direct formatting (§17.7.2 ordering).
 #[allow(clippy::too_many_arguments)]
-fn parse_paragraph_cond(
+fn parse_paragraph_cond_at_depth(
     node: roxmltree::Node,
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
@@ -2244,6 +3409,101 @@ fn parse_paragraph_cond(
     table_style_id: Option<&str>,
     cond: Option<&CondFmt>,
     field: &mut FieldState,
+    depth: DepthGuard,
+) -> DocParagraph {
+    let mut ignored_diagnostics = Vec::new();
+    parse_paragraph_cond_at_depth_with_diagnostics(
+        node,
+        style_map,
+        num_map,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
+        table_style_id,
+        cond,
+        field,
+        depth,
+        &mut ignored_diagnostics,
+    )
+}
+
+/// Resolve the three paragraph-indent axes when a numbering level is active.
+///
+/// ECMA-376 §§17.7.2, 17.7.8.1 and 17.9.22 place style-origin numbering below
+/// the paragraph style, but place directly selected numbering and its associated
+/// level properties in the final direct-formatting layer. A direct `w:ind`
+/// remains highest in both cases. Keeping this cascade shared prevents the body
+/// paragraph and the stable text-box legacy projection from drifting apart.
+fn resolve_numbered_indent_axes(
+    direct: &ParaFmt,
+    paragraph_style: &ParaFmt,
+    lower_layers: &ParaFmt,
+    level: &LevelDef,
+    direct_numbering: bool,
+) -> (f64, f64, f64) {
+    let level_left = level.indent_left_authored.then_some(level.indent_left);
+    let level_first = level.indent_first_authored.then_some(level.indent_first);
+
+    if direct_numbering {
+        (
+            direct
+                .indent_left
+                .or(level_left)
+                .or(paragraph_style.indent_left)
+                .or(lower_layers.indent_left)
+                .unwrap_or(level.indent_left),
+            direct
+                .indent_first
+                .or(level_first)
+                .or(paragraph_style.indent_first)
+                .or(lower_layers.indent_first)
+                .unwrap_or(level.indent_first),
+            direct
+                .indent_right
+                .or(level.indent_right)
+                .or(paragraph_style.indent_right)
+                .or(lower_layers.indent_right)
+                .unwrap_or(0.0),
+        )
+    } else {
+        (
+            direct
+                .indent_left
+                .or(paragraph_style.indent_left)
+                .or(level_left)
+                .or(lower_layers.indent_left)
+                .unwrap_or(level.indent_left),
+            direct
+                .indent_first
+                .or(paragraph_style.indent_first)
+                .or(level_first)
+                .or(lower_layers.indent_first)
+                .unwrap_or(level.indent_first),
+            direct
+                .indent_right
+                .or(paragraph_style.indent_right)
+                .or(level.indent_right)
+                .or(lower_layers.indent_right)
+                .unwrap_or(0.0),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_paragraph_cond_at_depth_with_diagnostics(
+    node: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    table_style_id: Option<&str>,
+    cond: Option<&CondFmt>,
+    field: &mut FieldState,
+    depth: DepthGuard,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) -> DocParagraph {
     // Get style ID from pPr/pStyle. When absent, resolve_para falls back to the
     // paragraph style marked w:default="1" via StyleMap::default_para_style_id.
@@ -2255,6 +3515,8 @@ fn parse_paragraph_cond(
     // Resolve base formatting from style (incl. table-style conditional rPr/pPr).
     let (mut base_para, base_run) =
         style_map.resolve_para_cond(explicit_style_id.as_deref(), table_style_id, cond);
+    let paragraph_style = style_map.resolve_paragraph_style_layer(explicit_style_id.as_deref());
+    let direct_numbering = ppr_node.and_then(|ppr| child_w(ppr, "numPr")).is_some();
 
     // Apply direct paragraph formatting overrides.
     //
@@ -2276,20 +3538,17 @@ fn parse_paragraph_cond(
     // indent is honored even when numbering is removed (the numId=0 case below); an
     // inherited indent is not. Captured for all three axes (start/end/first-line) so the
     // de-list drop is symmetric for LTR and RTL.
-    let mut direct_indent_left: Option<f64> = None;
-    let mut direct_indent_first: Option<f64> = None;
-    let mut direct_indent_right: Option<f64> = None;
+    let direct_para = ppr_node.map(parse_para_fmt).unwrap_or_default();
+    let direct_indent_left = direct_para.indent_left;
+    let direct_indent_first = direct_para.indent_first;
+    let direct_indent_right = direct_para.indent_right;
     if let Some(ppr) = ppr_node {
-        let direct = parse_para_fmt(ppr);
-        direct_indent_left = direct.indent_left;
-        direct_indent_first = direct.indent_first;
-        direct_indent_right = direct.indent_right;
         // Layer the paragraph's DIRECT pPr over its resolved style. Reuse the
         // canonical style-cascade merge (`apply_para`) so the two paths can never
         // drift: an earlier hand-written copy here omitted para_borders / shading /
         // pageBreakBefore / contextualSpacing / keepNext / keepLines / widowControl,
         // dropping every DIRECT pBdr (sample-14's full-width references rule).
-        apply_para(&mut base_para, &direct);
+        apply_para(&mut base_para, &direct_para);
         if let Some(rpr) = child_w(ppr, "rPr") {
             let direct_run = parse_run_fmt(rpr);
             apply_direct_run(&mut mark_run, &direct_run);
@@ -2305,7 +3564,7 @@ fn parse_paragraph_cond(
     // A de-listed paragraph (numId=0, see the indent_left/first resolution below) drops
     // its inherited END indent too, honoring only a direct one — symmetric with the
     // start side so an RTL list item de-lists consistently.
-    let indent_right = if base_para.num_id == Some(0) {
+    let fallback_indent_right = if base_para.num_id == Some(0) {
         direct_indent_right.unwrap_or(0.0)
     } else {
         base_para.indent_right.unwrap_or(0.0)
@@ -2347,6 +3606,7 @@ fn parse_paragraph_cond(
                 lvl_jc,
                 marker_ascii,
                 marker_ea,
+                marker_font_facts,
                 marker_color,
                 marker_color_auto,
                 pic_bullet,
@@ -2355,6 +3615,7 @@ fn parse_paragraph_cond(
                 .map(|l| {
                     let mut marker_fmt = base_run.clone();
                     apply_direct_run(&mut marker_fmt, &l.rpr);
+                    let marker_font_facts = resolved_run_font_facts(&marker_fmt, theme);
                     (
                         l.format.clone(),
                         l.indent_left,
@@ -2363,6 +3624,7 @@ fn parse_paragraph_cond(
                         l.lvl_jc.clone(),
                         theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
                         theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
+                        Some(marker_font_facts),
                         l.rpr.color.clone(),
                         l.rpr.color_auto,
                         l.pic_bullet.clone(),
@@ -2377,6 +3639,7 @@ fn parse_paragraph_cond(
                         "left".to_string(),
                         theme.resolve_font_ref(base_run.font_family_ascii.clone()),
                         theme.resolve_font_ref(base_run.font_family_east_asia.clone()),
+                        Some(resolved_run_font_facts(&base_run, theme)),
                         None,
                         false,
                         None,
@@ -2413,6 +3676,7 @@ fn parse_paragraph_cond(
                 jc: lvl_jc,
                 font_family: marker_ascii,
                 font_family_east_asia: marker_ea,
+                font_facts: marker_font_facts,
                 color: marker_color,
                 color_auto: marker_color_auto,
                 pic_bullet_image_path,
@@ -2432,20 +3696,24 @@ fn parse_paragraph_cond(
         .as_ref()
         .and_then(|num| num_map.get_level(num.num_id, num.level));
 
-    // Indent precedence (ECMA-376 §17.9.22 + §17.7.2): the paragraph's own DIRECT
-    // `w:ind` overrides the numbering level's `pPr/ind` ("paragraph properties
-    // specified on the numbered paragraph itself override the paragraph properties
-    // specified by pPr elements within a numbering lvl element"), which in turn
-    // overrides the paragraph STYLE. The merge is per-attribute (§17.3.1.12), so a
-    // direct `w:left` that omits `w:hanging`/`w:firstLine` keeps the level's
-    // first-line indent — e.g. sample-15's REFERENCES list: level ind left=720
-    // hanging=360, direct `w:ind w:left="360"` ⇒ body at 18 pt, marker at the margin.
+    // Indent precedence (ECMA-376 §17.7.2 style hierarchy + §§17.7.8.1,
+    // 17.9.22) depends on where numPr originated. Style-origin numbering is
+    // applied before the paragraph style; direct numPr and its associated level
+    // properties are part of the final direct-formatting layer. Direct w:ind is
+    // always last. Resolve each axis independently.
+    //
+    // The numbering parser retains a legacy depth fallback for levels without
+    // authored w:ind. That non-normative fallback is used only after every real
+    // style layer, so it cannot overwrite document/table/paragraph formatting.
     // When no level resolves, a de-listed paragraph (numId=0) keeps only its direct
     // ind and a plain paragraph keeps its style/direct (base) ind.
-    let (indent_left, indent_first) = if let Some(l) = level {
-        (
-            direct_indent_left.unwrap_or(l.indent_left),
-            direct_indent_first.unwrap_or(l.indent_first),
+    let (indent_left, indent_first, indent_right) = if let Some(l) = level {
+        resolve_numbered_indent_axes(
+            &direct_para,
+            &paragraph_style,
+            &base_para,
+            l,
+            direct_numbering,
         )
     } else if base_para.num_id == Some(0) {
         // `numId=0` explicitly removes numbering (ECMA-376 §17.3.1.19 / §17.9.18). That
@@ -2467,26 +3735,34 @@ fn parse_paragraph_cond(
         (
             direct_indent_left.unwrap_or(0.0),
             direct_indent_first.unwrap_or(0.0),
+            direct_indent_right.unwrap_or(0.0),
         )
     } else {
         (
             base_para.indent_left.unwrap_or(0.0),
             base_para.indent_first.unwrap_or(0.0),
+            fallback_indent_right,
         )
     };
-    // The end-side axis (w:ind@right ≡ end) follows the same ladder: direct end
-    // indent, else the level's end indent (an RTL list carries its indent there,
-    // e.g. w:right="720" w:hanging="360"), else the style/de-list (base) value
-    // already resolved into `indent_right` above.
-    let indent_right = direct_indent_right
-        .or_else(|| level.and_then(|l| l.indent_right))
-        .unwrap_or(indent_right);
 
     // Parse runs
     let mut runs = vec![];
+    let mut complex_field_boundaries = vec![];
     parse_para_content(
-        node, &base_run, style_map, num_map, media_map, chart_map, rel_map, theme, &mut runs, None,
+        node,
+        &base_run,
+        style_map,
+        num_map,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
+        &mut runs,
+        &mut complex_field_boundaries,
+        None,
         field,
+        depth,
+        diagnostics,
     );
 
     // ECMA-376 §17.13.6.2 — bookmark destinations that start inside this
@@ -2528,6 +3804,10 @@ fn parse_paragraph_cond(
         .collect();
 
     DocParagraph {
+        // [MS-DOCX] §2.6.2.3 — preserve the authored identifier exactly. It is
+        // part-local identity, not formatting, so style resolution does not
+        // participate and an absent attribute remains absent.
+        paragraph_id: attr_w14(node, "paraId"),
         alignment,
         indent_left,
         indent_right,
@@ -2538,6 +3818,7 @@ fn parse_paragraph_cond(
         numbering,
         tab_stops,
         runs,
+        complex_field_boundaries,
         bookmarks,
         shading: base_para.shading.clone(),
         page_break_before: base_para.page_break_before.unwrap_or(false),
@@ -2559,6 +3840,8 @@ fn parse_paragraph_cond(
         mark_vanish: mark_run.vanish.unwrap_or(false),
         // ECMA-376 §17.3.1.44: widowControl defaults to true when absent.
         widow_control: base_para.widow_control.unwrap_or(true),
+        // ECMA-376 §17.3.1.21: omission is explicitly equivalent to true.
+        overflow_punct: base_para.overflow_punct.unwrap_or(true),
         borders: base_para.para_borders.clone(),
         // Fall back to the document's default paragraph style (w:default="1")
         // rather than the literal "Normal" — international templates often use
@@ -2580,6 +3863,7 @@ fn parse_paragraph_cond(
             .or_else(|| theme.resolve_font_ref(mark_run.font_family_east_asia.clone())),
         default_font_family_east_asia: theme
             .resolve_font_ref(mark_run.font_family_east_asia.clone()),
+        paragraph_mark_font_facts: Some(resolved_run_font_facts(&mark_run, theme)),
         // §17.3.1.29 — the mark's resolved color from the SAME `mark_run`
         // chain as `default_font_size` (direct pPr/rPr → pStyle chain →
         // docDefaults; an explicit auto already collapsed to None). Word
@@ -2598,6 +3882,7 @@ fn parse_paragraph_cond(
         // ECMA-376 §17.3.1.11 — text-frame / drop-cap properties, resolved
         // through the style chain. Some ⇒ paragraph is part of a text frame.
         frame_pr: base_para.frame_pr.clone(),
+        paragraph_typography_acquisition: base_para.paragraph_typography.clone(),
     }
 }
 
@@ -2607,6 +3892,9 @@ fn parse_paragraph_cond(
 /// single flat state.
 #[derive(Default)]
 struct FieldFrame {
+    /// Stable within this field scope (body/story/table-cell). The TypeScript
+    /// parser boundary scopes it by the owning container before layout sees it.
+    occurrence_id: u32,
     /// Have we passed this frame's `separate` fldChar yet?
     past_separate: bool,
     /// Accumulated instruction text for THIS frame (PAGE, TOC, PAGEREF, …).
@@ -2620,12 +3908,17 @@ struct FieldFrame {
     substitute: bool,
     /// True when this frame's instruction is a TOC field (§17.16.5.69).
     is_toc: bool,
+    /// Classified when `separate` closes the instruction region.
+    field_type: String,
+    /// REF/PAGEREF bookmark when the field-specific `\\h` switch is authored.
+    hyperlink_anchor: Option<String>,
 }
 
 /// Stack of open field frames for the current paragraph content walk.
 #[derive(Default)]
 struct FieldState {
     stack: Vec<FieldFrame>,
+    next_occurrence_id: u32,
 }
 
 impl FieldState {
@@ -2646,6 +3939,14 @@ impl FieldState {
     fn in_toc(&self) -> bool {
         self.stack.iter().any(|f| f.is_toc)
     }
+
+    fn result_hyperlink_anchor(&self) -> Option<String> {
+        self.stack
+            .iter()
+            .rev()
+            .filter(|frame| frame.past_separate && !frame.substitute)
+            .find_map(|frame| frame.hyperlink_anchor.clone())
+    }
 }
 
 // Threads the immutable parse context (style/media/rel maps, theme) plus the
@@ -2662,19 +3963,36 @@ fn parse_para_content(
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
+    complex_field_boundaries: &mut Vec<ComplexFieldBoundaryWire>,
     revision: Option<&RunRevision>,
     // Complex-field state threaded across paragraphs. A field is delimited by
     // its fldChar begin/end (§17.16.18), NOT by paragraph boundaries — a TOC
     // field's result spans one paragraph per entry. The caller owns this so the
     // stack survives from one paragraph to the next.
     field: &mut FieldState,
+    depth: DepthGuard,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) {
     for child in element_children_flat(node) {
         match child.tag_name().name() {
             "r" => {
                 handle_run_in_para(
-                    child, base_run, style_map, num_map, media_map, chart_map, theme, runs, field,
-                    None, None, revision,
+                    child,
+                    base_run,
+                    style_map,
+                    num_map,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    runs,
+                    complex_field_boundaries,
+                    field,
+                    None,
+                    None,
+                    revision,
+                    depth,
+                    diagnostics,
                 );
             }
             "hyperlink" => {
@@ -2703,12 +4021,16 @@ fn parse_para_content(
                         num_map,
                         media_map,
                         chart_map,
+                        rel_map,
                         theme,
                         runs,
+                        complex_field_boundaries,
                         field,
                         Some(href.clone()),
                         anchor.clone(),
                         revision,
+                        depth,
+                        diagnostics,
                     );
                 }
             }
@@ -2722,10 +4044,26 @@ fn parse_para_content(
                 } else {
                     "deletion"
                 };
+                let id_raw = attr_w(child, "id");
+                let id_value = id_raw.as_deref().and_then(|value| {
+                    let value = value.trim();
+                    let digits = value.strip_prefix(['-', '+']).unwrap_or(value);
+                    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+                        .then(|| value.to_string())
+                });
                 let inner = RunRevision {
                     kind: kind.to_string(),
                     author: attr_w(child, "author"),
                     date: attr_w(child, "date"),
+                    typography_id: TypographyValueWire {
+                        status: match (&id_raw, id_value.is_some()) {
+                            (None, _) => TypographyValueStatusWire::Missing,
+                            (Some(_), true) => TypographyValueStatusWire::Valid,
+                            (Some(_), false) => TypographyValueStatusWire::Invalid,
+                        },
+                        raw: id_raw,
+                        value: id_value,
+                    },
                 };
                 parse_para_content(
                     child,
@@ -2737,14 +4075,29 @@ fn parse_para_content(
                     rel_map,
                     theme,
                     runs,
+                    complex_field_boundaries,
                     Some(&inner),
                     field,
+                    depth,
+                    diagnostics,
                 );
             }
             "smartTag" => {
                 parse_para_content(
-                    child, base_run, style_map, num_map, media_map, chart_map, rel_map, theme,
-                    runs, revision, field,
+                    child,
+                    base_run,
+                    style_map,
+                    num_map,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    runs,
+                    complex_field_boundaries,
+                    revision,
+                    field,
+                    depth,
+                    diagnostics,
                 );
             }
             "fldSimple" => {
@@ -2760,7 +4113,7 @@ fn parse_para_content(
                     }
                 }
                 let fallback = extract_text_from_runs(child);
-                runs.push(make_field_run(&instr, &fmt, &fallback, theme));
+                runs.push(make_field_run(&instr, &fmt, &fallback, theme, revision));
             }
             "oMath" => {
                 let nodes = crate::math::parse_omath_nodes(child);
@@ -2819,8 +4172,10 @@ fn handle_run_in_para(
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
     chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
+    complex_field_boundaries: &mut Vec<ComplexFieldBoundaryWire>,
     field: &mut FieldState,
     // Outer None = not inside a hyperlink. Some(None) = hyperlink without URL. Some(Some(url)) = hyperlink with URL.
     link_href: Option<Option<String>>,
@@ -2829,6 +4184,8 @@ fn handle_run_in_para(
     // the run is not inside a hyperlink at all).
     link_anchor: Option<String>,
     revision: Option<&RunRevision>,
+    depth: DepthGuard,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) {
     // Inspect this run for field control characters or instruction text first.
     let mut fld_char_type: Option<String> = None;
@@ -2854,7 +4211,12 @@ fn handle_run_in_para(
             "begin" => {
                 // Push a new (nested) field frame. §17.16.18 — fields nest, so a
                 // TOC field's result region may itself open PAGEREF fields.
-                field.stack.push(FieldFrame::default());
+                let occurrence_id = field.next_occurrence_id;
+                field.next_occurrence_id = field.next_occurrence_id.saturating_add(1);
+                field.stack.push(FieldFrame {
+                    occurrence_id,
+                    ..FieldFrame::default()
+                });
             }
             "separate" => {
                 if let Some(frame) = field.top_mut() {
@@ -2864,6 +4226,16 @@ fn handle_run_in_para(
                     // content as normal runs — so multi-paragraph / nested fields like a TOC
                     // keep their headings, tabs and page numbers.
                     frame.substitute = classify_field(&frame.instruction) != "other";
+                    let semantics = classify_complex_field(&frame.instruction);
+                    frame.field_type = semantics.field_type;
+                    frame.hyperlink_anchor = semantics.hyperlink_anchor;
+                    if !frame.substitute {
+                        complex_field_boundaries.push(complex_field_boundary(
+                            frame,
+                            "start",
+                            runs.len(),
+                        ));
+                    }
                 }
             }
             "end" => {
@@ -2875,6 +4247,13 @@ fn handle_run_in_para(
                             &fmt,
                             &frame.fallback,
                             theme,
+                            revision,
+                        ));
+                    } else if frame.past_separate {
+                        complex_field_boundaries.push(complex_field_boundary(
+                            &frame,
+                            "end",
+                            runs.len(),
                         ));
                     }
                 }
@@ -2935,6 +4314,18 @@ fn handle_run_in_para(
 
     // Normal run
     let in_toc = field.in_toc();
+    // ECMA-376 §17.16.5.45/§17.16.5.51: PAGEREF/REF `\\h` makes the
+    // cached result a link to the referenced bookmark even without an enclosing
+    // `<w:hyperlink>`. An authored external hyperlink still wins downstream.
+    let field_hyperlink_anchor = field.result_hyperlink_anchor();
+    let link_anchor = link_anchor.or_else(|| field_hyperlink_anchor.clone());
+    let link_href = if link_href.is_some() {
+        link_href
+    } else if field_hyperlink_anchor.is_some() {
+        Some(None)
+    } else {
+        None
+    };
     parse_run_inner(
         r_node,
         base_run,
@@ -2942,12 +4333,15 @@ fn handle_run_in_para(
         num_map,
         media_map,
         chart_map,
+        rel_map,
         theme,
         runs,
         link_href,
         link_anchor,
         revision,
         in_toc,
+        depth,
+        diagnostics,
     );
 }
 
@@ -2959,6 +4353,57 @@ fn classify_toc(instr: &str) -> bool {
         .split_whitespace()
         .next()
         .is_some_and(|tok| tok.eq_ignore_ascii_case("TOC"))
+}
+
+struct ComplexFieldSemantics {
+    field_type: String,
+    hyperlink_anchor: Option<String>,
+}
+
+/// Classify the complex-field facts needed by acquisition. REF (§17.16.5.51)
+/// and PAGEREF (§17.16.5.45) both use the first field argument as a bookmark;
+/// their field-specific `\\h` switch creates an internal hyperlink to it.
+fn classify_complex_field(instr: &str) -> ComplexFieldSemantics {
+    let tokens: Vec<&str> = instr.split_whitespace().collect();
+    let token = tokens.first().copied().unwrap_or_default();
+    let field_type = if token.eq_ignore_ascii_case("REF") {
+        "ref"
+    } else if token.eq_ignore_ascii_case("PAGEREF") {
+        "pageRef"
+    } else {
+        "other"
+    };
+    let has_hyperlink_switch = tokens
+        .iter()
+        .skip(2)
+        .any(|candidate| candidate.eq_ignore_ascii_case("\\h"));
+    let hyperlink_anchor = if field_type != "other" && has_hyperlink_switch {
+        tokens
+            .get(1)
+            .map(|target| target.trim_matches(['\'', '"']).to_string())
+            .filter(|target| !target.is_empty())
+    } else {
+        None
+    };
+    ComplexFieldSemantics {
+        field_type: field_type.to_string(),
+        hyperlink_anchor,
+    }
+}
+
+fn complex_field_boundary(
+    frame: &FieldFrame,
+    boundary: &str,
+    run_index: usize,
+) -> ComplexFieldBoundaryWire {
+    ComplexFieldBoundaryWire {
+        occurrence_id: frame.occurrence_id,
+        boundary: boundary.to_string(),
+        run_index,
+        field_type: frame.field_type.clone(),
+        instruction: frame.instruction.trim().to_string(),
+        hyperlink_anchor: frame.hyperlink_anchor.clone(),
+    }
 }
 
 fn extract_text_from_runs(node: roxmltree::Node) -> String {
@@ -2973,9 +4418,247 @@ fn extract_text_from_runs(node: roxmltree::Node) -> String {
     out
 }
 
-fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors) -> DocRun {
+fn resolved_run_font_slots(fmt: &RunFmt, theme: &ThemeColors) -> Option<RunFontSlots> {
+    let direct = RunFontAxisValues {
+        ascii: fmt.font_family_ascii_direct.clone(),
+        high_ansi: fmt.font_family_high_ansi_direct.clone(),
+        east_asia: fmt.font_family_east_asia_direct.clone(),
+        complex_script: fmt.font_family_cs_direct.clone(),
+    };
+    let theme_values = RunFontAxisValues {
+        ascii: theme.resolve_font_ref(fmt.font_family_ascii_theme.clone()),
+        high_ansi: theme.resolve_font_ref(fmt.font_family_high_ansi_theme.clone()),
+        east_asia: theme.resolve_font_ref(fmt.font_family_east_asia_theme.clone()),
+        complex_script: theme.resolve_font_ref(fmt.font_family_cs_theme.clone()),
+    };
+    let theme_present = RunFontAxisPresence {
+        ascii: fmt.font_family_ascii_theme.is_some(),
+        high_ansi: fmt.font_family_high_ansi_theme.is_some(),
+        east_asia: fmt.font_family_east_asia_theme.is_some(),
+        complex_script: fmt.font_family_cs_theme.is_some(),
+    };
+    let any = direct.ascii.is_some()
+        || direct.high_ansi.is_some()
+        || direct.east_asia.is_some()
+        || direct.complex_script.is_some()
+        || theme_present.ascii
+        || theme_present.high_ansi
+        || theme_present.east_asia
+        || theme_present.complex_script;
+    any.then_some(RunFontSlots {
+        direct,
+        theme: theme_values,
+        theme_present,
+    })
+}
+
+fn resolved_run_font_facts(fmt: &RunFmt, theme: &ThemeColors) -> RunFontFacts {
+    let font_family_east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
+    RunFontFacts {
+        font_family: theme
+            .resolve_font_ref(fmt.font_family_ascii.clone())
+            .or_else(|| font_family_east_asia.clone()),
+        font_family_high_ansi: theme.resolve_font_ref(fmt.font_family_high_ansi.clone()),
+        font_slots: resolved_run_font_slots(fmt, theme),
+        font_family_east_asia,
+        font_hint: fmt.font_hint.clone(),
+        rtl: fmt.rtl,
+        cs: fmt.cs_toggle,
+        font_family_cs: theme.resolve_font_ref(fmt.font_family_cs.clone()),
+        font_size: fmt.font_size,
+        font_size_cs: fmt.font_size_cs,
+        bold: fmt.bold.unwrap_or(false),
+        italic: fmt.italic.unwrap_or(false),
+        bold_cs: fmt.bold_cs,
+        italic_cs: fmt.italic_cs,
+        lang_bidi: fmt.lang_bidi.clone(),
+        lang_east_asia: fmt.lang_east_asia.clone(),
+        kerning: fmt.kerning,
+    }
+}
+
+fn missing_typography_value<T>() -> TypographyValueWire<T> {
+    TypographyValueWire {
+        status: TypographyValueStatusWire::Missing,
+        raw: None,
+        value: None,
+    }
+}
+
+fn parsed_typography_value<T>(raw: Option<String>, value: Option<T>) -> TypographyValueWire<T> {
+    TypographyValueWire {
+        status: match (&raw, value.is_some()) {
+            (None, _) => TypographyValueStatusWire::Missing,
+            (Some(_), true) => TypographyValueStatusWire::Valid,
+            (Some(_), false) => TypographyValueStatusWire::Invalid,
+        },
+        raw,
+        value,
+    }
+}
+
+/// Preserve the complete phonetic-guide input before the stable public
+/// RubyAnnotation projection flattens it. ECMA-376 §§17.3.3.11/.12/.14/.25-.28
+/// make ruby alignment, base size, raise, language, and guide-run formatting
+/// independent facts; [MS-OI29500] §2.1.552 additionally needs the authored
+/// left/right alignment token for RTL compatibility behavior downstream.
+fn ruby_typography_wire(
+    ruby: roxmltree::Node,
+    base_fmt: &RunFmt,
+    style_map: &StyleMap,
+    theme: &ThemeColors,
+) -> RubyTypographyWire {
+    let ruby_pr = child_w(ruby, "rubyPr");
+    let element_value = |name: &str| {
+        ruby_pr
+            .and_then(|properties| child_w(properties, name))
+            .and_then(|element| attr_w(element, "val"))
+    };
+    let align_raw = element_value("rubyAlign");
+    let align_value = align_raw.as_deref().and_then(|value| {
+        matches!(
+            value,
+            "center" | "distributeLetter" | "distributeSpace" | "left" | "right" | "rightVertical"
+        )
+        .then(|| value.to_string())
+    });
+    let half_points = |name: &str| {
+        let raw = element_value(name);
+        let value = raw
+            .as_deref()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| value / 2.0);
+        parsed_typography_value(raw, value)
+    };
+    let language_raw = element_value("lid");
+    let language_value = language_raw
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    let guide_runs = child_w(ruby, "rt")
+        .into_iter()
+        .flat_map(|rt| {
+            rt.children()
+                .filter(|node| node.is_element() && node.tag_name().name() == "r")
+        })
+        .filter_map(|run| {
+            let text = run
+                .descendants()
+                .filter(|node| {
+                    node.is_element()
+                        && is_w_ns(node.tag_name().namespace())
+                        && matches!(node.tag_name().name(), "t" | "delText")
+                })
+                .filter_map(|node| node.text())
+                .collect::<String>();
+            if text.is_empty() {
+                return None;
+            }
+            let mut fmt = base_fmt.clone();
+            let rpr = child_w(run, "rPr");
+            if let Some(style_id) = rpr
+                .and_then(|properties| child_w(properties, "rStyle"))
+                .and_then(|style| attr_w(style, "val"))
+            {
+                apply_direct_run(&mut fmt, &style_map.resolve_run_style(&style_id));
+            }
+            if let Some(properties) = rpr {
+                apply_direct_run(&mut fmt, &parse_run_fmt(properties));
+            }
+            let language = rpr
+                .and_then(|properties| child_w(properties, "lang"))
+                .and_then(|lang| attr_w(lang, "val"))
+                .map(|value| value.to_lowercase());
+            let east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
+            Some(RubyGuideRunTypographyWire {
+                text,
+                font_family: theme
+                    .resolve_font_ref(fmt.font_family_ascii.clone())
+                    .or(east_asia),
+                font_size_pt: fmt.font_size,
+                bold: fmt.bold.unwrap_or(false),
+                italic: fmt.italic.unwrap_or(false),
+                color: fmt.color.clone(),
+                language,
+            })
+        })
+        .collect();
+    RubyTypographyWire {
+        align: parsed_typography_value(align_raw, align_value),
+        base_font_size_pt: half_points("hpsBaseText"),
+        raise_pt: half_points("hpsRaise"),
+        language: parsed_typography_value(language_raw, language_value),
+        guide_runs,
+    }
+}
+
+fn run_typography_wire(
+    fmt: &RunFmt,
+    ruby: Option<&RubyAnnotation>,
+    revision: Option<&RunRevision>,
+) -> RunTypographyWire {
+    RunTypographyWire {
+        underline: fmt.underline_typography.clone(),
+        strike: fmt.strikethrough.unwrap_or(false),
+        double_strike: fmt.dstrike.unwrap_or(false),
+        caps: fmt.all_caps.unwrap_or(false),
+        small_caps: fmt.small_caps.unwrap_or(false),
+        color_auto: fmt.color_auto,
+        vertical_align: fmt
+            .vertical_align_typography
+            .clone()
+            .unwrap_or_else(missing_typography_value),
+        position_pt: fmt
+            .position_typography
+            .clone()
+            .unwrap_or_else(missing_typography_value),
+        snap_to_grid: fmt.snap_to_grid,
+        character_spacing_pt: fmt.char_spacing,
+        character_scale: fmt.char_scale,
+        fit_text: fmt.fit_text.as_ref().map(|fit_text| FitTextSpecWire {
+            val_twips: fit_text.val,
+            id: fit_text.id.clone(),
+        }),
+        kerning_threshold_pt: fmt.kerning,
+        emphasis: fmt
+            .emphasis_typography
+            .clone()
+            .unwrap_or_else(missing_typography_value),
+        languages: TypographyLanguagesWire {
+            east_asia: fmt.lang_east_asia.clone(),
+            bidi: fmt.lang_bidi.clone(),
+        },
+        east_asian_layout: EastAsianLayoutTypographyWire {
+            vert: fmt.east_asian_vert,
+            vert_compress: fmt.east_asian_vert_compress,
+            combine: fmt.east_asian_combine,
+            combine_brackets: fmt
+                .combine_brackets_typography
+                .clone()
+                .unwrap_or_else(missing_typography_value),
+        },
+        border: fmt.border_typography.clone(),
+        ruby: ruby.and_then(|annotation| annotation.typography.clone()),
+        revision: revision.map(|revision| RevisionTypographyWire {
+            kind: revision.kind.clone(),
+            id: revision.typography_id.clone(),
+            author: revision.author.clone(),
+            date: revision.date.clone(),
+        }),
+    }
+}
+
+fn make_field_run(
+    instr: &str,
+    fmt: &RunFmt,
+    fallback: &str,
+    theme: &ThemeColors,
+    revision: Option<&RunRevision>,
+) -> DocRun {
     let field_type = classify_field(instr);
-    DocRun::Field(FieldRun {
+    DocRun::Field(Box::new(FieldRun {
         field_type,
         instruction: instr.trim().to_string(),
         fallback_text: fallback.to_string(),
@@ -2988,6 +4671,18 @@ fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors
         font_family: theme
             .resolve_font_ref(fmt.font_family_ascii.clone())
             .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone())),
+        font_family_high_ansi: theme.resolve_font_ref(fmt.font_family_high_ansi.clone()),
+        font_slots: resolved_run_font_slots(fmt, theme),
+        font_family_east_asia: theme.resolve_font_ref(fmt.font_family_east_asia.clone()),
+        font_hint: fmt.font_hint.clone(),
+        rtl: fmt.rtl,
+        cs: fmt.cs_toggle,
+        font_family_cs: theme.resolve_font_ref(fmt.font_family_cs.clone()),
+        font_size_cs: fmt.font_size_cs,
+        bold_cs: fmt.bold_cs,
+        italic_cs: fmt.italic_cs,
+        lang_bidi: fmt.lang_bidi.clone(),
+        lang_east_asia: fmt.lang_east_asia.clone(),
         background: fmt.background.clone(),
         vert_align: fmt.vert_align.clone(),
         all_caps: fmt.all_caps.unwrap_or(false),
@@ -2995,7 +4690,8 @@ fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors
         double_strikethrough: fmt.dstrike.unwrap_or(false),
         highlight: fmt.highlight.clone(),
         emphasis_mark: fmt.emphasis_mark.clone(),
-    })
+        typography_acquisition: Some(run_typography_wire(fmt, None, revision)),
+    }))
 }
 
 fn classify_field(instr: &str) -> String {
@@ -3049,7 +4745,10 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.font_size == b.font_size
         && a.color == b.color
         && a.font_family == b.font_family
+        && a.font_family_high_ansi == b.font_family_high_ansi
+        && a.font_slots == b.font_slots
         && a.font_family_east_asia == b.font_family_east_asia
+        && a.font_hint == b.font_hint
         && a.is_link == b.is_link
         && a.background == b.background
         && a.color_auto == b.color_auto
@@ -3068,6 +4767,7 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.bold_cs == b.bold_cs
         && a.italic_cs == b.italic_cs
         && a.lang_bidi == b.lang_bidi
+        && a.lang_east_asia == b.lang_east_asia
         && a.snap_to_grid == b.snap_to_grid
         // Character metrics change measured or painted geometry, so every one
         // must match before a noBreakHyphen run can be folded into its neighbour.
@@ -3079,6 +4779,41 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.kerning == b.kerning
         && a.east_asian_vert == b.east_asian_vert
         && a.east_asian_vert_compress == b.east_asian_vert_compress
+        // Public-equivalent runs can still differ in theme/shadow/frame or raw
+        // diagnostic facts. Merging them would discard the second run's private
+        // acquisition contract before retained layout sees it.
+        && a.typography_acquisition == b.typography_acquisition
+}
+
+/// Prepend the zero-advance host-character metrics for a floating DrawingML
+/// payload. The metrics belong to the enclosing WordprocessingML `<w:r>`, so a
+/// group expanded into multiple drawing runs must still receive exactly one.
+fn prepend_anchor_host_metrics(
+    drawing_runs: &mut Vec<DocRun>,
+    anchor_host_metrics: &AnchorHostMetrics,
+) {
+    let has_floating_drawing = drawing_runs.iter().any(|run| match run {
+        DocRun::Image(image) => image.anchor,
+        DocRun::Chart(chart) => chart.anchor,
+        DocRun::UnavailableDrawing(drawing) => drawing.anchor_acquisition.is_some(),
+        DocRun::Shape(_) => true,
+        _ => false,
+    });
+    if has_floating_drawing {
+        let occurrence_id = drawing_runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Image(image) => image.anchor_acquisition.as_ref(),
+                DocRun::Chart(chart) => chart.anchor_acquisition.as_ref(),
+                DocRun::UnavailableDrawing(drawing) => drawing.anchor_acquisition.as_ref(),
+                DocRun::Shape(shape) => shape.anchor_acquisition.as_ref(),
+                _ => None,
+            })
+            .map(|facts| facts.occurrence_id.clone());
+        let mut host = anchor_host_metrics.clone();
+        host.anchor_occurrence_id = occurrence_id;
+        drawing_runs.insert(0, DocRun::AnchorHost(host));
+    }
 }
 
 // Same parse-context threading as handle_run_in_para.
@@ -3090,6 +4825,7 @@ fn parse_run_inner(
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
     chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
     link_href: Option<Option<String>>,
@@ -3100,6 +4836,8 @@ fn parse_run_inner(
     // True when this run is part of a TOC field's result (§17.16.5.69). Used to
     // suppress the Hyperlink character style's blue/underline on TOC entries.
     in_toc: bool,
+    depth: DepthGuard,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) {
     // Merge run-level formatting
     let rpr_node = child_w(node, "rPr");
@@ -3123,6 +4861,7 @@ fn parse_run_inner(
     if fmt.vanish.unwrap_or(false) {
         return;
     }
+    collect_text_effect_diagnostic(rpr_node, diagnostics);
 
     // Word renders TOC-field hyperlinks with the surrounding TOC paragraph style,
     // NOT the Hyperlink character style's blue/underline — the entries carry
@@ -3177,10 +4916,28 @@ fn parse_run_inner(
     let font_family = theme
         .resolve_font_ref(fmt.font_family_ascii.clone())
         .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone()));
+    let font_family_high_ansi = theme.resolve_font_ref(fmt.font_family_high_ansi.clone());
+    let font_slots = resolved_run_font_slots(&fmt, theme);
     // ECMA-376 §17.3.2.26 eastAsia axis, resolved INDEPENDENTLY of ascii so the
     // renderer can pick per character (CJK glyphs → eastAsia face). `font_family`
     // above keeps the conflated single-font fallback for non-per-char paths.
     let font_family_east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
+    // A floating drawing remains attached to an anchor character in this run.
+    // ECMA-376 §20.4.2.3 defines the floating placement; Word's line formatter
+    // still sizes that anchor character from the resolved §17.3.2 run
+    // properties. Preserve those metrics on emitted shapes instead of dropping
+    // them at the parser/model boundary.
+    let anchor_host_metrics = AnchorHostMetrics {
+        font_size,
+        font_family: font_family.clone(),
+        font_family_east_asia: font_family_east_asia.clone(),
+        bold,
+        italic,
+        anchor_occurrence_id: None,
+    };
+    let attach_anchor_host_metrics = |drawing_runs: &mut Vec<DocRun>| {
+        prepend_anchor_host_metrics(drawing_runs, &anchor_host_metrics);
+    };
     let vert_align = fmt.vert_align.clone();
     let all_caps = fmt.all_caps.unwrap_or(false);
     let small_caps = fmt.small_caps.unwrap_or(false);
@@ -3215,6 +4972,8 @@ fn parse_run_inner(
     let bold_cs = fmt.bold_cs;
     let italic_cs = fmt.italic_cs;
     let lang_bidi = fmt.lang_bidi.clone();
+    let lang_east_asia = fmt.lang_east_asia.clone();
+    let font_hint = fmt.font_hint.clone();
     let snap_to_grid = fmt.snap_to_grid;
     // Run character metrics (ECMA-376 §17.3.2.35 spacing / §17.3.2.43 w /
     // §17.3.2.24 position / §17.3.2.19 kern), resolved through the style chain
@@ -3239,6 +4998,7 @@ fn parse_run_inner(
     let east_asian_vert_compress = fmt.east_asian_vert_compress;
     let east_asian_combine = fmt.east_asian_combine;
     let east_asian_combine_brackets = fmt.east_asian_combine_brackets.clone();
+    let typography_acquisition = Some(run_typography_wire(&fmt, None, revision));
 
     // Set by the "noBreakHyphen" arm below when it just pushed/extended a text
     // run for a `<w:noBreakHyphen/>` — tells the VERY NEXT loop iteration's
@@ -3270,7 +5030,10 @@ fn parse_run_inner(
                         font_size,
                         color: color.clone(),
                         font_family: font_family.clone(),
+                        font_family_high_ansi: font_family_high_ansi.clone(),
+                        font_slots: font_slots.clone(),
                         font_family_east_asia: font_family_east_asia.clone(),
+                        font_hint: font_hint.clone(),
                         is_link,
                         background: fmt.background.clone(),
                         color_auto,
@@ -3292,6 +5055,7 @@ fn parse_run_inner(
                         bold_cs,
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
+                        lang_east_asia: lang_east_asia.clone(),
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
@@ -3304,6 +5068,7 @@ fn parse_run_inner(
                         east_asian_combine,
                         east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                         note_ref: None,
+                        typography_acquisition: typography_acquisition.clone(),
                     };
                     match runs.last_mut() {
                         Some(DocRun::Text(prev))
@@ -3345,12 +5110,15 @@ fn parse_run_inner(
                         font_size,
                         color: color.clone(),
                         font_family: sym_font.clone(),
+                        font_family_high_ansi: sym_font.clone(),
+                        font_slots: None,
                         // Keep the eastAsia axis pointed at the sym font too, so a
                         // glyph that happens to classify as CJK still resolves
                         // against the symbol font rather than the run's eastAsia
                         // face. PUA sym chars route to the Latin slot, so the ascii
                         // axis (`font_family`) is what actually drives rendering.
                         font_family_east_asia: sym_font,
+                        font_hint: font_hint.clone(),
                         is_link,
                         background: fmt.background.clone(),
                         color_auto,
@@ -3372,6 +5140,7 @@ fn parse_run_inner(
                         bold_cs,
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
+                        lang_east_asia: lang_east_asia.clone(),
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
@@ -3384,6 +5153,7 @@ fn parse_run_inner(
                         east_asian_combine,
                         east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                         note_ref: None,
+                        typography_acquisition: typography_acquisition.clone(),
                     })));
                 }
             }
@@ -3400,7 +5170,10 @@ fn parse_run_inner(
                     font_size,
                     color: color.clone(),
                     font_family: font_family.clone(),
+                    font_family_high_ansi: font_family_high_ansi.clone(),
+                    font_slots: font_slots.clone(),
                     font_family_east_asia: font_family_east_asia.clone(),
+                    font_hint: font_hint.clone(),
                     is_link,
                     background: fmt.background.clone(),
                     color_auto,
@@ -3422,6 +5195,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    lang_east_asia: lang_east_asia.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -3434,6 +5208,7 @@ fn parse_run_inner(
                     east_asian_combine,
                     east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                     note_ref: None,
+                    typography_acquisition: typography_acquisition.clone(),
                 })));
             }
             "br" => {
@@ -3495,7 +5270,10 @@ fn parse_run_inner(
                     font_size,
                     color: color.clone(),
                     font_family: font_family.clone(),
+                    font_family_high_ansi: font_family_high_ansi.clone(),
+                    font_slots: font_slots.clone(),
                     font_family_east_asia: font_family_east_asia.clone(),
+                    font_hint: font_hint.clone(),
                     is_link,
                     background: fmt.background.clone(),
                     color_auto,
@@ -3517,6 +5295,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    lang_east_asia: lang_east_asia.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -3529,6 +5308,7 @@ fn parse_run_inner(
                     east_asian_combine,
                     east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                     note_ref: None,
+                    typography_acquisition: typography_acquisition.clone(),
                 };
                 match runs.last_mut() {
                     Some(DocRun::Text(prev)) if text_runs_mergeable(prev, &this) => {
@@ -3609,10 +5389,18 @@ fn parse_run_inner(
                     .and_then(|v| v.parse::<f64>().ok())
                     .map(|hp| hp / 2.0) // half-points → points
                     .unwrap_or_else(|| fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE) / 2.0);
+                let hps_raise_pt = child_w(child, "rubyPr")
+                    .and_then(|rp| child_w(rp, "hpsRaise"))
+                    .and_then(|hps_raise| attr_w(hps_raise, "val"))
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .map(|hp| hp / 2.0); // half-points → points (§17.3.3.12)
+                let ruby_typography = ruby_typography_wire(child, &fmt, style_map, theme);
                 let ruby = if !rt_text.is_empty() {
                     Some(RubyAnnotation {
                         text: rt_text,
                         font_size_pt: rt_size_pt,
+                        hps_raise_pt,
+                        typography: Some(ruby_typography),
                     })
                 } else {
                     None
@@ -3630,12 +5418,15 @@ fn parse_run_inner(
                             num_map,
                             media_map,
                             chart_map,
+                            rel_map,
                             theme,
                             runs,
                             link_href.clone(),
                             link_anchor.clone(),
                             revision,
                             in_toc,
+                            depth,
+                            diagnostics,
                         );
                     }
                     // Attach ruby to the FIRST text run produced from rubyBase
@@ -3646,6 +5437,9 @@ fn parse_run_inner(
                         for r in &mut runs[before..] {
                             if let DocRun::Text(t) = r {
                                 t.ruby = Some(rb_anno.clone());
+                                if let Some(typography) = &mut t.typography_acquisition {
+                                    typography.ruby = rb_anno.typography.clone();
+                                }
                                 break;
                             }
                         }
@@ -3653,11 +5447,19 @@ fn parse_run_inner(
                 }
             }
             "drawing" => {
-                for r in
-                    parse_inline_drawing(style_map, num_map, child, media_map, chart_map, theme)
-                {
-                    runs.push(r);
-                }
+                let mut drawing_runs = parse_inline_drawing(
+                    style_map,
+                    num_map,
+                    child,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    depth,
+                    diagnostics,
+                );
+                attach_anchor_host_metrics(&mut drawing_runs);
+                runs.extend(drawing_runs);
             }
             "footnoteReference" | "endnoteReference" | "footnoteRef" | "endnoteRef" => {
                 // ECMA-376 §17.11.6 / §17.11.7 / §17.11.16 / §17.11.17.
@@ -3687,7 +5489,10 @@ fn parse_run_inner(
                     font_size,
                     color: color.clone(),
                     font_family: font_family.clone(),
+                    font_family_high_ansi: font_family_high_ansi.clone(),
+                    font_slots: font_slots.clone(),
                     font_family_east_asia: font_family_east_asia.clone(),
+                    font_hint: font_hint.clone(),
                     is_link,
                     background: fmt.background.clone(),
                     color_auto,
@@ -3714,6 +5519,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    lang_east_asia: lang_east_asia.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -3729,6 +5535,7 @@ fn parse_run_inner(
                         kind: kind.to_string(),
                         id: id_str,
                     }),
+                    typography_acquisition: typography_acquisition.clone(),
                 })));
             }
             "AlternateContent" => {
@@ -3745,11 +5552,19 @@ fn parse_run_inner(
                 {
                     for inner in selected.children().filter(|n| n.is_element()) {
                         if inner.tag_name().name() == "drawing" {
-                            for r in parse_inline_drawing(
-                                style_map, num_map, inner, media_map, chart_map, theme,
-                            ) {
-                                runs.push(r);
-                            }
+                            let mut drawing_runs = parse_inline_drawing(
+                                style_map,
+                                num_map,
+                                inner,
+                                media_map,
+                                chart_map,
+                                rel_map,
+                                theme,
+                                depth,
+                                diagnostics,
+                            );
+                            attach_anchor_host_metrics(&mut drawing_runs);
+                            runs.extend(drawing_runs);
                         }
                     }
                 }
@@ -3767,10 +5582,10 @@ fn parse_run_inner(
                 // The imagedata form is tried first so a picture pict is not
                 // mistaken for an (empty) text-box panel.
                 if let Some(img) = parse_vml_pict_image(child, media_map) {
-                    runs.push(DocRun::Image(img));
-                } else if let Some(shp) =
-                    parse_vml_pict(style_map, num_map, child, theme, media_map)
-                {
+                    runs.push(DocRun::Image(Box::new(img)));
+                } else if let Some(shp) = parse_vml_pict(
+                    style_map, num_map, child, theme, media_map, chart_map, rel_map, depth,
+                ) {
                     runs.push(DocRun::Shape(Box::new(shp)));
                 }
             }
@@ -3793,13 +5608,21 @@ fn parse_run_inner(
                     .children()
                     .find(|n| n.is_element() && n.tag_name().name() == "drawing");
                 if let Some(drawing) = drawing {
-                    for r in parse_inline_drawing(
-                        style_map, num_map, drawing, media_map, chart_map, theme,
-                    ) {
-                        runs.push(r);
-                    }
+                    let mut drawing_runs = parse_inline_drawing(
+                        style_map,
+                        num_map,
+                        drawing,
+                        media_map,
+                        chart_map,
+                        rel_map,
+                        theme,
+                        depth,
+                        diagnostics,
+                    );
+                    attach_anchor_host_metrics(&mut drawing_runs);
+                    runs.extend(drawing_runs);
                 } else if let Some(img) = parse_object_ole_image(child, media_map) {
-                    runs.push(DocRun::Image(img));
+                    runs.push(DocRun::Image(Box::new(img)));
                 }
             }
             _ => {}
@@ -3846,7 +5669,7 @@ struct InlineBlip {
     image_path: String,
     mime_type: String,
     svg_image_path: Option<String>,
-    /// ECMA-376 §20.1.8.55 `<a:srcRect>` crop (fractions 0..1), or `None`.
+    /// ECMA-376 §20.1.8.55 `<a:srcRect>` crop (signed fractions), or `None`.
     src_rect: Option<SrcRect>,
     /// ECMA-376 §20.1.8.23 `<a:duotone>` recolour resolved through the theme,
     /// or `None`.
@@ -3888,11 +5711,7 @@ fn resolve_inline_blip(
     let duotone = blip_fill.and_then(|bf| parse_blip_duotone_docx(bf, theme));
     // §20.1.8.6 alphaModFix opacity (fraction, or None when opaque).
     let alpha = blip_fill.and_then(parse_blip_alpha);
-    let extent = node
-        .descendants()
-        .find(|n| n.tag_name().name() == "extent")?;
-    let cx: f64 = extent.attribute("cx").and_then(|v| v.parse().ok())?;
-    let cy: f64 = extent.attribute("cy").and_then(|v| v.parse().ok())?;
+    let (width_pt, height_pt) = drawing_extent_points(node)?;
     Some(InlineBlip {
         image_path,
         mime_type,
@@ -3900,8 +5719,8 @@ fn resolve_inline_blip(
         src_rect,
         duotone,
         alpha,
-        width_pt: cx / 12700.0,
-        height_pt: cy / 12700.0,
+        width_pt,
+        height_pt,
     })
 }
 
@@ -3982,13 +5801,84 @@ fn docx_understands_drawing_ns(ns: &str) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_inline_drawing(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     node: roxmltree::Node,
     media_map: &HashMap<String, String>,
     chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
+    depth: DepthGuard,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
+) -> Vec<DocRun> {
+    let runs = parse_inline_drawing_impl(
+        style_map, num_map, node, media_map, chart_map, rel_map, theme, depth,
+    );
+    collect_drawing_extent_diagnostic(node, media_map, chart_map, &runs, diagnostics);
+    runs
+}
+
+fn unresolved_drawing_resource_kind(
+    container: roxmltree::Node,
+) -> Option<UnavailableDrawingResourceKind> {
+    // A group or WordprocessingShape owns child transforms and may mix several
+    // payloads. This first slice retains only one picture/chart whose wp:extent
+    // is the complete outer geometry.
+    if container
+        .descendants()
+        .any(|node| matches!(node.tag_name().name(), "wgp" | "wsp"))
+    {
+        return None;
+    }
+    let chart = container
+        .descendants()
+        .find(|node| node.tag_name().name() == "graphicData")
+        .is_some_and(|graphic_data| {
+            graphic_data.attribute("uri").is_some_and(|uri| {
+                uri.contains("drawingml/2006/chart")
+                    || uri.contains("chartex")
+                    || uri.contains("chartEx")
+            }) && graphic_data
+                .descendants()
+                .any(|node| node.tag_name().name() == "chart")
+        });
+    if chart {
+        return Some(UnavailableDrawingResourceKind::Chart);
+    }
+    container
+        .descendants()
+        .any(|node| node.tag_name().name() == "blip")
+        .then_some(UnavailableDrawingResourceKind::Image)
+}
+
+fn unavailable_drawing_run(
+    container: roxmltree::Node,
+    anchor_acquisition: Option<AnchorAcquisitionWire>,
+) -> Option<DocRun> {
+    let resource_kind = unresolved_drawing_resource_kind(container)?;
+    let (width_pt, height_pt) = drawing_extent_points(container)?;
+    Some(DocRun::UnavailableDrawing(Box::new(
+        UnavailableDrawingRun {
+            resource_kind,
+            width_pt,
+            height_pt,
+            anchor_acquisition,
+        },
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_inline_drawing_impl(
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    node: roxmltree::Node,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    depth: DepthGuard,
 ) -> Vec<DocRun> {
     // Distinguish inline vs anchor
     let is_anchor = node.descendants().any(|n| n.tag_name().name() == "anchor");
@@ -4045,38 +5935,30 @@ fn parse_inline_drawing(
                         // the inline-image contract; a chart without one is dropped
                         // rather than emitted at zero size. If absent, fall through to
                         // the ordinary image path (which will also drop it).
-                        if let Some(extent) = container
-                            .descendants()
-                            .find(|n| n.tag_name().name() == "extent")
-                        {
-                            let cx: Option<f64> =
-                                extent.attribute("cx").and_then(|v| v.parse().ok());
-                            let cy: Option<f64> =
-                                extent.attribute("cy").and_then(|v| v.parse().ok());
-                            if let (Some(cx), Some(cy)) = (cx, cy) {
-                                return vec![DocRun::Chart(Box::new(ChartRun {
-                                    chart: chart.clone(),
-                                    width_pt: cx / 12700.0,
-                                    height_pt: cy / 12700.0,
-                                    anchor: false,
-                                    anchor_x_pt: 0.0,
-                                    anchor_y_pt: 0.0,
-                                    anchor_x_from_margin: false,
-                                    anchor_y_from_para: false,
-                                    // Inline: anchor-only fields absent.
-                                    wrap_mode: None,
-                                    dist_top: 0.0,
-                                    dist_bottom: 0.0,
-                                    dist_left: 0.0,
-                                    dist_right: 0.0,
-                                    wrap_side: None,
-                                    allow_overlap: true,
-                                    anchor_x_align: None,
-                                    anchor_y_align: None,
-                                    anchor_x_relative_from: None,
-                                    anchor_y_relative_from: None,
-                                }))];
-                            }
+                        if let Some((width_pt, height_pt)) = drawing_extent_points(container) {
+                            return vec![DocRun::Chart(Box::new(ChartRun {
+                                chart: chart.clone(),
+                                width_pt,
+                                height_pt,
+                                anchor: false,
+                                anchor_x_pt: 0.0,
+                                anchor_y_pt: 0.0,
+                                anchor_x_from_margin: false,
+                                anchor_y_from_para: false,
+                                // Inline: anchor-only fields absent.
+                                wrap_mode: None,
+                                dist_top: 0.0,
+                                dist_bottom: 0.0,
+                                dist_left: 0.0,
+                                dist_right: 0.0,
+                                wrap_side: None,
+                                allow_overlap: true,
+                                anchor_x_align: None,
+                                anchor_y_align: None,
+                                anchor_x_relative_from: None,
+                                anchor_y_relative_from: None,
+                                anchor_acquisition: None,
+                            }))];
                         }
                     }
                 }
@@ -4098,15 +5980,22 @@ fn parse_inline_drawing(
             height_pt,
         } = match resolve_inline_blip(container, media_map, theme) {
             Some(b) => b,
-            None => return vec![],
+            None => {
+                return unavailable_drawing_run(container, None)
+                    .into_iter()
+                    .collect()
+            }
         };
-        return vec![DocRun::Image(ImageRun {
+        return vec![DocRun::Image(Box::new(ImageRun {
             image_path,
             mime_type,
             svg_image_path,
             src_rect,
             width_pt,
             height_pt,
+            rotation: 0.0,
+            flip_h: false,
+            flip_v: false,
             anchor: false,
             anchor_x_pt: 0.0,
             anchor_y_pt: 0.0,
@@ -4131,7 +6020,8 @@ fn parse_inline_drawing(
             // anchor-only (ECMA-376 §20.4.3.2/§20.4.3.5).
             anchor_x_relative_from: None,
             anchor_y_relative_from: None,
-        })];
+            anchor_acquisition: None,
+        }))];
     }
 
     // ── Anchor image/shape ─────────────────────────────────
@@ -4152,6 +6042,7 @@ fn parse_inline_drawing(
     let (pct_h, pct_v, rel_h, rel_v) = parse_anchor_pct_pos(&container);
     let (size_w_pct, size_h_pct, size_w_rel, size_h_rel) = parse_anchor_size_rel(&container);
     let anchor_meta = parse_anchor_wrap(&container);
+    let anchor_acquisition = parse_anchor_acquisition_wire(&container);
     // ECMA-376 §20.4.2.3 wp:anchor/@relativeHeight — stacking order among
     // floating drawings. Word emits large values here for front-layer shapes;
     // lower values paint first, higher values paint on top.
@@ -4224,35 +6115,29 @@ fn parse_inline_drawing(
                     // Same `<wp:extent>` (cx/cy EMU → pt) contract as the inline
                     // chart path: a chart without a parseable extent falls
                     // through to the blip path (which also drops it).
-                    if let Some(extent) = container
-                        .descendants()
-                        .find(|n| n.tag_name().name() == "extent")
-                    {
-                        let cx: Option<f64> = extent.attribute("cx").and_then(|v| v.parse().ok());
-                        let cy: Option<f64> = extent.attribute("cy").and_then(|v| v.parse().ok());
-                        if let (Some(cx), Some(cy)) = (cx, cy) {
-                            return vec![DocRun::Chart(Box::new(ChartRun {
-                                chart: chart.clone(),
-                                width_pt: cx / 12700.0,
-                                height_pt: cy / 12700.0,
-                                anchor: true,
-                                anchor_x_pt: pos_x,
-                                anchor_y_pt: pos_y,
-                                anchor_x_from_margin: x_from_margin,
-                                anchor_y_from_para: y_from_para,
-                                wrap_mode: anchor_meta.wrap_mode.clone(),
-                                dist_top: anchor_meta.dist_top,
-                                dist_bottom: anchor_meta.dist_bottom,
-                                dist_left: anchor_meta.dist_left,
-                                dist_right: anchor_meta.dist_right,
-                                wrap_side: anchor_meta.wrap_side.clone(),
-                                allow_overlap: anchor_meta.allow_overlap,
-                                anchor_x_align: x_align.clone(),
-                                anchor_y_align: y_align.clone(),
-                                anchor_x_relative_from: rel_h.clone(),
-                                anchor_y_relative_from: rel_v.clone(),
-                            }))];
-                        }
+                    if let Some((width_pt, height_pt)) = drawing_extent_points(container) {
+                        return vec![DocRun::Chart(Box::new(ChartRun {
+                            chart: chart.clone(),
+                            width_pt,
+                            height_pt,
+                            anchor: true,
+                            anchor_x_pt: pos_x,
+                            anchor_y_pt: pos_y,
+                            anchor_x_from_margin: x_from_margin,
+                            anchor_y_from_para: y_from_para,
+                            wrap_mode: anchor_meta.wrap_mode.clone(),
+                            dist_top: anchor_meta.dist_top,
+                            dist_bottom: anchor_meta.dist_bottom,
+                            dist_left: anchor_meta.dist_left,
+                            dist_right: anchor_meta.dist_right,
+                            wrap_side: anchor_meta.wrap_side.clone(),
+                            allow_overlap: anchor_meta.allow_overlap,
+                            anchor_x_align: x_align.clone(),
+                            anchor_y_align: y_align.clone(),
+                            anchor_x_relative_from: rel_h.clone(),
+                            anchor_y_relative_from: rel_v.clone(),
+                            anchor_acquisition: Some(anchor_acquisition.clone()),
+                        }))];
                     }
                 }
             }
@@ -4265,7 +6150,8 @@ fn parse_inline_drawing(
         .find(|n| n.tag_name().name() == "wgp")
     {
         let mut out: Vec<DocRun> = Vec::new();
-        for img in parse_wgp_images(
+        let group_metadata = anchor_group_metadata_index(wgp);
+        let mut images = parse_wgp_images_with_metadata(
             wgp,
             media_map,
             theme,
@@ -4274,24 +6160,39 @@ fn parse_inline_drawing(
             pos_y,
             y_from_para,
             &anchor_meta,
-        ) {
-            out.push(DocRun::Image(img));
-        }
-        for mut shp in parse_wgp_shapes(
+            &group_metadata,
+        );
+        let mut shapes = parse_wgp_shapes_with_metadata(
             style_map,
             num_map,
             wgp,
             theme,
             media_map,
+            chart_map,
+            rel_map,
+            depth,
             pos_x,
             x_from_margin,
             pos_y,
             y_from_para,
             &anchor_meta,
             anchor_z_order,
-        ) {
+            &group_metadata,
+        );
+        for mut img in images.drain(..) {
+            let group = img.anchor_acquisition.take().and_then(|facts| facts.group);
+            let mut facts = anchor_acquisition.clone();
+            facts.group = group;
+            img.anchor_acquisition = Some(facts);
+            out.push(DocRun::Image(Box::new(img)));
+        }
+        for mut shp in shapes.drain(..) {
             shp.behind_doc = behind_doc;
             apply_pos_meta(&mut shp);
+            let group = shp.anchor_acquisition.take().and_then(|facts| facts.group);
+            let mut facts = anchor_acquisition.clone();
+            facts.group = group;
+            shp.anchor_acquisition = Some(facts);
             out.push(DocRun::Shape(Box::new(shp)));
         }
         return out;
@@ -4308,20 +6209,21 @@ fn parse_inline_drawing(
             wsp,
             theme,
             media_map,
+            chart_map,
+            rel_map,
+            depth,
             pos_x,
             x_from_margin,
             pos_y,
             y_from_para,
             &anchor_meta,
-            1.0,
-            1.0,
-            0.0,
-            0.0,
-            false,
+            None,
+            None,
             anchor_z_order,
         ) {
             shp.behind_doc = behind_doc;
             apply_pos_meta(&mut shp);
+            shp.anchor_acquisition = Some(anchor_acquisition.clone());
             return vec![DocRun::Shape(Box::new(shp))];
         }
     }
@@ -4341,15 +6243,22 @@ fn parse_inline_drawing(
         height_pt,
     } = match resolve_inline_blip(container, media_map, theme) {
         Some(b) => b,
-        None => return vec![],
+        None => {
+            return unavailable_drawing_run(container, Some(anchor_acquisition))
+                .into_iter()
+                .collect()
+        }
     };
-    vec![DocRun::Image(ImageRun {
+    vec![DocRun::Image(Box::new(ImageRun {
         image_path,
         mime_type,
         svg_image_path,
         src_rect,
         width_pt,
         height_pt,
+        rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
         anchor: true,
         anchor_x_pt: pos_x,
         anchor_y_pt: pos_y,
@@ -4381,7 +6290,566 @@ fn parse_inline_drawing(
         // `anchor_*_from_*` boolean hints.
         anchor_x_relative_from: rel_h.clone(),
         anchor_y_relative_from: rel_v.clone(),
-    })]
+        anchor_acquisition: Some(anchor_acquisition),
+    }))]
+}
+
+/// Diagnose only extent decisions made by the real DrawingML acquisition path.
+///
+/// A shape/group obtains its geometry from `a:xfrm`, so `wp:extent` is not a
+/// retention precondition there. For a picture/chart, missing or invalid
+/// extent is reported only when the other payload input resolves and no run was
+/// emitted; a valid zero extent is reported only when an Image/Chart run was
+/// actually retained. This keeps the fixed "was omitted" messages factual.
+fn collect_drawing_extent_diagnostic(
+    drawing: roxmltree::Node,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    runs: &[DocRun],
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
+) {
+    let Some(container) = drawing.descendants().find(|node| {
+        node.is_element()
+            && is_wp_ns(node.tag_name().namespace())
+            && matches!(node.tag_name().name(), "inline" | "anchor")
+    }) else {
+        return;
+    };
+    if drawing_container_hidden(container) {
+        return;
+    }
+
+    let retained_extent_consumer = runs.iter().any(|run| {
+        matches!(
+            run,
+            DocRun::Image(_) | DocRun::Chart(_) | DocRun::UnavailableDrawing(_)
+        )
+    });
+    if !retained_extent_consumer {
+        // The implemented group/shape branches size from `a:xfrm` and never
+        // consult `wp:extent`; do not blame extent if such a payload is present.
+        if container
+            .descendants()
+            .any(|node| matches!(node.tag_name().name(), "wgp" | "wsp"))
+        {
+            return;
+        }
+        let chart_resolves = container
+            .descendants()
+            .find(|node| node.tag_name().name() == "graphicData")
+            .filter(|graphic_data| {
+                graphic_data.attribute("uri").is_some_and(|uri| {
+                    uri.contains("drawingml/2006/chart")
+                        || uri.contains("chartex")
+                        || uri.contains("chartEx")
+                })
+            })
+            .and_then(|_| {
+                container
+                    .descendants()
+                    .find(|node| node.tag_name().name() == "chart")
+            })
+            .and_then(|chart| {
+                attr_ns(
+                    &chart,
+                    relationships::TRANSITIONAL,
+                    relationships::STRICT,
+                    "id",
+                )
+            })
+            .is_some_and(|rid| chart_map.contains_key(rid));
+        let blip_resolves = container
+            .descendants()
+            .find(|node| node.tag_name().name() == "blip")
+            .and_then(|blip| resolve_blip_urls(blip, media_map))
+            .is_some();
+        if !chart_resolves && !blip_resolves {
+            return;
+        }
+    }
+
+    match drawing_extent(container) {
+        DrawingExtent::Missing if !retained_extent_consumer => push_pending_parse_diagnostic(
+            diagnostics,
+            PARSE_DIAGNOSTIC_CODE_MISSING_DRAWING_EXTENT,
+            PARSE_DIAGNOSTIC_SEVERITY_MISSING_DRAWING_EXTENT,
+        ),
+        DrawingExtent::Invalid if !retained_extent_consumer => push_pending_parse_diagnostic(
+            diagnostics,
+            PARSE_DIAGNOSTIC_CODE_INVALID_DRAWING_EXTENT,
+            PARSE_DIAGNOSTIC_SEVERITY_INVALID_DRAWING_EXTENT,
+        ),
+        DrawingExtent::Valid { cx, cy } if retained_extent_consumer && (cx == 0 || cy == 0) => {
+            push_pending_parse_diagnostic(
+                diagnostics,
+                PARSE_DIAGNOSTIC_CODE_DEGENERATE_DRAWING_EXTENT,
+                PARSE_DIAGNOSTIC_SEVERITY_DEGENERATE_DRAWING_EXTENT,
+            );
+        }
+        DrawingExtent::Missing | DrawingExtent::Invalid | DrawingExtent::Valid { .. } => {}
+    }
+}
+
+fn parse_on_off(value: &str) -> Option<bool> {
+    match value {
+        "1" | "true" | "on" => Some(true),
+        "0" | "false" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn anchor_emu_pt(value: Option<&str>) -> Option<f64> {
+    value
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .map(|emu| emu / 12700.0)
+}
+
+fn anchor_value_status<T>(raw: Option<&str>, parsed: Option<T>) -> AnchorValueStatusWire {
+    match (raw, parsed.is_some()) {
+        (None, _) => AnchorValueStatusWire::Missing,
+        (Some(_), true) => AnchorValueStatusWire::Valid,
+        (Some(_), false) => AnchorValueStatusWire::Invalid,
+    }
+}
+
+fn anchor_edges(node: roxmltree::Node) -> AnchorEdgesWire {
+    let top_raw = node.attribute("distT").or_else(|| node.attribute("t"));
+    let right_raw = node.attribute("distR").or_else(|| node.attribute("r"));
+    let bottom_raw = node.attribute("distB").or_else(|| node.attribute("b"));
+    let left_raw = node.attribute("distL").or_else(|| node.attribute("l"));
+    let top_pt = anchor_emu_pt(top_raw);
+    let right_pt = anchor_emu_pt(right_raw);
+    let bottom_pt = anchor_emu_pt(bottom_raw);
+    let left_pt = anchor_emu_pt(left_raw);
+    AnchorEdgesWire {
+        top_pt,
+        top_status: anchor_value_status(top_raw, top_pt),
+        right_pt,
+        right_status: anchor_value_status(right_raw, right_pt),
+        bottom_pt,
+        bottom_status: anchor_value_status(bottom_raw, bottom_pt),
+        left_pt,
+        left_status: anchor_value_status(left_raw, left_pt),
+    }
+}
+
+fn parse_anchor_axis(container: &roxmltree::Node, name: &str) -> AnchorAxisWire {
+    let Some(node) = find_position_node(container, name) else {
+        return AnchorAxisWire::default();
+    };
+    let relative_from_raw = node.attribute("relativeFrom");
+    let relative_from = relative_from_raw.map(str::to_string);
+    let relative_from_valid = relative_from_raw.filter(|value| {
+        if name == "positionH" {
+            matches!(
+                *value,
+                "character"
+                    | "column"
+                    | "insideMargin"
+                    | "leftMargin"
+                    | "margin"
+                    | "outsideMargin"
+                    | "page"
+                    | "rightMargin"
+            )
+        } else {
+            matches!(
+                *value,
+                "bottomMargin"
+                    | "insideMargin"
+                    | "line"
+                    | "margin"
+                    | "outsideMargin"
+                    | "page"
+                    | "paragraph"
+                    | "topMargin"
+            )
+        }
+    });
+    let percent_name = if name == "positionH" {
+        "pctPosHOffset"
+    } else {
+        "pctPosVOffset"
+    };
+    let percent_node = node
+        .descendants()
+        .find(|child| child.is_element() && child.tag_name().name() == percent_name);
+    let percent = percent_node
+        .and_then(|child| child.text())
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .map(|value| value / 100_000.0);
+    let align_node = node
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "align");
+    let align = align_node
+        .and_then(|child| child.text())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| {
+            if name == "positionH" {
+                matches!(*value, "center" | "inside" | "left" | "outside" | "right")
+            } else {
+                matches!(*value, "bottom" | "center" | "inside" | "outside" | "top")
+            }
+        })
+        .map(str::to_string);
+    let offset_node = node
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "posOffset");
+    let offset = offset_node.and_then(|child| anchor_emu_pt(child.text()));
+    let authored = usize::from(percent_node.is_some())
+        + usize::from(align_node.is_some())
+        + usize::from(offset_node.is_some());
+    let choice = if authored != 1 {
+        if authored == 0 {
+            AnchorAxisChoiceWire::Missing
+        } else {
+            AnchorAxisChoiceWire::Invalid
+        }
+    } else if percent_node.is_some() {
+        percent.map_or(AnchorAxisChoiceWire::Invalid, |fraction| {
+            AnchorAxisChoiceWire::Percent { fraction }
+        })
+    } else if align_node.is_some() {
+        align.map_or(AnchorAxisChoiceWire::Invalid, |value| {
+            AnchorAxisChoiceWire::Align { value }
+        })
+    } else {
+        offset.map_or(AnchorAxisChoiceWire::Invalid, |value_pt| {
+            AnchorAxisChoiceWire::Offset { value_pt }
+        })
+    };
+    AnchorAxisWire {
+        relative_from,
+        relative_from_status: anchor_value_status(relative_from_raw, relative_from_valid),
+        choice,
+    }
+}
+
+fn parse_effect_extent(node: roxmltree::Node) -> AnchorEdgesWire {
+    anchor_edges(node)
+}
+
+fn parse_relative_size_axis(
+    container: &roxmltree::Node,
+    outer: &str,
+    inner: &str,
+) -> Option<AnchorRelativeSizeAxisWire> {
+    let node = find_position_node(container, outer)?;
+    let relative_from_raw = node.attribute("relativeFrom");
+    let fraction_node = node
+        .descendants()
+        .find(|child| child.is_element() && child.tag_name().name() == inner);
+    let raw_fraction = fraction_node.and_then(|child| child.text());
+    let fraction = raw_fraction
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .map(|value| value / 100_000.0);
+    let relative_from_valid = relative_from_raw.filter(|value| {
+        if outer == "sizeRelH" {
+            matches!(
+                *value,
+                "margin" | "page" | "leftMargin" | "rightMargin" | "insideMargin" | "outsideMargin"
+            )
+        } else {
+            matches!(
+                *value,
+                "margin" | "page" | "topMargin" | "bottomMargin" | "insideMargin" | "outsideMargin"
+            )
+        }
+    });
+    Some(AnchorRelativeSizeAxisWire {
+        relative_from: relative_from_raw.map(str::to_string),
+        relative_from_status: anchor_value_status(relative_from_raw, relative_from_valid),
+        fraction,
+        fraction_status: match fraction_node {
+            None => AnchorValueStatusWire::Missing,
+            Some(_) if fraction.is_some() => AnchorValueStatusWire::Valid,
+            Some(_) => AnchorValueStatusWire::Invalid,
+        },
+    })
+}
+
+fn parse_raw_transform(xfrm: roxmltree::Node) -> AnchorRawTransformWire {
+    let parse = |node: Option<roxmltree::Node>, attr: &str| {
+        node.and_then(|value| value.attribute(attr))
+            .and_then(|raw| raw.parse::<f64>().ok())
+    };
+    let off = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "off");
+    let ext = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "ext");
+    let child_off = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "chOff");
+    let child_ext = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "chExt");
+    AnchorRawTransformWire {
+        offset_x_emu: parse(off, "x"),
+        offset_y_emu: parse(off, "y"),
+        extent_width_emu: parse(ext, "cx"),
+        extent_height_emu: parse(ext, "cy"),
+        child_offset_x_emu: parse(child_off, "x"),
+        child_offset_y_emu: parse(child_off, "y"),
+        child_extent_width_emu: parse(child_ext, "cx"),
+        child_extent_height_emu: parse(child_ext, "cy"),
+        rotation_units: xfrm.attribute("rot").and_then(|raw| raw.parse().ok()),
+        flip_h: xfrm.attribute("flipH").and_then(parse_on_off),
+        flip_v: xfrm.attribute("flipV").and_then(parse_on_off),
+    }
+}
+
+#[derive(Clone)]
+struct AnchorGroupMetadata {
+    child_source_id: String,
+    source_index: usize,
+    source_count: usize,
+    transform_chain: Vec<AnchorRawTransformWire>,
+    child_transform: Option<AnchorRawTransformWire>,
+}
+
+type AnchorGroupMetadataIndex = HashMap<usize, AnchorGroupMetadata>;
+
+#[cfg(test)]
+std::thread_local! {
+    static ANCHOR_GROUP_METADATA_INDEX_BUILDS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+fn anchor_group_metadata_index(wgp: roxmltree::Node) -> AnchorGroupMetadataIndex {
+    #[cfg(test)]
+    ANCHOR_GROUP_METADATA_INDEX_BUILDS.with(|count| count.set(count.get() + 1));
+    let source_count = wgp
+        .descendants()
+        .filter(|node| node.is_element() && matches!(node.tag_name().name(), "pic" | "wsp"))
+        .count();
+    fn visit(
+        group: roxmltree::Node,
+        inherited_chain: &[AnchorRawTransformWire],
+        source_count: usize,
+        source_index: &mut usize,
+        result: &mut AnchorGroupMetadataIndex,
+    ) {
+        let mut chain = inherited_chain.to_vec();
+        if let Some(xfrm) = group_xfrm(group) {
+            chain.push(parse_raw_transform(xfrm));
+        }
+        for child in group.children().filter(|node| node.is_element()) {
+            match child.tag_name().name() {
+                "pic" | "wsp" => {
+                    let child_transform = child
+                        .children()
+                        .find(|node| node.is_element() && node.tag_name().name() == "spPr")
+                        .and_then(|sp_pr| {
+                            sp_pr
+                                .children()
+                                .find(|node| node.is_element() && node.tag_name().name() == "xfrm")
+                        })
+                        .map(parse_raw_transform);
+                    result.insert(
+                        child.range().start,
+                        AnchorGroupMetadata {
+                            child_source_id: format!("group-child-{}", child.range().start),
+                            source_index: *source_index,
+                            source_count,
+                            transform_chain: chain.clone(),
+                            child_transform,
+                        },
+                    );
+                    *source_index += 1;
+                }
+                "grpSp" => visit(child, &chain, source_count, source_index, result),
+                _ => {}
+            }
+        }
+    }
+    let mut result = HashMap::new();
+    let mut source_index = 0;
+    visit(wgp, &[], source_count, &mut source_index, &mut result);
+    result
+}
+
+fn parse_anchor_group_wire(
+    metadata: &AnchorGroupMetadata,
+    resolved_child_frame: DrawingRect,
+) -> AnchorGroupWire {
+    AnchorGroupWire {
+        child_source_id: metadata.child_source_id.clone(),
+        source_index: metadata.source_index,
+        source_count: metadata.source_count,
+        transform_chain: metadata.transform_chain.clone(),
+        child_transform: metadata.child_transform.clone(),
+        resolved_child_frame: AnchorResolvedChildFrameWire {
+            offset_x_pt: resolved_child_frame.x / 12700.0,
+            offset_y_pt: resolved_child_frame.y / 12700.0,
+            width_pt: resolved_child_frame.width / 12700.0,
+            height_pt: resolved_child_frame.height / 12700.0,
+            rotation_deg: resolved_child_frame.rotation_degrees,
+            flip_h: resolved_child_frame.flip_h,
+            flip_v: resolved_child_frame.flip_v,
+        },
+    }
+}
+
+/// Private, lossless acquisition facts for retained layout. The public run
+/// model intentionally remains unchanged. ECMA-376 Part 1 §§20.4.2.3,
+/// 20.4.2.6 and 20.4.2.16 require anchor and child-wrap distances/effects to
+/// remain distinct; [MS-OI29500] §§2.1.1354/.1357 define Word's polygon points
+/// in a fixed 21600×21600 shape coordinate space.
+fn parse_anchor_acquisition_wire(container: &roxmltree::Node) -> AnchorAcquisitionWire {
+    let simple = container
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "simplePos");
+    let simple_attr = container.attribute("simplePos");
+    let extent = container
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "extent");
+    let parent_effect = container
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "effectExtent");
+    let wrap_nodes: Vec<_> = container
+        .children()
+        .filter(|child| {
+            child.is_element()
+                && matches!(
+                    child.tag_name().name(),
+                    "wrapNone" | "wrapSquare" | "wrapTight" | "wrapThrough" | "wrapTopAndBottom"
+                )
+        })
+        .collect();
+    let authored_kinds = wrap_nodes
+        .iter()
+        .map(|node| node.tag_name().name().to_string())
+        .collect::<Vec<_>>();
+    let wrap = if wrap_nodes.len() == 1 {
+        let node = wrap_nodes[0];
+        let polygon_node = node
+            .children()
+            .find(|child| child.is_element() && child.tag_name().name() == "wrapPolygon");
+        let polygon = polygon_node.map(|polygon| {
+            let points: Vec<_> = polygon
+                .children()
+                .filter(|point| {
+                    point.is_element() && matches!(point.tag_name().name(), "start" | "lineTo")
+                })
+                .map(|point| {
+                    let raw_x = point.attribute("x").map(str::to_string);
+                    let raw_y = point.attribute("y").map(str::to_string);
+                    AnchorPointWire {
+                        x: raw_x.as_deref().and_then(|raw| raw.parse::<i64>().ok()),
+                        y: raw_y.as_deref().and_then(|raw| raw.parse::<i64>().ok()),
+                        raw_x,
+                        raw_y,
+                    }
+                })
+                .collect();
+            let invalid_point_count = points
+                .iter()
+                .filter(|point| point.x.is_none() || point.y.is_none())
+                .count();
+            AnchorPolygonWire {
+                edited: polygon
+                    .attribute("edited")
+                    .and_then(parse_on_off)
+                    .unwrap_or(false),
+                coordinate_space: AnchorPolygonSpaceWire {
+                    width: 21600,
+                    height: 21600,
+                },
+                points,
+                invalid_point_count,
+            }
+        });
+        AnchorWrapWire {
+            kind: match node.tag_name().name() {
+                "wrapNone" => AnchorWrapKindWire::None,
+                "wrapSquare" => AnchorWrapKindWire::Square,
+                "wrapTight" => AnchorWrapKindWire::Tight,
+                "wrapThrough" => AnchorWrapKindWire::Through,
+                "wrapTopAndBottom" => AnchorWrapKindWire::TopAndBottom,
+                _ => unreachable!(),
+            },
+            authored_kinds,
+            side: node.attribute("wrapText").map(str::to_string),
+            distances: anchor_edges(node),
+            effect_extent: node
+                .children()
+                .find(|child| child.is_element() && child.tag_name().name() == "effectExtent")
+                .map(parse_effect_extent),
+            polygon,
+        }
+    } else {
+        AnchorWrapWire {
+            kind: if wrap_nodes.is_empty() {
+                AnchorWrapKindWire::Missing
+            } else {
+                AnchorWrapKindWire::Invalid
+            },
+            authored_kinds,
+            ..Default::default()
+        }
+    };
+    let simple_enabled = simple_attr.and_then(parse_xsd_bool);
+    let simple_x_raw = simple.and_then(|node| node.attribute("x"));
+    let simple_y_raw = simple.and_then(|node| node.attribute("y"));
+    let simple_x = anchor_emu_pt(simple_x_raw);
+    let simple_y = anchor_emu_pt(simple_y_raw);
+    let extent_width_raw = extent.and_then(|node| node.attribute("cx"));
+    let extent_height_raw = extent.and_then(|node| node.attribute("cy"));
+    let extent_width = anchor_emu_pt(extent_width_raw);
+    let extent_height = anchor_emu_pt(extent_height_raw);
+    let behind_raw = container.attribute("behindDoc");
+    let behind_doc = behind_raw.and_then(parse_xsd_bool);
+    let relative_height_raw = container.attribute("relativeHeight");
+    let relative_height = relative_height_raw.and_then(|raw| raw.parse().ok());
+    let locked_raw = container.attribute("locked");
+    let locked = locked_raw.and_then(parse_xsd_bool);
+    let allow_overlap_raw = container.attribute("allowOverlap");
+    let allow_overlap = allow_overlap_raw.and_then(parse_xsd_bool);
+    let layout_in_cell_raw = container.attribute("layoutInCell");
+    let layout_in_cell = layout_in_cell_raw.and_then(parse_xsd_bool);
+    AnchorAcquisitionWire {
+        occurrence_id: format!("wp-anchor-{}", container.range().start),
+        simple_position: AnchorSimplePositionWire {
+            enabled: simple_enabled,
+            status: anchor_value_status(simple_attr, simple_enabled),
+            x_pt: simple_x,
+            x_status: anchor_value_status(simple_x_raw, simple_x),
+            y_pt: simple_y,
+            y_status: anchor_value_status(simple_y_raw, simple_y),
+        },
+        horizontal: parse_anchor_axis(container, "positionH"),
+        vertical: parse_anchor_axis(container, "positionV"),
+        extent: AnchorExtentWire {
+            width_pt: extent_width,
+            height_pt: extent_height,
+            width_status: anchor_value_status(extent_width_raw, extent_width),
+            height_status: anchor_value_status(extent_height_raw, extent_height),
+        },
+        parent_effect_extent: parent_effect.map(parse_effect_extent).unwrap_or_default(),
+        anchor_distances: anchor_edges(*container),
+        relative_size: AnchorRelativeSizeWire {
+            horizontal: parse_relative_size_axis(container, "sizeRelH", "pctWidth"),
+            vertical: parse_relative_size_axis(container, "sizeRelV", "pctHeight"),
+        },
+        wrap,
+        behavior: AnchorBehaviorWire {
+            behind_doc,
+            behind_doc_status: anchor_value_status(behind_raw, behind_doc),
+            relative_height,
+            relative_height_status: anchor_value_status(relative_height_raw, relative_height),
+            locked,
+            locked_status: anchor_value_status(locked_raw, locked),
+            allow_overlap,
+            allow_overlap_status: anchor_value_status(allow_overlap_raw, allow_overlap),
+            layout_in_cell,
+            layout_in_cell_status: anchor_value_status(layout_in_cell_raw, layout_in_cell),
+        },
+        group: None,
+    }
 }
 
 #[derive(Clone)]
@@ -4393,11 +6861,10 @@ struct AnchorMeta {
     dist_left: f64,
     dist_right: f64,
     /// ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap` — whether this floating
-    /// object may overlap other floating objects. Spec default is **true**
-    /// (the attribute is optional). `false` mandates the object be repositioned
-    /// to prevent overlap. We implement `Default` by hand so the spec default of
-    /// `true` is preserved everywhere `AnchorMeta::default()` is used (a derived
-    /// `Default` would wrongly yield `false`).
+    /// object may overlap other floating objects. CT_Anchor requires the
+    /// attribute; this legacy public-model adapter uses true only as its
+    /// compatibility fallback. The private acquisition wire separately retains
+    /// missing/invalid/explicit values for diagnostics.
     allow_overlap: bool,
 }
 
@@ -4410,7 +6877,7 @@ impl Default for AnchorMeta {
             dist_bottom: 0.0,
             dist_left: 0.0,
             dist_right: 0.0,
-            // §20.4.2.3: omitted @allowOverlap ⇒ true.
+            // Legacy public-model compatibility fallback, not a schema default.
             allow_overlap: true,
         }
     }
@@ -4425,7 +6892,8 @@ fn parse_anchor_wrap(container: &roxmltree::Node) -> AnchorMeta {
     let dist_right = container.attribute("distR").map(to_pt).unwrap_or(0.0);
 
     // ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap`: "1"/"true" ⇒ true,
-    // "0"/"false" ⇒ false, omitted ⇒ true (spec default).
+    // "0"/"false" ⇒ false. Missing is malformed CT_Anchor; this old adapter
+    // retains its prior true fallback while the private wire records missing.
     let allow_overlap = container
         .attribute("allowOverlap")
         .map(|v| v == "1" || v == "true")
@@ -4479,9 +6947,9 @@ fn parse_anchor_wrap(container: &roxmltree::Node) -> AnchorMeta {
 /// "column" and "margin" relative offsets both mean: add marginLeft in the renderer.
 /// `<wp:positionH>` / `<wp:positionV>` may live directly under `<wp:anchor>`,
 /// or be wrapped in `<mc:AlternateContent>` for Word 2010+ pct-based positioning.
-/// In the wrapped form `<mc:Choice>` holds the wp14 pct-based variant and
-/// `<mc:Fallback>` holds a posOffset variant. Always pick Choice (matches what
-/// Word renders in 2010+); never read from Fallback.
+/// In the common wrapped form an understood wp14 Choice holds percentage
+/// positioning and Fallback holds posOffset. ECMA-376 Part 3 §9.3 selects the
+/// first fully understood Choice, otherwise Fallback.
 fn find_position_node<'a, 'i>(
     container: &roxmltree::Node<'a, 'i>,
     name: &str,
@@ -4493,8 +6961,13 @@ fn find_position_node<'a, 'i>(
         .children()
         .filter(|n| n.tag_name().name() == "AlternateContent")
     {
-        if let Some(choice) = ac.children().find(|n| n.tag_name().name() == "Choice") {
-            if let Some(n) = choice
+        // ECMA-376 Part 3 §9.3: resolve Requires by namespace URI and use the
+        // fallback when no supported Choice exists. Reuse the common MCE seam
+        // used by DOCX/PPTX/XLSX instead of treating the first Choice as live.
+        if let Some(selected) =
+            ooxml_common::mce::select_alternate_content(ac, &docx_understands_drawing_ns)
+        {
+            if let Some(n) = selected
                 .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == name)
             {
@@ -4618,6 +7091,7 @@ fn parse_anchor_size_rel(
 /// Expand a wp:wgp group into individual ImageRun entries.
 /// Each pic child gets page-relative coordinates: group anchor origin + child offset within group.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn parse_wgp_images(
     wgp: roxmltree::Node,
     media_map: &HashMap<String, String>,
@@ -4628,6 +7102,32 @@ fn parse_wgp_images(
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
 ) -> Vec<ImageRun> {
+    let group_metadata = anchor_group_metadata_index(wgp);
+    parse_wgp_images_with_metadata(
+        wgp,
+        media_map,
+        theme,
+        anchor_pos_x,
+        x_from_margin,
+        anchor_pos_y,
+        y_from_para,
+        anchor_meta,
+        &group_metadata,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_wgp_images_with_metadata(
+    wgp: roxmltree::Node,
+    media_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    anchor_pos_x: f64,
+    x_from_margin: bool,
+    anchor_pos_y: f64,
+    y_from_para: bool,
+    anchor_meta: &AnchorMeta,
+    group_metadata: &AnchorGroupMetadataIndex,
+) -> Vec<ImageRun> {
     // Pictures inside a wpg group live in the group's child coordinate space and
     // must be mapped to page space through the cumulative transform of every
     // group on the path from the wgp down to the pic (ECMA-376 §20.1.7.5/.6),
@@ -4637,7 +7137,7 @@ fn parse_wgp_images(
     // pic's own offset, ignoring both the group's scale/offset and any nested
     // grpSp transform, mis-placing/mis-sizing grouped pictures.)
     let base = match group_xfrm(wgp) {
-        Some(x) => GroupTransform::IDENTITY.compose_child(x),
+        Some(x) => compose_group_xfrm(GroupTransform::IDENTITY, x),
         None => GroupTransform::IDENTITY,
     };
     let mut results = Vec::new();
@@ -4651,6 +7151,7 @@ fn parse_wgp_images(
         anchor_pos_y,
         y_from_para,
         anchor_meta,
+        group_metadata,
         &mut results,
     );
     results
@@ -4672,6 +7173,7 @@ fn walk_group_images(
     anchor_pos_y: f64,
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
+    group_metadata: &AnchorGroupMetadataIndex,
     results: &mut Vec<ImageRun>,
 ) {
     for child in group.children().filter(|n| n.is_element()) {
@@ -4691,13 +7193,14 @@ fn walk_group_images(
                     anchor_pos_y,
                     y_from_para,
                     anchor_meta,
+                    group_metadata.get(&child.range().start),
                 ) {
                     results.push(img);
                 }
             }
             "grpSp" => {
                 let child_xform = match group_xfrm(child) {
-                    Some(x) => xform.compose_child(x),
+                    Some(x) => compose_group_xfrm(xform, x),
                     None => xform,
                 };
                 walk_group_images(
@@ -4710,6 +7213,7 @@ fn walk_group_images(
                     anchor_pos_y,
                     y_from_para,
                     anchor_meta,
+                    group_metadata,
                     results,
                 );
             }
@@ -4735,6 +7239,7 @@ fn parse_group_pic(
     anchor_pos_y: f64,
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
+    group_metadata: Option<&AnchorGroupMetadata>,
 ) -> Option<ImageRun> {
     // Position and size come from the pic's spPr > a:xfrm (child-coord EMU).
     let sp_pr = pic.children().find(|n| n.tag_name().name() == "spPr")?;
@@ -4757,6 +7262,25 @@ fn parse_group_pic(
         .attribute("cy")
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.0);
+    let leaf_rotation = xfrm
+        .attribute("rot")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0)
+        / 60000.0;
+    let leaf_flip_h = matches!(xfrm.attribute("flipH"), Some("1") | Some("true"));
+    let leaf_flip_v = matches!(xfrm.attribute("flipV"), Some("1") | Some("true"));
+    let mapped = apply_word_direct_group_rect(
+        xform,
+        DrawingRect {
+            x: ox,
+            y: oy,
+            width: cx,
+            height: cy,
+            rotation_degrees: leaf_rotation,
+            flip_h: leaf_flip_h,
+            flip_v: leaf_flip_v,
+        },
+    );
 
     if cx <= 0.0 || cy <= 0.0 {
         return None;
@@ -4793,13 +7317,16 @@ fn parse_group_pic(
         mime_type,
         svg_image_path,
         src_rect,
-        width_pt: cx * xform.scale_x / 12700.0,
-        height_pt: cy * xform.scale_y / 12700.0,
+        width_pt: mapped.width / 12700.0,
+        height_pt: mapped.height / 12700.0,
+        rotation: mapped.rotation_degrees,
+        flip_h: mapped.flip_h,
+        flip_v: mapped.flip_v,
         anchor: true,
         // Map the pic offset through the group chain, then add the page-space
         // anchor offset of the whole group.
-        anchor_x_pt: anchor_pos_x + xform.off_x_emu / 12700.0 + ox * xform.scale_x / 12700.0,
-        anchor_y_pt: anchor_pos_y + xform.off_y_emu / 12700.0 + oy * xform.scale_y / 12700.0,
+        anchor_x_pt: anchor_pos_x + mapped.x / 12700.0,
+        anchor_y_pt: anchor_pos_y + mapped.y / 12700.0,
         anchor_x_from_margin: x_from_margin,
         anchor_y_from_para: y_from_para,
         color_replace_from,
@@ -4827,6 +7354,10 @@ fn parse_group_pic(
         // Leave None so the renderer doesn't double-resolve the container.
         anchor_x_relative_from: None,
         anchor_y_relative_from: None,
+        anchor_acquisition: group_metadata.map(|metadata| AnchorAcquisitionWire {
+            group: Some(parse_anchor_group_wire(metadata, mapped)),
+            ..Default::default()
+        }),
     })
 }
 
@@ -4837,54 +7368,17 @@ fn parse_group_pic(
 /// transforms have no skew). ECMA-376 §20.1.7.5 (`a:grpSpPr` group transform)
 /// and §20.1.7.6 (`a:xfrm` child offset/extent) define this scale/offset, and
 /// nested groups compose their transforms multiplicatively.
-#[derive(Clone, Copy)]
-struct GroupTransform {
-    scale_x: f64,
-    scale_y: f64,
-    off_x_emu: f64,
-    off_y_emu: f64,
-}
+type GroupTransform = DrawingGroupTransform;
 
-impl GroupTransform {
-    const IDENTITY: GroupTransform = GroupTransform {
-        scale_x: 1.0,
-        scale_y: 1.0,
-        off_x_emu: 0.0,
-        off_y_emu: 0.0,
-    };
-
-    /// Compose with the transform of a child group whose own `grpSpPr/xfrm`
-    /// gives off/ext/chOff/chExt. The child group maps grandchild coordinates
-    /// `g` to this group's child space via `mid = g_off - g_chOff*g_scale +
-    /// g*g_scale`; applying `self` (child→page) on top yields the composite
-    /// `page = self.off + self.scale*(mid)`. Expanding gives:
-    ///   new_scale = self.scale * g_scale
-    ///   new_off   = self.off + self.scale * (g_off - g_chOff * g_scale)
-    fn compose_child(self, xfrm: roxmltree::Node) -> GroupTransform {
-        let (off_x, off_y, ext_cx, ext_cy, ch_off_x, ch_off_y, ch_ext_cx, ch_ext_cy) =
-            read_group_xfrm(xfrm);
-        let g_scale_x = if ch_ext_cx > 0.0 && ext_cx > 0.0 {
-            ext_cx / ch_ext_cx
-        } else {
-            1.0
-        };
-        let g_scale_y = if ch_ext_cy > 0.0 && ext_cy > 0.0 {
-            ext_cy / ch_ext_cy
-        } else {
-            1.0
-        };
-        GroupTransform {
-            scale_x: self.scale_x * g_scale_x,
-            scale_y: self.scale_y * g_scale_y,
-            off_x_emu: self.off_x_emu + self.scale_x * (off_x - ch_off_x * g_scale_x),
-            off_y_emu: self.off_y_emu + self.scale_y * (off_y - ch_off_y * g_scale_y),
-        }
-    }
+/// Parse the host element's `a:xfrm` and delegate the DrawingML composition
+/// contract to `ooxml-common`, shared with the PPTX and XLSX adapters.
+fn compose_group_xfrm(parent: GroupTransform, xfrm: roxmltree::Node) -> GroupTransform {
+    parent.compose_group(read_group_xfrm(xfrm))
 }
 
 /// Read off/ext/chOff/chExt (EMU) from a group `a:xfrm`. Returns
 /// (off_x, off_y, ext_cx, ext_cy, ch_off_x, ch_off_y, ch_ext_cx, ch_ext_cy).
-fn read_group_xfrm(xfrm: roxmltree::Node) -> (f64, f64, f64, f64, f64, f64, f64, f64) {
+fn read_group_xfrm(xfrm: roxmltree::Node) -> DrawingGroupSpec {
     let attr = |node: Option<roxmltree::Node>, name: &str| {
         node.and_then(|n| n.attribute(name).and_then(|v| v.parse::<f64>().ok()))
             .unwrap_or(0.0)
@@ -4901,16 +7395,23 @@ fn read_group_xfrm(xfrm: roxmltree::Node) -> (f64, f64, f64, f64, f64, f64, f64,
     let ch_ext = xfrm
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "chExt");
-    (
-        attr(off, "x"),
-        attr(off, "y"),
-        attr(ext, "cx"),
-        attr(ext, "cy"),
-        attr(ch_off, "x"),
-        attr(ch_off, "y"),
-        attr(ch_ext, "cx"),
-        attr(ch_ext, "cy"),
-    )
+    DrawingGroupSpec {
+        off_x: attr(off, "x"),
+        off_y: attr(off, "y"),
+        ext_x: attr(ext, "cx"),
+        ext_y: attr(ext, "cy"),
+        child_off_x: attr(ch_off, "x"),
+        child_off_y: attr(ch_off, "y"),
+        child_ext_x: attr(ch_ext, "cx"),
+        child_ext_y: attr(ch_ext, "cy"),
+        rotation_degrees: xfrm
+            .attribute("rot")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 60000.0,
+        flip_h: matches!(xfrm.attribute("flipH"), Some("1") | Some("true")),
+        flip_v: matches!(xfrm.attribute("flipV"), Some("1") | Some("true")),
+    }
 }
 
 /// Locate a group's `grpSpPr > xfrm` (the group's own transform), if present.
@@ -4932,6 +7433,7 @@ fn group_xfrm<'a, 'i>(group: roxmltree::Node<'a, 'i>) -> Option<roxmltree::Node<
 /// the cumulative child→page transform must be the product of every group on
 /// the path from the wgp down to the wsp — not just the outermost grpSpPr.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn parse_wgp_shapes(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
@@ -4945,9 +7447,49 @@ fn parse_wgp_shapes(
     anchor_meta: &AnchorMeta,
     anchor_z_order: u32,
 ) -> Vec<ShapeRun> {
+    let group_metadata = anchor_group_metadata_index(wgp);
+    let chart_map = HashMap::new();
+    let rel_map = HashMap::new();
+    parse_wgp_shapes_with_metadata(
+        style_map,
+        num_map,
+        wgp,
+        theme,
+        media_map,
+        &chart_map,
+        &rel_map,
+        DepthGuard::root(),
+        anchor_pos_x,
+        x_from_margin,
+        anchor_pos_y,
+        y_from_para,
+        anchor_meta,
+        anchor_z_order,
+        &group_metadata,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_wgp_shapes_with_metadata(
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    wgp: roxmltree::Node,
+    theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    depth: DepthGuard,
+    anchor_pos_x: f64,
+    x_from_margin: bool,
+    anchor_pos_y: f64,
+    y_from_para: bool,
+    anchor_meta: &AnchorMeta,
+    anchor_z_order: u32,
+    group_metadata: &AnchorGroupMetadataIndex,
+) -> Vec<ShapeRun> {
     // Base transform = the outermost wgp grpSpPr/xfrm (chOff/chExt → off/ext).
     let base = match group_xfrm(wgp) {
-        Some(x) => GroupTransform::IDENTITY.compose_child(x),
+        Some(x) => compose_group_xfrm(GroupTransform::IDENTITY, x),
         None => GroupTransform::IDENTITY,
     };
 
@@ -4958,10 +7500,18 @@ fn parse_wgp_shapes(
     // nesting depth.
     let (group_w_pt, group_h_pt) = match group_xfrm(wgp) {
         Some(x) => {
-            let (_, _, ext_cx, ext_cy, _, _, ch_ext_cx, ch_ext_cy) = read_group_xfrm(x);
+            let spec = read_group_xfrm(x);
             (
-                (if ext_cx > 0.0 { ext_cx } else { ch_ext_cx }) / 12700.0,
-                (if ext_cy > 0.0 { ext_cy } else { ch_ext_cy }) / 12700.0,
+                (if spec.ext_x > 0.0 {
+                    spec.ext_x
+                } else {
+                    spec.child_ext_x
+                }) / 12700.0,
+                (if spec.ext_y > 0.0 {
+                    spec.ext_y
+                } else {
+                    spec.child_ext_y
+                }) / 12700.0,
             )
         }
         None => (0.0, 0.0),
@@ -4976,6 +7526,9 @@ fn parse_wgp_shapes(
         base,
         theme,
         media_map,
+        chart_map,
+        rel_map,
+        depth,
         anchor_pos_x,
         x_from_margin,
         anchor_pos_y,
@@ -4984,6 +7537,7 @@ fn parse_wgp_shapes(
         group_w_pt,
         group_h_pt,
         anchor_z_order,
+        group_metadata,
         &mut z_order,
         &mut results,
     );
@@ -5003,6 +7557,9 @@ fn walk_group_children(
     xform: GroupTransform,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    depth: DepthGuard,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
@@ -5011,6 +7568,7 @@ fn walk_group_children(
     group_w_pt: f64,
     group_h_pt: f64,
     anchor_z_order: u32,
+    group_metadata: &AnchorGroupMetadataIndex,
     z_order: &mut u32,
     results: &mut Vec<ShapeRun>,
 ) {
@@ -5030,16 +7588,16 @@ fn walk_group_children(
                     child,
                     theme,
                     media_map,
+                    chart_map,
+                    rel_map,
+                    depth,
                     anchor_pos_x,
                     x_from_margin,
                     anchor_pos_y,
                     y_from_para,
                     anchor_meta,
-                    xform.scale_x,
-                    xform.scale_y,
-                    xform.off_x_emu / 12700.0,
-                    xform.off_y_emu / 12700.0,
-                    true,
+                    Some(xform),
+                    group_metadata.get(&child.range().start),
                     anchor_z_order.saturating_add(idx),
                 ) {
                     shape.group_width_pt = Some(group_w_pt);
@@ -5050,7 +7608,7 @@ fn walk_group_children(
             "grpSp" => {
                 // Compose this nested group's transform, then recurse.
                 let child_xform = match group_xfrm(child) {
-                    Some(x) => xform.compose_child(x),
+                    Some(x) => compose_group_xfrm(xform, x),
                     None => xform,
                 };
                 walk_group_children(
@@ -5060,6 +7618,9 @@ fn walk_group_children(
                     child_xform,
                     theme,
                     media_map,
+                    chart_map,
+                    rel_map,
+                    depth,
                     anchor_pos_x,
                     x_from_margin,
                     anchor_pos_y,
@@ -5068,6 +7629,7 @@ fn walk_group_children(
                     group_w_pt,
                     group_h_pt,
                     anchor_z_order,
+                    group_metadata,
                     z_order,
                     results,
                 );
@@ -5077,11 +7639,8 @@ fn walk_group_children(
     }
 }
 
-/// Parse a single wps:wsp into ShapeRun. `sx,sy` scale the shape's spPr/xfrm
-/// from group child coord space to page EMU; `group_off_pt_*` are the group origin
-/// on the page (in pt) so the shape's off.x/off.y (in child coord space) can be
-/// translated to page-relative pt. For a standalone wsp (no wgp), pass sx=sy=1,
-/// group_off=0 and `include_xfrm_offset=false`: the enclosing wp:anchor
+/// Parse a single wps:wsp into ShapeRun. `group_transform` is the cumulative
+/// Annex L DrawingML group hierarchy. For a standalone wsp pass `None`: the enclosing wp:anchor
 /// positionH/V already places the DrawingML object, while the shape's
 /// a:xfrm/off is its local DrawingML transform.
 // Carries the accumulated anchor/group coordinate transform (offsets, scale,
@@ -5094,16 +7653,16 @@ fn parse_wsp_shape(
     wsp: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    depth: DepthGuard,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
-    sx: f64,
-    sy: f64,
-    group_off_pt_x: f64,
-    group_off_pt_y: f64,
-    include_xfrm_offset: bool,
+    group_transform: Option<GroupTransform>,
+    group_metadata: Option<&AnchorGroupMetadata>,
     z_order: u32,
 ) -> Option<ShapeRun> {
     let sp_pr = wsp
@@ -5157,20 +7716,45 @@ fn parse_wsp_shape(
     let flip_h = matches!(xfrm.attribute("flipH"), Some("1") | Some("true"));
     let flip_v = matches!(xfrm.attribute("flipV"), Some("1") | Some("true"));
 
-    let width_pt = cx * sx / 12700.0;
-    let height_pt = cy * sy / 12700.0;
-    let local_x_pt = if include_xfrm_offset {
-        ox * sx / 12700.0
-    } else {
-        0.0
-    };
-    let local_y_pt = if include_xfrm_offset {
-        oy * sy / 12700.0
-    } else {
-        0.0
-    };
-    let anchor_x_pt = anchor_pos_x + group_off_pt_x + local_x_pt;
-    let anchor_y_pt = anchor_pos_y + group_off_pt_y + local_y_pt;
+    // Annex L §L.4.7.4–§L.4.7.6: effective scale stays on its authored axis,
+    // rotations/flips compose separately, and the full hierarchy maps the
+    // child's original centre to determine translation.
+    let (width_pt, height_pt, local_x_pt, local_y_pt, rotation, flip_h, flip_v) =
+        if let Some(transform) = group_transform {
+            let mapped = apply_word_direct_group_rect(
+                transform,
+                DrawingRect {
+                    x: ox,
+                    y: oy,
+                    width: cx,
+                    height: cy,
+                    rotation_degrees: rotation,
+                    flip_h,
+                    flip_v,
+                },
+            );
+            (
+                mapped.width / 12700.0,
+                mapped.height / 12700.0,
+                mapped.x / 12700.0,
+                mapped.y / 12700.0,
+                mapped.rotation_degrees,
+                mapped.flip_h,
+                mapped.flip_v,
+            )
+        } else {
+            (
+                cx / 12700.0,
+                cy / 12700.0,
+                0.0,
+                0.0,
+                rotation,
+                flip_h,
+                flip_v,
+            )
+        };
+    let anchor_x_pt = anchor_pos_x + local_x_pt;
+    let anchor_y_pt = anchor_pos_y + local_y_pt;
 
     let cust_geom = sp_pr
         .children()
@@ -5312,18 +7896,21 @@ fn parse_wsp_shape(
 
     // Shape body text: <wps:txbx><w:txbxContent>...</w:txbxContent></wps:txbx>
     // and the bodyPr (insets / vertical anchor).
-    let (
-        text_blocks,
-        text_anchor,
-        text_autofit,
-        text_vert,
-        text_inset_l,
-        text_inset_t,
-        text_inset_r,
-        text_inset_b,
-    ) = parse_shape_text_body(style_map, num_map, wsp, theme, media_map);
+    let ShapeTextBody {
+        legacy_blocks: text_blocks,
+        content: text_box_content,
+        anchor: text_anchor,
+        autofit: text_autofit,
+        vert: text_vert,
+        inset_l: text_inset_l,
+        inset_t: text_inset_t,
+        inset_r: text_inset_r,
+        inset_b: text_inset_b,
+    } = parse_shape_text_body(
+        style_map, num_map, wsp, theme, media_map, chart_map, rel_map, depth,
+    );
 
-    Some(ShapeRun {
+    let mut shape = ShapeRun {
         width_pt,
         height_pt,
         anchor_x_pt,
@@ -5346,6 +7933,7 @@ fn parse_wsp_shape(
         flip_v,
         wrap_mode: anchor_meta.wrap_mode.clone(),
         text_blocks,
+        text_box_content,
         default_text_color,
         text_anchor,
         text_autofit,
@@ -5355,7 +7943,25 @@ fn parse_wsp_shape(
         text_inset_r,
         text_inset_b,
         ..Default::default()
-    })
+    };
+    if let Some(metadata) = group_metadata {
+        shape.anchor_acquisition = Some(AnchorAcquisitionWire {
+            group: Some(parse_anchor_group_wire(
+                metadata,
+                DrawingRect {
+                    x: local_x_pt * 12700.0,
+                    y: local_y_pt * 12700.0,
+                    width: width_pt * 12700.0,
+                    height: height_pt * 12700.0,
+                    rotation_degrees: rotation,
+                    flip_h,
+                    flip_v,
+                },
+            )),
+            ..Default::default()
+        });
+    }
+    Some(shape)
 }
 
 /// Parse the adjust handles from a `<a:prstGeom>`'s `<a:avLst>` into an
@@ -5413,23 +8019,195 @@ fn parse_preset_adj(prst_geom: roxmltree::Node) -> Vec<Option<f64>> {
     out
 }
 
-/// The `<wps:txbx>`/`<wps:bodyPr>` body parsed off a shape:
-/// `(blocks, anchor, autofit, vert, inset_l, inset_t, inset_r, inset_b)`.
-/// `vert` is the ECMA-376 §20.1.10.83 text-flow direction; the four insets are pt.
-type ShapeTextBody = (
-    Vec<ShapeText>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    f64,
-    f64,
-    f64,
-    f64,
-);
+/// The `<wps:txbx>`/`<wps:bodyPr>` body parsed off a shape. The complete
+/// `content` stream is parser-only; `legacy_blocks` remains the stable public
+/// paragraph projection until that API can be retired independently.
+#[derive(Debug)]
+struct ShapeTextBody {
+    legacy_blocks: Vec<ShapeText>,
+    content: Vec<TextBoxBlockWire>,
+    anchor: Option<String>,
+    autofit: Option<String>,
+    vert: Option<String>,
+    inset_l: f64,
+    inset_t: f64,
+    inset_r: f64,
+    inset_b: f64,
+}
 
-/// Extract text blocks and bodyPr from a wsp shape.
-/// Returns a `ShapeTextBody` =
-/// `(blocks, anchor, autofit, vert, inset_l, inset_t, inset_r, inset_b)`.
+fn text_box_qname(node: roxmltree::Node) -> String {
+    if is_w_ns(node.tag_name().namespace()) {
+        format!("w:{}", node.tag_name().name())
+    } else if let Some(namespace) = node.tag_name().namespace() {
+        format!("{{{namespace}}}{}", node.tag_name().name())
+    } else {
+        node.tag_name().name().to_string()
+    }
+}
+
+/// Flatten block SDTs while retaining an authored element-index path for every
+/// effective child. Other schema-permitted wrappers remain explicit unsupported
+/// markers until their visible-content semantics are implemented.
+fn text_box_block_nodes<'a, 'input>(
+    node: roxmltree::Node<'a, 'input>,
+) -> Vec<(roxmltree::Node<'a, 'input>, Vec<usize>)> {
+    fn collect<'a, 'input>(
+        node: roxmltree::Node<'a, 'input>,
+        parent_path: &[usize],
+        out: &mut Vec<(roxmltree::Node<'a, 'input>, Vec<usize>)>,
+    ) {
+        for (index, child) in node.children().filter(|node| node.is_element()).enumerate() {
+            let mut path = parent_path.to_vec();
+            path.push(index);
+            if is_w_ns(child.tag_name().namespace()) && child.tag_name().name() == "sdt" {
+                if let Some(content) = child_w(child, "sdtContent") {
+                    collect(content, &path, out);
+                } else {
+                    out.push((child, path));
+                }
+            } else {
+                out.push((child, path));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    collect(node, &[], &mut out);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_text_box_content(
+    content: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    depth: DepthGuard,
+) -> (Vec<TextBoxBlockWire>, Vec<ShapeText>) {
+    let nodes = text_box_block_nodes(content);
+    let sequence_nodes: Vec<_> = nodes.iter().map(|(node, _)| (*node, false)).collect();
+    let table_sequences = logical_table_sequence_contexts(
+        &sequence_nodes,
+        style_map,
+        TablePositioningContext::IgnoredStory,
+    );
+    let mut field = FieldState::default();
+    let mut wire = Vec::with_capacity(nodes.len());
+    let mut legacy = Vec::new();
+    // Acquisition of newly supported blocks must not change the still-active
+    // public textBlocks paint route or numbering after the shape. Parse the
+    // complete stream against an isolated story snapshot, while the live map
+    // advances only through the same direct paragraphs the pre-B2 projection
+    // visited. The complete wire still has one coherent internal sequence.
+    let mut content_num_map = num_map.clone();
+
+    for (node, source_path) in nodes {
+        match (node.tag_name().namespace(), node.tag_name().name()) {
+            (namespace, "p") if is_w_ns(namespace) => {
+                // Preserve the stable ShapeRun.textBlocks view exactly as the
+                // pre-B2 parser emitted it, including numbering across direct
+                // paragraphs while newly acquired tables remain invisible.
+                let paragraph = parse_paragraph_cond_at_depth(
+                    node,
+                    style_map,
+                    &mut content_num_map,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    None,
+                    None,
+                    &mut field,
+                    depth,
+                );
+                if let Some(block) =
+                    extract_simple_paragraph_text(style_map, num_map, node, theme, media_map)
+                {
+                    legacy.push(block);
+                }
+                wire.push(TextBoxBlockWire::Body(BodyElement::Paragraph(Box::new(
+                    paragraph,
+                ))));
+            }
+            (namespace, "tbl") if is_w_ns(namespace) => {
+                if let Some(table_depth) = depth.descend() {
+                    let table = parse_table(
+                        node,
+                        style_map,
+                        &mut content_num_map,
+                        media_map,
+                        chart_map,
+                        rel_map,
+                        theme,
+                        table_depth,
+                        TablePositioningContext::IgnoredStory,
+                        table_sequences
+                            .get(&node.id())
+                            .copied()
+                            .unwrap_or_else(|| LogicalTableSequenceContext::standalone(node)),
+                    );
+                    wire.push(TextBoxBlockWire::Body(BodyElement::Table(Box::new(table))));
+                } else {
+                    wire.push(TextBoxBlockWire::Unsupported {
+                        kind: "unsupportedTextBoxBlock".to_string(),
+                        q_name: text_box_qname(node),
+                        source_path,
+                    });
+                }
+            }
+            _ => wire.push(TextBoxBlockWire::Unsupported {
+                kind: "unsupportedTextBoxBlock".to_string(),
+                q_name: text_box_qname(node),
+                source_path,
+            }),
+        }
+    }
+
+    (wire, legacy)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_text_box_content_at_depth(
+    content: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    depth: DepthGuard,
+) -> (Vec<TextBoxBlockWire>, Vec<ShapeText>) {
+    if let Some(content_depth) = depth.descend() {
+        parse_text_box_content(
+            content,
+            style_map,
+            num_map,
+            media_map,
+            chart_map,
+            rel_map,
+            theme,
+            content_depth,
+        )
+    } else {
+        // Keep the authored container observable when the shared recursion
+        // budget is exhausted. Downstream layout can surface one deterministic
+        // diagnostic instead of mistaking a skipped subtree for an empty box.
+        (
+            vec![TextBoxBlockWire::Unsupported {
+                kind: "unsupportedTextBoxBlock".to_string(),
+                q_name: text_box_qname(content),
+                source_path: Vec::new(),
+            }],
+            Vec::new(),
+        )
+    }
+}
+
+/// Extract the complete text-box block wire, stable legacy text projection,
+/// and bodyPr settings from a wsp shape.
 ///
 /// Per ECMA-376 §21.1.2.1.1, lIns/tIns/rIns/bIns are the distance from
 /// the rendered (page-space) bounding-box edge to the text, measured in
@@ -5438,12 +8216,16 @@ type ShapeTextBody = (
 /// live in page space, so the inset is invariant to the group's sx/sy scale.
 /// Defaults follow §21.1.2.1.1: lIns=rIns=91440 EMU (0.1in = 7.2pt),
 /// tIns=bIns=45720 EMU (0.05in = 3.6pt).
+#[allow(clippy::too_many_arguments)]
 fn parse_shape_text_body(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     wsp: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    depth: DepthGuard,
 ) -> ShapeTextBody {
     let txbx = wsp
         .children()
@@ -5495,22 +8277,29 @@ fn parse_shape_text_body(
         .map(emu_to_pt)
         .unwrap_or(45720.0 / 12700.0);
 
-    let blocks: Vec<ShapeText> = txbx
-        .and_then(|t| {
-            t.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
-        })
+    let text_box_content = txbx.and_then(|t| {
+        t.children()
+            .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
+    });
+    let (content, legacy_blocks) = text_box_content
         .map(|content| {
-            children_w_flat(content, "p")
-                .into_iter()
-                .filter_map(|p| {
-                    extract_simple_paragraph_text(style_map, num_map, p, theme, media_map)
-                })
-                .collect()
+            parse_text_box_content_at_depth(
+                content, style_map, num_map, media_map, chart_map, rel_map, theme, depth,
+            )
         })
         .unwrap_or_default();
 
-    (blocks, anchor, autofit, vert, l, t, r, b)
+    ShapeTextBody {
+        legacy_blocks,
+        content,
+        anchor,
+        autofit,
+        vert,
+        inset_l: l,
+        inset_t: t,
+        inset_r: r,
+        inset_b: b,
+    }
 }
 
 /// Reduce a <w:p> inside <w:txbxContent> to a single ShapeText. Pulls
@@ -5570,13 +8359,16 @@ fn extract_simple_paragraph_text(
             .or_else(|| theme.default_east_asia_font_ref())
     };
 
-    let style_id = child_w(p, "pPr")
+    let ppr_node = child_w(p, "pPr");
+    let style_id = ppr_node
         .and_then(|ppr| child_w(ppr, "pStyle"))
         .and_then(|s| attr_w(s, "val"));
     // ECMA-376 §17.7.2 — resolve the paragraph style chain once. The
     // paragraph half feeds layout below; the run half is the docDefaults +
     // paragraph-style rPr baseline for every run in this paragraph.
     let (style_para, base_run) = style_map.resolve_para(style_id.as_deref(), None);
+    let paragraph_style = style_map.resolve_paragraph_style_layer(style_id.as_deref());
+    let direct_numbering = ppr_node.and_then(|ppr| child_w(ppr, "numPr")).is_some();
     let resolve_run_fmt = |rpr_node: Option<roxmltree::Node>| -> RunFmt {
         let mut fmt = base_run.clone();
         if let Some(rpr) = rpr_node {
@@ -5639,18 +8431,33 @@ fn extract_simple_paragraph_text(
                 let Some(rb) = child_w(ruby_node, "rubyBase") else {
                     continue;
                 };
+                // Walk the rubyBase runs IN DOCUMENT ORDER, emitting `<w:t>` text
+                // and a horizontal tab for each `<w:tab>` (§17.3.3.32). Previously
+                // this scanned only `<w:t>`, so an in-base `<w:tab/>` collapsed to
+                // nothing (issue #1012). Word GT (`sample-59.pdf`) honors the tab
+                // as a real tab, so the base is split at tabs below — parity with
+                // the body path (`parse_run_inner`), which emits Text|Tab|Text.
+                // Match by WordprocessingML NAMESPACE (not bare local name) so an
+                // embedded graphic's DrawingML `<a:tab>`/`<a:t>` cannot leak in,
+                // mirroring the non-ruby shape run walk above.
                 let mut base_text = String::new();
                 let mut base_fmt: Option<RunFmt> = None;
                 for rb_run in rb
                     .children()
                     .filter(|n| n.is_element() && n.tag_name().name() == "r")
                 {
-                    for t in rb_run
+                    for n in rb_run
                         .descendants()
-                        .filter(|n| n.is_element() && n.tag_name().name() == "t")
+                        .filter(|n| n.is_element() && is_w_ns(n.tag_name().namespace()))
                     {
-                        if let Some(text_node) = t.text() {
-                            base_text.push_str(text_node);
+                        match n.tag_name().name() {
+                            "t" => {
+                                if let Some(text_node) = n.text() {
+                                    base_text.push_str(text_node);
+                                }
+                            }
+                            "tab" => base_text.push('\t'),
+                            _ => {}
                         }
                     }
                     if base_fmt.is_none() {
@@ -5670,23 +8477,66 @@ fn extract_simple_paragraph_text(
                         .and_then(|v| v.parse::<f64>().ok())
                         .map(|hp| hp / 2.0)
                         .unwrap_or_else(|| fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE) / 2.0);
+                    let hps_raise_pt = child_w(ruby_node, "rubyPr")
+                        .and_then(|rp| child_w(rp, "hpsRaise"))
+                        .and_then(|hps_raise| attr_w(hps_raise, "val"))
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .map(|hp| hp / 2.0);
                     Some(RubyAnnotation {
                         text: rt_text,
                         font_size_pt,
+                        hps_raise_pt,
+                        typography: None,
                     })
                 };
-                out.push((base_text, fmt, ruby));
+                // §17.3.3.25 + §17.3.3.32 — split the base at tabs so the shared
+                // line engine resolves each `\t` against the paragraph tab stops
+                // (§17.3.1.37), exactly as the body path does. The ruby annotation
+                // rides the FIRST EMITTED piece only: the body path
+                // (`parse_run_inner`) attaches it to the first `DocRun::Text` — and
+                // its `<w:tab/>` is itself a `Text("\t")` run — so a base that opens
+                // with a tab attaches ruby to that tab run there too. Mirror that
+                // exactly (`ruby_slot.take()` on whichever piece is emitted first,
+                // text or tab) so the two paths never diverge. With no tab this is a
+                // single run, so the common `漢字` case is unchanged.
+                let mut ruby_slot = ruby;
+                let parts: Vec<&str> = base_text.split('\t').collect();
+                for (i, part) in parts.iter().enumerate() {
+                    if !part.is_empty() {
+                        out.push((part.to_string(), fmt.clone(), ruby_slot.take()));
+                    }
+                    if i + 1 < parts.len() {
+                        out.push(("\t".to_string(), fmt.clone(), ruby_slot.take()));
+                    }
+                }
             }
             return out;
         }
 
         let mut run_text = String::new();
-        for t in r
+        // Walk the run's descendants IN DOCUMENT ORDER, emitting `<w:t>` text and a
+        // horizontal tab for each `<w:tab>` (§17.3.3.32). The body path emits the
+        // same `\t` for its run-content `w:tab` (~parser.rs:3401); the shape path
+        // previously scanned only `<w:t>`, so a text-box `<w:tab/>` collapsed to
+        // nothing and tabbed layouts (sample-32's course grid:
+        // "Course<tab><tab>(0.5)<tab>□") lost their column alignment. The `\t`
+        // reaches the SAME line engine, which resolves it against the paragraph's
+        // tab stops + the default-tab grid (`effState.defaultTabPt`, §17.15.1.25).
+        // Match by WordprocessingML NAMESPACE, not bare local name: an embedded
+        // graphic under the same `<w:r>` can carry DrawingML `<a:tab>`/`<a:t>`,
+        // which are NOT run content and must not leak into the paragraph text.
+        for n in r
             .descendants()
-            .filter(|n| n.is_element() && n.tag_name().name() == "t")
+            .filter(|n| n.is_element() && is_w_ns(n.tag_name().namespace()))
         {
-            if let Some(text_node) = t.text() {
-                run_text.push_str(text_node);
+            match n.tag_name().name() {
+                "t" => {
+                    if let Some(text_node) = n.text() {
+                        run_text.push_str(text_node);
+                    }
+                }
+                "tab" => run_text.push('\t'),
+                _ => {}
             }
         }
         let fmt = resolve_run_fmt(child_w(r, "rPr"));
@@ -5771,7 +8621,7 @@ fn extract_simple_paragraph_text(
     // as the docx BODY renderer does (Word honors a signed hanging first-line
     // list-independently), unlike the pptx/xlsx shape paths which clamp because
     // they have no list marker to hang.
-    let direct_ind = child_w(p, "pPr").map(parse_para_fmt).unwrap_or_default();
+    let direct_ind = ppr_node.map(parse_para_fmt).unwrap_or_default();
     let numbering = direct_ind.num_id.or(style_para.num_id).and_then(|num_id| {
         if num_id == 0 {
             return None;
@@ -5786,6 +8636,7 @@ fn extract_simple_paragraph_text(
             lvl_jc,
             marker_ascii,
             marker_ea,
+            marker_font_facts,
             marker_color,
             marker_color_auto,
             pic_bullet,
@@ -5794,6 +8645,7 @@ fn extract_simple_paragraph_text(
             .map(|l| {
                 let mut marker_fmt = first_fmt.clone();
                 apply_direct_run(&mut marker_fmt, &l.rpr);
+                let marker_font_facts = resolved_run_font_facts(&marker_fmt, theme);
                 (
                     l.format.clone(),
                     l.indent_left,
@@ -5802,6 +8654,7 @@ fn extract_simple_paragraph_text(
                     l.lvl_jc.clone(),
                     theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
                     theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
+                    Some(marker_font_facts),
                     l.rpr.color.clone(),
                     l.rpr.color_auto,
                     l.pic_bullet.clone(),
@@ -5816,6 +8669,7 @@ fn extract_simple_paragraph_text(
                     "left".to_string(),
                     theme.resolve_font_ref(first_fmt.font_family_ascii.clone()),
                     theme.resolve_font_ref(first_fmt.font_family_east_asia.clone()),
+                    Some(resolved_run_font_facts(&first_fmt, theme)),
                     None,
                     false,
                     None,
@@ -5848,6 +8702,7 @@ fn extract_simple_paragraph_text(
             jc: lvl_jc,
             font_family: marker_ascii,
             font_family_east_asia: marker_ea,
+            font_facts: marker_font_facts,
             color: marker_color,
             color_auto: marker_color_auto,
             pic_bullet_image_path,
@@ -5859,10 +8714,13 @@ fn extract_simple_paragraph_text(
     let level = numbering
         .as_ref()
         .and_then(|num| num_map.get_level(num.num_id, num.level));
-    let (indent_left, indent_first) = if let Some(l) = level {
-        (
-            direct_ind.indent_left.unwrap_or(l.indent_left),
-            direct_ind.indent_first.unwrap_or(l.indent_first),
+    let (indent_left, indent_first, indent_right) = if let Some(l) = level {
+        resolve_numbered_indent_axes(
+            &direct_ind,
+            &paragraph_style,
+            &style_para,
+            l,
+            direct_numbering,
         )
     } else {
         (
@@ -5874,13 +8732,12 @@ fn extract_simple_paragraph_text(
                 .indent_first
                 .or(style_para.indent_first)
                 .unwrap_or(0.0),
+            direct_ind
+                .indent_right
+                .or(style_para.indent_right)
+                .unwrap_or(0.0),
         )
     };
-    let indent_right = direct_ind
-        .indent_right
-        .or_else(|| level.and_then(|l| l.indent_right))
-        .or(style_para.indent_right)
-        .unwrap_or(0.0);
 
     // ECMA-376 §17.3.1.33 — the txbxContent paragraph's own `<w:spacing>` is
     // reserved INSIDE the text box (twips → pt). Word offsets the text down by
@@ -5910,6 +8767,29 @@ fn extract_simple_paragraph_text(
         .line_spacing_rule
         .clone()
         .or_else(|| style_para.line_spacing_rule.clone());
+
+    // ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — resolved with the SAME
+    // §17.7.2 precedence as the spacing above (direct `<w:pPr>` via `direct_ind`
+    // wins, else the style-chain-resolved `style_para`, which folds in the
+    // paragraph style + docDefaults). Paired with the resolved paragraph style id
+    // so the renderer can drop the inter-paragraph gap between two adjacent
+    // same-style paragraphs that both set the toggle — the identical rule the body
+    // path applies (`contextual_spacing`/`style_id`; renderer `contextualSuppressed`).
+    // Without this a `<w:contextualSpacing/>` ListParagraph list inside a fixed box
+    // kept the docDefault `after=160` (8 pt) gap that inflated its line pitch and
+    // clipped the trailing line (sample-32).
+    let contextual_spacing = direct_ind
+        .contextual_spacing
+        .or(style_para.contextual_spacing)
+        .unwrap_or(false);
+    // Expose the SAME stable style id the body path stamps (parser.rs ~2578):
+    // the explicit `<w:pStyle>`, else the document default paragraph style
+    // (locale ids like "a"/"標準"), else "Normal", so grouping survives templates
+    // that never name the default style explicitly.
+    let resolved_style_id = style_id
+        .clone()
+        .or_else(|| style_map.default_para_style_id().map(str::to_string))
+        .or_else(|| Some("Normal".to_string()));
 
     // ECMA-376 §17.3.1.37 tab stops and §17.3.1.6 bidi — resolved with the SAME
     // §17.7.2 precedence as the indent/spacing above (direct `<w:pPr>` via
@@ -5983,6 +8863,8 @@ fn extract_simple_paragraph_text(
         indent_first,
         tab_stops,
         bidi,
+        contextual_spacing,
+        style_id: resolved_style_id,
         image_path,
         mime_type,
         svg_image_path,
@@ -6044,80 +8926,127 @@ fn omml_operator_takes_spacing(text: &str) -> bool {
 /// an imagedata shape never reaches here — this path only builds fill/stroke/
 /// text-box panels. The OLE-object case (`<w:object>` with a VML preview) is
 /// handled separately; see `parse_object_ole_image`.
+#[allow(clippy::too_many_arguments)]
 fn parse_vml_pict(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     pict: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    depth: DepthGuard,
 ) -> Option<ShapeRun> {
-    // v:shape / v:rect / v:roundrect — any VML shape element with geometry. A
+    // v:shape / v:rect / v:roundrect / v:line — any VML shape element with geometry. A
     // shape whose payload is a `<v:imagedata>` is a PICTURE, not a text/fill
     // panel (it is drawn by parse_vml_pict_image, or intentionally skipped when
     // its image can't be resolved); such a shape must not be turned into an
     // empty rectangle here, so it is excluded from the candidate set.
     let shape = pict.descendants().find(|n| {
         n.is_element()
-            && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
+            && matches!(
+                n.tag_name().name(),
+                "shape" | "rect" | "roundrect" | "oval" | "line"
+            )
             && !n
                 .children()
                 .any(|c| c.is_element() && c.tag_name().name() == "imagedata")
     })?;
 
-    // CSS-like `style`: "position:relative;width:300pt;height:60pt;…"
+    // CSS-like `style`: "position:relative;width:300pt;height:60pt;…".
+    // A referenced shapetype carries the legacy conceptual shape id (`o:spt`);
+    // map the interoperable subset onto the shared DrawingML preset engine.
     let style = shape.attribute("style").unwrap_or("");
-    let width_pt = vml_css_length_pt(style, "width").unwrap_or(0.0);
-    let height_pt = vml_css_length_pt(style, "height").unwrap_or(0.0);
-    if width_pt <= 0.0 || height_pt <= 0.0 {
+    let shape_type = shape
+        .attribute("type")
+        .map(|value| value.trim_start_matches('#'))
+        .and_then(|id| {
+            pict.descendants().find(|node| {
+                node.is_element()
+                    && node.tag_name().name() == "shapetype"
+                    && node.attribute("id") == Some(id)
+            })
+        });
+    let spt = shape
+        .attributes()
+        .find(|attr| attr.name() == "spt")
+        .or_else(|| shape_type.and_then(|node| node.attributes().find(|attr| attr.name() == "spt")))
+        .and_then(|attr| attr.value().parse::<u16>().ok());
+    let preset_geometry = match shape.tag_name().name() {
+        "line" => Some("line".to_string()),
+        "rect" => Some("rect".to_string()),
+        "roundrect" => Some("roundRect".to_string()),
+        "oval" => Some("ellipse".to_string()),
+        _ => Some(
+            spt.and_then(vml_shape_type_preset)
+                .unwrap_or("rect")
+                .to_string(),
+        ),
+    };
+    let is_line_geometry = preset_geometry.as_deref().is_some_and(|preset| {
+        let preset = preset.to_ascii_lowercase();
+        preset == "line" || preset.contains("connector")
+    });
+
+    let line_points = if shape.tag_name().name() == "line" {
+        match (
+            shape.attribute("from").and_then(parse_vml_point_pt),
+            shape.attribute("to").and_then(parse_vml_point_pt),
+        ) {
+            (Some(from), Some(to)) => Some((from, to)),
+            _ => return None,
+        }
+    } else {
+        None
+    };
+    let (width_pt, height_pt) = if let Some((from, to)) = line_points {
+        ((to.0 - from.0).abs(), (to.1 - from.1).abs())
+    } else {
+        (
+            vml_css_length_pt(style, "width").unwrap_or(0.0),
+            vml_css_length_pt(style, "height").unwrap_or(0.0),
+        )
+    };
+    if width_pt < 0.0
+        || height_pt < 0.0
+        || (is_line_geometry && width_pt == 0.0 && height_pt == 0.0)
+        || (!is_line_geometry && (width_pt == 0.0 || height_pt == 0.0))
+    {
         return None;
     }
 
-    // VML colors: `fillcolor` / `strokecolor` are "#rrggbb" or a named color; we
-    // keep the 6-hex form the renderer expects (no leading '#').
-    let fill = shape
-        .attribute("fillcolor")
-        .and_then(vml_color_hex6)
-        .map(|color| ShapeFill::Solid { color });
-    // `stroked="f"` (or "false") disables the stroke regardless of strokecolor
-    // (§19.1.2 shape stroked attribute). Otherwise a strokecolor implies a
-    // stroke; VML's default weight is 0.75pt (Part 4 §19.1.2.21 strokeweight).
-    let stroked_off = shape
-        .attribute("stroked")
-        .is_some_and(|v| matches!(v.trim(), "f" | "false" | "0"));
-    let stroke = if stroked_off {
-        None
-    } else {
-        shape.attribute("strokecolor").and_then(vml_color_hex6)
-    };
-    let stroke_width = if stroke.is_some() {
-        shape
-            .descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == "stroke")
-            .and_then(|n| n.attribute("weight"))
-            .and_then(|w| w.trim_end_matches("pt").trim().parse::<f64>().ok())
-            .or_else(|| {
-                shape
-                    .attribute("strokeweight")
-                    .and_then(|w| w.trim_end_matches("pt").trim().parse::<f64>().ok())
-            })
-            .unwrap_or(0.75)
-    } else {
-        0.0
-    };
+    let resolved_fill = resolve_vml_fill(shape, shape_type);
+    let resolved_stroke = resolve_vml_stroke(shape, shape_type);
 
     // ECMA-376 Part 4 §19.1.2.5 `<v:fill opacity>` — fill alpha (default opaque).
-    let fill_opacity = shape
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "fill")
-        .and_then(|f| f.attribute("opacity"))
-        .and_then(parse_vml_opacity);
+    let fill_opacity = resolved_fill.opacity;
 
-    // §19.1.2.23 `<v:textpath>` — WordArt text (a watermark). When present this
-    // shape draws stretched rotated text instead of a fill/stroke panel + body.
-    let text_path = shape
+    // §19.1.2.23 `<v:textpath>` — preserve WordArt text plus the resolved
+    // CT_Path / CT_TextPath controls. `textpathok` and `on` decide whether the
+    // path text is enabled; `fitshape` / `fitpath` decide fitting downstream.
+    let text_path_node = shape
         .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "textpath")
-        .and_then(parse_vml_textpath);
+        .find(|n| n.is_element() && n.tag_name().name() == "textpath");
+    let inherited_text_path_node = shape_type.and_then(|node| {
+        node.children()
+            .find(|child| child.is_element() && child.tag_name().name() == "textpath")
+    });
+    let text_path_ok = shape
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "path")
+        .and_then(|node| node.attribute("textpathok"))
+        .and_then(parse_vml_true_false)
+        .or_else(|| {
+            shape_type
+                .and_then(|node| {
+                    node.children()
+                        .find(|child| child.is_element() && child.tag_name().name() == "path")
+                })
+                .and_then(|node| node.attribute("textpathok"))
+                .and_then(parse_vml_true_false)
+        });
+    let text_path = text_path_node
+        .and_then(|node| parse_vml_textpath(node, inherited_text_path_node, text_path_ok));
 
     // §19.1.2.19 style `rotation` — degrees clockwise (default 0).
     let rotation = vml_css_length_pt(style, "rotation").unwrap_or(0.0);
@@ -6140,45 +9069,102 @@ fn parse_vml_pict(
     };
     let anchor_x_align = vml_css_str(style, "mso-position-horizontal").and_then(map_align);
     let anchor_y_align = vml_css_str(style, "mso-position-vertical").and_then(map_valign);
-    // `text` and `char`/`line` relative-froms map to paragraph-relative flow; we
-    // only forward the page/margin containers the watermark cares about.
-    let map_rel = |v: &str| match v {
+    // VML's `text` base is the containing text column horizontally (including a
+    // table cell's inner text box) and the anchor paragraph vertically. Carry
+    // those explicit containers instead of degrading them to the page margins.
+    let map_x_rel = |v: &str| match v {
         "margin" => Some("margin".to_string()),
         "page" => Some("page".to_string()),
+        "text" => Some("column".to_string()),
+        "char" => Some("character".to_string()),
+        _ => None,
+    };
+    let map_y_rel = |v: &str| match v {
+        "margin" => Some("margin".to_string()),
+        "page" => Some("page".to_string()),
+        "text" => Some("paragraph".to_string()),
+        "line" => Some("line".to_string()),
         _ => None,
     };
     let anchor_x_relative_from =
-        vml_css_str(style, "mso-position-horizontal-relative").and_then(map_rel);
+        vml_css_str(style, "mso-position-horizontal-relative").and_then(map_x_rel);
     let anchor_y_relative_from =
-        vml_css_str(style, "mso-position-vertical-relative").and_then(map_rel);
+        vml_css_str(style, "mso-position-vertical-relative").and_then(map_y_rel);
 
     // §19.1.2.19 style `z-index` — a negative value places the shape BEHIND the
     // document text (a watermark), matching wp:anchor behindDoc semantics.
     let behind_doc = vml_css_length_pt(style, "z-index").is_some_and(|z| z < 0.0);
 
-    // Body text from <v:textbox><w:txbxContent> (none for a textpath watermark).
-    let text_blocks: Vec<ShapeText> = if text_path.is_some() {
+    // Body blocks from <v:textbox><w:txbxContent>. VML and WPS share the same
+    // CT_TxbxContent parser/wire; textPath still suppresses only the legacy
+    // body-text paint projection, not preservation of authored content.
+    let text_box_content_node = shape
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "txbxContent");
+    let (text_box_content, parsed_legacy_blocks) = match text_box_content_node {
+        Some(content) if text_path.is_some() => {
+            // Before B2, a VML textPath suppressed txbxContent before parsing,
+            // so its paragraphs did not advance document numbering. Preserve
+            // that visible behavior while still acquiring the complete wire.
+            let mut suppressed_num_map = num_map.clone();
+            parse_text_box_content_at_depth(
+                content,
+                style_map,
+                &mut suppressed_num_map,
+                media_map,
+                chart_map,
+                rel_map,
+                theme,
+                depth,
+            )
+        }
+        Some(content) => parse_text_box_content_at_depth(
+            content, style_map, num_map, media_map, chart_map, rel_map, theme, depth,
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
+    let text_blocks = if text_path.is_some() {
         Vec::new()
     } else {
-        shape
-            .descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
-            .map(|content| {
-                children_w_flat(content, "p")
-                    .into_iter()
-                    .filter_map(|p| {
-                        extract_simple_paragraph_text(style_map, num_map, p, theme, media_map)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        parsed_legacy_blocks
     };
+
+    // §19.1.2.19: Word's absolute VML text boxes encode their numeric
+    // position in margin-left / margin-top even when `left:0` is also present.
+    // Preserve those authored offsets instead of collapsing every box to the
+    // anchor paragraph's leading corner.
+    let anchor_x_pt = line_points
+        .map(|(from, to)| from.0.min(to.0))
+        .unwrap_or_else(|| {
+            vml_css_length_pt(style, "margin-left")
+                .or_else(|| vml_css_length_pt(style, "left"))
+                .unwrap_or(0.0)
+        });
+    let anchor_y_pt = line_points
+        .map(|(from, to)| from.1.min(to.1))
+        .unwrap_or_else(|| {
+            vml_css_length_pt(style, "margin-top")
+                .or_else(|| vml_css_length_pt(style, "top"))
+                .unwrap_or(0.0)
+        });
+    let style_flip = vml_css_str(style, "flip").unwrap_or_default();
+    let flip_h = line_points.is_some_and(|(from, to)| from.0 > to.0)
+        ^ style_flip.split_whitespace().any(|axis| axis == "x");
+    let flip_v = line_points.is_some_and(|(from, to)| from.1 > to.1)
+        ^ style_flip.split_whitespace().any(|axis| axis == "y");
+    let adj_values = shape
+        .attribute("adj")
+        .or_else(|| shape_type.and_then(|node| node.attribute("adj")))
+        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .map(|value| vec![Some(value * 100000.0 / 21600.0)])
+        .unwrap_or_default();
 
     Some(ShapeRun {
         width_pt,
         height_pt,
-        anchor_x_pt: 0.0,
-        anchor_y_pt: 0.0,
+        anchor_x_pt,
+        anchor_y_pt,
         anchor_x_from_margin: true,
         anchor_y_from_para: !behind_doc,
         anchor_x_align,
@@ -6188,16 +9174,23 @@ fn parse_vml_pict(
         behind_doc,
         z_order: 0,
         subpaths: Vec::new(),
-        preset_geometry: Some("rect".to_string()),
-        adj_values: Vec::new(),
-        fill,
+        preset_geometry,
+        adj_values,
+        fill: resolved_fill.fill,
         fill_opacity,
-        stroke,
-        stroke_width,
+        stroke: resolved_stroke.color,
+        stroke_width: resolved_stroke.width_pt,
+        stroke_dash: resolved_stroke.dash,
+        stroke_cap: resolved_stroke.cap,
+        head_end: resolved_stroke.head_end,
+        tail_end: resolved_stroke.tail_end,
         rotation,
+        flip_h,
+        flip_v,
         text_path,
         // VML t202 text-box default insets are the OOXML defaults (§21.1.2.1.1).
         text_blocks,
+        text_box_content,
         text_anchor: None,
         text_inset_l: 91440.0 / 12700.0,
         text_inset_t: 45720.0 / 12700.0,
@@ -6207,11 +9200,330 @@ fn parse_vml_pict(
     })
 }
 
+/// Map legacy VML conceptual shape ids ([MS-OE376] §3.9.5) onto the equivalent
+/// DrawingML preset names consumed by the shared DOCX/PPTX geometry engine.
+fn vml_shape_type_preset(spt: u16) -> Option<&'static str> {
+    match spt {
+        1 => Some("rect"),
+        2 => Some("roundRect"),
+        3 => Some("ellipse"),
+        20 => Some("line"),
+        32 => Some("straightConnector1"),
+        85 => Some("leftBracket"),
+        86 => Some("rightBracket"),
+        87 => Some("leftBrace"),
+        88 => Some("rightBrace"),
+        185 => Some("bracketPair"),
+        186 => Some("bracePair"),
+        202 => Some("rect"),
+        _ => None,
+    }
+}
+
+fn vml_direct_child<'a, 'input>(
+    node: roxmltree::Node<'a, 'input>,
+    local_name: &str,
+) -> Option<roxmltree::Node<'a, 'input>> {
+    node.children()
+        .find(|child| child.is_element() && child.tag_name().name() == local_name)
+}
+
+struct ResolvedVmlStroke {
+    color: Option<String>,
+    width_pt: f64,
+    dash: Option<String>,
+    cap: Option<String>,
+    head_end: Option<LineEnd>,
+    tail_end: Option<LineEnd>,
+}
+
+struct ResolvedVmlFill {
+    fill: Option<ShapeFill>,
+    opacity: Option<f64>,
+}
+
+/// Resolve the Part 4 §19.1.2.5/§19.1.2.19 fill cascade. Instance properties
+/// override the referenced shapetype; within either layer `<v:fill>` overrides
+/// the element attributes. An enabled fill defaults to white.
+fn resolve_vml_fill(
+    shape: roxmltree::Node,
+    shape_type: Option<roxmltree::Node>,
+) -> ResolvedVmlFill {
+    let shape_fill = vml_direct_child(shape, "fill");
+    let type_fill = shape_type.and_then(|node| vml_direct_child(node, "fill"));
+    let type_enabled = type_fill
+        .and_then(|node| node.attribute("on"))
+        .and_then(parse_vml_true_false)
+        .or_else(|| {
+            shape_type
+                .and_then(|node| node.attribute("filled"))
+                .and_then(parse_vml_true_false)
+        })
+        .unwrap_or(true);
+    let enabled = shape_fill
+        .and_then(|node| node.attribute("on"))
+        .and_then(parse_vml_true_false)
+        .or_else(|| shape.attribute("filled").and_then(parse_vml_true_false))
+        .unwrap_or(type_enabled);
+    let fill = enabled.then(|| {
+        let color = shape_fill
+            .and_then(|node| node.attribute("color"))
+            .and_then(vml_color_hex6)
+            .or_else(|| shape.attribute("fillcolor").and_then(vml_color_hex6))
+            .or_else(|| {
+                type_fill
+                    .and_then(|node| node.attribute("color"))
+                    .and_then(vml_color_hex6)
+            })
+            .or_else(|| {
+                shape_type
+                    .and_then(|node| node.attribute("fillcolor"))
+                    .and_then(vml_color_hex6)
+            })
+            .unwrap_or_else(|| "FFFFFF".to_string());
+        ShapeFill::Solid { color }
+    });
+    let opacity = enabled
+        .then(|| {
+            shape_fill
+                .and_then(|node| node.attribute("opacity"))
+                .or_else(|| type_fill.and_then(|node| node.attribute("opacity")))
+                .and_then(parse_vml_opacity)
+        })
+        .flatten();
+    ResolvedVmlFill { fill, opacity }
+}
+
+/// Resolve the Part 4 §19.1.2.19/§19.1.2.21 stroke cascade as one cohesive
+/// value. Instance properties override the referenced shapetype; within either
+/// layer a direct `<v:stroke>` child overrides the element attributes.
+fn resolve_vml_stroke(
+    shape: roxmltree::Node,
+    shape_type: Option<roxmltree::Node>,
+) -> ResolvedVmlStroke {
+    let shape_stroke = vml_direct_child(shape, "stroke");
+    let type_stroke = shape_type.and_then(|node| vml_direct_child(node, "stroke"));
+    let type_enabled = type_stroke
+        .and_then(|node| node.attribute("on"))
+        .and_then(parse_vml_true_false)
+        .or_else(|| {
+            shape_type
+                .and_then(|node| node.attribute("stroked"))
+                .and_then(parse_vml_true_false)
+        })
+        .unwrap_or(true);
+    let enabled = shape_stroke
+        .and_then(|node| node.attribute("on"))
+        .and_then(parse_vml_true_false)
+        .or_else(|| shape.attribute("stroked").and_then(parse_vml_true_false))
+        .unwrap_or(type_enabled);
+
+    let color = enabled.then(|| {
+        shape_stroke
+            .and_then(|node| node.attribute("color"))
+            .and_then(vml_color_hex6)
+            .or_else(|| shape.attribute("strokecolor").and_then(vml_color_hex6))
+            .or_else(|| {
+                type_stroke
+                    .and_then(|node| node.attribute("color"))
+                    .and_then(vml_color_hex6)
+            })
+            .or_else(|| {
+                shape_type
+                    .and_then(|node| node.attribute("strokecolor"))
+                    .and_then(vml_color_hex6)
+            })
+            .unwrap_or_else(|| "000000".to_string())
+    });
+    let width_pt = if enabled {
+        shape_stroke
+            .and_then(|node| node.attribute("weight"))
+            .and_then(parse_vml_stroke_weight_pt)
+            .or_else(|| {
+                shape
+                    .attribute("strokeweight")
+                    .and_then(parse_vml_stroke_weight_pt)
+            })
+            .or_else(|| {
+                type_stroke
+                    .and_then(|node| node.attribute("weight"))
+                    .and_then(parse_vml_stroke_weight_pt)
+            })
+            .or_else(|| {
+                shape_type
+                    .and_then(|node| node.attribute("strokeweight"))
+                    .and_then(parse_vml_stroke_weight_pt)
+            })
+            .unwrap_or(1.0)
+    } else {
+        0.0
+    };
+    let dash = enabled
+        .then(|| {
+            shape_stroke
+                .and_then(|node| node.attribute("dashstyle"))
+                .or_else(|| type_stroke.and_then(|node| node.attribute("dashstyle")))
+                .and_then(normalize_vml_dashstyle)
+        })
+        .flatten();
+    let cap = enabled
+        .then(|| {
+            shape_stroke
+                .and_then(|node| node.attribute("endcap"))
+                .or_else(|| type_stroke.and_then(|node| node.attribute("endcap")))
+                .and_then(|value| match value.to_ascii_lowercase().as_str() {
+                    "round" => Some("round".to_string()),
+                    "square" => Some("square".to_string()),
+                    "flat" => Some("butt".to_string()),
+                    _ => None,
+                })
+        })
+        .flatten();
+    let head_end = shape_stroke
+        .filter(|node| node.attribute("startarrow").is_some())
+        .or_else(|| type_stroke.filter(|node| node.attribute("startarrow").is_some()))
+        .and_then(|node| {
+            parse_vml_line_end(node, "startarrow", "startarrowwidth", "startarrowlength")
+        });
+    let tail_end = shape_stroke
+        .filter(|node| node.attribute("endarrow").is_some())
+        .or_else(|| type_stroke.filter(|node| node.attribute("endarrow").is_some()))
+        .and_then(|node| parse_vml_line_end(node, "endarrow", "endarrowwidth", "endarrowlength"));
+
+    ResolvedVmlStroke {
+        color,
+        width_pt,
+        dash,
+        cap,
+        head_end,
+        tail_end,
+    }
+}
+
+/// VML ST_TrueFalse accepts the long, short, and numeric spellings.
+fn parse_vml_true_false(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "t" | "true" | "1" => Some(true),
+        "f" | "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Part 4 §19.1.2.19 `strokeweight`: explicit CSS units convert normally, but
+/// a bare number is EMU (not points). The caller supplies the specified 1pt
+/// default when no valid value is present.
+fn parse_vml_stroke_weight_pt(raw: &str) -> Option<f64> {
+    let value = raw.trim().to_ascii_lowercase();
+    let has_unit = ["pt", "in", "cm", "mm", "pc", "px"]
+        .iter()
+        .any(|unit| value.ends_with(unit));
+    if has_unit {
+        parse_vml_length_pt(&value)
+    } else {
+        value.parse::<f64>().ok().map(|emu| emu / 12700.0)
+    }
+}
+
+/// Normalize Part 4 §19.1.2.21 VML symbolic dash names onto the shared
+/// DrawingML preset vocabulary. Numeric custom patterns remain textual and are
+/// interpreted by core's shape-stroke resolver, which applies the Part 4
+/// pair/discard grammar.
+fn normalize_vml_dashstyle(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("solid") {
+        return None;
+    }
+    let preset = match value.to_ascii_lowercase().as_str() {
+        "shortdash" => "sysDash",
+        "shortdot" => "sysDot",
+        "shortdashdot" => "sysDashDot",
+        "shortdashdotdot" => "sysDashDotDot",
+        "dot" => "dot",
+        "dash" => "dash",
+        "longdash" => "lgDash",
+        "dashdot" => "dashDot",
+        "longdashdot" => "lgDashDot",
+        "longdashdotdot" => "lgDashDotDot",
+        _ => return Some(value.to_string()),
+    };
+    Some(preset.to_string())
+}
+
+/// Convert one VML length to points. VML coordinates commonly use points and
+/// inches in the same document (`from="…pt"`, `to="6in"`), while a bare number
+/// in a WordprocessingML `<w:pict>` is interpreted as points.
+fn parse_vml_length_pt(value: &str) -> Option<f64> {
+    let value = value.trim().to_ascii_lowercase();
+    let (number, scale) = if let Some(number) = value.strip_suffix("pt") {
+        (number, 1.0)
+    } else if let Some(number) = value.strip_suffix("in") {
+        (number, 72.0)
+    } else if let Some(number) = value.strip_suffix("cm") {
+        (number, 72.0 / 2.54)
+    } else if let Some(number) = value.strip_suffix("mm") {
+        (number, 72.0 / 25.4)
+    } else if let Some(number) = value.strip_suffix("pc") {
+        (number, 12.0)
+    } else if let Some(number) = value.strip_suffix("px") {
+        (number, 72.0 / 96.0)
+    } else {
+        (value.as_str(), 1.0)
+    };
+    number.trim().parse::<f64>().ok().map(|n| n * scale)
+}
+
+/// Parse VML's `x,y` point-pair grammar used by `<v:line from/to>`.
+fn parse_vml_point_pt(value: &str) -> Option<(f64, f64)> {
+    let mut parts = value.split(',');
+    let x = parse_vml_length_pt(parts.next()?)?;
+    let y = parse_vml_length_pt(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((x, y))
+}
+
+/// Convert VML `<v:stroke startarrow/endarrow>` to the DrawingML-compatible
+/// line-end contract used by the shared renderer.
+fn parse_vml_line_end(
+    stroke: roxmltree::Node,
+    type_attr: &str,
+    width_attr: &str,
+    length_attr: &str,
+) -> Option<LineEnd> {
+    let r#type = match stroke
+        .attribute(type_attr)?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "none" => return None,
+        "block" => "triangle",
+        "classic" => "stealth",
+        "diamond" => "diamond",
+        "oval" => "oval",
+        "open" => "arrow",
+        _ => return None,
+    };
+    let w = match stroke.attribute(width_attr).unwrap_or("medium").trim() {
+        "narrow" | "sm" => "sm",
+        "wide" | "lg" => "lg",
+        _ => "med",
+    };
+    let len = match stroke.attribute(length_attr).unwrap_or("medium").trim() {
+        "short" | "sm" => "sm",
+        "long" | "lg" => "lg",
+        _ => "med",
+    };
+    Some(LineEnd {
+        r#type: r#type.to_string(),
+        w: w.to_string(),
+        len: len.to_string(),
+    })
+}
+
 /// Read a length from a VML CSS `style` string (ECMA-376 Part 4 §19.1.2.19
-/// "style" — a semicolon-delimited `name:value` list). Returns the numeric value
-/// with a trailing `pt` unit stripped; VML lengths in a `<w:pict>` default to
-/// points, so a bare number is taken as pt. Non-`pt` units (px/cm/…) and
-/// percentages are not converted here (callers that need them handle it).
+/// "style" — a semicolon-delimited `name:value` list) and convert it to points.
 /// Property match is case-insensitive per the CSS2 grammar.
 fn vml_css_length_pt(style: &str, prop: &str) -> Option<f64> {
     for decl in style.split(';') {
@@ -6222,7 +9534,7 @@ fn vml_css_length_pt(style: &str, prop: &str) -> Option<f64> {
             None => continue,
         };
         if k.eq_ignore_ascii_case(prop) {
-            return v.trim_end_matches("pt").trim().parse::<f64>().ok();
+            return parse_vml_length_pt(v);
         }
     }
     None
@@ -6276,9 +9588,16 @@ fn parse_vml_opacity(raw: &str) -> Option<f64> {
 /// element's CSS `style` (`font-family`, `font-weight`, `font-style`, and the
 /// `bold`/`italic` keywords of the `font` shorthand). Quotes around the family
 /// are stripped. Returns `None` when the element carries no `string`.
-fn parse_vml_textpath(textpath: roxmltree::Node) -> Option<TextPath> {
+fn parse_vml_textpath(
+    textpath: roxmltree::Node,
+    inherited: Option<roxmltree::Node>,
+    text_path_ok: Option<bool>,
+) -> Option<TextPath> {
     let string = textpath.attribute("string")?.to_string();
     let style = textpath.attribute("style").unwrap_or("");
+    let inherited_style = inherited
+        .and_then(|node| node.attribute("style"))
+        .unwrap_or("");
 
     // font-family: prefer the explicit property, else the last token of the
     // `font` shorthand (`style variant weight size/line family`). Strip quotes.
@@ -6290,6 +9609,15 @@ fn parse_vml_textpath(textpath: roxmltree::Node) -> Option<TextPath> {
                 // The family is everything after the size token; a simple,
                 // robust take is the substring after the last size-like token.
                 // Fall back to the last whitespace-delimited token.
+                shorthand
+                    .rsplit(|c: char| c.is_whitespace())
+                    .find(|t| !t.is_empty())
+                    .map(strip_quotes)
+            })
+        })
+        .or_else(|| vml_css_str(inherited_style, "font-family").map(strip_quotes))
+        .or_else(|| {
+            vml_css_str(inherited_style, "font").and_then(|shorthand| {
                 shorthand
                     .rsplit(|c: char| c.is_whitespace())
                     .find(|t| !t.is_empty())
@@ -6317,7 +9645,38 @@ fn parse_vml_textpath(textpath: roxmltree::Node) -> Option<TextPath> {
         font_family,
         bold,
         italic,
+        vml: VmlTextPathFacts {
+            text_path_ok: Some(text_path_ok.unwrap_or(false)),
+            on: Some(resolved_vml_textpath_bool(textpath, inherited, "on").unwrap_or(false)),
+            fit_shape: Some(
+                resolved_vml_textpath_bool(textpath, inherited, "fitshape").unwrap_or(false),
+            ),
+            fit_path: Some(
+                resolved_vml_textpath_bool(textpath, inherited, "fitpath").unwrap_or(false),
+            ),
+            trim: Some(resolved_vml_textpath_bool(textpath, inherited, "trim").unwrap_or(false)),
+            x_scale: Some(
+                resolved_vml_textpath_bool(textpath, inherited, "xscale").unwrap_or(false),
+            ),
+            font_size_pt: vml_css_length_pt(style, "font-size")
+                .or_else(|| vml_css_length_pt(inherited_style, "font-size")),
+        },
     })
+}
+
+fn resolved_vml_textpath_bool(
+    textpath: roxmltree::Node,
+    inherited: Option<roxmltree::Node>,
+    attribute: &str,
+) -> Option<bool> {
+    textpath
+        .attribute(attribute)
+        .and_then(parse_vml_true_false)
+        .or_else(|| {
+            inherited
+                .and_then(|node| node.attribute(attribute))
+                .and_then(parse_vml_true_false)
+        })
 }
 
 /// Parse a bare legacy VML `<w:pict>` picture — a `<v:shape>` (or
@@ -6382,6 +9741,9 @@ fn parse_vml_pict_image(
         src_rect: None,
         width_pt,
         height_pt,
+        rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
         anchor: false,
         anchor_x_pt: 0.0,
         anchor_y_pt: 0.0,
@@ -6401,6 +9763,7 @@ fn parse_vml_pict_image(
         anchor_y_align: None,
         anchor_x_relative_from: None,
         anchor_y_relative_from: None,
+        anchor_acquisition: None,
     })
 }
 
@@ -6470,6 +9833,9 @@ fn parse_object_ole_image(
         src_rect: None,
         width_pt,
         height_pt,
+        rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
         anchor: false,
         anchor_x_pt: 0.0,
         anchor_y_pt: 0.0,
@@ -6489,6 +9855,7 @@ fn parse_object_ole_image(
         anchor_y_align: None,
         anchor_x_relative_from: None,
         anchor_y_relative_from: None,
+        anchor_acquisition: None,
     })
 }
 
@@ -6895,6 +10262,137 @@ fn parse_docx_chart(
 // parse_table_cell → parse_table and trap the whole parse; past the shared limit
 // the over-deep table is dropped and the rest of the document still parses. See
 // `ooxml_common::depth`.
+fn table_width_acquisition(node: Option<roxmltree::Node>) -> Option<TableWidthAcquisitionWire> {
+    node.map(|n| TableWidthAcquisitionWire {
+        kind: attr_w(n, "type"),
+        value: attr_w(n, "w"),
+    })
+}
+
+fn table_layout_kind_acquisition(
+    node: Option<roxmltree::Node>,
+) -> Option<TableLayoutKindAcquisitionWire> {
+    node.map(|n| TableLayoutKindAcquisitionWire {
+        kind: attr_w(n, "type"),
+    })
+}
+
+fn table_margin_acquisition(node: Option<roxmltree::Node>) -> Option<TableMarginAcquisitionWire> {
+    node.map(|m| TableMarginAcquisitionWire {
+        top: table_width_acquisition(child_w(m, "top")),
+        bottom: table_width_acquisition(child_w(m, "bottom")),
+        // Keep logical and legacy physical names independently. Collapsing
+        // start/end into left/right here loses the information needed to apply
+        // §17.4.68 after bidi direction is known.
+        start: table_width_acquisition(child_w(m, "start")),
+        end: table_width_acquisition(child_w(m, "end")),
+        left: table_width_acquisition(child_w(m, "left")),
+        right: table_width_acquisition(child_w(m, "right")),
+    })
+}
+
+fn table_property_exception_acquisition(
+    node: Option<roxmltree::Node>,
+) -> Option<TablePropertyExceptionAcquisitionWire> {
+    node.map(|p| TablePropertyExceptionAcquisitionWire {
+        preferred_width: table_width_acquisition(child_w(p, "tblW")),
+        layout: table_layout_kind_acquisition(child_w(p, "tblLayout")),
+        justification: child_w(p, "jc").and_then(|n| attr_w(n, "val")),
+        indent: table_width_acquisition(child_w(p, "tblInd")),
+        borders: child_w(p, "tblBorders").map(parse_table_borders),
+        cell_margins: table_margin_acquisition(child_w(p, "tblCellMar")),
+        cell_spacing: table_width_acquisition(child_w(p, "tblCellSpacing")),
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TablePositioningContext {
+    Normal,
+    /// [MS-OI29500] 2.1.162(b): Word ignores tblpPr for tables contained in a
+    /// textbox, footnote, endnote, or comment. Current block-table parsing uses
+    /// this for note stories; the context also keeps that rule explicit when
+    /// richer textbox/comment block models are introduced.
+    IgnoredStory,
+}
+
+impl TablePositioningContext {
+    fn ignores_table_positioning(self) -> bool {
+        self == Self::IgnoredStory
+    }
+}
+
+/// Resolve whether an authored tblpPr participates in layout as floating table
+/// positioning in Word. ECMA-376 Part 1 §17.4.57 makes tblpPr the positioning
+/// payload, but Word ignores the cases in [MS-OI29500] 2.1.162(b), using the
+/// Word-specific anchor defaults from (c). Clause (d) constrains Word-authored
+/// integer ranges but adds no ignore case. Clause (e) means the ignore predicate
+/// must inspect the saved lexical offset: a saved value of 1 remains effective
+/// positioning even though Word displays that coordinate as zero after its
+/// one-twip open-time adjustment. Keep this semantic result apart from the
+/// payload so downstream layout never reconstructs the decision from already-
+/// defaulted numeric fields.
+fn table_is_ordinary_flow(
+    tblp_pr: Option<roxmltree::Node>,
+    context: TablePositioningContext,
+) -> bool {
+    let Some(positioning) = tblp_pr else {
+        return true;
+    };
+    if context.ignores_table_positioning() || positioning.attributes().len() == 0 {
+        return true;
+    }
+
+    // Word's defaults differ from the ISO defaults: horizontal=text and
+    // vertical=margin. Missing offsets take their schema default zero. An
+    // invalid lexical integer does not satisfy the explicitly-zero exception.
+    let offset_is_zero = |name: &str| match attr_w(positioning, name) {
+        None => true,
+        Some(value) => value.parse::<i64>().ok() == Some(0),
+    };
+    let horizontal = attr_w(positioning, "horzAnchor").unwrap_or_else(|| "text".to_string());
+    let vertical = attr_w(positioning, "vertAnchor").unwrap_or_else(|| "margin".to_string());
+    offset_is_zero("tblpX") && offset_is_zero("tblpY") && horizontal == "text" && vertical != "text"
+}
+
+/// Count authored `<w:tr>` rows, including those nested behind range-markup
+/// wrappers, for §17.4.37 logical-table row totals.
+fn table_row_count(node: roxmltree::Node) -> usize {
+    children_w_flat(node, "tr").len()
+}
+
+/// Effective ECMA-376 §17.7.4 table-style identity of a `<w:tbl>`.
+///
+/// An explicit `<w:tblStyle w:val>` is honored only when it resolves to a real
+/// `<w:style w:type="table">`; an unresolved or non-table reference yields
+/// `None` and cannot form a §17.4.37 grouping identity. When the table omits
+/// `<w:tblStyle>` the implicit default table style applies, preserving the
+/// existing §17.7.4 omitted-style policy owned by `default_table_style_id`.
+fn effective_table_style_id(node: roxmltree::Node, style_map: &StyleMap) -> Option<String> {
+    let authored = child_w(node, "tblPr")
+        .and_then(|properties| child_w(properties, "tblStyle"))
+        .and_then(|style| attr_w(style, "val"));
+    match authored {
+        Some(style_id) if style_map.contains_table_style(&style_id) => Some(style_id),
+        Some(_) => None,
+        None => style_map.default_table_style_id().map(str::to_string),
+    }
+}
+
+/// Resolve one ECMA-376 §17.4.49 `w:tblLook` on/off flag: a named attribute
+/// (`w:firstRow="1"` …) wins, otherwise the legacy combined hex bitmask bit.
+/// Shared so §17.4.37 sequence membership and per-table cnf agree on activation.
+fn tbl_look_flag(tbl_pr: Option<roxmltree::Node>, name: &str, bit: u32) -> bool {
+    let look = tbl_pr.and_then(|p| child_w(p, "tblLook"));
+    let look_val = look
+        .and_then(|l| attr_w(l, "val"))
+        .and_then(|v| u32::from_str_radix(v.trim(), 16).ok());
+    match look.and_then(|l| attr_w(l, name)).as_deref() {
+        Some("1") | Some("true") | Some("on") => true,
+        Some(_) => false, // explicit "0"/"false" disables regardless of hex
+        None => look_val.map(|v| v & bit != 0).unwrap_or(false),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_table(
     node: roxmltree::Node,
@@ -6905,24 +10403,62 @@ fn parse_table(
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     depth: DepthGuard,
+    table_positioning_context: TablePositioningContext,
+    logical_sequence: LogicalTableSequenceContext,
+) -> DocTable {
+    let mut ignored_diagnostics = Vec::new();
+    parse_table_with_diagnostics(
+        node,
+        style_map,
+        num_map,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
+        depth,
+        table_positioning_context,
+        logical_sequence,
+        &mut ignored_diagnostics,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_table_with_diagnostics(
+    node: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    depth: DepthGuard,
+    table_positioning_context: TablePositioningContext,
+    logical_sequence: LogicalTableSequenceContext,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) -> DocTable {
     let tbl_pr = child_w(node, "tblPr");
     let tbl_grid = child_w(node, "tblGrid");
 
-    // Resolve the table style ID (§17.4.63 w:tblStyle). Cell paragraphs
-    // inherit this style's pPr — e.g. "Table Grid" (style `af3` in this
-    // sample) sets line="240" after="0", which tightens cell line spacing
-    // below the body-text default inherited from docDefault.
-    let table_style_id = tbl_pr
-        .and_then(|p| child_w(p, "tblStyle"))
-        .and_then(|s| attr_w(s, "val"));
+    let grid_columns = tbl_grid
+        .map(|g| {
+            children_w(g, "gridCol")
+                .iter()
+                .map(|c| TableGridColumnAcquisitionWire {
+                    width: attr_w(*c, "w"),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
-    // Column widths from tblGrid
+    // Column widths from tblGrid. ECMA-376 §17.4.16 makes a missing `@w`
+    // zero, not a conventional 1-inch column. The grid is an input to the
+    // table-width algorithm and can be augmented later; do not bake a guessed
+    // width into the stable compatibility field.
     let col_widths: Vec<f64> = tbl_grid
         .map(|g| {
             children_w(g, "gridCol")
                 .iter()
-                .map(|c| attr_w(*c, "w").map(|v| twips_to_pt(&v)).unwrap_or(72.0))
+                .map(|c| attr_w(*c, "w").map(|v| twips_to_pt(&v)).unwrap_or(0.0))
                 .collect()
         })
         .unwrap_or_default();
@@ -6937,10 +10473,9 @@ fn parse_table(
     // `<w:tblCellMar>` (and other tblPr defaults) MUST apply, otherwise a
     // table whose cells rely on TableNormal's 108-twip left/right padding
     // (the Word convention) renders with the wrong column geometry.
-    let effective_table_style_id = table_style_id
-        .as_deref()
-        .or_else(|| style_map.default_table_style_id());
+    let effective_table_style_id = effective_table_style_id(node, style_map);
     let tstyle = effective_table_style_id
+        .as_deref()
         .map(|id| style_map.resolve_table_style(id))
         .unwrap_or_default();
     // ECMA-376 §17.4.49 (w:tblLook). Word writes this either with the modern
@@ -6950,17 +10485,7 @@ fn parse_table(
     // Legacy bit values (§17.4.49 / the older w:tblLook hex form):
     //   0x0020 firstRow   0x0040 lastRow   0x0080 firstColumn
     //   0x0100 lastColumn 0x0200 noHBand   0x0400 noVBand
-    let look = tbl_pr.and_then(|p| child_w(p, "tblLook"));
-    let look_val: Option<u32> = look
-        .and_then(|l| attr_w(l, "val"))
-        .and_then(|v| u32::from_str_radix(v.trim(), 16).ok());
-    let look_flag = |name: &str, bit: u32| {
-        match look.and_then(|l| attr_w(l, name)).as_deref() {
-            Some("1") | Some("true") | Some("on") => true,
-            Some(_) => false, // explicit "0"/"false" disables regardless of hex
-            None => look_val.map(|v| v & bit != 0).unwrap_or(false),
-        }
-    };
+    let look_flag = |name: &str, bit: u32| tbl_look_flag(tbl_pr, name, bit);
     let first_row = look_flag("firstRow", 0x0020);
     let last_row = look_flag("lastRow", 0x0040);
     let first_col = look_flag("firstColumn", 0x0080);
@@ -7053,6 +10578,17 @@ fn parse_table(
             .get("firstRow")
             .map(|c| c.shd.is_some())
             .unwrap_or(false);
+    // The horizontal-band PARITY ORIGIN belongs to the §17.4.37 logical table's
+    // first member, not to each source table's local tblLook. A later member's
+    // own firstRow flag must not re-shift the shared banding, so gate the origin
+    // offset on the sequence-owned firstRow flag combined with the shared style's
+    // firstRow shading (all members share one effective table style).
+    let sequence_first_row_styled = logical_sequence.sequence_first_row_flag
+        && tstyle
+            .cond
+            .get("firstRow")
+            .map(|c| c.shd.is_some())
+            .unwrap_or(false);
     // firstRow rPr/pPr is honored whenever firstRow is enabled and the style
     // defines ANY firstRow run/para formatting (independent of shading).
     let first_row_has_fmt = first_row
@@ -7061,7 +10597,10 @@ fn parse_table(
             .get("firstRow")
             .map(|c| c.run.is_some() || c.para.is_some())
             .unwrap_or(false);
-    let row_count = tr_nodes.len();
+    debug_assert!(
+        logical_sequence.row_offset.saturating_add(tr_nodes.len()) <= logical_sequence.total_rows,
+        "logical table sequence must contain every authored row"
+    );
 
     // Resolve the ROW-LEVEL conditional keys for row `r` (firstRow/lastRow/
     // band*Horz), LOW→HIGH precedence per §17.7.6. The row's explicit
@@ -7079,17 +10618,21 @@ fn parse_table(
                 .collect();
         }
         let mut out: Vec<&'static str> = Vec::new();
-        let is_first_row = r == 0 && (first_row_styled || first_row_has_fmt || first_row);
-        let is_last_row = last_row && r + 1 == row_count;
+        // §17.4.37: firstRow/lastRow and horizontal banding continue across the
+        // whole logical table, so classify by the row's ordinal within the
+        // shared logical sequence, not within this authored source table.
+        let logical_row = logical_sequence.row_offset.saturating_add(r);
+        let is_first_row = logical_row == 0 && (first_row_styled || first_row_has_fmt || first_row);
+        let is_last_row = last_row && logical_row + 1 == logical_sequence.total_rows;
         // Horizontal banding applies to BODY rows — neither the (styled) first row
         // nor the last row. The banding parity offset only shifts when row 0 was
         // consumed as a SHADED first row; a first row that only carries rPr/pPr
         // (no shd) still bands from row 0 like Word.
         if !is_first_row && !is_last_row && h_band {
-            let bi = if first_row_styled {
-                r as i64 - 1
+            let bi = if sequence_first_row_styled {
+                logical_row as i64 - 1
             } else {
-                r as i64
+                logical_row as i64
             };
             // §17.7.6.7: group consecutive `row_band` body rows into one band
             // before alternating band1/band2.
@@ -7255,6 +10798,27 @@ fn parse_table(
             cell_conds.push(cell_cond(r, grid_col, cell_cnf.as_deref()));
             grid_col += span.max(1);
         }
+        // §17.7.6.3/.4: whole-table style spacing is the base layer and a
+        // matching full-row conditional style may override it. Direct table,
+        // tblPrEx, and trPr spacing remain separate higher-precedence wires.
+        let mut style_cell_spacing = tstyle.cell_spacing.clone();
+        let mut style_cell_margins = tstyle.cell_margins.clone();
+        let mut style_tbl_header = tstyle.tbl_header;
+        let mut style_cant_split = tstyle.cant_split;
+        for key in row_conds(r) {
+            if let Some(condition) = tstyle.cond.get(key) {
+                if let Some(spacing) = condition.cell_spacing.clone() {
+                    style_cell_spacing = Some(spacing);
+                }
+                merge_table_margin_layer(&mut style_cell_margins, &condition.cell_margins);
+                if condition.tbl_header.is_some() {
+                    style_tbl_header = condition.tbl_header;
+                }
+                if condition.cant_split.is_some() {
+                    style_cant_split = condition.cant_split;
+                }
+            }
+        }
         let row = parse_table_row(
             *tr_node,
             style_map,
@@ -7271,12 +10835,55 @@ fn parse_table(
             // for tstyle's borders, banding and cell margins. This keeps
             // the inheritance consistent across all tstyle-derived
             // attributes.
-            effective_table_style_id,
+            effective_table_style_id.as_deref(),
             &cell_conds,
+            style_cell_spacing,
+            style_cell_margins,
+            style_tbl_header,
+            style_cant_split,
             depth,
+            table_positioning_context,
+            diagnostics,
         );
         rows.push(row);
         all_cell_conds.push(cell_conds);
+    }
+
+    // §17.4.14/.15: offsets which conflict with an authored table grid are
+    // ignored; they do not manufacture columns. Cell spans may still extend an
+    // insufficient grid (§17.4.16/.17/.48), so validate gridAfter against the
+    // grid after those content-driven extensions are known.
+    if tbl_grid.is_some() {
+        let authored_grid_count = grid_columns.len() as u32;
+        for row in &mut rows {
+            if row.grid_before > authored_grid_count {
+                row.grid_before = 0;
+            }
+        }
+        let content_grid_count = rows
+            .iter()
+            .map(|row| {
+                row.grid_before.saturating_add(
+                    row.cells
+                        .iter()
+                        .map(|cell| cell.col_span.max(1))
+                        .sum::<u32>(),
+                )
+            })
+            .max()
+            .unwrap_or(0)
+            .max(authored_grid_count);
+        for row in &mut rows {
+            let occupied = row.grid_before.saturating_add(
+                row.cells
+                    .iter()
+                    .map(|cell| cell.col_span.max(1))
+                    .sum::<u32>(),
+            );
+            if occupied.saturating_add(row.grid_after) > content_grid_count {
+                row.grid_after = 0;
+            }
+        }
     }
 
     // Apply table-style cell shading + vAlign where the cell didn't set them
@@ -7390,6 +10997,41 @@ fn parse_table(
         .and_then(|p| child_w(p, "tblOverlap"))
         .and_then(|n| attr_w(n, "val"));
 
+    let required_column_count = rows
+        .iter()
+        .map(|row| {
+            row.grid_before
+                .saturating_add(
+                    row.cells
+                        .iter()
+                        .map(|cell| cell.col_span.max(1))
+                        .sum::<u32>(),
+                )
+                .saturating_add(row.grid_after)
+        })
+        .max()
+        .unwrap_or(0)
+        .max(grid_columns.len() as u32);
+    let table_layout = TableLayoutAcquisitionWire {
+        effective_style_id: effective_table_style_id,
+        ordinary_flow: table_is_ordinary_flow(
+            tbl_pr.and_then(|p| child_w(p, "tblpPr")),
+            table_positioning_context,
+        ),
+        logical_sequence_id: format!("table-sequence:{}", logical_sequence.sequence_id),
+        logical_row_offset: logical_sequence.row_offset,
+        logical_total_rows: logical_sequence.total_rows,
+        grid: TableGridAcquisitionWire {
+            authored: tbl_grid.is_some(),
+            columns: grid_columns,
+            required_column_count,
+        },
+        preferred_width: table_width_acquisition(tbl_pr.and_then(|p| child_w(p, "tblW"))),
+        layout: table_layout_kind_acquisition(tbl_pr.and_then(|p| child_w(p, "tblLayout"))),
+        cell_spacing: table_width_acquisition(tbl_pr.and_then(|p| child_w(p, "tblCellSpacing"))),
+        cell_margins: table_margin_acquisition(tbl_pr.and_then(|p| child_w(p, "tblCellMar"))),
+    };
+
     DocTable {
         col_widths,
         rows,
@@ -7406,6 +11048,7 @@ fn parse_table(
         bidi_visual,
         tblp_pr,
         overlap,
+        table_layout,
     }
 }
 
@@ -7423,8 +11066,14 @@ fn parse_table_row(
     // precedence order), threaded into each cell's content as a base layer below
     // paragraph/char styles. Indexed positionally against the row's `tc` nodes.
     cell_conds: &[CondFmt],
+    style_cell_spacing: Option<TableWidthAcquisitionWire>,
+    style_cell_margins: Option<TableMarginAcquisitionWire>,
+    style_tbl_header: Option<bool>,
+    style_cant_split: Option<bool>,
     // Recursion-depth guard threaded from the owning table (see `parse_table`).
     depth: DepthGuard,
+    table_positioning_context: TablePositioningContext,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) -> DocTableRow {
     let tr_pr = child_w(node, "trPr");
     let tr_height_node = tr_pr.and_then(|p| child_w(p, "trHeight"));
@@ -7435,10 +11084,48 @@ fn parse_table_row(
     let row_height_rule = tr_height_node
         .and_then(|h| attr_w(h, "hRule"))
         .unwrap_or_else(|| "auto".to_string());
-    let is_header = tr_pr.and_then(|p| child_w(p, "tblHeader")).is_some();
+    let table_row_layout = TableRowLayoutAcquisitionWire {
+        height: tr_height_node.map(|h| {
+            let authored_rule = attr_w(h, "hRule");
+            TableRowHeightAcquisitionWire {
+                value: attr_w(h, "val"),
+                rule: authored_rule.clone().unwrap_or_else(|| "auto".to_string()),
+                rule_authored: authored_rule.is_some(),
+            }
+        }),
+        justification: tr_pr
+            .and_then(|p| child_w(p, "jc"))
+            .and_then(|n| attr_w(n, "val")),
+        before_width: table_width_acquisition(tr_pr.and_then(|p| child_w(p, "wBefore"))),
+        after_width: table_width_acquisition(tr_pr.and_then(|p| child_w(p, "wAfter"))),
+        cell_spacing: table_width_acquisition(tr_pr.and_then(|p| child_w(p, "tblCellSpacing"))),
+        style_cell_spacing,
+        style_cell_margins,
+        // §17.4.60 places tblPrEx directly under tr, not inside trPr.
+        exception: table_property_exception_acquisition(child_w(node, "tblPrEx")),
+    };
+    let is_header = tr_pr
+        .and_then(|p| bool_prop(p, "tblHeader"))
+        .or(style_tbl_header)
+        .unwrap_or(false);
     let cant_split = tr_pr
         .and_then(|p| bool_prop(p, "cantSplit"))
+        .or(style_cant_split)
         .unwrap_or(false);
+    // ECMA-376 §17.4.15 / §17.4.14 — these are structural offsets into the
+    // shared tblGrid. They determine which grid columns the row's first/last
+    // cells occupy; wBefore/wAfter remain preferred-width constraints for those
+    // skipped columns (§17.18.87).
+    let grid_before = tr_pr
+        .and_then(|p| child_w(p, "gridBefore"))
+        .and_then(|n| attr_w(n, "val"))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    let grid_after = tr_pr
+        .and_then(|p| child_w(p, "gridAfter"))
+        .and_then(|n| attr_w(n, "val"))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
 
     let mut cells = vec![];
     for (i, tc_node) in children_w_flat(node, "tc").into_iter().enumerate() {
@@ -7454,16 +11141,21 @@ fn parse_table_row(
             table_style_id,
             cond,
             depth,
+            table_positioning_context,
+            diagnostics,
         );
         cells.push(cell);
     }
 
     DocTableRow {
         cells,
+        grid_before,
+        grid_after,
         row_height,
         row_height_rule,
         is_header,
         cant_split,
+        table_row_layout,
     }
 }
 
@@ -7481,6 +11173,8 @@ fn parse_table_cell(
     cond: Option<&CondFmt>,
     // Recursion-depth guard threaded from the owning row (see `parse_table`).
     depth: DepthGuard,
+    table_positioning_context: TablePositioningContext,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) -> DocTableCell {
     let tc_pr = child_w(node, "tcPr");
 
@@ -7490,7 +11184,7 @@ fn parse_table_cell(
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
 
-    // ECMA-376 §17.4.85: ST_Merge default is "continue", so a <w:vMerge/>
+    // ECMA-376 §17.4.84: ST_Merge default is "continue", so a <w:vMerge/>
     // element with no val attribute means the cell continues the merged
     // region from the row above. Only val="restart" begins a new merge.
     let v_merge = tc_pr
@@ -7555,6 +11249,10 @@ fn parse_table_cell(
     let margin_bottom = edge_mar("bottom");
     let margin_left = edge_mar("left");
     let margin_right = edge_mar("right");
+    let table_cell_layout = TableCellLayoutAcquisitionWire {
+        preferred_width: table_width_acquisition(tc_w),
+        margins: table_margin_acquisition(tc_mar),
+    };
 
     // ECMA-376 §17.4.7: a cell may contain paragraphs AND nested tables in
     // any order. element_children_flat unwraps sdt wrappers like elsewhere.
@@ -7562,19 +11260,36 @@ fn parse_table_cell(
     // A complex field cannot cross a cell boundary in well-formed content, so a
     // cell gets its own field scope (paragraphs within the cell still share it).
     let mut field = FieldState::default();
-    for child in element_children_flat(node) {
+    // §17.4.37 applies inside a cell too: nested source tables use the same
+    // parser-owned membership as body-level tables.
+    let cell_children = element_children_flat(node);
+    let logical_table_children: Vec<_> = cell_children
+        .iter()
+        .copied()
+        .map(|child| (child, false))
+        .collect();
+    let logical_table_sequences = logical_table_sequence_contexts(
+        &logical_table_children,
+        style_map,
+        table_positioning_context,
+    );
+    for child in cell_children {
         match child.tag_name().name() {
-            "p" => content.push(CellElement::Paragraph(parse_paragraph_cond(
-                child,
-                style_map,
-                num_map,
-                media_map,
-                chart_map,
-                rel_map,
-                theme,
-                table_style_id,
-                cond,
-                &mut field,
+            "p" => content.push(CellElement::Paragraph(Box::new(
+                parse_paragraph_cond_at_depth_with_diagnostics(
+                    child,
+                    style_map,
+                    num_map,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    table_style_id,
+                    cond,
+                    &mut field,
+                    depth,
+                    diagnostics,
+                ),
             ))),
             // A nested table resolves its OWN table style + conditional
             // formatting; the outer cell's `cond` does not propagate into it.
@@ -7586,7 +11301,7 @@ fn parse_table_cell(
             // unaffected.
             "tbl" => {
                 if let Some(child_depth) = depth.descend() {
-                    content.push(CellElement::Table(parse_table(
+                    content.push(CellElement::Table(Box::new(parse_table_with_diagnostics(
                         child,
                         style_map,
                         num_map,
@@ -7595,7 +11310,13 @@ fn parse_table_cell(
                         rel_map,
                         theme,
                         child_depth,
-                    )));
+                        table_positioning_context,
+                        logical_table_sequences
+                            .get(&child.id())
+                            .copied()
+                            .unwrap_or_else(|| LogicalTableSequenceContext::standalone(child)),
+                        diagnostics,
+                    ))));
                 }
             }
             _ => {}
@@ -7615,6 +11336,7 @@ fn parse_table_cell(
         margin_bottom,
         margin_left,
         margin_right,
+        table_cell_layout,
     }
 }
 
@@ -7939,6 +11661,13 @@ mod tests {
     use crate::xml_util::W_NS;
 
     fn parse_tbl(body: &str) -> DocTable {
+        parse_tbl_in_story(body, TablePositioningContext::Normal)
+    }
+
+    fn parse_tbl_in_story(
+        body: &str,
+        table_positioning_context: TablePositioningContext,
+    ) -> DocTable {
         let xml = format!(r#"<w:tbl xmlns:w="{ns}">{body}</w:tbl>"#, ns = W_NS);
         let doc = roxmltree::Document::parse(&xml).unwrap();
         let style_map = StyleMap::parse("");
@@ -7955,7 +11684,295 @@ mod tests {
             &rels,
             &theme,
             DepthGuard::root(),
+            table_positioning_context,
+            LogicalTableSequenceContext::standalone(doc.root_element()),
         )
+    }
+
+    fn parse_tbl_with_style_map(body: &str, style_map: &StyleMap) -> DocTable {
+        let xml = format!(r#"<w:tbl xmlns:w="{ns}">{body}</w:tbl>"#, ns = W_NS);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let rels: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        parse_table(
+            doc.root_element(),
+            style_map,
+            &mut num_map,
+            &media,
+            &HashMap::new(),
+            &rels,
+            &theme,
+            DepthGuard::root(),
+            TablePositioningContext::Normal,
+            LogicalTableSequenceContext::standalone(doc.root_element()),
+        )
+    }
+
+    #[test]
+    fn table_row_preserves_grid_columns_before_and_after_cells() {
+        // ECMA-376 §17.4.15 / §17.4.14: gridBefore/gridAfter are structural
+        // grid offsets, not ignorable preferred-width hints. A consumer must
+        // skip these columns before/after placing the row's real cells.
+        let table = parse_tbl(
+            r#"
+            <w:tblGrid>
+              <w:gridCol w:w="400"/><w:gridCol w:w="800"/><w:gridCol w:w="1200"/>
+            </w:tblGrid>
+            <w:tr>
+              <w:trPr>
+                <w:gridBefore w:val="1"/><w:wBefore w:w="400" w:type="dxa"/>
+                <w:gridAfter w:val="1"/><w:wAfter w:w="1200" w:type="dxa"/>
+              </w:trPr>
+              <w:tc><w:tcPr><w:tcW w:w="800" w:type="dxa"/></w:tcPr><w:p/></w:tc>
+            </w:tr>
+            "#,
+        );
+        let row = serde_json::to_value(&table.rows[0]).expect("serialize table row");
+        assert_eq!(row["gridBefore"], 1);
+        assert_eq!(row["gridAfter"], 1);
+    }
+
+    #[test]
+    fn table_layout_wire_preserves_authored_grid_width_and_style_facts() {
+        // §17.4.62/§17.7.4: an explicit table style is effective only when it
+        // resolves to a real `<w:style w:type="table">`. Supply that style so
+        // this wire-preservation test exercises the valid-explicit-style path;
+        // the unresolved/non-table case is asserted separately by
+        // `unresolved_or_non_table_style_is_not_an_effective_grouping_identity`.
+        let table = parse_tbl_with_style_map(
+            r#"
+            <w:tblPr>
+              <w:tblStyle w:val="SyntheticTableStyle"/>
+              <w:tblW w:w="3750" w:type="pct"/>
+              <w:tblLayout w:type="fixed"/>
+              <w:tblCellSpacing w:w="40" w:type="dxa"/>
+            </w:tblPr>
+            <w:tblGrid><w:gridCol w:w="720"/><w:gridCol/></w:tblGrid>
+            <w:tr>
+              <w:trPr>
+                <w:jc w:val="end"/>
+                <w:gridBefore w:val="1"/><w:wBefore w:w="15%" w:type="pct"/>
+                <w:gridAfter w:val="1"/><w:wAfter w:w="auto" w:type="auto"/>
+                <w:trHeight w:val="480"/>
+                <w:tblCellSpacing w:w="20" w:type="dxa"/>
+              </w:trPr>
+              <w:tblPrEx>
+                <w:tblW w:w="1440" w:type="dxa"/>
+                <w:tblLayout w:type="autofit"/>
+                <w:jc w:val="center"/>
+                <w:tblInd w:w="120" w:type="dxa"/>
+                <w:tblCellSpacing w:w="10" w:type="dxa"/>
+                <w:tblCellMar><w:start w:w="90" w:type="dxa"/></w:tblCellMar>
+                <w:tblBorders><w:top w:val="double" w:sz="8"/></w:tblBorders>
+              </w:tblPrEx>
+              <w:tc>
+                <w:tcPr>
+                  <w:gridSpan w:val="3"/>
+                  <w:tcW w:w="2500" w:type="pct"/>
+                  <w:tcMar>
+                    <w:start w:w="100" w:type="dxa"/>
+                    <w:end w:w="500" w:type="pct"/>
+                  </w:tcMar>
+                </w:tcPr>
+                <w:p/>
+              </w:tc>
+            </w:tr>
+            "#,
+            &StyleMap::parse(&format!(
+                r#"<w:styles xmlns:w="{ns}"><w:style w:type="table" w:styleId="SyntheticTableStyle"/></w:styles>"#,
+                ns = W_NS,
+            )),
+        );
+
+        let wire = serde_json::to_value(&table).expect("serialize table layout wire");
+        assert_eq!(wire["colWidths"], serde_json::json!([36.0, 0.0]));
+        assert_eq!(
+            wire["__tableLayout"]["effectiveStyleId"],
+            "SyntheticTableStyle"
+        );
+        assert_eq!(wire["__tableLayout"]["ordinaryFlow"], true);
+        assert_eq!(wire["__tableLayout"]["grid"]["authored"], true);
+        assert_eq!(wire["__tableLayout"]["grid"]["columns"][0]["width"], "720");
+        assert_eq!(
+            wire["__tableLayout"]["grid"]["columns"][1]["width"],
+            serde_json::Value::Null
+        );
+        assert_eq!(wire["__tableLayout"]["grid"]["requiredColumnCount"], 4);
+        assert_eq!(
+            wire["__tableLayout"]["preferredWidth"],
+            serde_json::json!({
+                "kind": "pct", "value": "3750"
+            })
+        );
+        assert_eq!(
+            wire["__tableLayout"]["layout"],
+            serde_json::json!({ "kind": "fixed" })
+        );
+        assert_eq!(
+            wire["__tableLayout"]["cellSpacing"],
+            serde_json::json!({
+                "kind": "dxa", "value": "40"
+            })
+        );
+
+        let row = &wire["rows"][0]["__tableRowLayout"];
+        assert_eq!(
+            row["height"],
+            serde_json::json!({
+                "value": "480", "rule": "auto", "ruleAuthored": false
+            })
+        );
+        assert_eq!(row["justification"], "end");
+        assert_eq!(wire["rows"][0]["gridAfter"], 0);
+        assert_eq!(
+            row["beforeWidth"],
+            serde_json::json!({ "kind": "pct", "value": "15%" })
+        );
+        assert_eq!(
+            row["afterWidth"],
+            serde_json::json!({ "kind": "auto", "value": "auto" })
+        );
+        assert_eq!(
+            row["cellSpacing"],
+            serde_json::json!({ "kind": "dxa", "value": "20" })
+        );
+        assert_eq!(
+            row["exception"]["layout"],
+            serde_json::json!({ "kind": "autofit" })
+        );
+        assert_eq!(
+            row["exception"]["preferredWidth"],
+            serde_json::json!({
+                "kind": "dxa", "value": "1440"
+            })
+        );
+        assert_eq!(row["exception"]["justification"], "center");
+        assert_eq!(
+            row["exception"]["indent"],
+            serde_json::json!({
+                "kind": "dxa", "value": "120"
+            })
+        );
+        assert_eq!(
+            row["exception"]["cellSpacing"],
+            serde_json::json!({
+                "kind": "dxa", "value": "10"
+            })
+        );
+        assert_eq!(
+            row["exception"]["cellMargins"]["start"],
+            serde_json::json!({
+                "kind": "dxa", "value": "90"
+            })
+        );
+        assert_eq!(row["exception"]["borders"]["top"]["style"], "double");
+
+        let cell = &wire["rows"][0]["cells"][0]["__tableCellLayout"];
+        assert_eq!(
+            cell["preferredWidth"],
+            serde_json::json!({
+                "kind": "pct", "value": "2500"
+            })
+        );
+        assert_eq!(
+            cell["margins"]["start"],
+            serde_json::json!({
+                "kind": "dxa", "value": "100"
+            })
+        );
+        assert_eq!(
+            cell["margins"]["end"],
+            serde_json::json!({
+                "kind": "pct", "value": "500"
+            })
+        );
+    }
+
+    #[test]
+    fn table_layout_wire_retains_word_effective_floating_status() {
+        let ordinary = [
+            r#"<w:tblPr/><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            r#"<w:tblPr><w:tblpPr/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            // A distance-from-text attribute prevents the "all omitted" arm,
+            // but the (c) anchor defaults plus zero offset defaults still meet
+            // every condition of the ignored-zero arm in (b).
+            r#"<w:tblPr><w:tblpPr w:leftFromText="20"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            r#"<w:tblPr><w:tblpPr w:tblpX="0" w:tblpY="0" w:horzAnchor="text" w:vertAnchor="margin"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            r#"<w:tblPr><w:tblpPr w:tblpX="0" w:tblpY="0" w:horzAnchor="text" w:vertAnchor="page"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            // The literal (b) predicate does not exempt relative-position
+            // attributes: default tblpX/tblpY remain zero in both cases.
+            r#"<w:tblPr><w:tblpPr w:tblpXSpec="center"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            r#"<w:tblPr><w:tblpPr w:tblpYSpec="center"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+        ];
+        for body in ordinary {
+            assert!(
+                parse_tbl(body).table_layout.ordinary_flow,
+                "[MS-OI29500] 2.1.162(b-c) ignored tblpPr must remain in ordinary flow"
+            );
+        }
+
+        let floating = [
+            // (e): the saved one-twip nudge avoids the lexical zero predicate;
+            // Word subtracts it only when resolving the display coordinate.
+            r#"<w:tblPr><w:tblpPr w:tblpX="1"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            r#"<w:tblPr><w:tblpPr w:tblpY="1"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            r#"<w:tblPr><w:tblpPr w:horzAnchor="page"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            r#"<w:tblPr><w:tblpPr w:vertAnchor="text"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+        ];
+        for body in floating {
+            assert!(
+                !parse_tbl(body).table_layout.ordinary_flow,
+                "a non-ignored tblpPr must be retained as effective floating placement"
+            );
+        }
+    }
+
+    #[test]
+    fn note_story_always_ignores_table_positioning() {
+        let table = parse_tbl_in_story(
+            r#"<w:tblPr><w:tblpPr w:tblpX="720" w:tblpY="720" w:horzAnchor="page" w:vertAnchor="page"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            TablePositioningContext::IgnoredStory,
+        );
+
+        assert!(table.table_layout.ordinary_flow);
+    }
+
+    #[test]
+    fn table_layout_wire_distinguishes_explicit_and_omitted_height_rule() {
+        let table = parse_tbl(
+            r#"
+            <w:tr><w:trPr><w:trHeight w:val="240"/></w:trPr><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:trPr><w:trHeight w:val="240" w:hRule="auto"/></w:trPr><w:tc><w:p/></w:tc></w:tr>
+            "#,
+        );
+        let wire = serde_json::to_value(&table).expect("serialize table layout wire");
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["height"]["ruleAuthored"],
+            false
+        );
+        assert_eq!(
+            wire["rows"][1]["__tableRowLayout"]["height"]["ruleAuthored"],
+            true
+        );
+    }
+
+    #[test]
+    fn authored_grid_ignores_before_and_after_offsets_which_do_not_fit() {
+        let table = parse_tbl(
+            r#"
+            <w:tblGrid><w:gridCol w:w="400"/><w:gridCol w:w="800"/></w:tblGrid>
+            <w:tr>
+              <w:trPr><w:gridBefore w:val="3"/><w:gridAfter w:val="1"/></w:trPr>
+              <w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p/></w:tc>
+            </w:tr>
+            "#,
+        );
+        let wire = serde_json::to_value(table).expect("serialize normalized table grid");
+        assert_eq!(wire["rows"][0]["gridBefore"], 0);
+        assert_eq!(wire["rows"][0]["gridAfter"], 0);
+        assert_eq!(wire["__tableLayout"]["grid"]["requiredColumnCount"], 2);
     }
 
     // ── Nested-table recursion depth guard (RB2) ───────────────────────────
@@ -8278,6 +12295,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn field_run_carries_inherited_script_slot_metadata() {
+        let base = RunFmt {
+            font_family_ascii: Some("Latin Face".to_string()),
+            font_family_east_asia: Some("EA Face".to_string()),
+            font_hint: Some("eastAsia".to_string()),
+            rtl: Some(true),
+            cs_toggle: Some(true),
+            font_family_cs: Some("CS Face".to_string()),
+            font_size: Some(10.0),
+            font_size_cs: Some(20.0),
+            bold: Some(false),
+            bold_cs: Some(true),
+            italic_cs: Some(true),
+            lang_bidi: Some("ar-sa".to_string()),
+            lang_east_asia: Some("zh-cn".to_string()),
+            ..Default::default()
+        };
+        let runs = parse_para(
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+            &base,
+            &StyleMap::parse(""),
+        );
+        let field = runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Field(field) => Some(field),
+                _ => None,
+            })
+            .expect("field run");
+
+        assert_eq!(field.font_family.as_deref(), Some("Latin Face"));
+        assert_eq!(field.font_family_east_asia.as_deref(), Some("EA Face"));
+        assert_eq!(field.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(field.rtl, Some(true));
+        assert_eq!(field.cs, Some(true));
+        assert_eq!(field.font_family_cs.as_deref(), Some("CS Face"));
+        assert_eq!(field.font_size_cs, Some(20.0));
+        assert_eq!(field.bold_cs, Some(true));
+        assert_eq!(field.italic_cs, Some(true));
+        assert_eq!(field.lang_bidi.as_deref(), Some("ar-sa"));
+        assert_eq!(field.lang_east_asia.as_deref(), Some("zh-cn"));
+    }
+
     // ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — a `fldSimple` DATE/TIME
     // field classifies as `date`/`time` (recomputable) and preserves its `\@`
     // date-time picture in `instruction`; the authored text is its `fallback_text`.
@@ -8380,6 +12441,8 @@ mod tests {
         let mut runs = Vec::new();
         let mut field = FieldState::default();
         let mut num_map = NumberingMap::default();
+        let mut diagnostics = Vec::new();
+        let mut complex_field_boundaries = Vec::new();
         parse_para_content(
             doc.root_element(),
             base_run,
@@ -8390,8 +12453,11 @@ mod tests {
             &rels,
             &theme,
             &mut runs,
+            &mut complex_field_boundaries,
             None,
             &mut field,
+            DepthGuard::root(),
+            &mut diagnostics,
         );
         runs
     }
@@ -8403,6 +12469,58 @@ mod tests {
                 _ => None,
             })
             .expect("expected a text run")
+    }
+
+    #[test]
+    fn body_ruby_surfaces_hps_raise_and_omits_it_when_absent() {
+        let base = RunFmt::default();
+        let styles = StyleMap::parse("");
+        let ruby = |ruby_pr: &str| {
+            format!(
+                r#"<w:r><w:ruby>
+                    <w:rubyPr><w:hps w:val="15"/>{ruby_pr}</w:rubyPr>
+                    <w:rt><w:r><w:t>かん</w:t></w:r></w:rt>
+                    <w:rubyBase><w:r><w:t>漢</w:t></w:r></w:rubyBase>
+                  </w:ruby></w:r>"#
+            )
+        };
+
+        let with_raise = parse_para(&ruby(r#"<w:hpsRaise w:val="30"/>"#), &base, &styles);
+        let annotation = first_text(&with_raise)
+            .ruby
+            .as_ref()
+            .expect("ruby annotation");
+        assert_eq!(
+            annotation.font_size_pt, 7.5,
+            "w:hps is stored in half-points"
+        );
+        assert_eq!(annotation.hps_raise_pt, Some(15.0));
+        assert_eq!(
+            serde_json::to_value(annotation).unwrap()["hpsRaisePt"],
+            serde_json::json!(15.0),
+        );
+
+        let without_raise = parse_para(&ruby(""), &base, &styles);
+        let annotation = first_text(&without_raise)
+            .ruby
+            .as_ref()
+            .expect("ruby annotation");
+        assert_eq!(annotation.hps_raise_pt, None);
+        assert!(
+            serde_json::to_value(annotation)
+                .unwrap()
+                .get("hpsRaisePt")
+                .is_none(),
+            "absent w:hpsRaise must remain distinguishable from zero",
+        );
+
+        let zero = parse_para(&ruby(r#"<w:hpsRaise w:val="0"/>"#), &base, &styles);
+        let annotation = first_text(&zero).ruby.as_ref().expect("ruby annotation");
+        assert_eq!(annotation.hps_raise_pt, Some(0.0));
+        assert_eq!(
+            serde_json::to_value(annotation).unwrap()["hpsRaisePt"],
+            serde_json::json!(0.0),
+        );
     }
 
     // §17.16.5.69 — Word generates each TOC entry as a navigation hyperlink
@@ -8588,11 +12706,212 @@ mod tests {
             &rels,
             &theme,
             DepthGuard::root(),
+            TablePositioningContext::Normal,
+            LogicalTableSequenceContext::standalone(doc.root_element()),
         )
     }
 
-    /// sample-3 root cause: a table whose `<w:tblPr>` carries NO
-    /// `<w:tblCellMar>` must inherit per-edge margins from the default table
+    #[test]
+    fn table_row_on_off_pagination_properties_honor_all_ct_on_off_tokens() {
+        let table = parse_tbl(
+            r#"
+            <w:tr><w:trPr><w:tblHeader/><w:cantSplit/></w:trPr><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:trPr><w:tblHeader w:val="true"/><w:cantSplit w:val="1"/></w:trPr><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:trPr><w:tblHeader w:val="false"/><w:cantSplit w:val="0"/></w:trPr><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:trPr><w:tblHeader w:val="off"/><w:cantSplit w:val="off"/></w:trPr><w:tc><w:p/></w:tc></w:tr>
+            "#,
+        );
+
+        let pagination = table
+            .rows
+            .iter()
+            .map(|row| (row.is_header, row.cant_split))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pagination,
+            vec![(true, true), (true, true), (false, false), (false, false)]
+        );
+    }
+
+    #[test]
+    fn table_row_pagination_properties_cascade_from_style_to_direct_tr_pr() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:styleId="BaseRows">
+                <w:trPr><w:tblHeader/><w:cantSplit/></w:trPr>
+              </w:style>
+              <w:style w:type="table" w:styleId="DerivedRows">
+                <w:basedOn w:val="BaseRows"/>
+                <w:trPr><w:tblHeader w:val="0"/></w:trPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let table = parse_tbl_with_styles(
+            r#"
+            <w:tblPr><w:tblStyle w:val="DerivedRows"/></w:tblPr>
+            <w:tr><w:tc><w:p/></w:tc></w:tr>
+            <w:tr>
+              <w:trPr><w:tblHeader/><w:cantSplit w:val="false"/></w:trPr>
+              <w:tc><w:p/></w:tc>
+            </w:tr>
+            "#,
+            &styles,
+        );
+
+        assert_eq!(
+            table
+                .rows
+                .iter()
+                .map(|row| (row.is_header, row.cant_split))
+                .collect::<Vec<_>>(),
+            vec![(false, true), (true, false)]
+        );
+    }
+
+    #[test]
+    fn conditional_table_style_row_properties_override_whole_table_row_properties() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:styleId="ConditionalRows">
+                <w:trPr><w:tblHeader w:val="0"/><w:cantSplit w:val="0"/></w:trPr>
+                <w:tblStylePr w:type="firstRow">
+                  <w:trPr><w:tblHeader/><w:cantSplit/></w:trPr>
+                </w:tblStylePr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let table = parse_tbl_with_styles(
+            r#"
+            <w:tblPr>
+              <w:tblStyle w:val="ConditionalRows"/>
+              <w:tblLook w:firstRow="1"/>
+            </w:tblPr>
+            <w:tr><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:tc><w:p/></w:tc></w:tr>
+            "#,
+            &styles,
+        );
+
+        assert_eq!(
+            table
+                .rows
+                .iter()
+                .map(|row| (row.is_header, row.cant_split))
+                .collect::<Vec<_>>(),
+            vec![(true, true), (false, false)]
+        );
+    }
+
+    #[test]
+    fn table_layout_wire_retains_implicit_default_table_style_identity() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:default="1" w:styleId="DefaultTableStyle"/>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let table = parse_tbl_with_styles(r#"<w:tr><w:tc><w:p/></w:tc></w:tr>"#, &styles);
+        let wire = serde_json::to_value(table).expect("serialize effective table style");
+        assert_eq!(
+            wire["__tableLayout"]["effectiveStyleId"],
+            "DefaultTableStyle"
+        );
+    }
+
+    #[test]
+    fn table_layout_wire_retains_based_on_and_conditional_style_spacing() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:styleId="BaseTable">
+                <w:tblPr>
+                  <w:tblCellSpacing w:w="60"/>
+                  <w:tblCellMar><w:start w:w="100"/><w:end w:w="140"/></w:tblCellMar>
+                </w:tblPr>
+              </w:style>
+              <w:style w:type="table" w:styleId="DerivedTable">
+                <w:basedOn w:val="BaseTable"/>
+                <w:tblStylePr w:type="firstRow">
+                  <w:tblPr>
+                    <w:tblCellSpacing w:w="20"/>
+                    <w:tblCellMar><w:end w:w="40"/></w:tblCellMar>
+                  </w:tblPr>
+                </w:tblStylePr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let table = parse_tbl_with_styles(
+            r#"<w:tblPr>
+                 <w:tblStyle w:val="DerivedTable"/>
+                 <w:tblLook w:firstRow="1"/>
+               </w:tblPr>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            &styles,
+        );
+        let wire = serde_json::to_value(table).expect("serialize inherited style spacing");
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["styleCellSpacing"],
+            serde_json::json!({ "kind": null, "value": "20" })
+        );
+        assert_eq!(
+            wire["rows"][1]["__tableRowLayout"]["styleCellSpacing"],
+            serde_json::json!({ "kind": null, "value": "60" })
+        );
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["styleCellMargins"]["start"],
+            serde_json::json!({ "kind": null, "value": "100" })
+        );
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["styleCellMargins"]["end"],
+            serde_json::json!({ "kind": null, "value": "40" })
+        );
+        assert_eq!(
+            wire["rows"][1]["__tableRowLayout"]["styleCellMargins"]["end"],
+            serde_json::json!({ "kind": null, "value": "140" })
+        );
+    }
+
+    #[test]
+    fn table_layout_wire_retains_default_style_logical_margins_and_spacing() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:default="1" w:styleId="DefaultTable">
+                <w:tblPr>
+                  <w:tblCellSpacing w:w="40"/>
+                  <w:tblCellMar>
+                    <w:start w:w="120"/><w:end w:w="140"/>
+                  </w:tblCellMar>
+                </w:tblPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let table = parse_tbl_with_styles(
+            r#"<w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            &styles,
+        );
+        let wire = serde_json::to_value(table).expect("serialize default style table facts");
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["styleCellMargins"]["start"],
+            serde_json::json!({ "kind": null, "value": "120" })
+        );
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["styleCellMargins"]["end"],
+            serde_json::json!({ "kind": null, "value": "140" })
+        );
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["styleCellSpacing"],
+            serde_json::json!({ "kind": null, "value": "40" })
+        );
+    }
+
+    /// A table whose `<w:tblPr>` carries no `<w:tblCellMar>` must inherit
+    /// per-edge margins from the default table
     /// style `<w:style w:type="table" w:default="1">` (typically
     /// "TableNormal"). ECMA-376 §17.4.42 explicitly says an omitted
     /// `<w:tblCellMar>` inherits from the associated table style; §17.7.4
@@ -8912,6 +13231,81 @@ mod tests {
         );
     }
 
+    #[test]
+    fn no_break_hyphen_merge_gate_compares_high_ansi_and_slot_metadata() {
+        let first = TextRun::default();
+        let mut high_ansi = first.clone();
+        high_ansi.font_family_high_ansi = Some("HANSI only".to_string());
+        assert!(!text_runs_mergeable(&first, &high_ansi));
+
+        let mut themed = first.clone();
+        let mut slots = RunFontSlots::default();
+        slots.direct.high_ansi = Some("Direct HANSI".to_string());
+        slots.theme_present.high_ansi = true;
+        themed.font_slots = Some(slots);
+        assert!(!text_runs_mergeable(&first, &themed));
+    }
+
+    #[test]
+    fn no_break_hyphen_does_not_merge_runs_that_differ_only_on_high_ansi() {
+        let runs = parse_para(
+            concat!(
+                r#"<w:r><w:rPr><w:rFonts w:hAnsi="HANSI A"/></w:rPr><w:t>999</w:t></w:r>"#,
+                r#"<w:r><w:rPr><w:rFonts w:hAnsi="HANSI B"/></w:rPr><w:noBreakHyphen/><w:t>99</w:t></w:r>"#,
+            ),
+            &RunFmt::default(),
+            &StyleMap::parse(""),
+        );
+        let text: Vec<(&str, Option<&str>)> = runs
+            .iter()
+            .filter_map(|run| match run {
+                DocRun::Text(run) => {
+                    Some((run.text.as_str(), run.font_family_high_ansi.as_deref()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            text,
+            vec![("999", Some("HANSI A")), ("-99", Some("HANSI B"))]
+        );
+    }
+
+    #[test]
+    fn unresolved_theme_presence_suppresses_direct_faces_on_all_four_axes() {
+        let fmt = RunFmt {
+            font_family_ascii_direct: Some("Direct ASCII".to_string()),
+            font_family_ascii_theme: Some("@theme:missingAscii".to_string()),
+            font_family_high_ansi_direct: Some("Direct HANSI".to_string()),
+            font_family_high_ansi_theme: Some("@theme:missingHAnsi".to_string()),
+            font_family_east_asia_direct: Some("Direct EA".to_string()),
+            font_family_east_asia_theme: Some("@theme:missingEA".to_string()),
+            font_family_cs_direct: Some("Direct CS".to_string()),
+            font_family_cs_theme: Some("@theme:missingCS".to_string()),
+            ..RunFmt::default()
+        };
+
+        let slots =
+            resolved_run_font_slots(&fmt, &ThemeColors::default()).expect("authored font slots");
+        assert_eq!(slots.direct.ascii.as_deref(), Some("Direct ASCII"));
+        assert_eq!(slots.direct.high_ansi.as_deref(), Some("Direct HANSI"));
+        assert_eq!(slots.direct.east_asia.as_deref(), Some("Direct EA"));
+        assert_eq!(slots.direct.complex_script.as_deref(), Some("Direct CS"));
+        assert!(slots.theme_present.ascii);
+        assert!(slots.theme_present.high_ansi);
+        assert!(slots.theme_present.east_asia);
+        assert!(slots.theme_present.complex_script);
+        assert_eq!(slots.theme.ascii, None);
+        assert_eq!(slots.theme.high_ansi, None);
+        assert_eq!(slots.theme.east_asia, None);
+        assert_eq!(slots.theme.complex_script, None);
+        let wire = serde_json::to_value(&slots).expect("font slots serialize");
+        assert_eq!(wire["themePresent"]["ascii"], true);
+        assert_eq!(wire["themePresent"]["highAnsi"], true);
+        assert_eq!(wire["themePresent"]["eastAsia"], true);
+        assert_eq!(wire["themePresent"]["complexScript"], true);
+    }
+
     // ECMA-376 §17.3.2.14: a fitText run renders at a MANUAL width, so merging
     // a plain noBreakHyphen run into it (or vice versa) would silently extend
     // the fixed-width region over glyphs that must lay out naturally. The
@@ -8951,7 +13345,7 @@ mod tests {
     /// `DocRun` discriminant union (packages/docx/src/types.ts). If this test
     /// fails after adding/renaming a variant, update BOTH sides together.
     #[test]
-    fn doc_run_wire_tags_match_ts_discriminant_union() {
+    fn doc_run_wire_tags_match_ts_acquisition_discriminants() {
         let image = ImageRun {
             image_path: "word/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
@@ -8959,6 +13353,9 @@ mod tests {
             src_rect: None,
             width_pt: 24.0,
             height_pt: 24.0,
+            rotation: 0.0,
+            flip_h: false,
+            flip_v: false,
             anchor: false,
             anchor_x_pt: 0.0,
             anchor_y_pt: 0.0,
@@ -8978,17 +13375,38 @@ mod tests {
             anchor_y_align: None,
             anchor_x_relative_from: None,
             anchor_y_relative_from: None,
+            anchor_acquisition: None,
         };
         let cases: Vec<(DocRun, &str)> = vec![
             (DocRun::Text(Box::default()), "text"),
-            (DocRun::Image(image), "image"),
+            (
+                DocRun::AnchorHost(AnchorHostMetrics {
+                    font_size: 11.0,
+                    font_family: None,
+                    font_family_east_asia: None,
+                    bold: false,
+                    italic: false,
+                    anchor_occurrence_id: None,
+                }),
+                "anchorHost",
+            ),
+            (DocRun::Image(Box::new(image)), "image"),
+            (
+                DocRun::UnavailableDrawing(Box::new(UnavailableDrawingRun {
+                    resource_kind: UnavailableDrawingResourceKind::Image,
+                    width_pt: 24.0,
+                    height_pt: 24.0,
+                    anchor_acquisition: None,
+                })),
+                "unavailableDrawing",
+            ),
             (
                 DocRun::Break {
                     break_type: BreakType::Line,
                 },
                 "break",
             ),
-            (DocRun::Field(FieldRun::default()), "field"),
+            (DocRun::Field(Box::default()), "field"),
             (DocRun::Shape(Box::default()), "shape"),
             (
                 DocRun::Math {
@@ -9017,8 +13435,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing \"type\" field: {value}"));
             assert_eq!(
                 actual_tag, expected_tag,
-                "DocRun wire tag mismatch — TS DocRun union (types.ts) expects \
-                 {expected_tag:?} but serde produced {actual_tag:?}; full JSON: {value}"
+                "DocRun wire tag mismatch — the TS public/internal acquisition \
+                 boundary expects {expected_tag:?} but serde produced \
+                 {actual_tag:?}; full JSON: {value}"
             );
         }
     }
@@ -9102,6 +13521,18 @@ mod wgp_image_tests {
             "anchor_y_pt = {}",
             img.anchor_y_pt
         );
+        let child = &img
+            .anchor_acquisition
+            .as_ref()
+            .expect("group acquisition")
+            .group
+            .as_ref()
+            .expect("group metadata")
+            .resolved_child_frame;
+        assert!((child.offset_x_pt - img.anchor_x_pt).abs() < 1e-6);
+        assert!((child.offset_y_pt - img.anchor_y_pt).abs() < 1e-6);
+        assert!((child.width_pt - img.width_pt).abs() < 1e-6);
+        assert!((child.height_pt - img.height_pt).abs() < 1e-6);
     }
 }
 
@@ -9120,10 +13551,11 @@ mod allow_overlap_tests {
         parse_anchor_wrap(&doc.root_element())
     }
 
-    // ECMA-376 §20.4.2.3 — @allowOverlap is optional; when omitted the object
-    // MAY overlap (default true).
+    // Hand-built/legacy public model compatibility: a missing required
+    // @allowOverlap keeps the historical no-constraint value. Private parser
+    // acquisition tests above retain the missing status instead.
     #[test]
-    fn omitted_allow_overlap_defaults_true() {
+    fn legacy_adapter_missing_allow_overlap_falls_back_true() {
         assert!(meta("").allow_overlap);
     }
 
@@ -9141,11 +13573,412 @@ mod allow_overlap_tests {
         assert!(meta(r#"allowOverlap="true""#).allow_overlap);
     }
 
-    // The hand-written Default must preserve the spec default of true so any
-    // AnchorMeta::default() (e.g. group images without an anchor) is correct.
+    // Non-anchor helper paths use the same legacy no-constraint fallback.
     #[test]
     fn default_anchor_meta_allows_overlap() {
         assert!(AnchorMeta::default().allow_overlap);
+    }
+}
+
+#[cfg(test)]
+mod anchor_acquisition_wire_tests {
+    use super::*;
+
+    fn facts(xml: &str) -> AnchorAcquisitionWire {
+        let doc = roxmltree::Document::parse(xml).expect("anchor XML");
+        parse_anchor_acquisition_wire(&doc.root_element())
+    }
+
+    #[test]
+    fn retains_normative_anchor_and_wrap_inputs_without_collapsing_sources() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp" xmlns:wp14="urn:wp14"
+                 simplePos="1" behindDoc="1" relativeHeight="42"
+                 locked="0" allowOverlap="0" layoutInCell="1"
+                 distT="12700" distR="25400" distB="38100" distL="50800">
+                 <wp:simplePos x="6350" y="-12700"/>
+                 <wp:positionH relativeFrom="margin"><wp:align>inside</wp:align></wp:positionH>
+                 <wp:positionV relativeFrom="paragraph"><wp:posOffset>127000</wp:posOffset></wp:positionV>
+                 <wp:extent cx="254000" cy="127000"/>
+                 <wp:effectExtent l="1270" t="2540" r="3810" b="5080"/>
+                 <wp:wrapThrough wrapText="largest" distL="6350" distR="7620">
+                   <wp:wrapPolygon edited="1">
+                     <wp:start x="0" y="0"/>
+                     <wp:lineTo x="21600" y="0"/>
+                     <wp:lineTo x="24000" y="21600"/>
+                   </wp:wrapPolygon>
+                 </wp:wrapThrough>
+                 <wp14:sizeRelH relativeFrom="page"><wp14:pctWidth>0</wp14:pctWidth></wp14:sizeRelH>
+                 <wp14:sizeRelV relativeFrom="margin"><wp14:pctHeight>50000</wp14:pctHeight></wp14:sizeRelV>
+               </wp:anchor>"#,
+        );
+
+        assert!(wire.occurrence_id.starts_with("wp-anchor-"));
+        assert_eq!(wire.simple_position.enabled, Some(true));
+        assert_eq!(wire.simple_position.x_pt, Some(0.5));
+        assert_eq!(wire.simple_position.x_status, AnchorValueStatusWire::Valid);
+        assert_eq!(wire.simple_position.y_pt, Some(-1.0));
+        assert_eq!(wire.simple_position.y_status, AnchorValueStatusWire::Valid);
+        assert_eq!(wire.horizontal.relative_from.as_deref(), Some("margin"));
+        assert!(
+            matches!(wire.horizontal.choice, AnchorAxisChoiceWire::Align { ref value } if value == "inside")
+        );
+        assert_eq!(wire.vertical.relative_from.as_deref(), Some("paragraph"));
+        assert!(
+            matches!(wire.vertical.choice, AnchorAxisChoiceWire::Offset { value_pt } if value_pt == 10.0)
+        );
+        assert_eq!(wire.extent.width_pt, Some(20.0));
+        assert_eq!(wire.extent.height_pt, Some(10.0));
+        assert_eq!(wire.parent_effect_extent.left_pt, Some(0.1));
+        assert_eq!(wire.anchor_distances.top_pt, Some(1.0));
+        assert_eq!(wire.anchor_distances.left_pt, Some(4.0));
+        assert_eq!(wire.wrap.kind, AnchorWrapKindWire::Through);
+        assert_eq!(wire.wrap.side.as_deref(), Some("largest"));
+        assert_eq!(wire.wrap.distances.left_pt, Some(0.5));
+        assert_eq!(wire.wrap.distances.right_pt, Some(0.6));
+        assert_eq!(wire.wrap.polygon.as_ref().map(|p| p.edited), Some(true));
+        assert_eq!(wire.wrap.polygon.as_ref().unwrap().points[2].x, Some(24000));
+        assert_eq!(
+            wire.relative_size.horizontal.as_ref().unwrap().fraction,
+            Some(0.0)
+        );
+        assert_eq!(
+            wire.relative_size.vertical.as_ref().unwrap().fraction,
+            Some(0.5)
+        );
+        assert_eq!(wire.behavior.behind_doc, Some(true));
+        assert_eq!(wire.behavior.relative_height, Some(42));
+        assert_eq!(wire.behavior.locked, Some(false));
+        assert_eq!(wire.behavior.locked_status, AnchorValueStatusWire::Valid);
+        assert_eq!(wire.behavior.allow_overlap, Some(false));
+        assert_eq!(
+            wire.behavior.allow_overlap_status,
+            AnchorValueStatusWire::Valid
+        );
+        assert_eq!(wire.behavior.layout_in_cell, Some(true));
+    }
+
+    #[test]
+    fn serializes_axis_choice_payloads_with_the_camel_case_wire_contract() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp">
+                 <wp:positionH relativeFrom="page"><wp:posOffset>12700</wp:posOffset></wp:positionH>
+                 <wp:positionV relativeFrom="page"><wp:posOffset>25400</wp:posOffset></wp:positionV>
+                 <wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+               </wp:anchor>"#,
+        );
+
+        let json = serde_json::to_value(&wire).expect("anchor acquisition wire serializes");
+        assert_eq!(json["horizontal"]["choice"]["valuePt"], 1.0);
+        assert!(json["horizontal"]["choice"].get("value_pt").is_none());
+        assert_eq!(json["vertical"]["choice"]["valuePt"], 2.0);
+        assert!(json["vertical"]["choice"].get("value_pt").is_none());
+    }
+
+    #[test]
+    fn preserves_child_effect_extent_and_missing_required_behavior_presence() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp">
+                 <wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>
+                 <wp:positionV relativeFrom="page"><wp:align>top</wp:align></wp:positionV>
+                 <wp:extent cx="12700" cy="12700"/>
+                 <wp:wrapSquare wrapText="bothSides" distT="12700">
+                   <wp:effectExtent l="2540" t="3810" r="5080" b="6350"/>
+                 </wp:wrapSquare>
+               </wp:anchor>"#,
+        );
+
+        assert_eq!(
+            wire.behavior.allow_overlap_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(wire.behavior.allow_overlap, None);
+        assert_eq!(wire.wrap.distances.top_pt, Some(1.0));
+        assert_eq!(wire.wrap.effect_extent.as_ref().unwrap().left_pt, Some(0.2));
+        assert_eq!(wire.parent_effect_extent.left_pt, None);
+    }
+
+    #[test]
+    fn mce_uses_supported_choice_and_falls_back_from_unknown_requirements() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
+                 xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+                 xmlns:x="urn:unsupported">
+                 <mc:AlternateContent>
+                   <mc:Choice Requires="x"><wp:positionH relativeFrom="page"><wp:align>right</wp:align></wp:positionH></mc:Choice>
+                   <mc:Fallback><wp:positionH relativeFrom="margin"><wp:posOffset>12700</wp:posOffset></wp:positionH></mc:Fallback>
+                 </mc:AlternateContent>
+                 <mc:AlternateContent>
+                   <mc:Choice Requires="wp14"><wp:positionV relativeFrom="page"><wp14:pctPosVOffset>0</wp14:pctPosVOffset></wp:positionV></mc:Choice>
+                   <mc:Fallback><wp:positionV relativeFrom="page"><wp:posOffset>25400</wp:posOffset></wp:positionV></mc:Fallback>
+                 </mc:AlternateContent>
+                 <wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+               </wp:anchor>"#,
+        );
+
+        assert_eq!(wire.horizontal.relative_from.as_deref(), Some("margin"));
+        assert!(
+            matches!(wire.horizontal.choice, AnchorAxisChoiceWire::Offset { value_pt } if value_pt == 1.0)
+        );
+        assert!(
+            matches!(wire.vertical.choice, AnchorAxisChoiceWire::Percent { fraction } if fraction == 0.0)
+        );
+    }
+
+    #[test]
+    fn malformed_choice_values_remain_diagnostic_instead_of_becoming_defaults() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp" simplePos="maybe" behindDoc="bad"
+                 relativeHeight="many" locked="perhaps" allowOverlap="sometimes" layoutInCell="perhaps">
+                 <wp:simplePos x="0" y="0"/>
+                 <wp:positionH><wp:align>left</wp:align><wp:posOffset>0</wp:posOffset></wp:positionH>
+                 <wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>
+                 <wp:extent cx="wide" cy="12700"/>
+                 <wp:wrapSquare wrapText="bothSides"/><wp:wrapNone/>
+               </wp:anchor>"#,
+        );
+        assert_eq!(wire.simple_position.status, AnchorValueStatusWire::Invalid);
+        assert_eq!(wire.simple_position.enabled, None);
+        assert!(matches!(
+            wire.horizontal.choice,
+            AnchorAxisChoiceWire::Invalid
+        ));
+        assert_eq!(
+            wire.horizontal.relative_from_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(wire.extent.width_status, AnchorValueStatusWire::Invalid);
+        assert_eq!(wire.wrap.kind, AnchorWrapKindWire::Invalid);
+        assert_eq!(wire.wrap.authored_kinds, vec!["wrapSquare", "wrapNone"]);
+        assert_eq!(
+            wire.behavior.behind_doc_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(
+            wire.behavior.relative_height_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(wire.behavior.locked_status, AnchorValueStatusWire::Invalid);
+        assert_eq!(
+            wire.behavior.allow_overlap_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(
+            wire.behavior.layout_in_cell_status,
+            AnchorValueStatusWire::Invalid
+        );
+    }
+
+    #[test]
+    fn retains_presence_and_validity_for_every_required_anchor_behavior_attribute() {
+        let missing = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp">
+              <wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>
+              <wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>
+              <wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+            </wp:anchor>"#,
+        );
+        assert_eq!(
+            missing.behavior.behind_doc_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(
+            missing.behavior.relative_height_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(
+            missing.behavior.locked_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(
+            missing.behavior.layout_in_cell_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(
+            missing.behavior.allow_overlap_status,
+            AnchorValueStatusWire::Missing
+        );
+
+        let invalid = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp" behindDoc="off" relativeHeight="-1"
+                 locked="on" layoutInCell="off" allowOverlap="on">
+              <wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>
+              <wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>
+              <wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+            </wp:anchor>"#,
+        );
+        assert_eq!(
+            invalid.behavior.behind_doc_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(
+            invalid.behavior.relative_height_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(
+            invalid.behavior.locked_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(
+            invalid.behavior.layout_in_cell_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(
+            invalid.behavior.allow_overlap_status,
+            AnchorValueStatusWire::Invalid
+        );
+    }
+
+    #[test]
+    fn simple_position_coordinates_preserve_missing_and_invalid_independently() {
+        let missing_x = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp" simplePos="1">
+              <wp:simplePos y="0"/><wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+            </wp:anchor>"#,
+        );
+        assert_eq!(
+            missing_x.simple_position.x_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(
+            missing_x.simple_position.y_status,
+            AnchorValueStatusWire::Valid
+        );
+
+        let invalid_y = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp" simplePos="1">
+              <wp:simplePos x="0" y="not-a-coordinate"/>
+              <wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+            </wp:anchor>"#,
+        );
+        assert_eq!(
+            invalid_y.simple_position.x_status,
+            AnchorValueStatusWire::Valid
+        );
+        assert_eq!(
+            invalid_y.simple_position.y_status,
+            AnchorValueStatusWire::Invalid
+        );
+    }
+
+    #[test]
+    fn malformed_polygon_points_are_retained_with_raw_values() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp"><wp:extent cx="12700" cy="12700"/>
+              <wp:wrapTight wrapText="bothSides"><wp:wrapPolygon>
+                <wp:start x="oops" y="0"/><wp:lineTo x="21600"/><wp:lineTo x="0" y="21600"/>
+              </wp:wrapPolygon></wp:wrapTight></wp:anchor>"#,
+        );
+        let polygon = wire.wrap.polygon.unwrap();
+        assert_eq!(polygon.points.len(), 3);
+        assert_eq!(polygon.invalid_point_count, 2);
+        assert_eq!(polygon.points[0].raw_x.as_deref(), Some("oops"));
+        assert_eq!(polygon.points[0].x, None);
+        assert_eq!(polygon.points[1].raw_y, None);
+    }
+
+    #[test]
+    fn unknown_axis_alignment_values_are_invalid() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp">
+              <wp:positionH relativeFrom="page"><wp:align>diagonal</wp:align></wp:positionH>
+              <wp:positionV relativeFrom="page"><wp:align>sideways</wp:align></wp:positionV>
+              <wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+            </wp:anchor>"#,
+        );
+        assert!(matches!(
+            wire.horizontal.choice,
+            AnchorAxisChoiceWire::Invalid
+        ));
+        assert!(matches!(
+            wire.vertical.choice,
+            AnchorAxisChoiceWire::Invalid
+        ));
+    }
+
+    #[test]
+    fn group_relation_uses_xml_source_order_and_raw_transform_chain() {
+        let xml = r#"<wpg:wgp xmlns:wpg="urn:wpg" xmlns:wps="urn:wps" xmlns:pic="urn:pic" xmlns:a="urn:a">
+          <wpg:grpSpPr><a:xfrm rot="60000"><a:off x="10" y="20"/><a:ext cx="30" cy="40"/><a:chOff x="1" y="2"/><a:chExt cx="3" cy="4"/></a:xfrm></wpg:grpSpPr>
+          <wps:wsp><wps:spPr><a:xfrm><a:off x="9" y="10"/><a:ext cx="11" cy="12"/></a:xfrm></wps:spPr></wps:wsp>
+          <pic:pic><pic:spPr><a:xfrm flipV="1"><a:off x="90" y="100"/><a:ext cx="110" cy="120"/></a:xfrm></pic:spPr></pic:pic>
+          <wps:wsp><wps:spPr><a:xfrm><a:off x="19" y="20"/><a:ext cx="21" cy="22"/></a:xfrm></wps:spPr></wps:wsp>
+        </wpg:wgp>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let root = doc.root_element();
+        let picture = root
+            .descendants()
+            .find(|node| node.tag_name().name() == "pic")
+            .unwrap();
+        let index = anchor_group_metadata_index(root);
+        let group = parse_anchor_group_wire(
+            index.get(&picture.range().start).unwrap(),
+            DrawingRect {
+                x: 12700.0,
+                y: 25400.0,
+                width: 38100.0,
+                height: 50800.0,
+                rotation_degrees: 12.0,
+                flip_h: true,
+                flip_v: false,
+            },
+        );
+        assert_eq!(
+            group.source_index, 1,
+            "shape/image interleave must follow XML order"
+        );
+        assert_eq!(group.source_count, 3);
+        assert!(group.child_source_id.starts_with("group-child-"));
+        assert_eq!(group.transform_chain[0].offset_x_emu, Some(10.0));
+        assert_eq!(
+            group.child_transform.as_ref().unwrap().extent_width_emu,
+            Some(110.0)
+        );
+        assert_eq!(group.child_transform.as_ref().unwrap().flip_v, Some(true));
+        assert_eq!(group.resolved_child_frame.offset_x_pt, 1.0);
+        assert_eq!(group.resolved_child_frame.offset_y_pt, 2.0);
+        assert_eq!(group.resolved_child_frame.width_pt, 3.0);
+        assert_eq!(group.resolved_child_frame.height_pt, 4.0);
+        assert_eq!(group.resolved_child_frame.rotation_deg, 12.0);
+        assert!(group.resolved_child_frame.flip_h);
+    }
+}
+
+#[cfg(test)]
+mod paragraph_identity_tests {
+    use super::*;
+    use crate::xml_util::{W14_NS, W_NS};
+
+    fn parse_p(attributes: &str) -> DocParagraph {
+        let xml = format!(
+            r#"<w:p xmlns:w="{w}" xmlns:w14="{w14}" {attributes}><w:r><w:t>text</w:t></w:r></w:p>"#,
+            w = W_NS,
+            w14 = W14_NS,
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let mut field = FieldState::default();
+        parse_paragraph(
+            doc.root_element(),
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            None,
+            &mut field,
+        )
+    }
+
+    #[test]
+    fn paragraph_preserves_w14_para_id_for_stable_source_addressing() {
+        assert_eq!(
+            parse_p(r#"w14:paraId="1A2b3C4d""#).paragraph_id.as_deref(),
+            Some("1A2b3C4d")
+        );
+        assert_eq!(parse_p("").paragraph_id, None);
     }
 }
 
@@ -9260,13 +14093,25 @@ mod math_jc_tests {
     #[test]
     fn paragraph_mark_default_east_asia_font_surfaces() {
         let p = parse_p(
-            r#"<w:pPr><w:rPr><w:rFonts w:ascii="Century" w:eastAsia="ＭＳ 明朝"/></w:rPr></w:pPr>"#,
+            r#"<w:pPr><w:rPr><w:rFonts w:ascii="Century" w:hAnsi="Arial"
+              w:eastAsia="ＭＳ 明朝" w:cs="Traditional Arabic" w:hint="eastAsia"/>
+              <w:lang w:eastAsia="ja-JP" w:bidi="ar-SA"/>
+            </w:rPr></w:pPr>"#,
         );
         assert_eq!(p.default_font_family.as_deref(), Some("Century"));
         assert_eq!(
             p.default_font_family_east_asia.as_deref(),
             Some("ＭＳ 明朝")
         );
+        let facts = p
+            .paragraph_mark_font_facts
+            .as_ref()
+            .expect("internal paragraph-mark font facts");
+        assert_eq!(facts.font_family_high_ansi.as_deref(), Some("Arial"));
+        assert_eq!(facts.font_family_cs.as_deref(), Some("Traditional Arabic"));
+        assert_eq!(facts.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(facts.lang_east_asia.as_deref(), Some("ja-jp"));
+        assert_eq!(facts.lang_bidi.as_deref(), Some("ar-sa"));
     }
 
     // ECMA-376 §22.1.2.30 `m:defJc` — document-wide default math justification in
@@ -10300,7 +15145,8 @@ mod rtl_tests {
     fn complex_script_bold_italic_and_lang_bidi_are_extracted() {
         let body = body_from(
             r#"<w:p><w:r><w:rPr><w:rtl/><w:bCs/><w:iCs/>
-              <w:lang w:val="en-AE" w:bidi="ae-AR"/></w:rPr><w:t>28-02-2026</w:t></w:r></w:p>"#,
+              <w:rFonts w:ascii="Latin" w:eastAsia="EA" w:hint="eastAsia"/>
+              <w:lang w:val="en-AE" w:eastAsia="ZH-cn" w:bidi="ae-AR"/></w:rPr><w:t>28-02-2026</w:t></w:r></w:p>"#,
         );
         let run = body
             .iter()
@@ -10319,6 +15165,8 @@ mod rtl_tests {
             Some("ae-ar"),
             "w:lang@w:bidi lower-cased → run.langBidi"
         );
+        assert_eq!(run.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(run.lang_east_asia.as_deref(), Some("zh-cn"));
     }
 
     /// Legacy VML text box (ECMA-376 Part 4 §14.1): `<w:pict>` with a
@@ -10443,6 +15291,7 @@ mod rtl_tests {
                 <w:keepNext/>
                 <w:keepLines/>
                 <w:widowControl w:val="0"/>
+                <w:overflowPunct w:val="0"/>
                 <w:contextualSpacing/>
               </w:pPr>
             </w:p>
@@ -10483,9 +15332,27 @@ mod rtl_tests {
             "direct widowControl=0 must override the spec default-true"
         );
         assert!(
+            !para.overflow_punct,
+            "direct overflowPunct=0 must override the spec default-true"
+        );
+        assert!(
             para.contextual_spacing,
             "direct contextualSpacing must survive"
         );
+    }
+
+    /// ECMA-376 §17.3.1.21 explicitly defines omission as true.
+    #[test]
+    fn overflow_punct_omission_defaults_true() {
+        let body = body_from(r#"<w:p><w:r><w:t>text</w:t></w:r></w:p>"#);
+        let para = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .expect("paragraph present");
+        assert!(para.overflow_punct);
     }
 
     /// ECMA-376 §17.3.1.7 — a `between` border is a first-class pBdr edge: a
@@ -10685,10 +15552,43 @@ mod footnote_tests {
         );
         for e in elems {
             if let BodyElement::Paragraph(p) = e {
-                return p;
+                return *p;
             }
         }
         panic!("no paragraph parsed");
+    }
+
+    fn first_para_with_table_style(
+        body_inner: &str,
+        styles_xml: &str,
+        numbering_xml: &str,
+        table_style_id: &str,
+    ) -> crate::types::DocParagraph {
+        let xml = format!(
+            r#"<w:document xmlns:w="{ns}"><w:body>{inner}</w:body></w:document>"#,
+            ns = W_NS,
+            inner = body_inner,
+        );
+        let doc = XmlDoc::parse(&xml).unwrap();
+        let paragraph_node = doc
+            .root_element()
+            .descendants()
+            .find(|node| node.tag_name().name() == "p")
+            .unwrap();
+        let mut style_map = StyleMap::parse(styles_xml);
+        let mut num_map = NumberingMap::parse(numbering_xml, &HashMap::new());
+        style_map.resolve_numbering_level_backlinks(&num_map);
+        parse_paragraph(
+            paragraph_node,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            Some(table_style_id),
+            &mut FieldState::default(),
+        )
     }
 
     /// Like `first_para_with`, but returns EVERY body paragraph (in order) so a
@@ -10731,7 +15631,7 @@ mod footnote_tests {
         )
         .into_iter()
         .filter_map(|e| match e {
-            BodyElement::Paragraph(p) => Some(p),
+            BodyElement::Paragraph(p) => Some(*p),
             _ => None,
         })
         .collect()
@@ -10904,10 +15804,155 @@ mod footnote_tests {
         );
     }
 
+    /// ECMA-376 §17.7.2 — paragraph-style properties are retained when the
+    /// style also associates a numbering definition. A level's generic `pPr`
+    /// supplies missing axes; it does not replace a style-authored hanging band.
+    #[test]
+    fn numbered_para_style_ind_overrides_numbering_level_per_attribute() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+              <w:style w:type="paragraph" w:styleId="BulletStyle">
+                <w:name w:val="Bullet Style"/>
+                <w:basedOn w:val="Normal"/>
+                <w:pPr>
+                  <w:numPr><w:numId w:val="4"/></w:numPr>
+                  <w:ind w:left="408" w:hanging="204"/>
+                </w:pPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="21">
+                <w:lvl w:ilvl="0">
+                  <w:start w:val="1"/>
+                  <w:numFmt w:val="bullet"/>
+                  <w:lvlText w:val="•"/>
+                  <w:pPr><w:ind w:left="360" w:hanging="360"/></w:pPr>
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="4"><w:abstractNumId w:val="21"/></w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+
+        let paragraph = first_para_with(
+            r#"<w:p><w:pPr><w:pStyle w:val="BulletStyle"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+            &styles,
+            &numbering,
+        );
+
+        assert!(
+            (paragraph.indent_left - 20.4).abs() < 0.01,
+            "style left=408 twips must survive the level default, got {}",
+            paragraph.indent_left
+        );
+        assert!(
+            (paragraph.indent_first + 10.2).abs() < 0.01,
+            "style hanging=204 twips must survive the level default, got {}",
+            paragraph.indent_first
+        );
+    }
+
+    /// ECMA-376 §17.7.2: when `numPr` is direct formatting, the numbering
+    /// definition and its associated paragraph properties are applied in the
+    /// final direct-formatting layer. Its level indent therefore overrides
+    /// paragraph-style, table-style, and document-default indents independently
+    /// for every authored axis (§17.9.22).
+    #[test]
+    fn direct_numbering_level_indents_override_lower_style_layers() {
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="21">
+                <w:lvl w:ilvl="0">
+                  <w:start w:val="1"/>
+                  <w:numFmt w:val="bullet"/>
+                  <w:lvlText w:val="•"/>
+                  <w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="4"><w:abstractNumId w:val="21"/></w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+        let direct_numbering = r#"<w:p><w:pPr>
+          <w:numPr><w:ilvl w:val="0"/><w:numId w:val="4"/></w:numPr>
+          <w:pBdr>
+            <w:top w:val="single" w:sz="4" w:space="1"/>
+            <w:left w:val="single" w:sz="4" w:space="4"/>
+            <w:bottom w:val="single" w:sz="4" w:space="1"/>
+            <w:right w:val="single" w:sz="4" w:space="4"/>
+          </w:pBdr>
+          <w:ind w:leftChars="0"/>
+        </w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#;
+        let assert_level_indent = |paragraph: crate::types::DocParagraph, layer: &str| {
+            assert!(
+                (paragraph.indent_left - 36.0).abs() < 0.01,
+                "direct numbering level left must override {layer}, got {}",
+                paragraph.indent_left,
+            );
+            assert!(
+                (paragraph.indent_first + 18.0).abs() < 0.01,
+                "direct numbering level hanging must override {layer}, got {}",
+                paragraph.indent_first,
+            );
+        };
+
+        let paragraph_style = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+                <w:name w:val="Normal"/>
+                <w:pPr><w:ind w:left="840" w:hanging="204"/></w:pPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let bordered = first_para_with(direct_numbering, &paragraph_style, &numbering);
+        assert!(
+            bordered.borders.is_some(),
+            "the direct paragraph border must survive the numbering cascade",
+        );
+        assert_level_indent(bordered, "paragraph style");
+
+        let document_defaults = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:docDefaults><w:pPrDefault><w:pPr>
+                <w:ind w:left="100" w:hanging="200"/>
+              </w:pPr></w:pPrDefault></w:docDefaults>
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+                <w:name w:val="Normal"/>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        assert_level_indent(
+            first_para_with(direct_numbering, &document_defaults, &numbering),
+            "document defaults",
+        );
+
+        let table_style = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+                <w:name w:val="Normal"/>
+              </w:style>
+              <w:style w:type="table" w:styleId="Box">
+                <w:name w:val="Box"/>
+                <w:pPr><w:ind w:left="100" w:hanging="200"/></w:pPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        assert_level_indent(
+            first_para_with_table_style(direct_numbering, &table_style, &numbering, "Box"),
+            "table style",
+        );
+    }
+
     /// ECMA-376 §17.7.2 (property precedence) — a paragraph's own DIRECT `w:ind`
     /// overrides the numbering level's `w:ind`. Direct formatting is more specific
-    /// than the numbering definition, which in turn overrides the paragraph style
-    /// (Control A in `numid_zero_drops_inherited_list_indent`). The merge is
+    /// than the paragraph style and numbering definition. The merge is
     /// per-attribute: a direct `w:left` that omits `w:hanging` keeps the level's
     /// hanging. sample-15's REFERENCES list proves it — numbering level
     /// `ind left=720 hanging=360`, but each item carries a direct `<w:ind w:left="360"/>`;
@@ -11273,6 +16318,9 @@ mod svg_blip_tests {
             src_rect: None,
             width_pt: 24.0,
             height_pt: 24.0,
+            rotation: 0.0,
+            flip_h: false,
+            flip_v: false,
             anchor: false,
             anchor_x_pt: 0.0,
             anchor_y_pt: 0.0,
@@ -11292,6 +16340,7 @@ mod svg_blip_tests {
             anchor_y_align: None,
             anchor_x_relative_from: None,
             anchor_y_relative_from: None,
+            anchor_acquisition: None,
         };
         let json = serde_json::to_string(&run).expect("serialize");
         assert!(
@@ -11391,16 +16440,12 @@ mod svg_blip_tests {
         assert!((img.width_pt - 24.0).abs() < 1e-6);
     }
 
-    /// `load_media_map` must drop an rId whose target part is declared in the
-    /// rels but ABSENT from the package (a path in the map is only ever emitted
-    /// when the entry truly resolves). This is the invariant the existence check
-    /// enforces — the check now uses `index_for_name` (central-directory lookup,
-    /// no inflate) in place of the former read-and-discard `read_zip_bytes`, so
-    /// this pins that the swap preserved the "missing part ⇒ dropped" behaviour.
-    /// With no resolvable blip the whole picture resolution returns `None`, so no
-    /// `DocRun::Image` is produced.
+    /// A dangling image relationship is unavailable paint, not absent layout.
+    /// The authored `wp:extent` still owns inline advance and line height, so the
+    /// parser retains a private unavailable-drawing record rather than deleting
+    /// the run and collapsing surrounding flow.
     #[test]
-    fn missing_media_part_drops_the_image() {
+    fn missing_media_part_retains_inline_drawing_geometry() {
         use zip::write::SimpleFileOptions;
         let document_xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
   <w:p><w:r><w:drawing>
@@ -11438,14 +16483,41 @@ mod svg_blip_tests {
         }
         let doc =
             parse_from_bytes(&buf).expect("parse must succeed even with a dangling image rId");
-        let has_image = doc.body.iter().any(|el| match el {
-            BodyElement::Paragraph(p) => p.runs.iter().any(|r| matches!(r, DocRun::Image(_))),
-            _ => false,
-        });
-        assert!(
-            !has_image,
-            "an rId whose media part is absent must be dropped, yielding no ImageRun"
+        let unavailable = doc
+            .body
+            .iter()
+            .find_map(|el| match el {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|run| match run {
+                    DocRun::UnavailableDrawing(run) => Some(run),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("a dangling image relationship must retain its authored geometry");
+        assert_eq!(
+            unavailable.resource_kind,
+            UnavailableDrawingResourceKind::Image
         );
+        assert!((unavailable.width_pt - 24.0).abs() < 1e-6);
+        assert!((unavailable.height_pt - 24.0).abs() < 1e-6);
+        assert!(unavailable.anchor_acquisition.is_none());
+        let json = doc
+            .body
+            .iter()
+            .find_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => paragraph.runs.iter().find_map(|run| {
+                    matches!(run, DocRun::UnavailableDrawing(_))
+                        .then(|| serde_json::to_value(run).expect("run serializes"))
+                }),
+                _ => None,
+            })
+            .expect("unavailable run JSON");
+        assert_eq!(json["type"], "unavailableDrawing");
+        assert_eq!(json["resourceKind"], "image");
+        assert_eq!(json["widthPt"], 24.0);
+        assert_eq!(json["heightPt"], 24.0);
+        assert!(json.get("imagePath").is_none());
+        assert!(json.get("__anchorAcquisition").is_none());
     }
 
     /// `load_media_map` must normalize `..` segments in a relationship Target
@@ -11554,7 +16626,7 @@ mod svg_blip_tests {
 
     /// ECMA-376 §20.1.8.55 — an inline picture whose `<pic:blipFill>` carries a
     /// non-zero `<a:srcRect>` populates `ImageRun.src_rect` with the four insets
-    /// converted from ST_Percentage (1000ths of a percent) to fractions 0..1.
+    /// converted from ST_Percentage (1000ths of a percent) to signed fractions.
     /// Mirrors sample-13 Fig.2's left-slice crop `l="8827" t="5949" r="64210"
     /// b="65916"` ⇒ 0.08827 / 0.05949 / 0.64210 / 0.65916.
     #[test]
@@ -11850,7 +16922,18 @@ mod anchor_image_relative_from_tests {
         theme: &ThemeColors,
     ) -> Vec<DocRun> {
         let mut num_map = NumberingMap::default();
-        super::parse_inline_drawing(style_map, &mut num_map, node, media_map, chart_map, theme)
+        let mut diagnostics = Vec::new();
+        super::parse_inline_drawing(
+            style_map,
+            &mut num_map,
+            node,
+            media_map,
+            chart_map,
+            &HashMap::new(),
+            theme,
+            DepthGuard::root(),
+            &mut diagnostics,
+        )
     }
 
     // Tiny valid PNG (1x1) so resolve_inline_blip's extent+blip contract holds.
@@ -11888,6 +16971,31 @@ mod anchor_image_relative_from_tests {
         buf
     }
 
+    fn build_docx_without_media(body_inner: &str) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+        let document_xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body_inner}</w:body></w:document>"#
+        );
+        let rels_xml = r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdPng" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/missing.png"/>
+</Relationships>"#;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default();
+            let mut put = |name: &str, bytes: &[u8]| {
+                use std::io::Write;
+                zw.start_file(name, opts).unwrap();
+                zw.write_all(bytes).unwrap();
+            };
+            put("word/document.xml", document_xml.as_bytes());
+            put("word/_rels/document.xml.rels", rels_xml.as_bytes());
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
     fn first_image(doc: &Document) -> &ImageRun {
         doc.body
             .iter()
@@ -11912,6 +17020,32 @@ mod anchor_image_relative_from_tests {
                 _ => None,
             })
             .expect("expected one anchor shape")
+    }
+
+    fn first_anchor_host(doc: &Document) -> &AnchorHostMetrics {
+        doc.body
+            .iter()
+            .find_map(|el| match el {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                    DocRun::AnchorHost(host) => Some(host),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("expected one anchor host")
+    }
+
+    fn first_unavailable_drawing(doc: &Document) -> &UnavailableDrawingRun {
+        doc.body
+            .iter()
+            .find_map(|el| match el {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|run| match run {
+                    DocRun::UnavailableDrawing(drawing) => Some(drawing.as_ref()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("expected one unavailable drawing")
     }
 
     /// Body XML for an anchor image with the given `<wp:positionH>` and
@@ -12020,7 +17154,215 @@ mod anchor_image_relative_from_tests {
 </w:drawing></w:r></w:p>"#;
         let data = build_docx(body);
         let doc = parse_from_bytes(&data).expect("parse must succeed");
-        assert_eq!(first_shape(&doc).z_order, 251651072);
+        let shape = first_shape(&doc);
+        assert_eq!(shape.z_order, 251651072);
+        let private = shape
+            .anchor_acquisition
+            .as_ref()
+            .expect("shape anchor facts");
+        assert_eq!(private.behavior.relative_height, Some(251651072));
+        assert_eq!(private.behavior.behind_doc, Some(false));
+    }
+
+    #[test]
+    fn anchored_shape_serializes_independent_host_run_metrics() {
+        let body = r#"<w:p><w:r>
+  <w:rPr>
+    <w:rFonts w:ascii="Arial" w:eastAsia="Yu Mincho"/>
+    <w:b/><w:i/><w:sz w:val="40"/>
+  </w:rPr>
+  <w:drawing>
+    <wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+               xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+               xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+               behindDoc="0" relativeHeight="1">
+      <wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>
+      <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>
+      <wp:extent cx="127000" cy="127000"/>
+      <wp:wrapNone/>
+      <wp:docPr id="1" name="shape"/>
+      <a:graphic><a:graphicData><wps:wsp><wps:spPr>
+        <a:xfrm><a:off x="0" y="0"/><a:ext cx="127000" cy="127000"/></a:xfrm>
+        <a:prstGeom prst="rect"/>
+      </wps:spPr></wps:wsp></a:graphicData></a:graphic>
+    </wp:anchor>
+  </w:drawing>
+</w:r></w:p>"#;
+        let data = build_docx(body);
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
+        let json = serde_json::to_value(first_anchor_host(&doc)).expect("host serializes");
+
+        assert_eq!(json["fontSize"], 20.0);
+        assert_eq!(json["fontFamily"], "Arial");
+        assert_eq!(json["fontFamilyEastAsia"], "Yu Mincho");
+        assert_eq!(json["bold"], true);
+        assert_eq!(json["italic"], true);
+    }
+
+    #[test]
+    fn anchored_picture_gets_one_independent_host_run() {
+        let body = anchor_body(
+            r#"<wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>"#,
+            r#"<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>"#,
+        );
+        let doc = parse_from_bytes(&build_docx(&body)).expect("parse must succeed");
+        let paragraph = doc
+            .body
+            .iter()
+            .find_map(|el| match el {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .expect("paragraph");
+
+        assert_eq!(
+            paragraph
+                .runs
+                .iter()
+                .filter(|r| matches!(r, DocRun::AnchorHost(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            first_anchor_host(&doc).anchor_occurrence_id.as_deref(),
+            first_image(&doc)
+                .anchor_acquisition
+                .as_ref()
+                .map(|facts| facts.occurrence_id.as_str()),
+            "host and payload must share one structural anchor identity",
+        );
+        assert_eq!(
+            paragraph
+                .runs
+                .iter()
+                .filter(|r| matches!(r, DocRun::Image(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn unavailable_anchored_picture_keeps_anchor_host_and_acquisition_geometry() {
+        let body = anchor_body(
+            r#"<wp:positionH relativeFrom="page"><wp:posOffset>12700</wp:posOffset></wp:positionH>"#,
+            r#"<wp:positionV relativeFrom="paragraph"><wp:posOffset>25400</wp:posOffset></wp:positionV>"#,
+        );
+        let doc = parse_from_bytes(&build_docx_without_media(&body))
+            .expect("a dangling anchored image relationship must not abort parsing");
+        let drawing = first_unavailable_drawing(&doc);
+        let acquisition = drawing
+            .anchor_acquisition
+            .as_ref()
+            .expect("anchored unavailable drawing must retain acquisition facts");
+        let host = first_anchor_host(&doc);
+
+        assert_eq!(drawing.resource_kind, UnavailableDrawingResourceKind::Image);
+        assert!((drawing.width_pt - 24.0).abs() < 1e-6);
+        assert!((drawing.height_pt - 24.0).abs() < 1e-6);
+        assert_eq!(
+            acquisition.horizontal.relative_from.as_deref(),
+            Some("page")
+        );
+        assert_eq!(
+            acquisition.vertical.relative_from.as_deref(),
+            Some("paragraph")
+        );
+        assert_eq!(acquisition.extent.width_pt, Some(24.0));
+        assert_eq!(acquisition.extent.height_pt, Some(24.0));
+        assert_eq!(
+            host.anchor_occurrence_id.as_deref(),
+            Some(acquisition.occurrence_id.as_str())
+        );
+    }
+
+    #[test]
+    fn grouped_shapes_share_one_independent_host_run() {
+        let metrics = AnchorHostMetrics {
+            font_size: 12.0,
+            font_family: Some("Arial".to_string()),
+            font_family_east_asia: None,
+            bold: false,
+            italic: false,
+            anchor_occurrence_id: None,
+        };
+        // A parsed wpg group expands into multiple Shape runs before the host
+        // character is attached. The enclosing w:r contributes only once.
+        let mut runs = vec![DocRun::Shape(Box::default()), DocRun::Shape(Box::default())];
+        prepend_anchor_host_metrics(&mut runs, &metrics);
+
+        assert_eq!(
+            runs.iter()
+                .filter(|r| matches!(r, DocRun::AnchorHost(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            runs.iter()
+                .filter(|r| matches!(r, DocRun::Shape(_)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn grouped_payloads_share_outer_identity_but_keep_xml_child_order() {
+        let body = r#"<w:p><w:r><w:drawing>
+          <wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
+            xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+            simplePos="0" behindDoc="0" relativeHeight="9" allowOverlap="1" layoutInCell="1">
+            <wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>
+            <wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>
+            <wp:extent cx="381000" cy="127000"/><wp:wrapNone/>
+            <a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="381000" cy="127000"/><a:chOff x="0" y="0"/><a:chExt cx="381000" cy="127000"/></a:xfrm></wpg:grpSpPr>
+              <wps:wsp><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="127000" cy="127000"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr></wps:wsp>
+              <pic:pic><pic:spPr><a:xfrm><a:off x="127000" y="0"/><a:ext cx="127000" cy="127000"/></a:xfrm></pic:spPr><pic:blipFill><a:blip r:embed="rIdPng"/></pic:blipFill></pic:pic>
+              <wps:wsp><wps:spPr><a:xfrm><a:off x="254000" y="0"/><a:ext cx="127000" cy="127000"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr></wps:wsp>
+            </wpg:wgp></a:graphicData></a:graphic>
+          </wp:anchor>
+        </w:drawing></w:r></w:p>"#;
+        ANCHOR_GROUP_METADATA_INDEX_BUILDS.with(|count| count.set(0));
+        let doc = parse_from_bytes(&build_docx(body)).expect("parse group");
+        ANCHOR_GROUP_METADATA_INDEX_BUILDS.with(|count| {
+            assert_eq!(
+                count.get(),
+                1,
+                "one wgp must build one shared metadata index"
+            )
+        });
+        let paragraph = doc
+            .body
+            .iter()
+            .find_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .unwrap();
+        let mut payloads: Vec<_> = paragraph
+            .runs
+            .iter()
+            .filter_map(|run| match run {
+                DocRun::Image(image) => image.anchor_acquisition.as_ref(),
+                DocRun::Shape(shape) => shape.anchor_acquisition.as_ref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(payloads.len(), 3);
+        let outer_id = payloads[0].occurrence_id.clone();
+        assert!(payloads.iter().all(|facts| facts.occurrence_id == outer_id));
+        assert_eq!(
+            first_anchor_host(&doc).anchor_occurrence_id.as_deref(),
+            Some(outer_id.as_str())
+        );
+        let mut source_indices: Vec<_> = payloads
+            .drain(..)
+            .map(|facts| facts.group.as_ref().unwrap().source_index)
+            .collect();
+        source_indices.sort_unstable();
+        assert_eq!(source_indices, vec![0, 1, 2]);
     }
 
     /// ECMA-376 §20.4.2.3/§20.4.3.5 — a standalone `wps:wsp` inside
@@ -12219,8 +17561,8 @@ mod anchor_image_relative_from_tests {
     /// ECMA-376 §21.2 — an inline `<w:drawing>` whose `<a:graphicData uri>` is the
     /// chart namespace and whose `<c:chart r:id>` resolves in the pre-built
     /// `chart_map` emits a `DocRun::Chart`, sized from `<wp:extent>` (EMU → pt),
-    /// instead of an image. A `<c:chart>` whose rId is absent from the map yields
-    /// nothing (the graphicData carries no blip to fall back to).
+    /// instead of an image. A `<c:chart>` whose rId is absent from the map keeps
+    /// its authored extent as an unavailable chart placeholder.
     #[test]
     fn inline_chart_drawing_emits_chart_run() {
         let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -12281,10 +17623,20 @@ mod anchor_image_relative_from_tests {
             other => panic!("expected DocRun::Chart, got {other:?}"),
         }
 
-        // Unresolvable rId (empty map) → no run (no blip fallback).
+        // Unresolvable rId (empty map) retains layout without inventing a chart
+        // model or image fallback.
         let empty: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
-        let none = parse_inline_drawing(&style_map, drawing, &media, &empty, &theme);
-        assert!(none.is_empty(), "unresolvable chart rId must emit nothing");
+        let unavailable = parse_inline_drawing(&style_map, drawing, &media, &empty, &theme);
+        assert_eq!(unavailable.len(), 1);
+        match &unavailable[0] {
+            DocRun::UnavailableDrawing(run) => {
+                assert_eq!(run.resource_kind, UnavailableDrawingResourceKind::Chart);
+                assert!((run.width_pt - 396.0).abs() < 1e-6);
+                assert!((run.height_pt - 216.0).abs() < 1e-6);
+                assert!(run.anchor_acquisition.is_none());
+            }
+            other => panic!("expected unavailable chart geometry, got {other:?}"),
+        }
     }
 
     /// CH14 — `parse_docx_chart` dispatches on the chart part's root
@@ -12468,9 +17820,21 @@ mod anchor_image_relative_from_tests {
         let mut chart_map: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
         chart_map.insert("rIdChart".to_string(), model);
 
-        let runs = parse_inline_drawing(&style_map, drawing, &media, &chart_map, &theme);
-        assert_eq!(runs.len(), 1, "one anchored chart run expected");
-        match &runs[0] {
+        let mut runs = parse_inline_drawing(&style_map, drawing, &media, &chart_map, &theme);
+        prepend_anchor_host_metrics(
+            &mut runs,
+            &AnchorHostMetrics {
+                font_size: 11.0,
+                font_family: Some("Arial".to_string()),
+                font_family_east_asia: None,
+                bold: false,
+                italic: false,
+                anchor_occurrence_id: None,
+            },
+        );
+        assert_eq!(runs.len(), 2, "one host plus one anchored chart expected");
+        assert!(matches!(&runs[0], DocRun::AnchorHost(host) if host.font_size == 11.0));
+        match &runs[1] {
             DocRun::Chart(c) => {
                 assert!(c.anchor, "anchored chart must carry anchor == true");
                 assert_eq!(c.chart.chart_type, "clusteredBar");
@@ -12494,13 +17858,32 @@ mod anchor_image_relative_from_tests {
             other => panic!("expected DocRun::Chart, got {other:?}"),
         }
 
-        // Unresolvable rId (empty map) → no run (chart fell through, no blip).
+        // Unresolvable rId keeps one host and the authored anchor geometry
+        // without inventing a chart model or image fallback.
         let empty: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
-        let none = parse_inline_drawing(&style_map, drawing, &media, &empty, &theme);
-        assert!(
-            none.is_empty(),
-            "unresolvable anchored chart rId must emit nothing"
+        let mut unavailable = parse_inline_drawing(&style_map, drawing, &media, &empty, &theme);
+        prepend_anchor_host_metrics(
+            &mut unavailable,
+            &AnchorHostMetrics {
+                font_size: 11.0,
+                font_family: None,
+                font_family_east_asia: None,
+                bold: false,
+                italic: false,
+                anchor_occurrence_id: None,
+            },
         );
+        assert_eq!(unavailable.len(), 2);
+        assert!(matches!(&unavailable[0], DocRun::AnchorHost(_)));
+        match &unavailable[1] {
+            DocRun::UnavailableDrawing(run) => {
+                assert_eq!(run.resource_kind, UnavailableDrawingResourceKind::Chart);
+                assert!((run.width_pt - 396.0).abs() < 1e-6);
+                assert!((run.height_pt - 216.0).abs() < 1e-6);
+                assert!(run.anchor_acquisition.is_some());
+            }
+            other => panic!("expected unavailable anchored chart geometry, got {other:?}"),
+        }
     }
 
     /// ECMA-376 §20.4.2.3 and §20.4.2.16: anchored charts carry the same
@@ -12582,6 +17965,10 @@ mod anchor_image_relative_from_tests {
                 assert_eq!(c.anchor_y_align, None);
                 assert_eq!(c.anchor_x_relative_from.as_deref(), Some("margin"));
                 assert_eq!(c.anchor_y_relative_from.as_deref(), Some("paragraph"));
+                let private = c.anchor_acquisition.as_ref().expect("chart anchor facts");
+                assert_eq!(private.wrap.kind, AnchorWrapKindWire::Square);
+                assert_eq!(private.behavior.allow_overlap, Some(false));
+                assert_eq!(private.behavior.layout_in_cell, Some(true));
             }
             other => panic!("expected DocRun::Chart, got {other:?}"),
         }
@@ -13044,6 +18431,19 @@ mod column_tests {
         );
         let doc = roxmltree::Document::parse(&xml).unwrap();
         parse_columns(doc.root_element())
+    }
+
+    #[test]
+    fn section_placement_retains_bidi_column_population_direction() {
+        let parse = |sect: &str| {
+            let xml = format!(r#"<w:sectPr xmlns:w="{ns}">{sect}</w:sectPr>"#, ns = W_NS,);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            section_placement_wire(Some(doc.root_element()), "section:test".to_string())
+        };
+
+        assert!(parse(r#"<w:bidi/>"#).section_bidi);
+        assert!(!parse(r#"<w:bidi w:val="0"/>"#).section_bidi);
+        assert!(!parse(r#"<w:cols w:num="2"/>"#).section_bidi);
     }
 
     /// Parse a minimal `<w:body>` document through the real body-parse path so we
@@ -13523,7 +18923,16 @@ mod column_tests {
         // Para(a), PageBreak, Para(b), ColumnBreak, Para(c).
         assert_eq!(body.len(), 5);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
-        assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert!(matches!(
+            body[1],
+            BodyElement::PageBreak {
+                same_paragraph_as_previous: Some(true),
+                ..
+            }
+        ));
+        let wire = serde_json::to_value(&body[1]).expect("page break serializes");
+        assert_eq!(wire["sameParagraphAsPrevious"], true);
+        assert!(wire.get("same_paragraph_as_previous").is_none());
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
         assert!(matches!(body[3], BodyElement::ColumnBreak));
         assert!(matches!(body[4], BodyElement::Paragraph(_)));
@@ -13549,7 +18958,13 @@ mod column_tests {
         // Para(before), PageBreak, Para(annex).
         assert_eq!(body.len(), 3);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
-        assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert!(matches!(
+            body[1],
+            BodyElement::PageBreak {
+                same_paragraph_as_previous: None,
+                ..
+            }
+        ));
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
     }
 
@@ -13569,7 +18984,13 @@ mod column_tests {
         // Para(shape-anchor), PageBreak, Para(after).
         assert_eq!(body.len(), 3);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
-        assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert!(matches!(
+            body[1],
+            BodyElement::PageBreak {
+                same_paragraph_as_previous: Some(true),
+                ..
+            }
+        ));
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
     }
 
@@ -13787,6 +19208,56 @@ mod column_tests {
         }
     }
 
+    #[test]
+    fn section_break_preserves_next_column_start_type() {
+        let body = body_from(
+            r#"<w:p><w:pPr><w:sectPr><w:type w:val="nextColumn"/></w:sectPr></w:pPr></w:p>"#,
+        );
+        match body
+            .iter()
+            .find(|element| matches!(element, BodyElement::SectionBreak { .. }))
+            .expect("section break")
+        {
+            BodyElement::SectionBreak { kind, .. } => assert_eq!(kind, "nextColumn"),
+            other => panic!("expected SectionBreak, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_final_section_break_emits_private_flow_placement_wire() {
+        let body = body_from(
+            r#"<w:p>
+                 <w:pPr><w:sectPr>
+                   <w:type w:val="continuous"/>
+                   <w:vAlign w:val="center"/>
+                   <w:lnNumType w:countBy="2" w:start="7" w:distance="240" w:restart="newSection"/>
+                 </w:sectPr></w:pPr>
+                 <w:r><w:t>section one</w:t></w:r>
+               </w:p>"#,
+        );
+        let wire = serde_json::to_value(&body[1]).expect("section break serializes");
+        assert_eq!(wire["__sectionPlacement"]["sectionId"], "section:0");
+        assert_eq!(wire["__sectionPlacement"]["vAlign"], "center");
+        assert_eq!(wire["__sectionPlacement"]["lineNumbering"]["countBy"], 2);
+        assert_eq!(wire["__sectionPlacement"]["lineNumbering"]["start"], 7);
+        assert_eq!(
+            wire["__sectionPlacement"]["lineNumbering"]["distance"],
+            12.0
+        );
+        assert_eq!(
+            wire["__sectionPlacement"]["lineNumbering"]["restart"],
+            "newSection"
+        );
+    }
+
+    #[test]
+    fn section_rtl_gutter_retains_explicit_off() {
+        let body =
+            body_from(r#"<w:p><w:pPr><w:sectPr><w:rtlGutter w:val="0"/></w:sectPr></w:pPr></w:p>"#);
+        let wire = serde_json::to_value(&body[1]).expect("section break serializes");
+        assert_eq!(wire["__sectionPlacement"]["rtlGutter"], false);
+    }
+
     /// ECMA-376 §17.6.13 `<w:pgSz>` / §17.6.11 `<w:pgMar>` — a mid-body section
     /// break carries its ENDING section's page geometry on `geom`. The final
     /// (body-level) section's geometry stays on `Document.section` (unchanged);
@@ -13872,6 +19343,73 @@ mod column_tests {
         assert_eq!(g.margin_left, 72.0);
         assert_eq!(g.header_distance, 36.0);
         assert_eq!(g.footer_distance, 36.0);
+    }
+
+    /// ECMA-376 §17.6.20 `<w:textDirection w:val>` — a mid-body section break
+    /// carries its ENDING section's text direction on `text_direction`, exactly
+    /// like `columns`/`page_num_type` (issue #1000 per-section mixing: a
+    /// vertical non-final section beside a horizontal final section). Same
+    /// TRANSITIONAL ST_TextDirection handling as the body-level SectionProps
+    /// parse: the default "lrTb" (and an absent element) collapse to `None`;
+    /// any other token is carried verbatim so the renderer decides which flow
+    /// vertically.
+    #[test]
+    fn section_break_carries_text_direction() {
+        // Extract the SectionBreak's text_direction from a body whose FIRST
+        // section ends with `sect_pr_xml` inside a pPr-owned sectPr.
+        let td_of = |sect_pr_xml: &str| -> Option<String> {
+            let body = body_from(&format!(
+                r#"
+                <w:p>
+                  <w:pPr>
+                    <w:sectPr>
+                      <w:type w:val="nextPage"/>
+                      {sect_pr_xml}
+                    </w:sectPr>
+                  </w:pPr>
+                </w:p>
+                <w:p><w:r><w:t>body</w:t></w:r></w:p>
+                "#,
+            ));
+            body.iter()
+                .find_map(|e| match e {
+                    BodyElement::SectionBreak { text_direction, .. } => {
+                        Some(text_direction.clone())
+                    }
+                    _ => None,
+                })
+                .expect("a SectionBreak marker")
+        };
+        // Vertical tokens are carried verbatim (§17.6.20 / Part 4 §14.11.7).
+        assert_eq!(
+            td_of(r#"<w:textDirection w:val="tbRl"/>"#).as_deref(),
+            Some("tbRl"),
+        );
+        assert_eq!(
+            td_of(r#"<w:textDirection w:val="btLr"/>"#).as_deref(),
+            Some("btLr"),
+        );
+        // The default "lrTb" collapses to None (horizontal serialization
+        // unchanged), as does an absent <w:textDirection>.
+        assert_eq!(td_of(r#"<w:textDirection w:val="lrTb"/>"#), None);
+        assert_eq!(td_of(""), None);
+
+        // A LOOSE mid-body sectPr (not pPr-owned) carries it too.
+        let body = body_from(
+            r#"
+            <w:p><w:r><w:t>sec1</w:t></w:r></w:p>
+            <w:sectPr><w:type w:val="nextPage"/><w:textDirection w:val="tbRl"/></w:sectPr>
+            <w:p><w:r><w:t>body</w:t></w:r></w:p>
+            "#,
+        );
+        let td = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::SectionBreak { text_direction, .. } => Some(text_direction.clone()),
+                _ => None,
+            })
+            .expect("a SectionBreak marker");
+        assert_eq!(td.as_deref(), Some("tbRl"));
     }
 
     /// ECMA-376 §17.6.11 — `w:top` / `w:bottom` are ST_SignedTwipsMeasure and MAY
@@ -14057,7 +19595,16 @@ mod txbx_inline_image_tests {
         media_map: &HashMap<String, String>,
     ) -> super::ShapeTextBody {
         let mut num_map = NumberingMap::default();
-        super::parse_shape_text_body(style_map, &mut num_map, wsp, theme, media_map)
+        super::parse_shape_text_body(
+            style_map,
+            &mut num_map,
+            wsp,
+            theme,
+            media_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
+        )
     }
 
     fn extract_simple_paragraph_text(
@@ -14106,12 +19653,13 @@ mod txbx_inline_image_tests {
         let mut media = HashMap::new();
         media.insert("rIdImg".to_string(), "word/media/image1.emf".to_string());
 
-        let (blocks, _anchor, _autofit, _vert, _l, _t, _r, _b) = parse_shape_text_body(
+        let body = parse_shape_text_body(
             &StyleMap::default(),
             doc.root_element(),
             &ThemeColors::default(),
             &media,
         );
+        let blocks = body.legacy_blocks;
 
         assert_eq!(blocks.len(), 2, "image paragraph + caption paragraph");
 
@@ -14171,7 +19719,7 @@ mod txbx_inline_image_tests {
                 &ThemeColors::default(),
                 &HashMap::new(),
             )
-            .2
+            .autofit
         };
         assert_eq!(
             autofit_of(wsp(r#"<wps:bodyPr><a:noAutofit/></wps:bodyPr>"#)).as_deref(),
@@ -14208,7 +19756,7 @@ mod txbx_inline_image_tests {
                 &ThemeColors::default(),
                 &HashMap::new(),
             )
-            .3
+            .vert
         };
         assert_eq!(
             vert_of(wsp(r#"<wps:bodyPr vert="eaVert"/>"#)).as_deref(),
@@ -14590,6 +20138,77 @@ mod txbx_inline_image_tests {
         assert!((block2.space_after - 18.0).abs() < 1e-6);
     }
 
+    /// ECMA-376 §17.3.1.9 — a text-box paragraph surfaces its resolved
+    /// `contextualSpacing` toggle AND its style id so the renderer can group
+    /// adjacent same-style paragraphs and drop the inter-paragraph gap (the body
+    /// path already does this via `contextual_spacing`/`style_id`; the text-box
+    /// path previously dropped both, so a `<w:contextualSpacing/>` ListParagraph
+    /// list kept the docDefault `after=160` gap that clipped its trailing line —
+    /// sample-32). Direct `<w:contextualSpacing/>` wins; an absent one inherits
+    /// from the paragraph style; a style id is exposed for grouping.
+    #[test]
+    fn extract_simple_paragraph_text_surfaces_contextual_spacing_and_style_id() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="ListParagraph">
+                <w:name w:val="List Paragraph"/>
+                <w:pPr><w:contextualSpacing/><w:spacing w:after="160"/></w:pPr>
+              </w:style>
+              <w:style w:type="paragraph" w:styleId="Plain">
+                <w:name w:val="Plain"/>
+                <w:pPr><w:spacing w:after="160"/></w:pPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let parse_block = |xml: &str| {
+            let doc = roxmltree::Document::parse(xml).unwrap();
+            extract_simple_paragraph_text(
+                &styles,
+                doc.root_element(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            )
+            .unwrap()
+        };
+
+        // (a) The toggle is INHERITED from the paragraph style (no direct one),
+        // and the explicit pStyle is exposed as the block's style id.
+        let inherited = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="ListParagraph"/></w:pPr>
+                 <w:r><w:t>item</w:t></w:r></w:p>"#,
+        );
+        assert!(
+            inherited.contextual_spacing,
+            "contextualSpacing must inherit from the paragraph style"
+        );
+        assert_eq!(inherited.style_id.as_deref(), Some("ListParagraph"));
+
+        // (b) A style WITHOUT contextualSpacing ⇒ false; its id is still exposed.
+        let plain = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Plain"/></w:pPr>
+                 <w:r><w:t>item</w:t></w:r></w:p>"#,
+        );
+        assert!(
+            !plain.contextual_spacing,
+            "a style without contextualSpacing ⇒ false"
+        );
+        assert_eq!(plain.style_id.as_deref(), Some("Plain"));
+
+        // (c) A DIRECT `<w:contextualSpacing/>` sets the toggle even over a style
+        // that lacks it.
+        let direct = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Plain"/><w:contextualSpacing/></w:pPr>
+                 <w:r><w:t>item</w:t></w:r></w:p>"#,
+        );
+        assert!(
+            direct.contextual_spacing,
+            "direct contextualSpacing must win over a style that lacks it"
+        );
+    }
+
     /// ECMA-376 §17.3.1.12 — a text-box paragraph surfaces its own `<w:ind>`
     /// left/right/first-line indent (twips→pt). first-line is SIGNED:
     /// `w:firstLine` is positive, `w:hanging` is negative. Absent ⇒ all 0.
@@ -14943,6 +20562,148 @@ mod txbx_inline_image_tests {
         assert!((block.indent_first + 36.0).abs() < 1e-6);
     }
 
+    /// ECMA-376 §§17.7.2, 17.7.8.1, 17.9.22 — when a text-box paragraph
+    /// directly selects numbering, the authored numbering-level paragraph
+    /// properties belong to the final direct-formatting layer. They therefore
+    /// override paragraph-style indents, just as they do for body paragraphs.
+    #[test]
+    fn extract_simple_paragraph_text_direct_numbering_indents_override_style() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Indented">
+                <w:pPr><w:ind w:left="840" w:right="360" w:firstLine="240"/></w:pPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let paragraph = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:pPr>
+                <w:pStyle w:val="Indented"/>
+                <w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr>
+              </w:pPr>
+              <w:r><w:t>Numbered text</w:t></w:r>
+            </w:p>"#,
+        )
+        .unwrap();
+        let numbering = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:abstractNum w:abstractNumId="3">
+                <w:lvl w:ilvl="0">
+                  <w:numFmt w:val="bullet"/>
+                  <w:lvlText w:val="•"/>
+                  <w:pPr><w:ind w:left="360" w:right="480" w:hanging="360"/></w:pPr>
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="5"><w:abstractNumId w:val="3"/></w:num>
+            </w:numbering>"#;
+        let mut num_map = NumberingMap::parse(numbering, &HashMap::new());
+
+        let block = super::extract_simple_paragraph_text(
+            &styles,
+            &mut num_map,
+            paragraph.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("numbered text-box paragraph yields text");
+
+        assert!((block.indent_left - 18.0).abs() < 1e-6);
+        assert!((block.indent_right - 24.0).abs() < 1e-6);
+        assert!((block.indent_first + 18.0).abs() < 1e-6);
+    }
+
+    /// Style-origin numbering is applied before the paragraph style
+    /// (§§17.7.2, 17.7.8.1), so the style's own per-axis indents win.
+    #[test]
+    fn extract_simple_paragraph_text_style_indents_override_style_numbering() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Numbered">
+                <w:pPr>
+                  <w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr>
+                  <w:ind w:left="840" w:right="360" w:firstLine="240"/>
+                </w:pPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let paragraph = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:pPr><w:pStyle w:val="Numbered"/></w:pPr>
+              <w:r><w:t>Numbered text</w:t></w:r>
+            </w:p>"#,
+        )
+        .unwrap();
+        let numbering = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:abstractNum w:abstractNumId="3">
+                <w:lvl w:ilvl="0">
+                  <w:numFmt w:val="bullet"/>
+                  <w:lvlText w:val="•"/>
+                  <w:pPr><w:ind w:left="360" w:right="480" w:hanging="360"/></w:pPr>
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="5"><w:abstractNumId w:val="3"/></w:num>
+            </w:numbering>"#;
+        let mut num_map = NumberingMap::parse(numbering, &HashMap::new());
+
+        let block = super::extract_simple_paragraph_text(
+            &styles,
+            &mut num_map,
+            paragraph.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("numbered text-box paragraph yields text");
+
+        assert!((block.indent_left - 42.0).abs() < 1e-6);
+        assert!((block.indent_right - 18.0).abs() < 1e-6);
+        assert!((block.indent_first - 12.0).abs() < 1e-6);
+    }
+
+    /// A level with no authored `w:ind` carries only the parser's legacy depth
+    /// fallback. That fallback must not displace real paragraph-style values,
+    /// even when the paragraph selects the numbering directly.
+    #[test]
+    fn extract_simple_paragraph_text_ignores_unauthored_numbering_indent_fallback() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Indented">
+                <w:pPr><w:ind w:left="840" w:firstLine="240"/></w:pPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let paragraph = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:pPr>
+                <w:pStyle w:val="Indented"/>
+                <w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr>
+              </w:pPr>
+              <w:r><w:t>Numbered text</w:t></w:r>
+            </w:p>"#,
+        )
+        .unwrap();
+        let numbering = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:abstractNum w:abstractNumId="3">
+                <w:lvl w:ilvl="0">
+                  <w:numFmt w:val="bullet"/>
+                  <w:lvlText w:val="•"/>
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="5"><w:abstractNumId w:val="3"/></w:num>
+            </w:numbering>"#;
+        let mut num_map = NumberingMap::parse(numbering, &HashMap::new());
+
+        let block = super::extract_simple_paragraph_text(
+            &styles,
+            &mut num_map,
+            paragraph.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("numbered text-box paragraph yields text");
+
+        assert!((block.indent_left - 42.0).abs() < 1e-6);
+        assert!((block.indent_first - 12.0).abs() < 1e-6);
+    }
+
     #[test]
     fn extract_simple_paragraph_text_includes_inline_omml_radicals() {
         let xml = r#"<w:p
@@ -15061,6 +20822,67 @@ mod txbx_inline_image_tests {
         assert!(none.tab_stops.is_empty());
     }
 
+    /// ECMA-376 §17.3.3.32 — a `<w:tab/>` inside a text-box run must surface as a
+    /// literal `\t` in the block/run text so the line engine can advance to the
+    /// next tab stop (or the default-tab grid). The parser previously scanned only
+    /// `<w:t>`, so a tab-only run collapsed to nothing and a tabbed course grid
+    /// (sample-32: "Course<tab><tab>(0.5)<tab>□") lost its column alignment. The
+    /// `\t` must sit in DOCUMENT ORDER between the surrounding text runs.
+    #[test]
+    fn extract_simple_paragraph_text_surfaces_tab_characters() {
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:r><w:t>Arabic 2250</w:t></w:r>
+                 <w:r><w:tab/></w:r>
+                 <w:r><w:tab/><w:t>(1.0)</w:t></w:r>
+               </w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        // Two tabs surface; the mid run interleaves its tab BEFORE its text.
+        assert_eq!(block.text, "Arabic 2250\t\t(1.0)");
+        // The tab-only run is preserved as its own rich run carrying just "\t"
+        // (not dropped as empty), so per-run layout keeps the advance.
+        let run_texts: Vec<&str> = block.runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(run_texts, vec!["Arabic 2250", "\t", "\t(1.0)"]);
+    }
+
+    /// The run-content walk matches `t`/`tab` by WordprocessingML NAMESPACE, not
+    /// bare local name: a DrawingML `<a:tab>` (e.g. in an embedded graphic's
+    /// `<a:tabLst>`) or `<a:t>` living under the same `<w:r>` must NOT leak into
+    /// the paragraph text as a `\t` / text fragment — only §17.3.3.32 `<w:tab/>`
+    /// and §17.3.3.31 `<w:t>` are WordprocessingML run content.
+    #[test]
+    fn extract_simple_paragraph_text_ignores_foreign_namespace_tab_and_t() {
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <w:r>
+                   <w:t>A</w:t>
+                   <a:tabLst><a:tab/></a:tabLst>
+                   <a:t>ignored</a:t>
+                   <w:tab/>
+                   <w:t>B</w:t>
+                 </w:r>
+               </w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(block.text, "A\tB");
+    }
+
     /// ECMA-376 §17.3.1.37 — a text-box paragraph's tab stops resolve through the
     /// paragraph STYLE chain (like indent/spacing) when the paragraph carries no
     /// direct `<w:tabs>`. A direct `<w:tabs>` REPLACES the inherited set (§17.7.2 —
@@ -15132,6 +20954,443 @@ mod txbx_inline_image_tests {
     }
 }
 
+// ECMA-376 CT_TxbxContent is w:EG_BlockLevelElts+, not a paragraph-only
+// container. These tests pin the parser-only block wire independently of the
+// stable ShapeRun.textBlocks compatibility projection.
+#[cfg(test)]
+mod txbx_block_wire_tests {
+    use super::*;
+
+    fn parse_wps_text_body(
+        content: &str,
+        media_map: &HashMap<String, String>,
+        rel_map: &HashMap<String, String>,
+        depth: DepthGuard,
+    ) -> ShapeTextBody {
+        let xml = format!(
+            r#"<wps:wsp
+                 xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                 xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                 xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                 xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                 xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <wps:txbx><w:txbxContent>{content}</w:txbxContent></wps:txbx>
+               </wps:wsp>"#,
+        );
+        let document = roxmltree::Document::parse(&xml).expect("WPS fixture");
+        let mut num_map = NumberingMap::default();
+        super::parse_shape_text_body(
+            &StyleMap::default(),
+            &mut num_map,
+            document.root_element(),
+            &ThemeColors::default(),
+            media_map,
+            &HashMap::new(),
+            rel_map,
+            depth,
+        )
+    }
+
+    fn block_content() -> &'static str {
+        r#"
+          <w:p><w:r><w:t>Before</w:t></w:r></w:p>
+          <w:tbl>
+            <w:tblGrid><w:gridCol w:w="1800"/></w:tblGrid>
+            <w:tr><w:tc>
+              <w:p><w:r><w:t>Outer cell</w:t></w:r></w:p>
+              <w:tbl>
+                <w:tblGrid><w:gridCol w:w="900"/></w:tblGrid>
+                <w:tr><w:tc><w:p><w:r><w:t>Nested cell</w:t></w:r></w:p></w:tc></w:tr>
+              </w:tbl>
+            </w:tc></w:tr>
+          </w:tbl>
+          <w:altChunk r:id="rIdAlt"/>
+          <w:p><w:r><w:t>After</w:t></w:r></w:p>
+        "#
+    }
+
+    fn assert_complete_wire(shape: &ShapeRun) {
+        assert_eq!(
+            shape
+                .text_blocks
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Before", "After"],
+            "the stable paragraph-only compatibility projection remains intact",
+        );
+
+        let json = serde_json::to_value(shape).expect("ShapeRun serializes");
+        let blocks = json["textBoxContent"]
+            .as_array()
+            .expect("parser-only textBoxContent array");
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block["type"].as_str().unwrap_or(""))
+                .collect::<Vec<_>>(),
+            ["paragraph", "table", "unsupportedTextBoxBlock", "paragraph"],
+            "authored block order is preserved",
+        );
+        assert_eq!(blocks[0]["runs"][0]["text"], "Before");
+        assert_eq!(
+            blocks[1]["rows"][0]["cells"][0]["content"][1]["type"], "table",
+            "nested table structure is preserved",
+        );
+        assert_eq!(
+            blocks[1]["rows"][0]["cells"][0]["content"][1]["rows"][0]["cells"][0]["content"][0]
+                ["runs"][0]["text"],
+            "Nested cell",
+        );
+        assert_eq!(blocks[2]["qName"], "w:altChunk");
+        assert_eq!(blocks[2]["sourcePath"], serde_json::json!([2]));
+        assert_eq!(blocks[3]["runs"][0]["text"], "After");
+    }
+
+    #[test]
+    fn wps_txbx_preserves_complete_ordered_block_wire() {
+        let xml = format!(
+            r#"<wps:wsp
+                 xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                 xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                 xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                 xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2540000" cy="1270000"/></a:xfrm>
+                   <a:prstGeom prst="rect"/></wps:spPr>
+                 <wps:txbx><w:txbxContent>{}</w:txbxContent></wps:txbx>
+               </wps:wsp>"#,
+            block_content(),
+        );
+        let doc = roxmltree::Document::parse(&xml).expect("WPS fixture");
+        let mut num_map = NumberingMap::default();
+        let shape = parse_wsp_shape(
+            &StyleMap::default(),
+            &mut num_map,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
+            0.0,
+            true,
+            0.0,
+            true,
+            &AnchorMeta::default(),
+            None,
+            None,
+            0,
+        )
+        .expect("WPS shape");
+        assert_complete_wire(&shape);
+    }
+
+    #[test]
+    fn vml_txbx_uses_the_same_complete_block_wire() {
+        let xml = format!(
+            r##"<w:pict
+                  xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                  xmlns:v="urn:schemas-microsoft-com:vml">
+                  <v:shape id="tb1" type="#_x0000_t202"
+                      style="position:relative;width:200pt;height:100pt">
+                    <v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox>
+                  </v:shape>
+                </w:pict>"##,
+            block_content(),
+        );
+        let doc = roxmltree::Document::parse(&xml).expect("VML fixture");
+        let mut num_map = NumberingMap::default();
+        let shape = parse_vml_pict(
+            &StyleMap::default(),
+            &mut num_map,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
+        )
+        .expect("VML shape");
+        assert_complete_wire(&shape);
+    }
+
+    #[test]
+    fn exhausted_depth_retains_an_explicit_container_marker() {
+        let body = parse_wps_text_body(
+            r#"<w:p><w:r><w:t>Too deep</w:t></w:r></w:p>"#,
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::with_limit(0),
+        );
+
+        assert!(body.legacy_blocks.is_empty());
+        assert_eq!(body.content.len(), 1);
+        let json = serde_json::to_value(&body.content).expect("wire serializes");
+        assert_eq!(json[0]["type"], "unsupportedTextBoxBlock");
+        assert_eq!(json[0]["qName"], "w:txbxContent");
+        assert_eq!(json[0]["sourcePath"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn vml_exhausted_depth_uses_the_same_explicit_container_marker() {
+        let xml = r##"<w:pict
+                  xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                  xmlns:v="urn:schemas-microsoft-com:vml">
+                  <v:shape id="tb1" type="#_x0000_t202"
+                      style="position:relative;width:200pt;height:100pt">
+                    <v:textbox><w:txbxContent>
+                      <w:p><w:r><w:t>Too deep</w:t></w:r></w:p>
+                    </w:txbxContent></v:textbox>
+                  </v:shape>
+                </w:pict>"##;
+        let document = roxmltree::Document::parse(xml).expect("VML fixture");
+        let mut num_map = NumberingMap::default();
+        let shape = parse_vml_pict(
+            &StyleMap::default(),
+            &mut num_map,
+            document.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::with_limit(0),
+        )
+        .expect("VML shape");
+
+        let json = serde_json::to_value(shape).expect("shape serializes");
+        assert_eq!(json["textBoxContent"][0]["type"], "unsupportedTextBoxBlock");
+        assert_eq!(json["textBoxContent"][0]["qName"], "w:txbxContent");
+        assert_eq!(
+            json["textBoxContent"][0]["sourcePath"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn text_box_paragraph_uses_its_part_relationship_and_media_context() {
+        let mut media_map = HashMap::new();
+        media_map.insert(
+            "rIdImage".to_string(),
+            "word/header-media/image1.png".to_string(),
+        );
+        let mut rel_map = HashMap::new();
+        rel_map.insert(
+            "rIdLink".to_string(),
+            "https://example.com/header".to_string(),
+        );
+        let body = parse_wps_text_body(
+            r#"
+              <w:p>
+                <w:hyperlink r:id="rIdLink"><w:r><w:t>Header link</w:t></w:r></w:hyperlink>
+                <w:r><w:drawing><wp:inline>
+                  <wp:extent cx="127000" cy="254000"/>
+                  <a:graphic><a:graphicData>
+                    <a:blip r:embed="rIdImage"/>
+                  </a:graphicData></a:graphic>
+                </wp:inline></w:drawing></w:r>
+              </w:p>
+            "#,
+            &media_map,
+            &rel_map,
+            DepthGuard::root(),
+        );
+
+        let json = serde_json::to_value(&body.content).expect("wire serializes");
+        assert_eq!(json[0]["type"], "paragraph");
+        assert_eq!(json[0]["runs"][0]["text"], "Header link");
+        assert_eq!(
+            json[0]["runs"][0]["hyperlink"],
+            "https://example.com/header"
+        );
+        assert_eq!(json[0]["runs"][1]["type"], "image");
+        assert_eq!(
+            json[0]["runs"][1]["imagePath"],
+            "word/header-media/image1.png"
+        );
+    }
+
+    #[test]
+    fn complete_projection_does_not_change_legacy_or_following_numbering() {
+        let numbering = r#"
+          <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:abstractNum w:abstractNumId="0">
+              <w:lvl w:ilvl="0">
+                <w:start w:val="1"/>
+                <w:numFmt w:val="decimal"/>
+                <w:lvlText w:val="%1."/>
+              </w:lvl>
+            </w:abstractNum>
+            <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+          </w:numbering>
+        "#;
+        let wsp_xml = r#"
+          <wps:wsp
+            xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+            xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <wps:txbx><w:txbxContent>
+              <w:p>
+                <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+                <w:r><w:t>Before table</w:t></w:r>
+              </w:p>
+              <w:tbl>
+                <w:tblGrid><w:gridCol w:w="1800"/></w:tblGrid>
+                <w:tr><w:tc><w:p>
+                  <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+                  <w:r><w:t>Inside table</w:t></w:r>
+                </w:p></w:tc></w:tr>
+              </w:tbl>
+              <w:p>
+                <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+                <w:r><w:t>After table</w:t></w:r>
+              </w:p>
+            </w:txbxContent></wps:txbx>
+          </wps:wsp>
+        "#;
+        let following_xml = r#"
+          <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+            <w:r><w:t>Following</w:t></w:r>
+          </w:p>
+        "#;
+        let wsp_document = roxmltree::Document::parse(wsp_xml).expect("WPS fixture");
+        let following_document =
+            roxmltree::Document::parse(following_xml).expect("paragraph fixture");
+        let mut num_map = NumberingMap::parse(numbering, &HashMap::new());
+
+        let body = super::parse_shape_text_body(
+            &StyleMap::default(),
+            &mut num_map,
+            wsp_document.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
+        );
+        let mut field = FieldState::default();
+        let following = parse_paragraph(
+            following_document.root_element(),
+            &StyleMap::default(),
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            None,
+            &mut field,
+        );
+
+        let wire = serde_json::to_value(&body.content).expect("wire serializes");
+        assert_eq!(wire[0]["numbering"]["text"], "1.");
+        assert_eq!(
+            wire[1]["rows"][0]["cells"][0]["content"][0]["numbering"]["text"],
+            "2.",
+        );
+        assert_eq!(wire[2]["numbering"]["text"], "3.");
+        assert_eq!(
+            body.legacy_blocks
+                .iter()
+                .map(|block| {
+                    block
+                        .numbering
+                        .as_ref()
+                        .map(|numbering| numbering.text.as_str())
+                })
+                .collect::<Vec<_>>(),
+            [Some("1."), Some("2.")],
+            "the stable projection must ignore newly acquired table content exactly as before",
+        );
+        assert_eq!(
+            following
+                .numbering
+                .as_ref()
+                .map(|numbering| numbering.text.as_str()),
+            Some("3."),
+            "newly acquired but not yet rendered table content must not change following output",
+        );
+    }
+
+    #[test]
+    fn vml_text_path_content_does_not_advance_suppressed_legacy_numbering() {
+        let numbering = r#"
+          <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:abstractNum w:abstractNumId="0">
+              <w:lvl w:ilvl="0">
+                <w:start w:val="1"/>
+                <w:numFmt w:val="decimal"/>
+                <w:lvlText w:val="%1."/>
+              </w:lvl>
+            </w:abstractNum>
+            <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+          </w:numbering>
+        "#;
+        let pict_xml = r##"
+          <w:pict
+            xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:v="urn:schemas-microsoft-com:vml">
+            <v:shape id="wordart" style="width:200pt;height:100pt">
+              <v:path textpathok="t"/>
+              <v:textpath on="t" string="WordArt"/>
+              <v:textbox><w:txbxContent>
+                <w:p>
+                  <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+                  <w:r><w:t>Suppressed body</w:t></w:r>
+                </w:p>
+              </w:txbxContent></v:textbox>
+            </v:shape>
+          </w:pict>
+        "##;
+        let following_xml = r#"
+          <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+            <w:r><w:t>Following</w:t></w:r>
+          </w:p>
+        "#;
+        let pict_document = roxmltree::Document::parse(pict_xml).expect("VML fixture");
+        let following_document =
+            roxmltree::Document::parse(following_xml).expect("paragraph fixture");
+        let mut num_map = NumberingMap::parse(numbering, &HashMap::new());
+
+        let shape = parse_vml_pict(
+            &StyleMap::default(),
+            &mut num_map,
+            pict_document.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
+        )
+        .expect("VML shape");
+        let mut field = FieldState::default();
+        let following = parse_paragraph(
+            following_document.root_element(),
+            &StyleMap::default(),
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            None,
+            &mut field,
+        );
+
+        assert!(shape.text_path.is_some());
+        assert!(shape.text_blocks.is_empty());
+        let wire = serde_json::to_value(&shape.text_box_content).expect("wire serializes");
+        assert_eq!(wire[0]["numbering"]["text"], "1.");
+        assert_eq!(
+            following
+                .numbering
+                .as_ref()
+                .map(|numbering| numbering.text.as_str()),
+            Some("1."),
+            "suppressed pre-B2 textPath body content must not consume live numbering",
+        );
+    }
+}
+
 // ECMA-376 §20.1.9.18 `<a:prstGeom>` — DOCX shapes use the same DrawingML
 // preset geometry catalog as PPTX/XLSX. Adjustment guides must be carried in
 // adj1..adj8 order, with omitted named guides preserved as holes, so core's
@@ -15187,16 +21446,16 @@ mod shape_preset_geometry_tests {
             doc.root_element(),
             theme,
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
             0.0,
             true,
             0.0,
             true,
             &AnchorMeta::default(),
-            1.0,
-            1.0,
-            0.0,
-            0.0,
-            false,
+            None,
+            None,
             0,
         )
         .expect("shape parses")
@@ -15323,16 +21582,16 @@ mod shape_fontref_color_tests {
             doc.root_element(),
             &theme(),
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
             0.0,
             true,
             0.0,
             true,
             &AnchorMeta::default(),
-            1.0,
-            1.0,
-            0.0,
-            0.0,
-            false,
+            None,
+            None,
             0,
         )
         .expect("shape parses")
@@ -15479,7 +21738,7 @@ mod numbering_marker_font_tests {
         elems
             .into_iter()
             .find_map(|e| match e {
-                BodyElement::Paragraph(p) => Some(p),
+                BodyElement::Paragraph(p) => Some(*p),
                 _ => None,
             })
             .expect("heading paragraph present")
@@ -15533,6 +21792,92 @@ mod numbering_marker_font_tests {
             Some("ＭＳ ゴシック"),
             "marker eastAsia axis inherits Heading1's MS Gothic"
         );
+        let facts = num.font_facts.as_ref().expect("internal marker font facts");
+        assert_eq!(facts.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(facts.font_family.as_deref(), Some("Times New Roman"));
+        assert_eq!(
+            facts.font_family_high_ansi.as_deref(),
+            Some("Times New Roman"),
+        );
+        assert_eq!(
+            facts.font_family_east_asia.as_deref(),
+            Some("ＭＳ ゴシック")
+        );
+    }
+
+    #[test]
+    fn numbering_marker_retains_four_slot_theme_presence_and_cs_metadata() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles{NS}><w:docDefaults><w:rPrDefault><w:rPr>
+              <w:lang w:eastAsia="zh-CN" w:bidi="ar-SA"/>
+              <w:rFonts w:ascii="Base ASCII" w:hAnsi="Base HANSI"
+                w:eastAsia="Base EA" w:cs="Base CS"/>
+            </w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#,
+        ));
+        let numbering_xml = format!(
+            r#"<w:numbering{NS}>
+              <w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">
+                <w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/>
+                <w:rPr><w:rFonts w:ascii="Direct ASCII" w:asciiTheme="majorAscii"
+                  w:hAnsi="Direct HANSI" w:hAnsiTheme="majorHAnsi"
+                  w:eastAsia="Direct EA" w:eastAsiaTheme="majorEastAsia"
+                  w:cs="Direct CS" w:cstheme="majorBidi" w:hint="eastAsia"/>
+                  <w:rtl/><w:cs/><w:szCs w:val="28"/><w:bCs/><w:iCs/>
+                </w:rPr>
+              </w:lvl></w:abstractNum>
+              <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+            </w:numbering>"#,
+        );
+        let body_xml = format!(
+            r#"<w:document{NS}><w:body><w:p><w:pPr><w:numPr>
+              <w:ilvl w:val="0"/><w:numId w:val="1"/>
+            </w:numPr></w:pPr><w:r><w:t>body</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        let doc = roxmltree::Document::parse(&body_xml).unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let mut num_map = NumberingMap::parse(&numbering_xml, &HashMap::new());
+        let para = parse_body_elements(
+            body,
+            &styles,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .into_iter()
+        .find_map(|element| match element {
+            BodyElement::Paragraph(para) => Some(para),
+            _ => None,
+        })
+        .expect("numbered paragraph");
+        let facts = para
+            .numbering
+            .as_ref()
+            .and_then(|numbering| numbering.font_facts.as_ref())
+            .expect("internal marker font facts");
+        let slots = facts.font_slots.as_ref().expect("four-slot facts");
+        assert_eq!(slots.direct.ascii.as_deref(), Some("Direct ASCII"));
+        assert_eq!(slots.direct.high_ansi.as_deref(), Some("Direct HANSI"));
+        assert_eq!(slots.direct.east_asia.as_deref(), Some("Direct EA"));
+        assert_eq!(slots.direct.complex_script.as_deref(), Some("Direct CS"));
+        assert!(slots.theme_present.ascii);
+        assert!(slots.theme_present.high_ansi);
+        assert!(slots.theme_present.east_asia);
+        assert!(slots.theme_present.complex_script);
+        assert_eq!(facts.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(facts.lang_east_asia.as_deref(), Some("zh-cn"));
+        assert_eq!(facts.lang_bidi.as_deref(), Some("ar-sa"));
+        assert_eq!(facts.rtl, Some(true));
+        assert_eq!(facts.cs, Some(true));
+        assert_eq!(facts.font_size_cs, Some(14.0));
+        assert_eq!(facts.bold_cs, Some(true));
+        assert_eq!(facts.italic_cs, Some(true));
     }
 
     /// No-regression: the COMMON Japanese case (eastAsia = a mincho, no Gothic
@@ -15543,7 +21888,7 @@ mod numbering_marker_font_tests {
         let body_xml = format!(
             r#"<w:document{NS}><w:body>
               <w:p><w:r>
-                <w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="ＭＳ 明朝"/></w:rPr>
+                <w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Arial" w:eastAsia="ＭＳ 明朝"/></w:rPr>
                 <w:t>本文テキスト</w:t>
               </w:r></w:p>
             </w:body></w:document>"#
@@ -15582,7 +21927,15 @@ mod numbering_marker_font_tests {
             })
             .unwrap();
         assert_eq!(run.font_family.as_deref(), Some("Times New Roman"));
+        assert_eq!(run.font_family_high_ansi.as_deref(), Some("Arial"));
         assert_eq!(run.font_family_east_asia.as_deref(), Some("ＭＳ 明朝"));
+        let slots = run
+            .font_slots
+            .as_ref()
+            .expect("internal four-axis font slots");
+        assert_eq!(slots.direct.ascii.as_deref(), Some("Times New Roman"));
+        assert_eq!(slots.direct.high_ansi.as_deref(), Some("Arial"));
+        assert_eq!(slots.direct.east_asia.as_deref(), Some("ＭＳ 明朝"));
     }
 
     // ---- Table conditional formatting: ST_Cnf bit decode (§14.11.9) ----
@@ -15675,6 +22028,8 @@ mod numbering_marker_font_tests {
             &rels,
             &theme,
             DepthGuard::root(),
+            TablePositioningContext::Normal,
+            LogicalTableSequenceContext::standalone(doc.root_element()),
         )
     }
 
@@ -15696,6 +22051,349 @@ mod numbering_marker_font_tests {
             }),
             _ => None,
         })
+    }
+
+    // ------------------------------------------------------------------
+    // ECMA-376 Part 1 §17.4.37 parser-owned logical-table membership.
+    // ------------------------------------------------------------------
+
+    fn logical_sequence_styles() -> StyleMap {
+        StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>
+                <w:style w:type="table" w:default="1" w:styleId="Sequence">
+                    <w:tblStylePr w:type="firstRow"><w:rPr><w:color w:val="AA0000"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="lastRow"><w:rPr><w:color w:val="0000BB"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="band1Horz"><w:rPr><w:color w:val="11AA11"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="band2Horz"><w:rPr><w:color w:val="BB22BB"/></w:rPr></w:tblStylePr>
+                </w:style>
+                <w:style w:type="table" w:styleId="Other">
+                    <w:tblStylePr w:type="firstRow"><w:rPr><w:color w:val="AA0000"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="lastRow"><w:rPr><w:color w:val="0000BB"/></w:rPr></w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ))
+    }
+
+    fn parse_body_tables(body: &str, styles: &StyleMap) -> Vec<DocTable> {
+        let xml = format!(r#"<w:body xmlns:w="{ns}">{body}</w:body>"#, ns = W_NS);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let mut num_map = NumberingMap::default();
+        parse_body_elements(
+            doc.root_element(),
+            styles,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .into_iter()
+        .filter_map(|element| match element {
+            BodyElement::Table(table) => Some(*table),
+            _ => None,
+        })
+        .collect()
+    }
+
+    fn one_row_table(tbl_pr: &str, text: &str) -> String {
+        format!(
+            r#"<w:tbl><w:tblPr>{tbl_pr}</w:tblPr><w:tr><w:tc><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+        )
+    }
+
+    fn first_cell_color(table: &DocTable) -> Option<String> {
+        cell_text_color(&table.rows[0].cells[0])
+    }
+
+    #[test]
+    fn adjacent_ordinary_tables_share_logical_outer_rows_with_effective_default_style() {
+        // §17.4.37 treats adjacent ordinary-flow tables with the same effective
+        // table style as one logical table. The style is deliberately implicit
+        // here: both source tables inherit the default table style, so lexical
+        // w:tblStyle equality is not sufficient.
+        let look = r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:noHBand="1"/>"#;
+        let tables = parse_body_tables(
+            &format!(
+                "{}{}",
+                one_row_table(look, "first"),
+                one_row_table(&format!(r#"<w:tblStyle w:val="Sequence"/>{look}"#), "last")
+            ),
+            &logical_sequence_styles(),
+        );
+
+        assert_eq!(tables.len(), 2, "authored table identities are preserved");
+        assert_eq!(first_cell_color(&tables[0]).as_deref(), Some("aa0000"));
+        assert_eq!(first_cell_color(&tables[1]).as_deref(), Some("0000bb"));
+        let first = serde_json::to_value(&tables[0].table_layout).unwrap();
+        let second = serde_json::to_value(&tables[1].table_layout).unwrap();
+        assert_eq!(first["logicalSequenceId"], second["logicalSequenceId"]);
+        assert!(first["logicalSequenceId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+        assert_eq!(first["logicalRowOffset"], 0);
+        assert_eq!(second["logicalRowOffset"], 1);
+        assert_eq!(first["logicalTotalRows"], 2);
+        assert_eq!(second["logicalTotalRows"], 2);
+    }
+
+    #[test]
+    fn unresolved_or_non_table_style_is_not_an_effective_grouping_identity() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:styleId="WrongType"/>
+                <w:style w:type="table" w:default="1" w:styleId="DefaultTable"/>
+            </w:styles>"#,
+            ns = W_NS,
+        ));
+        for style_id in ["Missing", "WrongType"] {
+            let tables = parse_body_tables(
+                &format!(
+                    "{}{}",
+                    one_row_table(&format!(r#"<w:tblStyle w:val="{style_id}"/>"#), "a"),
+                    one_row_table(&format!(r#"<w:tblStyle w:val="{style_id}"/>"#), "b"),
+                ),
+                &styles,
+            );
+            assert_eq!(tables.len(), 2);
+            for table in tables {
+                assert_eq!(
+                    table.table_layout.effective_style_id, None,
+                    "§17.4.62 requires the referenced style to exist as a table style",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn adjacent_ordinary_tables_continue_horizontal_row_banding() {
+        let look = r#"<w:tblLook w:firstRow="0" w:lastRow="0"/>"#;
+        let tables = parse_body_tables(
+            &format!(
+                "{}{}",
+                one_row_table(look, "band one"),
+                one_row_table(look, "band two")
+            ),
+            &logical_sequence_styles(),
+        );
+
+        assert_eq!(first_cell_color(&tables[0]).as_deref(), Some("11aa11"));
+        assert_eq!(first_cell_color(&tables[1]).as_deref(), Some("bb22bb"));
+    }
+
+    #[test]
+    fn paragraph_different_style_and_effective_float_break_logical_table_sequences() {
+        let look = r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:noHBand="1"/>"#;
+        let cases = [
+            format!(
+                "{}<w:p/>{}",
+                one_row_table(look, "before paragraph"),
+                one_row_table(look, "after paragraph")
+            ),
+            format!(
+                "{}{}",
+                one_row_table(look, "default style"),
+                one_row_table(
+                    &format!(r#"<w:tblStyle w:val="Other"/>{look}"#),
+                    "other style"
+                )
+            ),
+            format!(
+                "{}{}",
+                one_row_table(look, "ordinary"),
+                one_row_table(
+                    &format!(r#"<w:tblpPr w:tblpX="1"/>{look}"#),
+                    "effective float"
+                )
+            ),
+        ];
+
+        for body in cases {
+            let tables = parse_body_tables(&body, &logical_sequence_styles());
+            assert_eq!(first_cell_color(&tables[0]).as_deref(), Some("0000bb"));
+            assert_eq!(first_cell_color(&tables[1]).as_deref(), Some("0000bb"));
+            assert_ne!(
+                tables[0].table_layout.logical_sequence_id,
+                tables[1].table_layout.logical_sequence_id,
+                "parser-owned membership must retain each §17.4.37 barrier",
+            );
+        }
+    }
+
+    #[test]
+    fn ignored_tblppr_remains_ordinary_for_logical_table_sequence() {
+        // [MS-OI29500] 2.1.162(b-c): this authored positioning payload is
+        // ignored by Word after defaults are resolved. It therefore does not
+        // break the §17.4.37 ordinary-flow sequence merely because tblpPr is
+        // present lexically.
+        let look = r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:noHBand="1"/>"#;
+        let tables = parse_body_tables(
+            &format!(
+                "{}{}",
+                one_row_table(look, "first"),
+                one_row_table(
+                    &format!(
+                        r#"<w:tblpPr w:tblpX="0" w:tblpY="0" w:horzAnchor="text" w:vertAnchor="margin"/>{look}"#
+                    ),
+                    "last"
+                )
+            ),
+            &logical_sequence_styles(),
+        );
+
+        assert_eq!(first_cell_color(&tables[0]).as_deref(), Some("aa0000"));
+        assert_eq!(first_cell_color(&tables[1]).as_deref(), Some("0000bb"));
+        assert_eq!(
+            tables[0].table_layout.logical_sequence_id,
+            tables[1].table_layout.logical_sequence_id,
+        );
+    }
+
+    #[test]
+    fn non_paragraph_range_markup_does_not_intervene_in_logical_table_sequence() {
+        // §17.4.37 says specifically that an intervening p separates tables;
+        // range markup between two block elements is not a paragraph and must
+        // not change their logical row ordinals.
+        let look = r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:noHBand="1"/>"#;
+        let tables = parse_body_tables(
+            &format!(
+                r#"{}<w:bookmarkStart w:id="0" w:name="between"/>{}"#,
+                one_row_table(look, "first"),
+                one_row_table(look, "last")
+            ),
+            &logical_sequence_styles(),
+        );
+
+        assert_eq!(first_cell_color(&tables[0]).as_deref(), Some("aa0000"));
+        assert_eq!(first_cell_color(&tables[1]).as_deref(), Some("0000bb"));
+    }
+
+    #[test]
+    fn adjacent_nested_tables_share_logical_outer_rows() {
+        let look = r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:noHBand="1"/>"#;
+        let outer = parse_tbl_styled(
+            &format!(
+                r#"<w:tr><w:tc>{}{}</w:tc></w:tr>"#,
+                one_row_table(look, "nested first"),
+                one_row_table(look, "nested last")
+            ),
+            &logical_sequence_styles(),
+        );
+        let nested: Vec<&DocTable> = outer.rows[0].cells[0]
+            .content
+            .iter()
+            .filter_map(|element| match element {
+                CellElement::Table(table) => Some(table.as_ref()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            nested.len(),
+            2,
+            "authored nested table identities remain distinct"
+        );
+        assert_eq!(first_cell_color(nested[0]).as_deref(), Some("aa0000"));
+        assert_eq!(first_cell_color(nested[1]).as_deref(), Some("0000bb"));
+        let first = serde_json::to_value(&nested[0].table_layout).unwrap();
+        let second = serde_json::to_value(&nested[1].table_layout).unwrap();
+        assert_eq!(first["logicalSequenceId"], second["logicalSequenceId"]);
+        assert_eq!(first["logicalRowOffset"], 0);
+        assert_eq!(second["logicalRowOffset"], 1);
+        assert_eq!(first["logicalTotalRows"], 2);
+        assert_eq!(second["logicalTotalRows"], 2);
+    }
+
+    #[test]
+    fn absent_effective_style_identity_does_not_form_a_logical_table_sequence() {
+        let body = format!(
+            r#"<w:body xmlns:w="{ns}">{}{}</w:body>"#,
+            one_row_table("", "first"),
+            one_row_table("", "second"),
+            ns = W_NS
+        );
+        let doc = roxmltree::Document::parse(&body).unwrap();
+        let children = body_children_with_cover_breaks(doc.root_element());
+        let contexts = logical_table_sequence_contexts(
+            &children,
+            &StyleMap::parse(""),
+            TablePositioningContext::Normal,
+        );
+
+        for (table, _) in children {
+            let context = contexts.get(&table.id()).expect("table context");
+            assert_eq!(*context, LogicalTableSequenceContext::standalone(table));
+        }
+    }
+
+    #[test]
+    fn body_level_sect_pr_breaks_logical_table_sequence() {
+        // §17.6.1: a section boundary between two tables prevents them from
+        // becoming one §17.4.37 logical table even when style and flow match.
+        let look = r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:noHBand="1"/>"#;
+        let tables = parse_body_tables(
+            &format!(
+                r#"{}<w:sectPr><w:type w:val="continuous"/></w:sectPr>{}"#,
+                one_row_table(look, "before section"),
+                one_row_table(look, "after section")
+            ),
+            &logical_sequence_styles(),
+        );
+
+        assert_eq!(tables.len(), 2);
+        assert_ne!(
+            tables[0].table_layout.logical_sequence_id,
+            tables[1].table_layout.logical_sequence_id,
+        );
+    }
+
+    fn phase_styles() -> StyleMap {
+        StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>
+                <w:style w:type="table" w:default="1" w:styleId="Phase">
+                    <w:tblStylePr w:type="firstRow"><w:tcPr><w:shd w:val="clear" w:fill="FF0000"/></w:tcPr></w:tblStylePr>
+                    <w:tblStylePr w:type="band1Horz"><w:rPr><w:color w:val="11AA11"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="band2Horz"><w:rPr><w:color w:val="BB22BB"/></w:rPr></w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ))
+    }
+
+    fn two_row_table(tbl_pr: &str) -> String {
+        let tr = "<w:tr><w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr>".repeat(2);
+        format!(r#"<w:tbl><w:tblPr>{tbl_pr}</w:tblPr>{tr}</w:tbl>"#)
+    }
+
+    fn row_color(table: &DocTable, row: usize) -> Option<String> {
+        cell_text_color(&table.rows[row].cells[0])
+    }
+
+    #[test]
+    fn horizontal_band_parity_origin_is_owned_by_the_logical_sequence_first_member() {
+        // The first member activates a shaded firstRow, so the logical table's
+        // horizontal-band parity origins after logical row 0. The second member
+        // turns firstRow OFF via its own tblLook; that LOCAL flag must not
+        // re-phase the shared banding. Logical rows 0(firstRow) 1 2 3 must band
+        // 1,2,1 across the seam — not restart at the second member.
+        let tables = parse_body_tables(
+            &format!(
+                "{}{}",
+                two_row_table(r#"<w:tblLook w:firstRow="1" w:lastRow="0"/>"#),
+                two_row_table(r#"<w:tblLook w:firstRow="0" w:lastRow="0"/>"#)
+            ),
+            &phase_styles(),
+        );
+
+        assert_eq!(tables.len(), 2);
+        // logical row 1 (first member body row): band1.
+        assert_eq!(row_color(&tables[0], 1).as_deref(), Some("11aa11"));
+        // logical rows 2 and 3 (second member) continue the sequence's parity.
+        assert_eq!(row_color(&tables[1], 0).as_deref(), Some("bb22bb"));
+        assert_eq!(row_color(&tables[1], 1).as_deref(), Some("11aa11"));
     }
 
     // A cell carrying an explicit firstCol cnfStyle (`001000000000`) on its tcPr
@@ -16450,7 +23148,7 @@ mod numbering_marker_color_tests {
         )
         .into_iter()
         .find_map(|e| match e {
-            BodyElement::Paragraph(p) => Some(p),
+            BodyElement::Paragraph(p) => Some(*p),
             _ => None,
         })
         .expect("bullet paragraph present")
@@ -16633,7 +23331,7 @@ mod ole_object_tests {
             })
             .flat_map(|p| p.runs.into_iter())
             .filter_map(|r| match r {
-                DocRun::Image(img) => Some(img),
+                DocRun::Image(img) => Some(*img),
                 _ => None,
             })
             .collect()
@@ -16903,7 +23601,7 @@ mod vml_pict_tests {
         all_runs(body_xml, media)
             .into_iter()
             .filter_map(|r| match r {
-                DocRun::Image(img) => Some(img),
+                DocRun::Image(img) => Some(*img),
                 _ => None,
             })
             .collect()
@@ -16917,6 +23615,178 @@ mod vml_pict_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// VML §19.1.2.19 absolute text boxes carry their authored offsets in the
+    /// CSS-like `margin-left` / `margin-top` declarations. A stroke is enabled
+    /// by default unless `stroked="f"`; when no `strokecolor` is authored VML's
+    /// default is black. Word also emits numeric relative dash patterns on the
+    /// child `<v:stroke>` element.
+    #[test]
+    fn textbox_preserves_offsets_and_default_stroke() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shape type="#_x0000_t202"
+                  style="position:absolute;margin-left:18.25pt;margin-top:-14.25pt;width:444.7pt;height:38.7pt;mso-width-relative:margin"
+                  filled="f" strokeweight="1.5pt">
+                  <v:stroke dashstyle="0 2" endcap="round"/>
+                  <v:textbox><w:txbxContent><w:p><w:r><w:t>notice</w:t></w:r></w:p></w:txbxContent></v:textbox>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 1);
+        let shape = &shapes[0];
+        assert!((shape.anchor_x_pt - 18.25).abs() < 1e-6);
+        assert!((shape.anchor_y_pt + 14.25).abs() < 1e-6);
+        assert_eq!(shape.stroke.as_deref(), Some("000000"));
+        assert!((shape.stroke_width - 1.5).abs() < 1e-6);
+        assert_eq!(shape.stroke_dash.as_deref(), Some("0 2"));
+        assert_eq!(shape.stroke_cap.as_deref(), Some("round"));
+    }
+
+    /// Part 4 §19.1.2.19/§19.1.2.21: the shape instance overrides its
+    /// referenced shapetype, while the instance's child stroke overrides the
+    /// instance attributes. Stroke weight defaults to 1pt and a unitless value
+    /// is expressed in EMU.
+    #[test]
+    fn vml_stroke_cascade_and_units_follow_part4() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shapetype id="base" o:spt="86" stroked="f" strokecolor="#ff0000"
+                  strokeweight="25400" adj="1000">
+                  <v:stroke color="#00ff00" dashstyle="shortdot"/>
+                </v:shapetype>
+                <v:shape type="#base" stroked="t" strokecolor="#0000ff" adj="2000"
+                  style="width:20pt;height:30pt">
+                  <v:stroke on="t" color="#112233" weight="12700" dashstyle="longdashdotdot"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+              <w:p><w:r><w:pict>
+                <v:rect style="width:20pt;height:30pt" stroked="t">
+                  <v:stroke on="f" color="#abcdef"/>
+                </v:rect>
+              </w:pict></w:r></w:p>
+              <w:p><w:r><w:pict>
+                <v:rect style="width:20pt;height:30pt"/>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 3);
+
+        assert_eq!(shapes[0].stroke.as_deref(), Some("112233"));
+        assert!((shapes[0].stroke_width - 1.0).abs() < 1e-6);
+        assert_eq!(shapes[0].stroke_dash.as_deref(), Some("lgDashDotDot"));
+        assert_eq!(
+            shapes[0].adj_values,
+            vec![Some(2000.0 * 100000.0 / 21600.0)]
+        );
+
+        assert_eq!(shapes[1].stroke, None);
+        assert_eq!(shapes[1].stroke_width, 0.0);
+
+        assert_eq!(shapes[2].stroke.as_deref(), Some("000000"));
+        assert!((shapes[2].stroke_width - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vml_fill_cascade_and_default_follow_part4() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shapetype id="inherited" fillcolor="#ff0000"/>
+                <v:rect type="#inherited" style="width:20pt;height:30pt"/>
+              </w:pict></w:r></w:p>
+              <w:p><w:r><w:pict>
+                <v:shapetype id="typedChild"><v:fill color="#00ff00"/></v:shapetype>
+                <v:rect type="#typedChild" fillcolor="#0000ff" style="width:20pt;height:30pt"/>
+              </w:pict></w:r></w:p>
+              <w:p><w:r><w:pict>
+                <v:rect fillcolor="#0000ff" style="width:20pt;height:30pt">
+                  <v:fill color="#112233" opacity="0.5"/>
+                </v:rect>
+              </w:pict></w:r></w:p>
+              <w:p><w:r><w:pict>
+                <v:rect filled="t" style="width:20pt;height:30pt"><v:fill on="f"/></v:rect>
+              </w:pict></w:r></w:p>
+              <w:p><w:r><w:pict><v:rect style="width:20pt;height:30pt"/></w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 5);
+        fn color(shape: &ShapeRun) -> Option<&str> {
+            match shape.fill.as_ref() {
+                Some(ShapeFill::Solid { color }) => Some(color.as_str()),
+                _ => None,
+            }
+        }
+        assert_eq!(color(&shapes[0]), Some("ff0000"));
+        assert_eq!(color(&shapes[1]), Some("0000ff"));
+        assert_eq!(color(&shapes[2]), Some("112233"));
+        assert!((shapes[2].fill_opacity.unwrap_or(0.0) - 0.5).abs() < 1e-6);
+        assert!(shapes[3].fill.is_none());
+        assert_eq!(color(&shapes[4]), Some("FFFFFF"));
+    }
+
+    /// VML §19.1.2.12 `<v:line>` stores its geometry in `from` / `to`
+    /// rather than CSS width/height. Word uses these legacy line elements for
+    /// form connectors; `<v:stroke endarrow="block">` decorates the `to` end.
+    #[test]
+    fn line_preserves_endpoints_and_block_arrow() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:line style="position:absolute;mso-position-horizontal-relative:text;mso-position-vertical-relative:text" from="44pt,6.5pt"
+                  to="142pt,6.5pt" strokeweight="1.5pt">
+                  <v:stroke endarrow="block"/>
+                </v:line>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 1);
+        let shape = &shapes[0];
+        assert_eq!(shape.preset_geometry.as_deref(), Some("line"));
+        assert!((shape.anchor_x_pt - 44.0).abs() < 1e-6);
+        assert!((shape.anchor_y_pt - 6.5).abs() < 1e-6);
+        assert!((shape.width_pt - 98.0).abs() < 1e-6);
+        assert!(shape.height_pt.abs() < 1e-6);
+        assert_eq!(shape.stroke.as_deref(), Some("000000"));
+        assert!((shape.stroke_width - 1.5).abs() < 1e-6);
+        assert_eq!(shape.anchor_x_relative_from.as_deref(), Some("column"));
+        assert_eq!(shape.anchor_y_relative_from.as_deref(), Some("paragraph"));
+        assert_eq!(
+            shape.tail_end.as_ref().map(|end| end.r#type.as_str()),
+            Some("triangle")
+        );
+    }
+
+    /// [MS-OE376] §3.9.5 maps VML shape type 86 to Right Bracket. Reusing
+    /// the shared DrawingML preset lets DOCX and PPTX render the same geometry.
+    #[test]
+    fn legacy_shape_type_86_maps_to_right_bracket_preset() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shapetype id="_x0000_t86" o:spt="86" filled="f"/>
+                <v:shape type="#_x0000_t86"
+                  style="position:absolute;margin-left:133.5pt;margin-top:10.3pt;width:13.35pt;height:15.1pt"
+                  filled="f"/>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].preset_geometry.as_deref(), Some("rightBracket"));
     }
 
     /// §19.1.2.11 imagedata — a bare `<w:pict>` (no `<w:object>` wrapper) whose
@@ -17018,7 +23888,8 @@ mod vml_pict_tests {
     /// `<v:fill opacity>` and a `<v:textpath string="…" style="font-family:…">`.
     /// It must surface as a ShapeRun carrying the text_path (string + font),
     /// rotation (§19.1.2.19), fill colour, and fill_opacity (§19.1.2.5) — the
-    /// renderer draws the stretched rotated semi-transparent text.
+    /// retained acquisition uses the resolved text-path controls to decide
+    /// whether and how the authored text is fitted.
     #[test]
     fn watermark_textpath_shape_carries_text_rotation_and_opacity() {
         let body = format!(
@@ -17072,6 +23943,84 @@ mod vml_pict_tests {
         assert!(s.behind_doc, "negative z-index ⇒ behindDoc");
     }
 
+    /// ECMA-376 Part 4's transitional VML schema places `textpathok` on
+    /// `<v:path>` (CT_Path) and the remaining WordArt switches on
+    /// `<v:textpath>` (CT_TextPath). Word's built-in text-path shape types put
+    /// those facts on the referenced `<v:shapetype>` while the shape instance
+    /// supplies the string and font style. Preserve the fully resolved facts;
+    /// an instance attribute wins over its shape-type default.
+    #[test]
+    fn textpath_inherits_wordart_facts_from_real_shapetype() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shapetype id="_x0000_t136" coordsize="21600,21600" o:spt="136"
+                  adj="10800" path="m@7,l@8,m@5,21600l@6,21600e">
+                  <v:path textpathok="t" o:connecttype="custom"/>
+                  <v:textpath on="t" fitshape="t" fitpath="f" trim="t" xscale="f"/>
+                </v:shapetype>
+                <v:shape id="PowerPlusWaterMarkObject1" type="#_x0000_t136"
+                  style="position:absolute;width:415pt;height:207.5pt" stroked="f">
+                  <v:textpath trim="f"
+                    style="font-family:&quot;Calibri&quot;;font-size:1pt"
+                    string="DRAFT"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 1);
+        let wire = serde_json::to_value(
+            shapes[0]
+                .text_path
+                .as_ref()
+                .expect("text path must be parsed"),
+        )
+        .expect("text path serializes");
+
+        assert_eq!(wire["textPathOk"], true);
+        assert_eq!(wire["on"], true);
+        assert_eq!(wire["fitShape"], true);
+        assert_eq!(wire["fitPath"], false);
+        assert_eq!(wire["trim"], false, "shape instance overrides shapetype");
+        assert_eq!(wire["xScale"], false);
+        assert_eq!(wire["fontSizePt"], 1.0);
+    }
+
+    /// CT_Path / CT_TextPath boolean controls default to false. Emit those
+    /// defaults explicitly so parser-originated text paths retain provenance;
+    /// an object constructed only through the stable public model has no such
+    /// private wire keys.
+    #[test]
+    fn textpath_serializes_explicit_false_control_defaults() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shape style="width:120pt;height:40pt" stroked="f">
+                  <v:textpath style="font-family:Arial;font-size:14pt" string="NOTICE"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+
+        let shapes = shape_runs(&body, &HashMap::new());
+        let wire = serde_json::to_value(
+            shapes[0]
+                .text_path
+                .as_ref()
+                .expect("text path must be parsed"),
+        )
+        .expect("text path serializes");
+
+        for key in ["textPathOk", "on", "fitShape", "fitPath", "trim", "xScale"] {
+            assert_eq!(wire[key], false, "{key} must materialize its false default");
+        }
+        assert_eq!(wire["fontSizePt"], 14.0, "font size is authored input");
+    }
+
     /// §19.1.2.5 opacity — the "52429f" form (1/65536-ths, trailing `f`) decodes
     /// to 0.8; an absent `<v:fill opacity>` ⇒ fully opaque (`fill_opacity` =
     /// None). Also checks an unquoted `font-family`.
@@ -17112,6 +24061,164 @@ mod vml_pict_tests {
                 .as_deref(),
             Some("Arial")
         );
+    }
+}
+
+#[cfg(test)]
+mod wgp_shape_transform_tests {
+    use super::*;
+
+    /// Word applies a non-uniform group scale after an exact child quarter turn,
+    /// so the parent scale axes exchange against the child's unrotated frame.
+    /// The full group transform still maps the child's original centre.
+    #[test]
+    fn quarter_turned_child_composes_non_uniform_group_scale_about_its_center() {
+        let xml = r#"
+          <wpg:wgp xmlns:wpg="urn:wpg" xmlns:wps="urn:wps" xmlns:a="urn:a">
+            <wpg:grpSpPr><a:xfrm>
+              <a:off x="0" y="0"/><a:ext cx="127000" cy="254000"/>
+              <a:chOff x="0" y="0"/><a:chExt cx="127000" cy="127000"/>
+            </a:xfrm></wpg:grpSpPr>
+            <wps:wsp>
+              <wps:spPr>
+                <a:xfrm rot="5400000">
+                  <a:off x="0" y="50800"/><a:ext cx="127000" cy="25400"/>
+                </a:xfrm>
+                <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                <a:noFill/><a:ln><a:noFill/></a:ln>
+              </wps:spPr>
+            </wps:wsp>
+          </wpg:wgp>
+        "#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut num_map = NumberingMap::default();
+        let shapes = parse_wgp_shapes(
+            &StyleMap::default(),
+            &mut num_map,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            0.0,
+            false,
+            0.0,
+            true,
+            &AnchorMeta::default(),
+            0,
+        );
+        assert_eq!(shapes.len(), 1);
+        let shape = &shapes[0];
+        assert!((shape.rotation - 90.0).abs() < 1e-6);
+        assert!(
+            (shape.width_pt - 20.0).abs() < 1e-6,
+            "width={}",
+            shape.width_pt
+        );
+        assert!(
+            (shape.height_pt - 2.0).abs() < 1e-6,
+            "height={}",
+            shape.height_pt
+        );
+        assert!(
+            (shape.anchor_y_pt - 9.0).abs() < 1e-6,
+            "y={}",
+            shape.anchor_y_pt
+        );
+        assert!(!shape.flip_h);
+        assert!(!shape.flip_v);
+        let child = &shape
+            .anchor_acquisition
+            .as_ref()
+            .expect("group acquisition")
+            .group
+            .as_ref()
+            .expect("group metadata")
+            .resolved_child_frame;
+        assert!((child.offset_x_pt - shape.anchor_x_pt).abs() < 1e-6);
+        assert!((child.offset_y_pt - shape.anchor_y_pt).abs() < 1e-6);
+        assert!((child.width_pt - shape.width_pt).abs() < 1e-6);
+        assert!((child.height_pt - shape.height_pt).abs() < 1e-6);
+        assert!((child.rotation_deg - shape.rotation).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rotated_flipped_group_composes_shape_per_annex_l() {
+        let xml = r#"
+          <wpg:wgp xmlns:wpg="urn:wpg" xmlns:wps="urn:wps" xmlns:a="urn:a">
+            <wpg:grpSpPr><a:xfrm rot="5400000" flipH="1">
+              <a:off x="0" y="0"/><a:ext cx="2540000" cy="1270000"/>
+              <a:chOff x="0" y="0"/><a:chExt cx="1270000" cy="1270000"/>
+            </a:xfrm></wpg:grpSpPr>
+            <wps:wsp><wps:spPr>
+              <a:xfrm rot="900000" flipV="1">
+                <a:off x="127000" y="254000"/><a:ext cx="254000" cy="127000"/>
+              </a:xfrm>
+              <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+              <a:noFill/><a:ln><a:noFill/></a:ln>
+            </wps:spPr></wps:wsp>
+          </wpg:wgp>
+        "#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut num_map = NumberingMap::default();
+        let shapes = parse_wgp_shapes(
+            &StyleMap::default(),
+            &mut num_map,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            0.0,
+            false,
+            0.0,
+            true,
+            &AnchorMeta::default(),
+            0,
+        );
+        let shape = &shapes[0];
+        assert!((shape.anchor_x_pt - 105.0).abs() < 1e-6);
+        assert!((shape.anchor_y_pt - 105.0).abs() < 1e-6);
+        assert!((shape.width_pt - 40.0).abs() < 1e-6);
+        assert!((shape.height_pt - 10.0).abs() < 1e-6);
+        assert!((shape.rotation - 105.0).abs() < 1e-6);
+        assert!(shape.flip_h);
+        assert!(shape.flip_v);
+    }
+
+    #[test]
+    fn rotated_flipped_group_composes_picture_per_annex_l() {
+        let xml = r#"
+          <wpg:wgp xmlns:wpg="urn:wpg" xmlns:pic="urn:pic" xmlns:a="urn:a"
+                   xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <wpg:grpSpPr><a:xfrm rot="5400000" flipH="1">
+              <a:off x="0" y="0"/><a:ext cx="2540000" cy="1270000"/>
+              <a:chOff x="0" y="0"/><a:chExt cx="1270000" cy="1270000"/>
+            </a:xfrm></wpg:grpSpPr>
+            <pic:pic>
+              <pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill>
+              <pic:spPr><a:xfrm rot="900000" flipV="1">
+                <a:off x="127000" y="254000"/><a:ext cx="254000" cy="127000"/>
+              </a:xfrm></pic:spPr>
+            </pic:pic>
+          </wpg:wgp>
+        "#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let media = HashMap::from([("rId1".to_string(), "word/media/image1.png".to_string())]);
+        let images = parse_wgp_images(
+            doc.root_element(),
+            &media,
+            &ThemeColors::default(),
+            0.0,
+            false,
+            0.0,
+            true,
+            &AnchorMeta::default(),
+        );
+        let image = &images[0];
+        assert!((image.anchor_x_pt - 105.0).abs() < 1e-6);
+        assert!((image.anchor_y_pt - 105.0).abs() < 1e-6);
+        assert!((image.width_pt - 40.0).abs() < 1e-6);
+        assert!((image.height_pt - 10.0).abs() < 1e-6);
+        assert!((image.rotation - 105.0).abs() < 1e-6);
+        assert!(image.flip_h);
+        assert!(image.flip_v);
     }
 }
 
@@ -17846,5 +24953,170 @@ mod lvl_override_full_lvl_tests {
             "formatting-only override continues the shared count (its lvlText applies); \
              only startOverride restarts (§17.9.27)"
         );
+    }
+}
+
+#[cfg(test)]
+mod ruby_tab_tests {
+    use super::*;
+    use crate::xml_util::W_NS;
+
+    /// Reduce a `<w:p>` (text-box paragraph) to its `ShapeText` via the shape
+    /// text path (`extract_simple_paragraph_text` → `collect_run_node`).
+    fn parse_shape_para(body: &str) -> Option<ShapeText> {
+        let xml = format!(r#"<w:p xmlns:w="{ns}">{body}</w:p>"#, ns = W_NS);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        extract_simple_paragraph_text(&style_map, &mut num_map, doc.root_element(), &theme, &media)
+    }
+
+    #[test]
+    fn shape_ruby_surfaces_hps_raise_and_omits_it_when_absent() {
+        let parse = |ruby_pr: &str| {
+            parse_shape_para(&format!(
+                r#"<w:r><w:ruby>
+                    <w:rubyPr><w:hps w:val="15"/>{ruby_pr}</w:rubyPr>
+                    <w:rt><w:r><w:t>かん</w:t></w:r></w:rt>
+                    <w:rubyBase><w:r><w:t>漢</w:t></w:r></w:rubyBase>
+                  </w:ruby></w:r>"#
+            ))
+            .expect("text-box paragraph yields a ShapeText block")
+        };
+
+        let with_raise = parse(r#"<w:hpsRaise w:val="30"/>"#);
+        let annotation = with_raise.runs[0].ruby.as_ref().expect("ruby annotation");
+        assert_eq!(
+            annotation.font_size_pt, 7.5,
+            "w:hps is stored in half-points"
+        );
+        assert_eq!(annotation.hps_raise_pt, Some(15.0));
+        assert_eq!(
+            serde_json::to_value(annotation).unwrap()["hpsRaisePt"],
+            serde_json::json!(15.0),
+        );
+
+        let without_raise = parse("");
+        let annotation = without_raise.runs[0]
+            .ruby
+            .as_ref()
+            .expect("ruby annotation");
+        assert_eq!(annotation.hps_raise_pt, None);
+        assert!(
+            serde_json::to_value(annotation)
+                .unwrap()
+                .get("hpsRaisePt")
+                .is_none(),
+            "absent w:hpsRaise must remain distinguishable from zero",
+        );
+    }
+
+    /// ECMA-376 §17.3.3.25 (`w:ruby`) + §17.3.3.32 (`w:tab`) — a `<w:tab/>` inside
+    /// a rubyBase run must survive the TEXT-BOX parse path (issue #1012). Word GT
+    /// (`sample-59.pdf`) honors the in-base tab as a real tab, so the shape path
+    /// must mirror the body path (`parse_run_inner`): base `漢<tab>字` becomes the
+    /// run sequence [漢(ruby), \t, 字], with the ruby annotation riding the FIRST
+    /// (pre-tab) piece only.
+    #[test]
+    fn ruby_base_internal_tab_is_preserved_in_textbox_path() {
+        let st = parse_shape_para(
+            r#"<w:r><w:ruby>
+                <w:rubyPr><w:rubyAlign w:val="center"/><w:hps w:val="12"/></w:rubyPr>
+                <w:rt><w:r><w:t>かんじ</w:t></w:r></w:rt>
+                <w:rubyBase><w:r><w:t xml:space="preserve">漢</w:t><w:tab/><w:t xml:space="preserve">字</w:t></w:r></w:rubyBase>
+              </w:ruby></w:r>"#,
+        )
+        .expect("text-box paragraph yields a ShapeText block");
+
+        let texts: Vec<&str> = st.runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["漢", "\t", "字"],
+            "in-base <w:tab/> is preserved and splits the base like the body path",
+        );
+        assert_eq!(
+            st.runs[0].ruby.as_ref().map(|r| r.text.as_str()),
+            Some("かんじ"),
+            "ruby annotation rides the first (pre-tab) base piece",
+        );
+        assert!(st.runs[1].ruby.is_none(), "the tab piece carries no ruby");
+        assert!(
+            st.runs[2].ruby.is_none(),
+            "the post-tab piece carries no ruby"
+        );
+    }
+
+    /// A rubyBase WITHOUT an internal tab is unchanged: one run carrying the whole
+    /// base text with the ruby attached (no spurious split).
+    #[test]
+    fn ruby_base_without_tab_is_a_single_run() {
+        let st = parse_shape_para(
+            r#"<w:r><w:ruby>
+                <w:rubyPr><w:rubyAlign w:val="center"/><w:hps w:val="12"/></w:rubyPr>
+                <w:rt><w:r><w:t>かんじ</w:t></w:r></w:rt>
+                <w:rubyBase><w:r><w:t xml:space="preserve">漢字</w:t></w:r></w:rubyBase>
+              </w:ruby></w:r>"#,
+        )
+        .expect("text-box paragraph yields a ShapeText block");
+
+        let texts: Vec<&str> = st.runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts, vec!["漢字"], "no tab ⇒ no split");
+        assert_eq!(
+            st.runs[0].ruby.as_ref().map(|r| r.text.as_str()),
+            Some("かんじ"),
+        );
+    }
+
+    /// Consecutive `<w:tab/>` in the base each survive as their own `\t` piece
+    /// (`split('\t')` keeps the empty middle part, which is skipped, but the tab
+    /// pieces between parts are still emitted) — parity with the body path, which
+    /// emits one `Text("\t")` per `<w:tab/>`.
+    #[test]
+    fn ruby_base_consecutive_tabs_each_survive() {
+        let st = parse_shape_para(
+            r#"<w:r><w:ruby>
+                <w:rt><w:r><w:t>かんじ</w:t></w:r></w:rt>
+                <w:rubyBase><w:r><w:t xml:space="preserve">漢</w:t><w:tab/><w:tab/><w:t xml:space="preserve">字</w:t></w:r></w:rubyBase>
+              </w:ruby></w:r>"#,
+        )
+        .expect("text-box paragraph yields a ShapeText block");
+        let texts: Vec<&str> = st.runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts, vec!["漢", "\t", "\t", "字"], "both tabs preserved");
+        assert_eq!(
+            st.runs[0].ruby.as_ref().map(|r| r.text.as_str()),
+            Some("かんじ"),
+            "ruby rides the first (pre-tab) glyph",
+        );
+        assert!(st.runs[1..].iter().all(|r| r.ruby.is_none()));
+    }
+
+    /// A base that OPENS with a tab attaches the ruby to that first (tab) piece —
+    /// exactly what the body path does, since its `<w:tab/>` is a `Text("\t")` run
+    /// and the ruby attaches to the first `DocRun::Text`. Locks the two paths to
+    /// the same edge-case behavior (the annotation is not silently relocated onto
+    /// the post-tab glyph in the shape path).
+    #[test]
+    fn ruby_base_leading_tab_matches_body_first_emitted_piece() {
+        let st = parse_shape_para(
+            r#"<w:r><w:ruby>
+                <w:rt><w:r><w:t>かんじ</w:t></w:r></w:rt>
+                <w:rubyBase><w:r><w:tab/><w:t xml:space="preserve">字</w:t></w:r></w:rubyBase>
+              </w:ruby></w:r>"#,
+        )
+        .expect("text-box paragraph yields a ShapeText block");
+        let texts: Vec<&str> = st.runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["\t", "字"],
+            "leading tab preserved, base not lost"
+        );
+        assert_eq!(
+            st.runs[0].ruby.as_ref().map(|r| r.text.as_str()),
+            Some("かんじ"),
+            "ruby rides the first EMITTED piece (the tab), mirroring the body path",
+        );
+        assert!(st.runs[1].ruby.is_none());
     }
 }

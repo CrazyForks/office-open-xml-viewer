@@ -13,18 +13,25 @@
 //   • vo=Tu with a U+FE10–FE12 vertical form (、。，) → SUBSTITUTE that form
 //     (core `verticalFormSubstitute`), drawn upright so the font hangs it in the
 //     cell's upper-right corner; ！？ and small kana have no form and draw upright.
-//   • vo=Tr with a U+FE1x/FE3x vertical form — the brackets （）「」〈〉【】…, the white
-//     lenticular brackets 〖〗, and the fullwidth colon/semicolon ：； (#969) →
+//   • vo=Tr with a U+FE1x/FE3x vertical form present in the substitute fonts — the
+//     brackets （）「」〈〉【】… and the white lenticular brackets 〖〗 (#969) →
 //     SUBSTITUTE that form (core `verticalBracketFormSubstitute`), drawn upright
 //     (UAX#50 §5 "substitute a vertical glyph, rotate only as fallback"). XLSX has
-//     no Excel ground-truth image, so ：；〖〗 follow the Word/PowerPoint verdict.
-//   • vo=Tr with NO vertical form (ー U+30FC, quotes “”) → ROTATE the glyph 90° CW
-//     (the Tr fallback) so ー becomes the vertical bar Excel draws.
+//     no Excel ground-truth image, so 〖〗 follow the Word/PowerPoint verdict.
+//   • vo=Tr with NO substituted form → a geometric fallback: plain ROTATE 90° CW
+//     (quotes, colon, and unreachable long marks ー 〜 ～; a rotation turns the base
+//     colon's stacked dots into FE13's side-by-side dots), or UPRIGHT
+//     (the semicolon ；, whose FE14 form is an upright dot-over-comma, not a rotation;
+//     core `verticalTrUprightFallback`). FE13/FE14 are absent from most render fonts,
+//     so ：；take this geometric path rather than substitution (issue #969 follow-up).
 
 import {
   verticalOrientation,
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
+  verticalTrUprightFallback,
+  verticalTrLongMark,
+  withVertFeature,
 } from '@silurus/ooxml-core';
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -54,22 +61,46 @@ export function drawStackedVerticalChar(
   centerX: number,
   cellTopY: number,
   charH: number,
+  vertCapable = false,
 ): void {
   const cp = ch.codePointAt(0) ?? 0;
   const vo = verticalOrientation(cp);
 
+  if (vertCapable && verticalTrLongMark(cp)) {
+    ctx.save();
+    ctx.translate(centerX, cellTopY + charH / 2);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    withVertFeature(ctx, () => ctx.fillText(ch, 0, 0));
+    ctx.restore();
+    return;
+  }
+
   if (vo === 'Tr') {
-    // Substitute-first: a fullwidth bracket, white lenticular bracket, or the
-    // colon/semicolon ：；〖〗 (#969) has a U+FE1x/FE3x vertical form drawn UPRIGHT
-    // (UAX#50 §5). It fills the cell like an ideograph, so the caller's center/top
-    // placement lands it correctly.
+    // Substitute-first: a fullwidth bracket or white lenticular bracket 〖〗 (#969)
+    // has a U+FE3x/FE1x vertical form drawn UPRIGHT (UAX#50 §5). It fills the cell
+    // like an ideograph, so the caller's center/top placement lands it correctly.
     const bracket = verticalBracketFormSubstitute(cp);
     if (bracket !== null) {
       ctx.fillText(String.fromCodePoint(bracket), centerX, cellTopY);
       return;
     }
-    // Fallback: no vertical form (ー U+30FC, quotes) → rotate 90° CW, centred in the
-    // cell slot. save/restore also restores the caller's textAlign/textBaseline.
+    // Semicolon ；(FF1B): its FE14 vertical form is an upright dot-over-comma (not a
+    // rotation), so draw it UPRIGHT like an ideograph — NOT rotated (issue #969
+    // follow-up; FE13/FE14 were dropped from the core substitute map because those
+    // forms are absent from most render fonts). The colon ：falls through to rotate,
+    // reproducing FE13's side-by-side dots.
+    if (verticalTrUprightFallback(cp)) {
+      ctx.fillText(ch, centerX, cellTopY);
+      return;
+    }
+    // Fallback: no vertical form (ー U+30FC, wave dash / tilde 〜 ～, quotes, colon ：)
+    // → rotate 90° CW, centred in the cell slot. save/restore also restores the
+    // caller's textAlign/textBaseline.
+    //
+    // Unreachable `ー〜～` use this plain rotation too. The worker/skia fallback
+    // cannot verify the font's inaccessible vertical design, so it adds no mirror
+    // or shear approximation.
     ctx.save();
     ctx.translate(centerX, cellTopY + charH / 2);
     ctx.rotate(Math.PI / 2);

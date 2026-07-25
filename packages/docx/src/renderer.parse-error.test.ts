@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas } from './renderer';
+import { createLayoutServices } from './layout-runtime.js';
+import { renderDocumentToCanvas } from './renderer.js';
 import type { DocxDocumentModel, SectionProps } from './types';
 
 /**
@@ -18,7 +19,7 @@ interface DrawCall {
 }
 
 /** A minimal recording 2D context that logs the draw ops we assert on. */
-function recordingCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
+function recordingCtx(throwOnMeasure = false): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
   const calls: DrawCall[] = [];
   const rec =
     (op: string) =>
@@ -40,12 +41,16 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
     font: '',
     textAlign: 'start',
     textBaseline: 'alphabetic',
+    clearRect: rec('clearRect'),
     fillRect: rec('fillRect'),
     strokeRect: rec('strokeRect'),
     fillText: rec('fillText'),
     setLineDash: rec('setLineDash'),
     beginPath: rec('beginPath'),
-    measureText: (t: string) => ({ width: t.length * 6 }),
+    measureText: (t: string) => {
+      if (throwOnMeasure) throw new Error('target canvas measured text');
+      return { width: t.length * 6 };
+    },
   } as unknown as CanvasRenderingContext2D;
   return { ctx, calls };
 }
@@ -92,10 +97,11 @@ function degradedDoc(parseError: string): DocxDocumentModel {
 
 describe('RB7 renderDocumentToCanvas placeholder', () => {
   it('paints a placeholder carrying the parseError message for a degraded document', async () => {
-    const { ctx, calls } = recordingCtx();
+    const { ctx, calls } = recordingCtx(true);
     const canvas = stubCanvas(ctx);
+    const doc = degradedDoc('word/document.xml: unexpected end of stream');
     await renderDocumentToCanvas(
-      degradedDoc('word/document.xml: unexpected end of stream'),
+      doc,
       canvas,
       0,
       { width: 816, dpr: 1 },
@@ -111,10 +117,11 @@ describe('RB7 renderDocumentToCanvas placeholder', () => {
   });
 
   it('surfaces a corrupt-CONTAINER parseError (RB7 MAJOR) in the placeholder', async () => {
-    const { ctx, calls } = recordingCtx();
+    const { ctx, calls } = recordingCtx(true);
     const canvas = stubCanvas(ctx);
+    const doc = degradedDoc('(zip container): invalid Zip archive: Could not find EOCD');
     await renderDocumentToCanvas(
-      degradedDoc('(zip container): invalid Zip archive: Could not find EOCD'),
+      doc,
       canvas,
       0,
       { width: 816, dpr: 1 },
@@ -135,5 +142,20 @@ describe('RB7 renderDocumentToCanvas placeholder', () => {
     await renderDocumentToCanvas(healthy, canvas, 0, { width: 816, dpr: 1 });
     const texts = calls.filter((c) => c.op === 'fillText').map((c) => String(c.args[0]));
     expect(texts.some((t) => t.includes('could not be displayed'))).toBe(false);
+  });
+
+  it('restores Canvas measurement state when measurement throws', () => {
+    const ctx = {
+      font: 'before-font',
+      letterSpacing: '3px',
+      measureText: () => { throw new Error('measure failure'); },
+    } as unknown as CanvasRenderingContext2D;
+    const doc = degradedDoc('irrelevant');
+    const services = createLayoutServices(doc, { measureContext: ctx });
+
+    expect(() => services.text.shape({ text: 'x', fontSizePt: 10, fonts: { ascii: 'sans-serif' } }))
+      .toThrow(/measure failure/);
+    expect(ctx.font).toBe('before-font');
+    expect(ctx.letterSpacing).toBe('3px');
   });
 });

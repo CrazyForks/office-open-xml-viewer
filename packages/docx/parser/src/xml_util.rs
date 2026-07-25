@@ -1,6 +1,10 @@
 use ooxml_common::ns::{attr_ns, is_w_ns, wordprocessingml};
 use roxmltree::Node;
 
+/// Microsoft Word 2010 extension namespace used by paragraph identity and other
+/// post-ECMA-376 WordprocessingML extensions.
+pub const W14_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+
 /// Transitional WordprocessingML URI, used only by test fixtures that build
 /// `w:`-namespaced XML; runtime matching goes through [`is_w_ns`], which accepts
 /// the Strict URI too.
@@ -60,6 +64,11 @@ pub fn attr_w(node: Node, name: &str) -> Option<String> {
         name,
     )
     .map(|s| s.to_string())
+}
+
+/// Get an attribute in the Microsoft Word 2010 extension namespace.
+pub fn attr_w14(node: Node, name: &str) -> Option<String> {
+    node.attribute((W14_NS, name)).map(str::to_string)
 }
 
 /// Parse a bare decimal or an ECMA-376 universal measure into points.

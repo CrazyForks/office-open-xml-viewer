@@ -22,7 +22,11 @@ const DOCX_FILES: { name: string; pageCount: number; width: number }[] = [
   // XF9 vertical writing (§17.6.20 tbRl): a landscape vertical-Japanese
   // newspaper. width = physical page width (842pt, A4 landscape). Reference is
   // private (gitignored) and generated locally with UPDATE_REFS=1.
-  { name: 'private/sample-26', pageCount: 1, width: 842 },
+  // 2 pages per the Word PDF (page 2 carries only the spill of the final
+  // column): the deterministic untabled EA docGrid cell height (1.3 em — the
+  // sample-9 regression fix) restores the Word page count from the crammed
+  // 1-page state the 2026-07-13a baseline captured.
+  { name: 'private/sample-26', pageCount: 2, width: 842 },
   // Multilingual / section coverage (references private + gitignored, generated
   // locally with UPDATE_REFS=1):
   // sample-27 = continuous section-break page-number restart fixture (US Letter, 612pt).
@@ -103,6 +107,32 @@ test.describe('docx visual regression', () => {
         if (status === 'error') {
           const msg = await page.evaluate(() => document.body.dataset.errorMessage ?? '');
           throw new Error(`Fixture error on ${name} page ${pageNum}: ${msg}`);
+        }
+
+        // Loud out-of-range page guard. `i` is the requested page index and
+        // `pageCount` above is this VRT's DECLARED count; the fixture reports the
+        // renderer's REAL page count via dataset.pageCount. renderPage() silently
+        // clamps an out-of-range index back to page 0 (renderer.ts:
+        // `pages[pageIndex] ?? pages[0]`), so a stale declared count that exceeds
+        // the real pagination keeps snapshotting duplicate first pages under a
+        // green status — the #993 regression, where a private sample dropped
+        // 14→11 pages yet ~15 PRs of VRT stayed green on triplicated page-0 refs.
+        // Fail the moment a requested index is out of range. This runs BEFORE the
+        // UPDATE_REFS branch below on purpose: the silent duplication happened
+        // during reference refreshes, so the guard must fire there too.
+        const actualPageCount = Number(await page.evaluate(() => document.body.dataset.pageCount));
+        if (!Number.isInteger(actualPageCount) || actualPageCount <= 0) {
+          throw new Error(
+            `${name}: fixture did not report a valid page count (got "${actualPageCount}")`
+          );
+        }
+        if (i >= actualPageCount) {
+          throw new Error(
+            `${name}: requested page index ${i} (page ${pageNum}) is out of range — the renderer ` +
+            `produced only ${actualPageCount} page(s). renderPage() would clamp it back to page 0 ` +
+            `and snapshot a duplicate first page. Lower the DOCX_FILES pageCount for ${name} to ` +
+            `${actualPageCount}.`
+          );
         }
 
         await page.waitForTimeout(200);

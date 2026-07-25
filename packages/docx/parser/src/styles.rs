@@ -30,6 +30,10 @@ pub struct RunFmt {
     /// ECMA-376 §17.3.2.40 `<w:u w:color>` — an underline-only colour (hex 6, or
     /// the literal `auto`). `None` means the underline follows the glyph colour.
     pub underline_color: Option<String>,
+    /// Complete private `<w:u>` facts. The public bool/style/color projection is
+    /// retained for API compatibility; layout acquisition consumes this lexical
+    /// value/status representation so invalid enums are not normalized away.
+    pub(crate) underline_typography: Option<crate::types::UnderlineTypographyWire>,
     pub strikethrough: Option<bool>,
     pub font_size: Option<f64>, // pt
     pub color: Option<String>,  // hex 6
@@ -43,7 +47,16 @@ pub struct RunFmt {
     /// inherited concrete color so e.g. PlaceholderText gray does not survive.
     pub color_auto: bool,
     pub font_family_ascii: Option<String>,
+    pub font_family_high_ansi: Option<String>,
     pub font_family_east_asia: Option<String>,
+    pub font_family_ascii_direct: Option<String>,
+    pub font_family_ascii_theme: Option<String>,
+    pub font_family_high_ansi_direct: Option<String>,
+    pub font_family_high_ansi_theme: Option<String>,
+    pub font_family_east_asia_direct: Option<String>,
+    pub font_family_east_asia_theme: Option<String>,
+    /// ECMA-376 §17.3.2.26 rFonts@hint, resolved through the run style chain.
+    pub font_hint: Option<String>,
     pub background: Option<String>, // hex 6
     /// "super" | "sub" — mapped from w:vertAlign val="superscript|subscript"
     pub vert_align: Option<String>,
@@ -78,6 +91,9 @@ pub struct RunFmt {
     /// ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border drawn as a box around
     /// the run's text. Reuses `EdgeBorder` (width pt, color, style, space pt).
     pub border: Option<EdgeBorder>,
+    /// Full CT_Border (§17.3.4) attributes, including theme/shadow/frame facts
+    /// omitted by the stable public EdgeBorder projection.
+    pub(crate) border_typography: Option<crate::types::CtBorderTypographyWire>,
     /// ECMA-376 §17.3.2.30 w:rtl — this run contains complex-script (RTL)
     /// content. Resolved through the style chain onto the run model, where the
     /// renderer uses it to force complex-script shaping and feed the UAX#9
@@ -93,6 +109,8 @@ pub struct RunFmt {
     /// to `font_family_ascii` / `font_family_east_asia`; carries the same
     /// "@theme:<ref>" marker convention for @cstheme references.
     pub font_family_cs: Option<String>,
+    pub font_family_cs_direct: Option<String>,
+    pub font_family_cs_theme: Option<String>,
     /// ECMA-376 §17.3.2.39 w:szCs/@w:val — complex-script font size in pt
     /// (converted from half-points, same units as `font_size`).
     pub font_size_cs: Option<f64>,
@@ -112,6 +130,8 @@ pub struct RunFmt {
     /// ECMA-376 §17.3.2.20 w:lang/@w:bidi — complex-script (RTL) language tag,
     /// lower-cased (e.g. "ar-sa", "ae-ar"). Drives Word's AN digit ordering.
     pub lang_bidi: Option<String>,
+    /// ECMA-376 §17.3.2.20 w:lang/@w:eastAsia, lower-cased.
+    pub lang_east_asia: Option<String>,
     /// ECMA-376 §17.3.2.35 `<w:spacing w:val>` — character-spacing adjustment,
     /// the pitch added AFTER each character before the next is rendered
     /// ("equivalent to the additional character pitch added by a document
@@ -170,6 +190,10 @@ pub struct RunFmt {
     /// PARSED for completeness; the two-lines-in-one draw is a follow-up. `None` =
     /// no brackets.
     pub east_asian_combine_brackets: Option<String>,
+    pub(crate) vertical_align_typography: Option<crate::types::TypographyValueWire<String>>,
+    pub(crate) position_typography: Option<crate::types::TypographyValueWire<f64>>,
+    pub(crate) emphasis_typography: Option<crate::types::TypographyValueWire<String>>,
+    pub(crate) combine_brackets_typography: Option<crate::types::TypographyValueWire<String>>,
 }
 
 /// Resolved paragraph formatting.
@@ -208,8 +232,14 @@ pub struct ParaFmt {
     pub keep_lines: Option<bool>,
     /// Widow/orphan control (w:widowControl). Default per spec: true.
     pub widow_control: Option<bool>,
+    /// ECMA-376 §17.3.1.21 w:overflowPunct — allow one trailing punctuation
+    /// character beyond the paragraph extents. The final default (`true`) is
+    /// applied when the resolved paragraph is built so style/direct `false`
+    /// remains distinguishable from omission during the cascade.
+    pub overflow_punct: Option<bool>,
     /// Paragraph border edges (w:pBdr)
     pub para_borders: Option<crate::types::ParagraphBorders>,
+    pub(crate) paragraph_typography: Option<crate::types::ParagraphTypographyWire>,
     /// Heading outline level (w:outlineLvl, 0–8) when set. Word's built-in
     /// heading styles (Heading 1–9) are rendered with an implicit
     /// `w:keepNext` even when not spelled out in styles.xml; downstream
@@ -276,6 +306,15 @@ pub struct CondFmt {
     /// ECMA-376 §17.7.6: the conditional block's `<w:pPr>` — paragraph defaults
     /// for cells covered by this condition (e.g. firstRow `<w:jc w:val="right"/>`).
     pub para: Option<ParaFmt>,
+    /// Row-wide table-style spacing remains lexical until the layout boundary
+    /// applies CT_TblWidth defaults and the documented Word deviations.
+    pub cell_spacing: Option<crate::types::TableWidthAcquisitionWire>,
+    /// Full-row conditional table margin layer (§17.7.6.3).
+    pub cell_margins: Option<crate::types::TableMarginAcquisitionWire>,
+    /// Row pagination properties participate in the table-style cascade; an
+    /// explicit `false` must remain distinguishable from an omitted property.
+    pub tbl_header: Option<bool>,
+    pub cant_split: Option<bool>,
 }
 
 /// Fold an ordered list of conditional-format layers into one effective
@@ -301,6 +340,16 @@ pub fn merge_cond_layers(layers: &[&CondFmt]) -> CondFmt {
         }
         if let Some(p) = &layer.para {
             apply_para(out.para.get_or_insert_with(ParaFmt::default), p);
+        }
+        if layer.cell_spacing.is_some() {
+            out.cell_spacing = layer.cell_spacing.clone();
+        }
+        merge_table_margin_layer(&mut out.cell_margins, &layer.cell_margins);
+        if layer.tbl_header.is_some() {
+            out.tbl_header = layer.tbl_header;
+        }
+        if layer.cant_split.is_some() {
+            out.cant_split = layer.cant_split;
         }
     }
     out
@@ -352,6 +401,15 @@ pub struct TableStyleDef {
     pub cell_margin_bottom: Option<f64>,
     pub cell_margin_left: Option<f64>,
     pub cell_margin_right: Option<f64>,
+    /// Lexical margin layer retained independently from the compatibility
+    /// numeric projection so start/end can be mapped after bidiVisual is known.
+    pub cell_margins: Option<crate::types::TableMarginAcquisitionWire>,
+    /// Whole-table style spacing, inherited through basedOn.
+    pub cell_spacing: Option<crate::types::TableWidthAcquisitionWire>,
+    /// ECMA-376 §17.7.6.10/.11: row properties supplied by the table style.
+    /// `Option` preserves inheritance and explicit CT_OnOff false values.
+    pub tbl_header: Option<bool>,
+    pub cant_split: Option<bool>,
 }
 
 #[derive(Default)]
@@ -389,6 +447,17 @@ impl StyleMap {
     /// table itself.
     pub fn default_table_style_id(&self) -> Option<&str> {
         self.default_table_style_id.as_deref()
+    }
+
+    /// Whether `style_id` names an existing `<w:style w:type="table">`. Only
+    /// table-typed styles are indexed in `table_styles`, so this rejects both a
+    /// dangling reference and a reference to a paragraph/character style. Used
+    /// by ECMA-376 Part 1 §17.4.37 logical-table membership: an explicit but
+    /// unresolved or non-table style is not a valid grouping identity. This
+    /// does not alter the omitted-style / default-table-style policy, which
+    /// remains owned by `default_table_style_id`.
+    pub fn contains_table_style(&self, style_id: &str) -> bool {
+        self.table_styles.contains_key(style_id)
     }
 
     pub fn parse(xml: &str) -> Self {
@@ -550,6 +619,16 @@ impl StyleMap {
             if def.cell_margin_right.is_some() {
                 out.cell_margin_right = def.cell_margin_right;
             }
+            merge_table_margin_layer(&mut out.cell_margins, &def.cell_margins);
+            if def.cell_spacing.is_some() {
+                out.cell_spacing = def.cell_spacing.clone();
+            }
+            if def.tbl_header.is_some() {
+                out.tbl_header = def.tbl_header;
+            }
+            if def.cant_split.is_some() {
+                out.cant_split = def.cant_split;
+            }
             // §17.7.6: a derived table style's whole-table rPr/pPr layers ON TOP
             // of the base style's. We fold each level into a single accumulated
             // RunFmt/ParaFmt with the standard merge semantics (later wins).
@@ -571,6 +650,16 @@ impl StyleMap {
                 if let Some(p) = &v.para {
                     apply_para(slot.para.get_or_insert_with(ParaFmt::default), p);
                 }
+                if v.cell_spacing.is_some() {
+                    slot.cell_spacing = v.cell_spacing.clone();
+                }
+                merge_table_margin_layer(&mut slot.cell_margins, &v.cell_margins);
+                if v.tbl_header.is_some() {
+                    slot.tbl_header = v.tbl_header;
+                }
+                if v.cant_split.is_some() {
+                    slot.cant_split = v.cant_split;
+                }
             }
         }
         out
@@ -586,6 +675,23 @@ impl StyleMap {
         table_style_id: Option<&str>,
     ) -> (ParaFmt, RunFmt) {
         self.resolve_para_cond(style_id, table_style_id, None)
+    }
+
+    /// Resolve only the named/default paragraph-style chain, without document
+    /// defaults or table-style layers. Callers that combine numbering paragraph
+    /// properties need this provenance because §17.7.2 places style-origin
+    /// numbering below the paragraph style, while direct `numPr` and its
+    /// associated properties are applied in the final direct-formatting layer.
+    pub(crate) fn resolve_paragraph_style_layer(&self, style_id: Option<&str>) -> ParaFmt {
+        let mut paragraph = ParaFmt::default();
+        let mut run = RunFmt::default();
+        let effective_id = style_id
+            .map(str::to_string)
+            .or_else(|| self.default_para_style_id.clone());
+        if let Some(id) = effective_id.as_deref() {
+            self.apply_style_chain(id, &mut paragraph, &mut run);
+        }
+        paragraph
     }
 
     /// Like [`resolve_para`], but additionally layers a table style's resolved
@@ -834,6 +940,9 @@ pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.widow_control.is_some() {
         dst.widow_control = src.widow_control;
     }
+    if src.overflow_punct.is_some() {
+        dst.overflow_punct = src.overflow_punct;
+    }
     if let Some(src_b) = &src.para_borders {
         // Each pBdr EDGE inherits INDEPENDENTLY across the style hierarchy — bottom
         // §17.3.1.7, left §17.3.1.17, right §17.3.1.28, top §17.3.1.42, between
@@ -861,6 +970,31 @@ pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
         }
         if src_b.between.is_some() {
             dst_b.between = src_b.between.clone();
+        }
+    }
+    if let Some(src_typography) = &src.paragraph_typography {
+        let dst_typography = dst
+            .paragraph_typography
+            .get_or_insert_with(Default::default);
+        let src_borders = &src_typography.borders;
+        let dst_borders = &mut dst_typography.borders;
+        if src_borders.top.is_some() {
+            dst_borders.top = src_borders.top.clone();
+        }
+        if src_borders.right.is_some() {
+            dst_borders.right = src_borders.right.clone();
+        }
+        if src_borders.bottom.is_some() {
+            dst_borders.bottom = src_borders.bottom.clone();
+        }
+        if src_borders.left.is_some() {
+            dst_borders.left = src_borders.left.clone();
+        }
+        if src_borders.between.is_some() {
+            dst_borders.between = src_borders.between.clone();
+        }
+        if src_borders.bar.is_some() {
+            dst_borders.bar = src_borders.bar.clone();
         }
     }
     if src.bidi.is_some() {
@@ -906,6 +1040,25 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.underline_color.is_some() {
         dst.underline_color = src.underline_color.clone();
     }
+    if let Some(src_u) = &src.underline_typography {
+        let dst_u = dst
+            .underline_typography
+            .get_or_insert_with(Default::default);
+        // [MS-OI29500] §2.1.100: omitted underline attributes continue through
+        // the style hierarchy. Invalid authored values still override so the
+        // retained layer can emit a diagnostic instead of silently inheriting.
+        let merge = |dst: &mut crate::types::TypographyValueWire<String>,
+                     src: &crate::types::TypographyValueWire<String>| {
+            if src.status != crate::types::TypographyValueStatusWire::Missing {
+                *dst = src.clone();
+            }
+        };
+        merge(&mut dst_u.val, &src_u.val);
+        merge(&mut dst_u.color, &src_u.color);
+        merge(&mut dst_u.theme_color, &src_u.theme_color);
+        merge(&mut dst_u.theme_tint, &src_u.theme_tint);
+        merge(&mut dst_u.theme_shade, &src_u.theme_shade);
+    }
     if src.strikethrough.is_some() {
         dst.strikethrough = src.strikethrough;
     }
@@ -926,14 +1079,35 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.font_family_ascii.is_some() {
         dst.font_family_ascii = src.font_family_ascii.clone();
     }
+    if src.font_family_ascii_direct.is_some() || src.font_family_ascii_theme.is_some() {
+        dst.font_family_ascii_direct = src.font_family_ascii_direct.clone();
+        dst.font_family_ascii_theme = src.font_family_ascii_theme.clone();
+    }
+    if src.font_family_high_ansi.is_some() {
+        dst.font_family_high_ansi = src.font_family_high_ansi.clone();
+    }
+    if src.font_family_high_ansi_direct.is_some() || src.font_family_high_ansi_theme.is_some() {
+        dst.font_family_high_ansi_direct = src.font_family_high_ansi_direct.clone();
+        dst.font_family_high_ansi_theme = src.font_family_high_ansi_theme.clone();
+    }
     if src.font_family_east_asia.is_some() {
         dst.font_family_east_asia = src.font_family_east_asia.clone();
+    }
+    if src.font_family_east_asia_direct.is_some() || src.font_family_east_asia_theme.is_some() {
+        dst.font_family_east_asia_direct = src.font_family_east_asia_direct.clone();
+        dst.font_family_east_asia_theme = src.font_family_east_asia_theme.clone();
+    }
+    if src.font_hint.is_some() {
+        dst.font_hint = src.font_hint.clone();
     }
     if src.background.is_some() {
         dst.background = src.background.clone();
     }
     if src.vert_align.is_some() {
         dst.vert_align = src.vert_align.clone();
+    }
+    if src.vertical_align_typography.is_some() {
+        dst.vertical_align_typography = src.vertical_align_typography.clone();
     }
     if src.all_caps.is_some() {
         dst.all_caps = src.all_caps;
@@ -957,8 +1131,14 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.emphasis_mark.is_some() {
         dst.emphasis_mark = src.emphasis_mark.clone();
     }
+    if src.emphasis_typography.is_some() {
+        dst.emphasis_typography = src.emphasis_typography.clone();
+    }
     if src.border.is_some() {
         dst.border = src.border.clone();
+    }
+    if src.border_typography.is_some() {
+        dst.border_typography = src.border_typography.clone();
     }
     if src.rtl.is_some() {
         dst.rtl = src.rtl;
@@ -975,6 +1155,10 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.font_family_cs.is_some() {
         dst.font_family_cs = src.font_family_cs.clone();
     }
+    if src.font_family_cs_direct.is_some() || src.font_family_cs_theme.is_some() {
+        dst.font_family_cs_direct = src.font_family_cs_direct.clone();
+        dst.font_family_cs_theme = src.font_family_cs_theme.clone();
+    }
     if src.bold_cs.is_some() {
         dst.bold_cs = src.bold_cs;
     }
@@ -983,6 +1167,9 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     }
     if src.lang_bidi.is_some() {
         dst.lang_bidi = src.lang_bidi.clone();
+    }
+    if src.lang_east_asia.is_some() {
+        dst.lang_east_asia = src.lang_east_asia.clone();
     }
     // Run character-metric axes (§17.3.2.14 fitText / §17.3.2.35 spacing /
     // §17.3.2.43 w / §17.3.2.24 position / §17.3.2.19 kern). Each carries the
@@ -999,6 +1186,9 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     }
     if src.position.is_some() {
         dst.position = src.position;
+    }
+    if src.position_typography.is_some() {
+        dst.position_typography = src.position_typography.clone();
     }
     if src.kerning.is_some() {
         dst.kerning = src.kerning;
@@ -1017,6 +1207,9 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     }
     if src.east_asian_combine_brackets.is_some() {
         dst.east_asian_combine_brackets = src.east_asian_combine_brackets.clone();
+    }
+    if src.combine_brackets_typography.is_some() {
+        dst.combine_brackets_typography = src.combine_brackets_typography.clone();
     }
 
     // Complex-script font size resolution (ECMA-376 §17.3.2.18). Word treats a
@@ -1175,6 +1368,11 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     // (ECMA-376 default: true; explicit value=0 disables).
     fmt.widow_control = bool_prop(ppr, "widowControl");
 
+    // overflowPunct — allow one punctuation character past paragraph extents.
+    // ECMA-376 §17.3.1.21 defines omission as true; retain Option here so an
+    // explicit style/direct false participates correctly in the cascade.
+    fmt.overflow_punct = bool_prop(ppr, "overflowPunct");
+
     // bidi — right-to-left paragraph (ECMA-376 §17.3.1.6). On-off toggle:
     // present (or w:val="1"/"true") = RTL, w:val="0"/"false" = LTR. Carried to
     // the model as the paragraph base direction; the renderer feeds it to the
@@ -1254,6 +1452,16 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
             right: parse_edge("right"),
             between: parse_edge("between"),
         };
+        let typography_borders = crate::types::ParagraphTypographyBordersWire {
+            top: child_w(pbdr, "top").map(parse_ct_border_typography),
+            right: child_w(pbdr, "right").map(parse_ct_border_typography),
+            bottom: child_w(pbdr, "bottom").map(parse_ct_border_typography),
+            left: child_w(pbdr, "left").map(parse_ct_border_typography),
+            between: child_w(pbdr, "between").map(parse_ct_border_typography),
+            // CT_PBdr includes `bar` even though the stable public ParagraphBorders
+            // predates it. Keep it private rather than widening that API.
+            bar: child_w(pbdr, "bar").map(parse_ct_border_typography),
+        };
         // §17.3.1.7: a `between` border (the rule drawn between two adjacent
         // paragraphs sharing an identical border set) is a first-class edge — a
         // paragraph may declare ONLY `between` (internal rules, no outer box), so
@@ -1268,6 +1476,17 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
         {
             fmt.para_borders = Some(borders);
         }
+        if typography_borders.top.is_some()
+            || typography_borders.right.is_some()
+            || typography_borders.bottom.is_some()
+            || typography_borders.left.is_some()
+            || typography_borders.between.is_some()
+            || typography_borders.bar.is_some()
+        {
+            fmt.paragraph_typography = Some(crate::types::ParagraphTypographyWire {
+                borders: typography_borders,
+            });
+        }
     }
 
     // Text frame / drop cap (ECMA-376 §17.3.1.11 w:framePr). Presence makes the
@@ -1277,6 +1496,9 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
         use crate::types::FramePr;
         let twips = |name: &str| attr_w(fp, name).map(|s| twips_to_pt(&s));
         fmt.frame_pr = Some(Box::new(FramePr {
+            // CT_FramePr identity includes anchorLock. Retain it on the private
+            // wire without widening the stable public FramePr projection.
+            anchor_lock: on_off_attr(fp, "anchorLock").unwrap_or(false),
             // ST_DropCap default "none" (§17.18.20).
             drop_cap: attr_w(fp, "dropCap").unwrap_or_else(|| "none".to_string()),
             // §17.3.1.11 lines default 1.
@@ -1308,6 +1530,324 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     fmt
 }
 
+fn typography_value<T>(
+    raw: Option<String>,
+    value: Option<T>,
+) -> crate::types::TypographyValueWire<T> {
+    use crate::types::{TypographyValueStatusWire, TypographyValueWire};
+    let status = match (&raw, value.is_some()) {
+        (None, _) => TypographyValueStatusWire::Missing,
+        (Some(_), true) => TypographyValueStatusWire::Valid,
+        (Some(_), false) => TypographyValueStatusWire::Invalid,
+    };
+    TypographyValueWire { status, raw, value }
+}
+
+fn normalized_string_attr(
+    node: roxmltree::Node,
+    name: &str,
+    normalize: impl FnOnce(&str) -> Option<String>,
+) -> crate::types::TypographyValueWire<String> {
+    let raw = attr_w(node, name);
+    let value = raw.as_deref().and_then(normalize);
+    typography_value(raw, value)
+}
+
+fn on_off_value(node: roxmltree::Node, name: &str) -> crate::types::TypographyValueWire<bool> {
+    let raw = attr_w(node, name);
+    let value = raw.as_deref().and_then(|value| match value {
+        "1" | "true" | "on" => Some(true),
+        "0" | "false" | "off" => Some(false),
+        _ => None,
+    });
+    typography_value(raw, value)
+}
+
+fn is_st_border_value(value: &str) -> bool {
+    // ST_Border is intentionally validated at acquisition time. Keeping an
+    // unknown lexical value as a valid border would erase the distinction
+    // between conforming OOXML and a producer extension before layout can
+    // diagnose it (ECMA-376-1 Strict, §17.18.2).
+    const VALUES: &[&str] = &[
+        "nil",
+        "none",
+        "single",
+        "thick",
+        "double",
+        "dotted",
+        "dashed",
+        "dotDash",
+        "dotDotDash",
+        "triple",
+        "thinThickSmallGap",
+        "thickThinSmallGap",
+        "thinThickThinSmallGap",
+        "thinThickMediumGap",
+        "thickThinMediumGap",
+        "thinThickThinMediumGap",
+        "thinThickLargeGap",
+        "thickThinLargeGap",
+        "thinThickThinLargeGap",
+        "wave",
+        "doubleWave",
+        "dashSmallGap",
+        "dashDotStroked",
+        "threeDEmboss",
+        "threeDEngrave",
+        "outset",
+        "inset",
+        "apples",
+        "archedScallops",
+        "babyPacifier",
+        "babyRattle",
+        "balloons3Colors",
+        "balloonsHotAir",
+        "basicBlackDashes",
+        "basicBlackDots",
+        "basicBlackSquares",
+        "basicThinLines",
+        "basicWhiteDashes",
+        "basicWhiteDots",
+        "basicWhiteSquares",
+        "basicWideInline",
+        "basicWideMidline",
+        "basicWideOutline",
+        "bats",
+        "birds",
+        "birdsFlight",
+        "cabins",
+        "cakeSlice",
+        "candyCorn",
+        "celticKnotwork",
+        "certificateBanner",
+        "chainLink",
+        "champagneBottle",
+        "checkedBarBlack",
+        "checkedBarColor",
+        "checkered",
+        "christmasTree",
+        "circlesLines",
+        "circlesRectangles",
+        "classicalWave",
+        "clocks",
+        "compass",
+        "confetti",
+        "confettiGrays",
+        "confettiOutline",
+        "confettiStreamers",
+        "confettiWhite",
+        "cornerTriangles",
+        "couponCutoutDashes",
+        "couponCutoutDots",
+        "crazyMaze",
+        "creaturesButterfly",
+        "creaturesFish",
+        "creaturesInsects",
+        "creaturesLadyBug",
+        "crossStitch",
+        "cup",
+        "decoArch",
+        "decoArchColor",
+        "decoBlocks",
+        "diamondsGray",
+        "doubleD",
+        "doubleDiamonds",
+        "earth1",
+        "earth2",
+        "earth3",
+        "eclipsingSquares1",
+        "eclipsingSquares2",
+        "eggsBlack",
+        "fans",
+        "film",
+        "firecrackers",
+        "flowersBlockPrint",
+        "flowersDaisies",
+        "flowersModern1",
+        "flowersModern2",
+        "flowersPansy",
+        "flowersRedRose",
+        "flowersRoses",
+        "flowersTeacup",
+        "flowersTiny",
+        "gems",
+        "gingerbreadMan",
+        "gradient",
+        "handmade1",
+        "handmade2",
+        "heartBalloon",
+        "heartGray",
+        "hearts",
+        "heebieJeebies",
+        "holly",
+        "houseFunky",
+        "hypnotic",
+        "iceCreamCones",
+        "lightBulb",
+        "lightning1",
+        "lightning2",
+        "mapPins",
+        "mapleLeaf",
+        "mapleMuffins",
+        "marquee",
+        "marqueeToothed",
+        "moons",
+        "mosaic",
+        "musicNotes",
+        "northwest",
+        "ovals",
+        "packages",
+        "palmsBlack",
+        "palmsColor",
+        "paperClips",
+        "papyrus",
+        "partyFavor",
+        "partyGlass",
+        "pencils",
+        "people",
+        "peopleWaving",
+        "peopleHats",
+        "poinsettias",
+        "postageStamp",
+        "pumpkin1",
+        "pushPinNote2",
+        "pushPinNote1",
+        "pyramids",
+        "pyramidsAbove",
+        "quadrants",
+        "rings",
+        "safari",
+        "sawtooth",
+        "sawtoothGray",
+        "scaredCat",
+        "seattle",
+        "shadowedSquares",
+        "sharksTeeth",
+        "shorebirdTracks",
+        "skyrocket",
+        "snowflakeFancy",
+        "snowflakes",
+        "sombrero",
+        "southwest",
+        "stars",
+        "starsTop",
+        "stars3d",
+        "starsBlack",
+        "starsShadowed",
+        "sun",
+        "swirligig",
+        "tornPaper",
+        "tornPaperBlack",
+        "trees",
+        "triangleParty",
+        "triangles",
+        "triangle1",
+        "triangle2",
+        "triangleCircle1",
+        "triangleCircle2",
+        "shapes1",
+        "shapes2",
+        "twistedLines1",
+        "twistedLines2",
+        "vine",
+        "waveline",
+        "weavingAngles",
+        "weavingBraid",
+        "weavingRibbon",
+        "weavingStrips",
+        "whiteFlowers",
+        "woodwork",
+        "xIllusions",
+        "zanyTriangles",
+        "zigZag",
+        "zigZagStitch",
+        "custom",
+    ];
+    VALUES.contains(&value)
+}
+
+fn is_st_theme_color_value(value: &str) -> bool {
+    matches!(
+        value,
+        "dark1"
+            | "light1"
+            | "dark2"
+            | "light2"
+            | "accent1"
+            | "accent2"
+            | "accent3"
+            | "accent4"
+            | "accent5"
+            | "accent6"
+            | "hyperlink"
+            | "followedHyperlink"
+            | "none"
+            | "background1"
+            | "text1"
+            | "background2"
+            | "text2"
+    )
+}
+
+fn parse_ct_border_typography(node: roxmltree::Node) -> crate::types::CtBorderTypographyWire {
+    use crate::types::CtBorderTypographyWire;
+    let lower = |value: &str| (!value.trim().is_empty()).then(|| value.to_lowercase());
+    let hex_byte = |value: &str| {
+        (value.len() == 2 && value.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| value.to_ascii_uppercase())
+    };
+    let number = |name: &str, divisor: f64| {
+        let raw = attr_w(node, name);
+        let value = raw
+            .as_deref()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| value / divisor);
+        typography_value(raw, value)
+    };
+    CtBorderTypographyWire {
+        // CT_Border/@val is required (§17.3.4). Keep a missing/empty lexical
+        // value as such; the stable legacy border can still use its old fallback.
+        val: normalized_string_attr(node, "val", |value| {
+            is_st_border_value(value).then(|| value.to_string())
+        }),
+        color: normalized_string_attr(node, "color", lower),
+        theme_color: normalized_string_attr(node, "themeColor", |value| {
+            is_st_theme_color_value(value).then(|| value.to_string())
+        }),
+        theme_tint: normalized_string_attr(node, "themeTint", hex_byte),
+        theme_shade: normalized_string_attr(node, "themeShade", hex_byte),
+        size_pt: number("sz", 8.0),
+        space_pt: number("space", 1.0),
+        shadow: on_off_value(node, "shadow"),
+        frame: on_off_value(node, "frame"),
+    }
+}
+
+fn is_underline_value(value: &str) -> bool {
+    matches!(
+        value,
+        "none"
+            | "words"
+            | "single"
+            | "thick"
+            | "double"
+            | "dotted"
+            | "dottedHeavy"
+            | "dash"
+            | "dashedHeavy"
+            | "dashLong"
+            | "dashLongHeavy"
+            | "dotDash"
+            | "dashDotHeavy"
+            | "dotDotDash"
+            | "dashDotDotHeavy"
+            | "wave"
+            | "wavyHeavy"
+            | "wavyDouble"
+    )
+}
+
 pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     let mut fmt = RunFmt {
         bold: bool_prop(rpr, "b"),
@@ -1336,6 +1876,21 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
             // "Auto" must still be normalized to the lowercase sentinel here.
             fmt.underline_color = Some(color.to_lowercase());
         }
+        let lower = |value: &str| (!value.trim().is_empty()).then(|| value.to_lowercase());
+        let identity = |value: &str| (!value.trim().is_empty()).then(|| value.to_string());
+        let hex_byte = |value: &str| {
+            (value.len() == 2 && value.chars().all(|c| c.is_ascii_hexdigit()))
+                .then(|| value.to_ascii_uppercase())
+        };
+        fmt.underline_typography = Some(crate::types::UnderlineTypographyWire {
+            val: normalized_string_attr(u, "val", |value| {
+                is_underline_value(value).then(|| value.to_string())
+            }),
+            color: normalized_string_attr(u, "color", lower),
+            theme_color: normalized_string_attr(u, "themeColor", identity),
+            theme_tint: normalized_string_attr(u, "themeTint", hex_byte),
+            theme_shade: normalized_string_attr(u, "themeShade", hex_byte),
+        });
     }
 
     // Font size — w:sz (§17.3.2.38) governs Latin and East Asian (CJK) text
@@ -1380,6 +1935,11 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
                 fmt.lang_bidi = Some(bidi.to_lowercase());
             }
         }
+        if let Some(east_asia) = attr_w(lang, "eastAsia") {
+            if !east_asia.is_empty() {
+                fmt.lang_east_asia = Some(east_asia.to_lowercase());
+            }
+        }
     }
 
     // Color. An explicit `<w:color w:val="auto"/>` (ECMA-376 §17.3.2.6) does NOT
@@ -1406,22 +1966,38 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // attributes (ascii/hAnsi/eastAsia/cs) and theme references (asciiTheme,
     // hAnsiTheme, eastAsiaTheme, cstheme). Theme refs are resolved post-parse
     // in parse_document once a Theme is available; here we just record the
-    // reference string under the corresponding axis. Direct attributes take
-    // precedence over theme refs per spec.
+    // reference string under the corresponding axis. ECMA-376 §17.3.2.26 says
+    // the theme attribute supersedes the matching direct typeface attribute.
     if let Some(rf) = child_w(rpr, "rFonts") {
-        let direct_ascii = attr_w(rf, "ascii").or_else(|| attr_w(rf, "hAnsi"));
-        let theme_ascii = attr_w(rf, "asciiTheme").or_else(|| attr_w(rf, "hAnsiTheme"));
-        fmt.font_family_ascii = direct_ascii.or_else(|| theme_ascii.map(|t| format!("@theme:{t}")));
+        fmt.font_hint = attr_w(rf, "hint");
+        fmt.font_family_ascii_direct = attr_w(rf, "ascii");
+        fmt.font_family_ascii_theme = attr_w(rf, "asciiTheme").map(|t| format!("@theme:{t}"));
+        fmt.font_family_ascii = fmt
+            .font_family_ascii_theme
+            .clone()
+            .or_else(|| fmt.font_family_ascii_direct.clone());
+        fmt.font_family_high_ansi_direct = attr_w(rf, "hAnsi");
+        fmt.font_family_high_ansi_theme = attr_w(rf, "hAnsiTheme").map(|t| format!("@theme:{t}"));
+        fmt.font_family_high_ansi = fmt
+            .font_family_high_ansi_theme
+            .clone()
+            .or_else(|| fmt.font_family_high_ansi_direct.clone());
 
-        let direct_ea = attr_w(rf, "eastAsia");
-        let theme_ea = attr_w(rf, "eastAsiaTheme");
-        fmt.font_family_east_asia = direct_ea.or_else(|| theme_ea.map(|t| format!("@theme:{t}")));
+        fmt.font_family_east_asia_direct = attr_w(rf, "eastAsia");
+        fmt.font_family_east_asia_theme =
+            attr_w(rf, "eastAsiaTheme").map(|t| format!("@theme:{t}"));
+        fmt.font_family_east_asia = fmt
+            .font_family_east_asia_theme
+            .clone()
+            .or_else(|| fmt.font_family_east_asia_direct.clone());
 
-        // Complex-script typeface (§17.3.2.26 @cs / @cstheme). Same direct-wins
-        // rule and "@theme:<ref>" marker convention as the other axes.
-        let direct_cs = attr_w(rf, "cs");
-        let theme_cs = attr_w(rf, "cstheme");
-        fmt.font_family_cs = direct_cs.or_else(|| theme_cs.map(|t| format!("@theme:{t}")));
+        // Complex-script typeface (§17.3.2.26 @cs / @cstheme).
+        fmt.font_family_cs_direct = attr_w(rf, "cs");
+        fmt.font_family_cs_theme = attr_w(rf, "cstheme").map(|t| format!("@theme:{t}"));
+        fmt.font_family_cs = fmt
+            .font_family_cs_theme
+            .clone()
+            .or_else(|| fmt.font_family_cs_direct.clone());
     }
 
     // Run shading (ECMA-376 §17.3.2.32 w:shd). We adopt `@w:fill` only; `@w:val`
@@ -1438,13 +2014,14 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
 
     // Vertical alignment (superscript / subscript)
     if let Some(va) = child_w(rpr, "vertAlign") {
-        if let Some(val) = attr_w(va, "val") {
-            fmt.vert_align = match val.as_str() {
-                "superscript" => Some("super".to_string()),
-                "subscript" => Some("sub".to_string()),
-                _ => None,
-            };
-        }
+        let raw = attr_w(va, "val");
+        let value = raw.as_deref().and_then(|value| match value {
+            "superscript" => Some("super".to_string()),
+            "subscript" => Some("sub".to_string()),
+            _ => None,
+        });
+        fmt.vert_align = value.clone();
+        fmt.vertical_align_typography = Some(typography_value(raw, value));
     }
 
     // All caps / small caps
@@ -1473,12 +2050,17 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // it filters to `None` exactly like `highlight`.
     if let Some(em) = child_w(rpr, "em") {
         fmt.emphasis_mark = attr_w(em, "val").filter(|v| v != "none");
+        fmt.emphasis_typography = Some(normalized_string_attr(em, "val", |value| {
+            matches!(value, "none" | "dot" | "comma" | "circle" | "underDot")
+                .then(|| value.to_string())
+        }));
     }
 
     // Run border (ECMA-376 §17.3.2.4 w:bdr) — drawn as a box around the run.
     // val="none"/"nil" means no border, so we drop it rather than carrying a
     // zero-style EdgeBorder.
     if let Some(bdr) = child_w(rpr, "bdr") {
+        fmt.border_typography = Some(parse_ct_border_typography(bdr));
         let edge = parse_edge_border(bdr);
         if edge.style != "none" && edge.style != "nil" {
             fmt.border = Some(edge);
@@ -1547,9 +2129,15 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // baseline, negative = lowered. Converted to points here; the renderer adds
     // it as a baseline y-offset without changing the font size or line box.
     if let Some(pos) = child_w(rpr, "position") {
-        if let Some(v) = attr_w(pos, "val") {
-            fmt.position = Some(half_pt_to_pt(&v));
-        }
+        let raw = attr_w(pos, "val");
+        let value = raw
+            .as_deref()
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(|value| value / 2.0);
+        // Keep the stable public projection byte-for-byte compatible while the
+        // private value carries invalid status for the replacement layout path.
+        fmt.position = raw.as_deref().map(half_pt_to_pt);
+        fmt.position_typography = Some(typography_value(raw, value));
     }
 
     // Font kerning threshold (ECMA-376 §17.3.2.19 `<w:kern w:val>`). ST_HpsMeasure
@@ -1575,6 +2163,11 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         fmt.east_asian_vert_compress = on_off_attr(eal, "vertCompress");
         fmt.east_asian_combine = on_off_attr(eal, "combine");
         fmt.east_asian_combine_brackets = attr_w(eal, "combineBrackets").filter(|v| v != "none");
+        fmt.combine_brackets_typography =
+            Some(normalized_string_attr(eal, "combineBrackets", |value| {
+                matches!(value, "none" | "round" | "square" | "angle" | "curly")
+                    .then(|| value.to_string())
+            }));
     }
 
     fmt
@@ -1648,6 +2241,52 @@ fn merge_raw_borders(dst: &mut RawTblBorders, src: &RawTblBorders) {
     }
 }
 
+fn table_width_wire(
+    node: Option<roxmltree::Node>,
+) -> Option<crate::types::TableWidthAcquisitionWire> {
+    node.map(|n| crate::types::TableWidthAcquisitionWire {
+        kind: attr_w(n, "type"),
+        value: attr_w(n, "w"),
+    })
+}
+
+fn table_margin_wire(node: roxmltree::Node) -> crate::types::TableMarginAcquisitionWire {
+    crate::types::TableMarginAcquisitionWire {
+        top: table_width_wire(child_w(node, "top")),
+        bottom: table_width_wire(child_w(node, "bottom")),
+        start: table_width_wire(child_w(node, "start")),
+        end: table_width_wire(child_w(node, "end")),
+        left: table_width_wire(child_w(node, "left")),
+        right: table_width_wire(child_w(node, "right")),
+    }
+}
+
+pub(crate) fn merge_table_margin_layer(
+    target: &mut Option<crate::types::TableMarginAcquisitionWire>,
+    source: &Option<crate::types::TableMarginAcquisitionWire>,
+) {
+    let Some(source) = source else { return };
+    let target = target.get_or_insert_with(Default::default);
+    if source.top.is_some() {
+        target.top = source.top.clone();
+    }
+    if source.bottom.is_some() {
+        target.bottom = source.bottom.clone();
+    }
+    if source.start.is_some() {
+        target.start = source.start.clone();
+    }
+    if source.end.is_some() {
+        target.end = source.end.clone();
+    }
+    if source.left.is_some() {
+        target.left = source.left.clone();
+    }
+    if source.right.is_some() {
+        target.right = source.right.clone();
+    }
+}
+
 fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) -> TableStyleDef {
     let mut def = TableStyleDef {
         based_on,
@@ -1675,6 +2314,7 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
         // the base via `resolve_table_style`. §17.18.90 ST_TblWidth says
         // dxa = 1/20 pt; w:type other than dxa is ignored for margins.
         if let Some(m) = child_w(tbl_pr, "tblCellMar") {
+            def.cell_margins = Some(table_margin_wire(m));
             let edge = |name: &str| -> Option<f64> {
                 child_w(m, name)
                     .filter(|n| attr_w(*n, "type").map(|t| t == "dxa").unwrap_or(true))
@@ -1688,10 +2328,15 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
             def.cell_margin_left = edge("left").or_else(|| edge("start"));
             def.cell_margin_right = edge("right").or_else(|| edge("end"));
         }
+        def.cell_spacing = table_width_wire(child_w(tbl_pr, "tblCellSpacing"));
     }
     if let Some(tc_pr) = child_w(style_node, "tcPr") {
         def.cell_shd = shd_fill(tc_pr);
         def.cell_valign = child_w(tc_pr, "vAlign").and_then(|v| attr_w(v, "val"));
+    }
+    if let Some(tr_pr) = child_w(style_node, "trPr") {
+        def.tbl_header = bool_prop(tr_pr, "tblHeader");
+        def.cant_split = bool_prop(tr_pr, "cantSplit");
     }
     // ECMA-376 §17.7.6: a table style's top-level `<w:rPr>`/`<w:pPr>` are
     // whole-table run/paragraph defaults applied to every cell (e.g. Calendar 3
@@ -1721,6 +2366,12 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
             if let Some(borders) = child_w(tbl_pr, "tblBorders") {
                 merge_raw_borders(&mut cf.borders, &parse_raw_tbl_borders(borders));
             }
+            cf.cell_spacing = table_width_wire(child_w(tbl_pr, "tblCellSpacing"));
+            cf.cell_margins = child_w(tbl_pr, "tblCellMar").map(table_margin_wire);
+        }
+        if let Some(tr_pr) = child_w(sp, "trPr") {
+            cf.tbl_header = bool_prop(tr_pr, "tblHeader");
+            cf.cant_split = bool_prop(tr_pr, "cantSplit");
         }
         // §17.7.6: the conditional block carries its own `<w:rPr>`/`<w:pPr>`
         // (e.g. firstRow `<w:color w:val="365F91"/>` + `<w:jc w:val="right"/>`).
@@ -1784,6 +2435,32 @@ mod tests {
         assert_eq!(merged, vec![stop(200.0, "right", "dot")]);
     }
 
+    #[test]
+    fn overflow_punct_participates_in_paragraph_style_cascade() {
+        let parse = |inner: &str| {
+            let xml = format!(
+                r#"<w:pPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{inner}</w:pPr>"#
+            );
+            let document = XmlDoc::parse(&xml).unwrap();
+            parse_para_fmt(document.root_element())
+        };
+
+        let mut inherited = parse(r#"<w:overflowPunct w:val="0"/>"#);
+        apply_para(&mut inherited, &parse("<w:keepNext/>"));
+        assert_eq!(
+            inherited.overflow_punct,
+            Some(false),
+            "an omitted child property inherits the parent style value"
+        );
+
+        apply_para(&mut inherited, &parse("<w:overflowPunct/>"));
+        assert_eq!(
+            inherited.overflow_punct,
+            Some(true),
+            "a later style/direct on-value overrides inherited false"
+        );
+    }
+
     fn run_fmt_from(rpr_xml: &str) -> RunFmt {
         let xml = format!(
             r#"<w:rPr xmlns:w="{ns}">{body}</w:rPr>"#,
@@ -1794,6 +2471,109 @@ mod tests {
         parse_run_fmt(doc.root_element())
     }
 
+    #[test]
+    fn rfonts_preserves_four_axes_and_theme_supersedes_direct_typeface() {
+        let fmt = run_fmt_from(
+            r#"<w:rFonts
+                w:ascii="Ascii Direct" w:asciiTheme="majorAscii"
+                w:hAnsi="HAnsi Direct" w:hAnsiTheme="minorHAnsi"
+                w:eastAsia="EA Direct" w:eastAsiaTheme="majorEastAsia"
+                w:cs="CS Direct" w:cstheme="minorBidi"/>"#,
+        );
+
+        assert_eq!(fmt.font_family_ascii.as_deref(), Some("@theme:majorAscii"));
+        assert_eq!(
+            fmt.font_family_high_ansi.as_deref(),
+            Some("@theme:minorHAnsi")
+        );
+        assert_eq!(
+            fmt.font_family_east_asia.as_deref(),
+            Some("@theme:majorEastAsia")
+        );
+        assert_eq!(fmt.font_family_cs.as_deref(), Some("@theme:minorBidi"));
+        assert_eq!(
+            fmt.font_family_ascii_direct.as_deref(),
+            Some("Ascii Direct")
+        );
+        assert_eq!(
+            fmt.font_family_ascii_theme.as_deref(),
+            Some("@theme:majorAscii")
+        );
+        assert_eq!(
+            fmt.font_family_high_ansi_direct.as_deref(),
+            Some("HAnsi Direct")
+        );
+        assert_eq!(
+            fmt.font_family_high_ansi_theme.as_deref(),
+            Some("@theme:minorHAnsi")
+        );
+    }
+
+    #[test]
+    fn newer_direct_axes_replace_inherited_theme_axes_as_whole_slots() {
+        let mut effective = run_fmt_from(
+            r#"<w:rFonts
+                w:asciiTheme="majorAscii" w:hAnsiTheme="majorHAnsi"
+                w:eastAsiaTheme="majorEastAsia" w:cstheme="majorBidi"/>"#,
+        );
+        let direct = run_fmt_from(
+            r#"<w:rFonts
+                w:ascii="Run ASCII" w:hAnsi="Run HANSI"
+                w:eastAsia="Run EA" w:cs="Run CS"/>"#,
+        );
+        apply_run(&mut effective, &direct);
+
+        assert_eq!(effective.font_family_ascii.as_deref(), Some("Run ASCII"));
+        assert_eq!(
+            effective.font_family_high_ansi.as_deref(),
+            Some("Run HANSI")
+        );
+        assert_eq!(effective.font_family_east_asia.as_deref(), Some("Run EA"));
+        assert_eq!(effective.font_family_cs.as_deref(), Some("Run CS"));
+
+        let themes = run_fmt_from(
+            r#"<w:rFonts
+                w:asciiTheme="minorAscii" w:hAnsiTheme="minorHAnsi"
+                w:eastAsiaTheme="minorEastAsia" w:cstheme="minorBidi"/>"#,
+        );
+        apply_run(&mut effective, &themes);
+        assert_eq!(
+            effective.font_family_ascii.as_deref(),
+            Some("@theme:minorAscii")
+        );
+        assert_eq!(
+            effective.font_family_high_ansi.as_deref(),
+            Some("@theme:minorHAnsi")
+        );
+        assert_eq!(
+            effective.font_family_east_asia.as_deref(),
+            Some("@theme:minorEastAsia")
+        );
+        assert_eq!(
+            effective.font_family_cs.as_deref(),
+            Some("@theme:minorBidi")
+        );
+
+        let ascii_only = run_fmt_from(r#"<w:rFonts w:asciiTheme="minorAscii"/>"#);
+        apply_run(&mut effective, &ascii_only);
+        assert_eq!(
+            effective.font_family_ascii.as_deref(),
+            Some("@theme:minorAscii")
+        );
+        assert_eq!(
+            effective.font_family_high_ansi.as_deref(),
+            Some("@theme:minorHAnsi")
+        );
+        assert_eq!(
+            effective.font_family_east_asia.as_deref(),
+            Some("@theme:minorEastAsia")
+        );
+        assert_eq!(
+            effective.font_family_cs.as_deref(),
+            Some("@theme:minorBidi")
+        );
+    }
+
     fn para_fmt_from(ppr_xml: &str) -> ParaFmt {
         let xml = format!(
             r#"<w:pPr xmlns:w="{ns}">{body}</w:pPr>"#,
@@ -1802,6 +2582,28 @@ mod tests {
         );
         let doc = XmlDoc::parse(&xml).unwrap();
         parse_para_fmt(doc.root_element())
+    }
+
+    #[test]
+    fn frame_pr_preserves_anchor_lock_on_the_private_wire() {
+        // ECMA-376 §17.3.1.11: anchorLock participates in the effective
+        // CT_FramePr identity used to group adjacent framed paragraphs. Keep it
+        // off the stable public FramePr projection while preserving the fact for
+        // layout acquisition under an explicitly private wire name.
+        let locked = para_fmt_from(r#"<w:framePr w:anchorLock="on"/>"#)
+            .frame_pr
+            .expect("framePr parses");
+        assert!(locked.anchor_lock);
+        let locked_wire = serde_json::to_value(&locked).expect("framePr serializes");
+        assert_eq!(locked_wire["__anchorLock"], serde_json::json!(true));
+        assert!(locked_wire.get("anchorLock").is_none());
+
+        let unlocked = para_fmt_from(r#"<w:framePr/>"#)
+            .frame_pr
+            .expect("framePr parses");
+        assert!(!unlocked.anchor_lock);
+        let unlocked_wire = serde_json::to_value(&unlocked).expect("framePr serializes");
+        assert!(unlocked_wire.get("__anchorLock").is_none());
     }
 
     // ── RB2 neutralization: a pathologically deep styles.xml is rejected by the
@@ -1962,6 +2764,15 @@ mod tests {
         apply_run(&mut dst, &src);
         assert_eq!(dst.color, None);
         assert!(dst.color_auto);
+    }
+
+    #[test]
+    fn east_asia_font_hint_and_language_override_through_run_merge() {
+        let mut dst = run_fmt_from(r#"<w:rFonts w:hint="default"/><w:lang w:eastAsia="ja-JP"/>"#);
+        let src = run_fmt_from(r#"<w:rFonts w:hint="eastAsia"/><w:lang w:eastAsia="ZH-cn"/>"#);
+        apply_run(&mut dst, &src);
+        assert_eq!(dst.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(dst.lang_east_asia.as_deref(), Some("zh-cn"));
     }
 
     #[test]

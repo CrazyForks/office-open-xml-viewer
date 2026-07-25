@@ -1,6 +1,43 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+pub const PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_TEXT_EFFECT: &str = "UNSUPPORTED_TEXT_EFFECT";
+pub const PARSE_DIAGNOSTIC_CODE_INVALID_TEXT_EFFECT_VALUE: &str = "INVALID_TEXT_EFFECT_VALUE";
+pub const PARSE_DIAGNOSTIC_CODE_MISSING_DRAWING_EXTENT: &str = "MISSING_DRAWING_EXTENT";
+pub const PARSE_DIAGNOSTIC_CODE_INVALID_DRAWING_EXTENT: &str = "INVALID_DRAWING_EXTENT";
+pub const PARSE_DIAGNOSTIC_CODE_DEGENERATE_DRAWING_EXTENT: &str = "DEGENERATE_DRAWING_EXTENT";
+pub const PARSE_DIAGNOSTIC_SEVERITY_UNSUPPORTED_TEXT_EFFECT: DiagnosticSeverity =
+    DiagnosticSeverity::Warning;
+pub const PARSE_DIAGNOSTIC_SEVERITY_INVALID_TEXT_EFFECT_VALUE: DiagnosticSeverity =
+    DiagnosticSeverity::Warning;
+pub const PARSE_DIAGNOSTIC_SEVERITY_MISSING_DRAWING_EXTENT: DiagnosticSeverity =
+    DiagnosticSeverity::Error;
+pub const PARSE_DIAGNOSTIC_SEVERITY_INVALID_DRAWING_EXTENT: DiagnosticSeverity =
+    DiagnosticSeverity::Error;
+pub const PARSE_DIAGNOSTIC_SEVERITY_DEGENERATE_DRAWING_EXTENT: DiagnosticSeverity =
+    DiagnosticSeverity::Warning;
+
+/// Private parser-to-layout diagnostic severity. This wire is intentionally
+/// smaller than the public document model: diagnostics carry stable facts and
+/// source coordinates, never authored text or raw invalid lexical values.
+#[derive(Serialize, Debug, Clone, Copy, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticSeverity {
+    Warning,
+    Error,
+}
+
+/// One parser-owned fact that layout cannot otherwise recover after the
+/// authored node is normalized or omitted.
+#[derive(Serialize, Debug, Clone, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ParseDiagnostic {
+    pub code: String,
+    pub severity: DiagnosticSeverity,
+    pub part: String,
+    pub path: Vec<usize>,
+}
+
 #[derive(Serialize, Debug, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Document {
@@ -39,6 +76,9 @@ pub struct Document {
     /// no pitches. BTreeMap for deterministic (byte-stable) JSON key order.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub font_family_pitches: BTreeMap<String, String>,
+    /// ECMA-376 §17.8.3.1 font name → w:charset hexadecimal byte.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub font_family_charsets: BTreeMap<String, String>,
     /// ECMA-376 §17.8.3.3-.6 — embedded fonts declared in `word/fontTable.xml`
     /// (`<w:embedRegular>` / `embedBold` / `embedItalic` / `embedBoldItalic`),
     /// resolved through `word/_rels/fontTable.xml.rels` to their obfuscated
@@ -73,6 +113,20 @@ pub struct Document {
     /// (the renderer then uses spec defaults: kinsoku ON).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings: Option<DocumentSettings>,
+    #[serde(
+        rename = "__pageLayoutSettings",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub page_layout_settings: Option<PageLayoutSettingsWire>,
+    #[serde(
+        rename = "__noteLayoutSettings",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub note_layout_settings: Option<NoteLayoutSettingsWire>,
+    /// Private parser/layout wire. Empty for conforming, fully-supported input,
+    /// and omitted so the stable public document JSON remains unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub diagnostics: Vec<ParseDiagnostic>,
     /// RB7 partial degradation: set when `word/document.xml` — the body part —
     /// could not be read or parsed. The document still "opens" (so the viewer
     /// shows a placeholder page instead of throwing an opaque error) with an
@@ -82,6 +136,32 @@ pub struct Document {
     /// renderer paints a visible error placeholder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_error: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PageLayoutSettingsWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror_margins: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gutter_at_top: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub book_fold_printing: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub book_fold_rev_printing: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub print_two_on_one: Option<bool>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteLayoutSettingsWire {
+    /// §17.11.21 / §17.18.34 `w:footnotePr/w:pos`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footnote_position: Option<String>,
+    /// §17.11.22 / §17.18.22 `w:endnotePr/w:pos`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endnote_position: Option<String>,
 }
 
 /// One embedded font-style slot from `word/fontTable.xml`. `style` is one of
@@ -424,6 +504,8 @@ pub struct SectionProps {
     /// `None` ⇒ "top" (the default; body flows from the top margin unchanged).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub v_align: Option<String>,
+    #[serde(rename = "__sectionPlacement", skip_serializing_if = "Option::is_none")]
+    pub section_placement: Option<Box<SectionPlacementWire>>,
 }
 
 /// ECMA-376 §17.6.4 `<w:cols>` — the section's multi-column configuration.
@@ -456,11 +538,69 @@ pub struct ColSpec {
     pub space_pt: f64,
 }
 
+/** Parser-private section placement facts. This wire is deliberately emitted
+ * under `__sectionPlacement` on SectionBreak and projected into an internal TS
+ * sidecar; it is not part of the stable public BodyElement declaration. */
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionPlacementWire {
+    pub section_id: String,
+    /// §17.6.1 `<w:bidi>` controls section-level presentation, including
+    /// newspaper-column population order, without changing paragraph bidi.
+    pub section_bidi: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub v_align: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_numbering: Option<LineNumbering>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_line_pitch: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_char_space: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gutter_pt: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtl_gutter: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_borders_authored: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_borders: Option<PageBorders>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_geometry: Option<Box<SectionPageGeometryWire>>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionPageGeometryWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_width: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_height: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_top: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_right: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_bottom: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_left: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_distance: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footer_distance: Option<f64>,
+}
+
 #[derive(Serialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BodyElement {
-    Paragraph(DocParagraph),
-    Table(DocTable),
+    // Keep the block wrapper compact as paragraph metadata grows. `Box` is
+    // transparent to Serde, so the parser wire shape remains unchanged while
+    // body vectors avoid reserving the largest paragraph payload per element.
+    Paragraph(Box<DocParagraph>),
+    // Tables are similarly recursive and substantially larger than marker
+    // variants; indirection keeps every body-vector slot compact.
+    Table(Box<DocTable>),
     /// Page break. `parity` carries section-break parity intent:
     /// `Some("odd")` = oddPage break (next content must start on an odd
     /// 1-based page), `Some("even")` = evenPage. `None` = a plain `nextPage`
@@ -468,6 +608,15 @@ pub enum BodyElement {
     PageBreak {
         #[serde(skip_serializing_if = "Option::is_none")]
         parity: Option<String>,
+        /// True only when the hard break was authored after visible content in
+        /// the same source paragraph. Retained pagination uses this structural
+        /// ownership fact instead of inferring it from the preceding drawing.
+        // Enum-level rename_all renames variant tags, not struct-variant fields.
+        #[serde(
+            rename = "sameParagraphAsPrevious",
+            skip_serializing_if = "Option::is_none"
+        )]
+        same_paragraph_as_previous: Option<bool>,
     },
     /// ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` — force the following
     /// content into the next newspaper column of the current section (or the
@@ -510,13 +659,13 @@ pub enum BodyElement {
         /// `columns` lets it pick the section's column geometry. Empty when no
         /// section in the inheritance chain declared a header.
         #[serde(default)]
-        headers: HeadersFooters,
+        headers: Box<HeadersFooters>,
         /// ECMA-376 §17.10.1 — the resolved footer set for the section that ENDS
         /// at this marker (see `headers`). sample-13's first section declares a
         /// `first` footer (the DOI line) here; the renderer renders it on that
         /// section's first page.
         #[serde(default)]
-        footers: HeadersFooters,
+        footers: Box<HeadersFooters>,
         /// ECMA-376 §17.10.1 `<w:titlePg>` — whether THIS ending section has a
         /// distinct first-page header/footer. NOT inherited (each sectPr's flag
         /// stands alone, like the body-level `Document.section.title_page`).
@@ -526,7 +675,7 @@ pub enum BodyElement {
         /// `<w:pgMar>` (the renderer then falls back to the body-level section).
         /// The final (body-level) section's geometry stays on `Document.section`.
         #[serde(skip_serializing_if = "Option::is_none")]
-        geom: Option<SectionGeom>,
+        geom: Option<Box<SectionGeom>>,
         /// ECMA-376 §17.6.12 `<w:pgNumType>` — this ENDING section's page-numbering
         /// settings (start / fmt). `None` when the sectPr omits `<w:pgNumType>` (or
         /// carries only chapter attributes) — numbering continues; decimal. Carried
@@ -537,12 +686,52 @@ pub enum BodyElement {
         /// `headers` are carried per-terminating-section.
         #[serde(skip_serializing_if = "Option::is_none")]
         page_num_type: Option<PageNumType>,
+        /// ECMA-376 §17.6.20 `<w:textDirection w:val>` — this ENDING section's
+        /// flow direction (TRANSITIONAL ST_TextDirection, Part 4 §14.11.7), so a
+        /// vertical (tbRl/btLr) non-final section can coexist with a horizontal
+        /// final section (issue #1000 per-section mixing). Same handling as
+        /// `SectionProps.text_direction`: the default "lrTb" (and an absent
+        /// element) collapse to `None`; other tokens are carried verbatim.
+        /// Carried SEPARATELY from `geom` (like `page_num_type`) because a
+        /// section may inherit its page geometry yet still set its own flow
+        /// direction. `None` ⇒ horizontal (lrTb).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text_direction: Option<String>,
+        /// Internal A3 placement projection. Kept off the stable TS public
+        /// BodyElement contract and consumed only by parser-model normalization.
+        /// Boxed because this private diagnostic payload would otherwise set the
+        /// allocation size of every body element; Serde keeps the wire unchanged.
+        #[serde(rename = "__sectionPlacement")]
+        section_placement: Box<SectionPlacementWire>,
+    },
+}
+
+/// Parser-only block wire for ECMA-376 CT_TxbxContent
+/// (`w:EG_BlockLevelElts+`). Supported paragraphs/tables reuse the exact body
+/// payloads; unsupported block-level children remain ordered markers so the
+/// retained layout can diagnose rather than silently discard them.
+#[derive(Serialize, Debug, Clone)]
+#[serde(untagged)]
+pub(crate) enum TextBoxBlockWire {
+    Body(BodyElement),
+    Unsupported {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(rename = "qName")]
+        q_name: String,
+        #[serde(rename = "sourcePath")]
+        source_path: Vec<usize>,
     },
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DocParagraph {
+    /// [MS-DOCX] §2.6.2.3 `w14:paraId` — source paragraph identifier, unique
+    /// within its document part. Preserved verbatim for stable external
+    /// addressing; absent for documents that do not author the extension.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paragraph_id: Option<String>,
     /// "left" | "center" | "right" | "both"
     pub alignment: String,
     /// pt
@@ -565,6 +754,17 @@ pub struct DocParagraph {
     /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,
+    /// Parser-private structural events for a complex field's cached result.
+    /// ECMA-376 §17.16 defines the result as the content between the `separate`
+    /// and `end` fldChars. Keeping the half-open run interval here preserves
+    /// that identity without inserting synthetic flow runs into the stable
+    /// public `DocRun` union.
+    #[serde(
+        rename = "__complexFieldBoundaries",
+        skip_serializing_if = "Vec::is_empty",
+        default
+    )]
+    pub(crate) complex_field_boundaries: Vec<ComplexFieldBoundaryWire>,
     /// ECMA-376 §17.13.6.2 `<w:bookmarkStart w:name>` — the names of every
     /// bookmark that STARTS within (or at the head of) this paragraph, in
     /// document order. A `<w:hyperlink w:anchor="X">` (§17.16.23) jumps to the
@@ -600,6 +800,9 @@ pub struct DocParagraph {
     pub mark_vanish: bool,
     /// Widow/orphan control (w:widowControl). Default per spec: true.
     pub widow_control: bool,
+    /// ECMA-376 §17.3.1.21 `w:overflowPunct` — permit one punctuation
+    /// character beyond paragraph extents. Omission defaults to true.
+    pub overflow_punct: bool,
     /// Paragraph borders (w:pBdr)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub borders: Option<ParagraphBorders>,
@@ -622,6 +825,11 @@ pub struct DocParagraph {
     /// the ASCII fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_font_family_east_asia: Option<String>,
+    /// Internal effective paragraph-mark run facts used by the shared text
+    /// resolver for empty and anchor-only line metrics. Not part of the stable
+    /// public TypeScript document model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paragraph_mark_font_facts: Option<RunFontFacts>,
     /// ECMA-376 §17.3.1.29 — the paragraph MARK run's resolved `<w:color>`
     /// (direct `pPr/rPr` → pStyle chain → docDefaults, the same `mark_run`
     /// resolution that feeds `default_font_size`; hex 6 lowercased; an
@@ -662,6 +870,29 @@ pub struct DocParagraph {
     /// (clippy::large_enum_variant); serde flattens the Box, so JSON is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frame_pr: Option<Box<FramePr>>,
+    #[serde(
+        rename = "__paragraphTypographyAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) paragraph_typography_acquisition: Option<ParagraphTypographyWire>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ComplexFieldBoundaryWire {
+    pub occurrence_id: u32,
+    /// `start` is the boundary immediately after `separate`; `end` is the
+    /// boundary immediately before the matching `end` fldChar.
+    pub boundary: String,
+    /// Index in `DocParagraph::runs`; together the two events describe a
+    /// half-open result interval and work for text, graphics, and nested fields.
+    pub run_index: usize,
+    /// `ref` | `pageRef` | `other`. This is acquisition metadata, not the stable
+    /// public FieldRun classifier (complex cached results stay ordinary runs).
+    pub field_type: String,
+    pub instruction: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hyperlink_anchor: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -747,6 +978,11 @@ pub struct LineSpacing {
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FramePr {
+    /// ECMA-376 §17.3.1.11 `anchorLock`. This is retained only for effective
+    /// CT_FramePr identity during layout acquisition: exposing it as a normal
+    /// camelCase member would widen the stable public TypeScript FramePr API.
+    #[serde(rename = "__anchorLock", skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) anchor_lock: bool,
     /// ST_DropCap (§17.18.20): "none" | "drop" | "margin". Absent ⇒ "none".
     pub drop_cap: String,
     /// §17.3.1.11 `lines` — drop-cap vertical height in anchor lines. Default 1.
@@ -819,6 +1055,11 @@ pub struct NumberingInfo {
     /// bullet) with this family. `None` ⇒ renderer falls back to `font_family`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family_east_asia: Option<String>,
+    /// Internal effective numbering-level run facts. Kept outside the stable TS
+    /// public model, but serialized so layout can apply the normative four-slot
+    /// §17.3.2.26 selection to every scalar in mixed marker text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_facts: Option<RunFontFacts>,
     /// ECMA-376 §17.9.24 — the numbering level rPr's `<w:color w:val>` (hex 6,
     /// lowercased like run colors). Colors the marker glyph only, never the
     /// paragraph's runs. `None` (absent `<w:color>`) lets the renderer fall
@@ -860,7 +1101,19 @@ pub enum DocRun {
     // keeps the enum compact (clippy::large_enum_variant). Serde flattens the
     // Box, so the JSON tag/shape is unchanged.
     Text(Box<TextRun>),
-    Image(ImageRun),
+    /// Zero-advance formatting contribution of the WordprocessingML run that
+    /// hosts a floating DrawingML object. Kept independent of the drawing kind
+    /// because the same `<wp:anchor>` can contain a picture, chart, shape, or
+    /// group, while the host character participates in line sizing exactly once.
+    AnchorHost(AnchorHostMetrics),
+    // Boxed with Field because these rich payloads otherwise make every run
+    // reserve image/field-sized storage; Serde keeps the wire unchanged.
+    Image(Box<ImageRun>),
+    /// Parser-wire placeholder for a recognized picture/chart whose payload
+    /// relationship cannot be resolved while its authored DrawingML geometry
+    /// remains valid. The TypeScript normalization boundary projects this into
+    /// a clone-safe unavailable ImageRun without inventing a resource path.
+    UnavailableDrawing(Box<UnavailableDrawingRun>),
     /// ECMA-376 §21.2 DrawingML chart embedded in a `<w:drawing>` whose
     /// `<a:graphicData uri=".../chart">` carries a `<c:chart r:id>`. The chart
     /// model is the shared [`ooxml_common::chart::ChartModel`] (the same
@@ -875,7 +1128,7 @@ pub enum DocRun {
     Break {
         break_type: BreakType,
     },
-    Field(FieldRun),
+    Field(Box<FieldRun>),
     // Boxed: ShapeRun is by far the largest Run variant; boxing keeps the
     // enum compact (clippy::large_enum_variant). Serde flattens the Box, so
     // the JSON tag/shape is unchanged.
@@ -936,6 +1189,264 @@ pub struct LineEnd {
     pub w: String,
     /// ST_LineEndLength (§20.1.10.31). Absent in source ⇒ "med".
     pub len: String,
+}
+
+/// Resolved character formatting of the WordprocessingML run that hosts a
+/// floating drawing. The drawing is out of inline flow, but Word still uses its
+/// anchor character's run metrics when sizing the containing text line.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AnchorHostMetrics {
+    /// Effective run size in points (§17.3.2.38 `<w:sz>`).
+    pub font_size: f64,
+    /// Resolved ascii/hAnsi font face (§17.3.2.26 `<w:rFonts>`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    /// Resolved East Asian font face, kept separately so document-grid line
+    /// allocation can use the Far East design metrics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+    /// Parser-private identity of the `wp:anchor` occurrence hosted by this
+    /// zero-advance character. Kept off the stable TypeScript model.
+    #[serde(
+        rename = "__anchorOccurrenceId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) anchor_occurrence_id: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorEdgesWire {
+    pub(crate) top_pt: Option<f64>,
+    pub(crate) top_status: AnchorValueStatusWire,
+    pub(crate) right_pt: Option<f64>,
+    pub(crate) right_status: AnchorValueStatusWire,
+    pub(crate) bottom_pt: Option<f64>,
+    pub(crate) bottom_status: AnchorValueStatusWire,
+    pub(crate) left_pt: Option<f64>,
+    pub(crate) left_status: AnchorValueStatusWire,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum AnchorValueStatusWire {
+    #[default]
+    Missing,
+    Invalid,
+    Valid,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(crate) enum AnchorAxisChoiceWire {
+    #[default]
+    Missing,
+    Invalid,
+    Align {
+        value: String,
+    },
+    Offset {
+        #[serde(rename = "valuePt")]
+        value_pt: f64,
+    },
+    Percent {
+        fraction: f64,
+    },
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorAxisWire {
+    pub(crate) relative_from: Option<String>,
+    pub(crate) relative_from_status: AnchorValueStatusWire,
+    pub(crate) choice: AnchorAxisChoiceWire,
+}
+
+impl Default for AnchorAxisWire {
+    fn default() -> Self {
+        Self {
+            relative_from: None,
+            relative_from_status: AnchorValueStatusWire::Missing,
+            choice: AnchorAxisChoiceWire::Missing,
+        }
+    }
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorSimplePositionWire {
+    pub(crate) enabled: Option<bool>,
+    pub(crate) status: AnchorValueStatusWire,
+    pub(crate) x_pt: Option<f64>,
+    pub(crate) x_status: AnchorValueStatusWire,
+    pub(crate) y_pt: Option<f64>,
+    pub(crate) y_status: AnchorValueStatusWire,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorExtentWire {
+    pub(crate) width_pt: Option<f64>,
+    pub(crate) height_pt: Option<f64>,
+    pub(crate) width_status: AnchorValueStatusWire,
+    pub(crate) height_status: AnchorValueStatusWire,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorRelativeSizeAxisWire {
+    pub(crate) relative_from: Option<String>,
+    pub(crate) relative_from_status: AnchorValueStatusWire,
+    pub(crate) fraction: Option<f64>,
+    pub(crate) fraction_status: AnchorValueStatusWire,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorRelativeSizeWire {
+    pub(crate) horizontal: Option<AnchorRelativeSizeAxisWire>,
+    pub(crate) vertical: Option<AnchorRelativeSizeAxisWire>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorPointWire {
+    pub(crate) x: Option<i64>,
+    pub(crate) y: Option<i64>,
+    pub(crate) raw_x: Option<String>,
+    pub(crate) raw_y: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorPolygonWire {
+    pub(crate) edited: bool,
+    pub(crate) coordinate_space: AnchorPolygonSpaceWire,
+    pub(crate) points: Vec<AnchorPointWire>,
+    pub(crate) invalid_point_count: usize,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorPolygonSpaceWire {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum AnchorWrapKindWire {
+    #[default]
+    Missing,
+    Invalid,
+    None,
+    Square,
+    Tight,
+    Through,
+    TopAndBottom,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorWrapWire {
+    pub(crate) kind: AnchorWrapKindWire,
+    pub(crate) authored_kinds: Vec<String>,
+    pub(crate) side: Option<String>,
+    pub(crate) distances: AnchorEdgesWire,
+    pub(crate) effect_extent: Option<AnchorEdgesWire>,
+    pub(crate) polygon: Option<AnchorPolygonWire>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorBehaviorWire {
+    pub(crate) behind_doc: Option<bool>,
+    pub(crate) behind_doc_status: AnchorValueStatusWire,
+    pub(crate) relative_height: Option<u32>,
+    pub(crate) relative_height_status: AnchorValueStatusWire,
+    pub(crate) locked: Option<bool>,
+    pub(crate) locked_status: AnchorValueStatusWire,
+    pub(crate) allow_overlap: Option<bool>,
+    pub(crate) allow_overlap_status: AnchorValueStatusWire,
+    pub(crate) layout_in_cell: Option<bool>,
+    pub(crate) layout_in_cell_status: AnchorValueStatusWire,
+}
+
+impl Default for AnchorBehaviorWire {
+    fn default() -> Self {
+        Self {
+            behind_doc: None,
+            behind_doc_status: AnchorValueStatusWire::Missing,
+            relative_height: None,
+            relative_height_status: AnchorValueStatusWire::Missing,
+            locked: None,
+            locked_status: AnchorValueStatusWire::Missing,
+            allow_overlap: None,
+            allow_overlap_status: AnchorValueStatusWire::Missing,
+            layout_in_cell: None,
+            layout_in_cell_status: AnchorValueStatusWire::Missing,
+        }
+    }
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorRawTransformWire {
+    pub(crate) offset_x_emu: Option<f64>,
+    pub(crate) offset_y_emu: Option<f64>,
+    pub(crate) extent_width_emu: Option<f64>,
+    pub(crate) extent_height_emu: Option<f64>,
+    pub(crate) child_offset_x_emu: Option<f64>,
+    pub(crate) child_offset_y_emu: Option<f64>,
+    pub(crate) child_extent_width_emu: Option<f64>,
+    pub(crate) child_extent_height_emu: Option<f64>,
+    pub(crate) rotation_units: Option<f64>,
+    pub(crate) flip_h: Option<bool>,
+    pub(crate) flip_v: Option<bool>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorResolvedChildFrameWire {
+    pub(crate) offset_x_pt: f64,
+    pub(crate) offset_y_pt: f64,
+    pub(crate) width_pt: f64,
+    pub(crate) height_pt: f64,
+    pub(crate) rotation_deg: f64,
+    pub(crate) flip_h: bool,
+    pub(crate) flip_v: bool,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorGroupWire {
+    pub(crate) child_source_id: String,
+    pub(crate) source_index: usize,
+    pub(crate) source_count: usize,
+    pub(crate) transform_chain: Vec<AnchorRawTransformWire>,
+    pub(crate) child_transform: Option<AnchorRawTransformWire>,
+    pub(crate) resolved_child_frame: AnchorResolvedChildFrameWire,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorAcquisitionWire {
+    pub(crate) occurrence_id: String,
+    pub(crate) simple_position: AnchorSimplePositionWire,
+    pub(crate) horizontal: AnchorAxisWire,
+    pub(crate) vertical: AnchorAxisWire,
+    pub(crate) extent: AnchorExtentWire,
+    pub(crate) parent_effect_extent: AnchorEdgesWire,
+    pub(crate) anchor_distances: AnchorEdgesWire,
+    pub(crate) relative_size: AnchorRelativeSizeWire,
+    pub(crate) wrap: AnchorWrapWire,
+    pub(crate) behavior: AnchorBehaviorWire,
+    pub(crate) group: Option<AnchorGroupWire>,
 }
 
 /// A drawn shape (wps:wsp inside wp:anchor). Positioned like an anchor image
@@ -1037,6 +1548,9 @@ pub struct ShapeRun {
     /// `<a:ln><a:prstDash val>` (ECMA-376 §20.1.8.48). None ⇒ solid.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stroke_dash: Option<String>,
+    /// VML `<v:stroke endcap>` / DrawingML line cap, normalized for Canvas.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_cap: Option<String>,
     /// `<a:ln><a:headEnd>` decoration (line start). None ⇒ no head.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head_end: Option<LineEnd>,
@@ -1061,6 +1575,11 @@ pub struct ShapeRun {
     /// paragraph) isn't supported in shape bodies yet.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub text_blocks: Vec<ShapeText>,
+    /// Complete parser-only `w:txbxContent` block stream. This intentionally
+    /// stays off the stable TypeScript ShapeRun declaration; parser-model.ts
+    /// snapshots it into internal acquisition inputs before layout.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) text_box_content: Vec<TextBoxBlockWire>,
     /// ECMA-376 §20.1.4.1.17 `<wps:style><a:fontRef>` — the shape's DEFAULT text
     /// color (hex, no `#`). A text-box run that sets no explicit `<w:color>`
     /// takes this before falling back to the document/theme default (black). The
@@ -1120,11 +1639,10 @@ pub struct ShapeRun {
     /// | "largest". Defaults to "bothSides" when absent. Mirrors ImageRun.wrap_side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_side: Option<String>,
-    /// ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — WordArt text laid along the
-    /// shape's path (a text watermark). When set the renderer draws this string,
-    /// scaled to fill the shape box (`fitshape`), rotated by `rotation`, and
-    /// filled with `fill`/`fill_opacity`, INSTEAD of a fill/stroke panel + body
-    /// text. `None` for an ordinary VML shape.
+    /// ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — WordArt text plus its
+    /// resolved CT_Path / CT_TextPath controls. `textpathok` and `on` govern
+    /// display; `fitshape` / `fitpath` govern fitting. Rotation and paint remain
+    /// shape facts. `None` for an ordinary VML shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_path: Option<TextPath>,
     /// ECMA-376 Part 4 §19.1.2.5 `<v:fill opacity>` — the fill's alpha in
@@ -1132,13 +1650,17 @@ pub struct ShapeRun {
     /// watermark semi-transparently. `None` ⇒ fully opaque.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fill_opacity: Option<f64>,
+    #[serde(
+        rename = "__anchorAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) anchor_acquisition: Option<AnchorAcquisitionWire>,
 }
 
-/// ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — a WordArt vector text path. Word
-/// emits this for text watermarks (the `PowerPlusWaterMarkObject` shape). The
-/// text is stretched to fit the shape's bounding box (`fitshape`, the WordArt
-/// `#_x0000_t136` shapetype default), so the on-screen size derives from the
-/// shape geometry rather than the nominal `font-size` in the textpath style.
+/// ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — a WordArt vector text path.
+/// The authored font properties are preserved together with resolved controls;
+/// downstream acquisition applies display and fitting only when those controls
+/// request it.
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TextPath {
@@ -1154,6 +1676,35 @@ pub struct TextPath {
     /// `font-style:italic` (or the `italic` keyword in the `font` shorthand).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub italic: bool,
+    /// Resolved transitional VML control facts. These are parser/layout
+    /// implementation detail: serde flattens them into the wire object so the
+    /// internal TypeScript parser-model can acquire WordArt deterministically,
+    /// while the stable public `TextPath` declaration remains unchanged.
+    #[serde(flatten)]
+    pub(crate) vml: VmlTextPathFacts,
+}
+
+/// Private resolved facts from CT_Path / CT_TextPath. Parser construction fills
+/// every boolean with `Some`, including the specified false defaults. `None` is
+/// reserved for a non-parser/default Rust value and therefore remains distinct
+/// from explicit parser provenance on the serialized wire object.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VmlTextPathFacts {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) text_path_ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) on: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fit_shape: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fit_path: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) trim: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) x_scale: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) font_size_pt: Option<f64>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -1224,6 +1775,229 @@ pub enum PathCmd {
     Close,
 }
 
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFontAxisValues {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ascii: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub high_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complex_script: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFontAxisPresence {
+    pub ascii: bool,
+    pub high_ansi: bool,
+    pub east_asia: bool,
+    pub complex_script: bool,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFontSlots {
+    pub direct: RunFontAxisValues,
+    pub theme: RunFontAxisValues,
+    pub theme_present: RunFontAxisPresence,
+}
+
+/// Internal projection of the effective run properties needed by the DOCX text
+/// service. This is shared by numbering-level text (§17.9.6) and paragraph-mark
+/// line probes (§17.3.1.29); the stable public TypeScript model intentionally
+/// remains unchanged.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFontFacts {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_high_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_slots: Option<RunFontSlots>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtl: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_cs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size_cs: Option<f64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold_cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic_cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_bidi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kerning: Option<f64>,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum TypographyValueStatusWire {
+    #[default]
+    Missing,
+    Invalid,
+    Valid,
+}
+
+/// Parser-private lexical + normalized value. Keeping the lexical form is the
+/// diagnostic seam: required/enum values that are absent or malformed remain
+/// distinguishable from valid zero/false values instead of being guessed.
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TypographyValueWire<T> {
+    pub status: TypographyValueStatusWire,
+    pub raw: Option<String>,
+    pub value: Option<T>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CtBorderTypographyWire {
+    pub val: TypographyValueWire<String>,
+    pub color: TypographyValueWire<String>,
+    pub theme_color: TypographyValueWire<String>,
+    pub theme_tint: TypographyValueWire<String>,
+    pub theme_shade: TypographyValueWire<String>,
+    pub size_pt: TypographyValueWire<f64>,
+    pub space_pt: TypographyValueWire<f64>,
+    pub shadow: TypographyValueWire<bool>,
+    pub frame: TypographyValueWire<bool>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UnderlineTypographyWire {
+    pub val: TypographyValueWire<String>,
+    pub color: TypographyValueWire<String>,
+    pub theme_color: TypographyValueWire<String>,
+    pub theme_tint: TypographyValueWire<String>,
+    pub theme_shade: TypographyValueWire<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TypographyLanguagesWire {
+    pub east_asia: Option<String>,
+    pub bidi: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EastAsianLayoutTypographyWire {
+    pub vert: Option<bool>,
+    pub vert_compress: Option<bool>,
+    pub combine: Option<bool>,
+    pub combine_brackets: TypographyValueWire<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RubyGuideRunTypographyWire {
+    pub text: String,
+    pub font_family: Option<String>,
+    pub font_size_pt: Option<f64>,
+    pub bold: bool,
+    pub italic: bool,
+    pub color: Option<String>,
+    pub language: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RubyTypographyWire {
+    pub align: TypographyValueWire<String>,
+    pub base_font_size_pt: TypographyValueWire<f64>,
+    pub raise_pt: TypographyValueWire<f64>,
+    pub language: TypographyValueWire<String>,
+    pub guide_runs: Vec<RubyGuideRunTypographyWire>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RevisionTypographyWire {
+    pub kind: String,
+    pub id: TypographyValueWire<String>,
+    pub author: Option<String>,
+    pub date: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RunTypographyWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underline: Option<UnderlineTypographyWire>,
+    pub strike: bool,
+    pub double_strike: bool,
+    pub caps: bool,
+    pub small_caps: bool,
+    pub color_auto: bool,
+    pub vertical_align: TypographyValueWire<String>,
+    pub position_pt: TypographyValueWire<f64>,
+    pub snap_to_grid: Option<bool>,
+    pub character_spacing_pt: Option<f64>,
+    pub character_scale: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fit_text: Option<FitTextSpecWire>,
+    pub kerning_threshold_pt: Option<f64>,
+    pub emphasis: TypographyValueWire<String>,
+    pub languages: TypographyLanguagesWire,
+    pub east_asian_layout: EastAsianLayoutTypographyWire,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border: Option<CtBorderTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ruby: Option<RubyTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<RevisionTypographyWire>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FitTextSpecWire {
+    pub val_twips: f64,
+    pub id: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ParagraphTypographyBordersWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top: Option<CtBorderTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right: Option<CtBorderTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<CtBorderTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left: Option<CtBorderTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub between: Option<CtBorderTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bar: Option<CtBorderTypographyWire>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ParagraphTypographyWire {
+    pub borders: ParagraphTypographyBordersWire,
+}
+
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldRun {
@@ -1241,6 +2015,30 @@ pub struct FieldRun {
     pub font_size: f64,
     pub color: Option<String>,
     pub font_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_high_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_slots: Option<RunFontSlots>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtl: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_cs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size_cs: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold_cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic_cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_bidi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_east_asia: Option<String>,
     pub background: Option<String>,
     /// "super" | "sub" | None
     pub vert_align: Option<String>,
@@ -1258,6 +2056,11 @@ pub struct FieldRun {
     /// or fallback text) draws through the same per-glyph stamp as a plain run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emphasis_mark: Option<String>,
+    #[serde(
+        rename = "__typographyAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) typography_acquisition: Option<RunTypographyWire>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -1283,6 +2086,11 @@ pub struct TextRun {
     pub font_size: f64,
     pub color: Option<String>,
     pub font_family: Option<String>,
+    /// ECMA-376 §17.3.2.26 hAnsi axis, preserved independently from ascii.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_high_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_slots: Option<RunFontSlots>,
     /// ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`), resolved
     /// through the style chain + docDefaults. CJK characters in this run render
     /// with this family; `font_family` keeps the conflated single-font fallback
@@ -1293,6 +2101,9 @@ pub struct TextRun {
     /// falls back to `font_family`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family_east_asia: Option<String>,
+    /// Resolved ECMA-376 §17.3.2.26 rFonts@hint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_hint: Option<String>,
     pub is_link: bool,
     pub background: Option<String>,
     /// ECMA-376 §17.3.2.6 — `<w:color w:val="auto"/>` was set on this run. The
@@ -1382,6 +2193,9 @@ pub struct TextRun {
     /// Arabic/Hebrew digit ordering). `None` when unspecified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_bidi: Option<String>,
+    /// Resolved ECMA-376 §17.3.2.20 w:lang/@w:eastAsia.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_east_asia: Option<String>,
     /// ECMA-376 §17.3.2.34 `<w:snapToGrid>` — run participation in the section
     /// character grid. `Some(false)` opts this run out; `None` inherits.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1446,6 +2260,11 @@ pub struct TextRun {
     /// the note's 1-based position, not the raw id). `None` for ordinary runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note_ref: Option<NoteRef>,
+    #[serde(
+        rename = "__typographyAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) typography_acquisition: Option<RunTypographyWire>,
 }
 
 /// A footnote / endnote reference marker. The displayed number is resolved by
@@ -1472,6 +2291,10 @@ pub struct RunRevision {
     /// `<w:ins w:date>` / `<w:del w:date>` ISO-8601 timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
+    /// ECMA-376 §17.13.5 requires `w:id`. It stays off the stable public
+    /// revision shape and is projected through the private typography wire.
+    #[serde(skip)]
+    pub(crate) typography_id: TypographyValueWire<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -1480,6 +2303,14 @@ pub struct RubyAnnotation {
     pub text: String,
     /// pt
     pub font_size_pt: f64,
+    /// Distance “between the phonetic guide base text and the phonetic guide text”
+    /// in pt (ECMA-376 §17.3.3.12).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hps_raise_pt: Option<f64>,
+    /// Rich rubyPr/rt facts are parser acquisition data, not a public model
+    /// expansion. The owning TextRun projects them through its private wire.
+    #[serde(skip)]
+    pub(crate) typography: Option<RubyTypographyWire>,
 }
 
 /// One formatting run (`<w:r>`) inside a shape-text paragraph. Mirrors the
@@ -1597,6 +2428,24 @@ pub struct ShapeText {
     /// reordering pass (the body renderer reads the identical field).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bidi: Option<bool>,
+    /// ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — resolved through the style
+    /// chain (direct `<w:pPr>` wins, else the paragraph style incl. docDefaults).
+    /// When set, Word suppresses `space_before`/`space_after` between this
+    /// text-box paragraph and an ADJACENT paragraph that shares its `style_id`
+    /// and also sets the toggle — identical to the body paragraph's
+    /// `contextual_spacing` (parser.rs `resolve_para` / renderer `contextualSuppressed`).
+    /// Without it a `<w:contextualSpacing/>` ListParagraph list inside a fixed
+    /// text box kept inheriting the docDefault `after=160` (8 pt) gap, which
+    /// inflated its line pitch and clipped the trailing line (sample-32).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub contextual_spacing: bool,
+    /// Resolved paragraph style id of this text-box paragraph: the explicit
+    /// `<w:pStyle w:val>` when present, else the document default paragraph style
+    /// (`w:default="1"`), else "Normal" — the SAME stable id the body path stamps
+    /// (parser.rs ~2578) so §17.3.1.9 `contextual_spacing` can group adjacent
+    /// same-style paragraphs even under locale-specific default style ids.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style_id: Option<String>,
     /// Embedded zip path of an inline image living inside this text-box
     /// paragraph (`<w:drawing><wp:inline>…<a:blip r:embed>`), e.g.
     /// `word/media/image1.emf`. `None` for a text-only paragraph. Resolved
@@ -1651,6 +2500,13 @@ pub struct ImageRun {
     pub width_pt: f64,
     /// pt
     pub height_pt: f64,
+    /// Effective DrawingML rotation after composing a picture's parent groups.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub rotation: f64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_h: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_v: bool,
     /// true = wp:anchor (absolute page position), false = wp:inline (flows with text)
     pub anchor: bool,
     /// X offset in pt (anchor only).  Interpretation depends on anchor_x_from_margin.
@@ -1702,8 +2558,9 @@ pub struct ImageRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_side: Option<String>,
     /// ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap` — whether this floating
-    /// object may overlap other floats. Spec default is true (attribute optional);
-    /// `false` mandates the renderer reposition the object to prevent any overlap.
+    /// object may overlap other floats. CT_Anchor requires the attribute;
+    /// parser-originated missing/invalid status is retained on the private wire.
+    /// This public boolean keeps the historical hand-built-model fallback.
     /// Inline images carry true (the no-constraint value).
     pub allow_overlap: bool,
     /// ECMA-376 §20.4.3.1 wp:align (positionH/wp:align). When present the
@@ -1733,6 +2590,31 @@ pub struct ImageRun {
     pub anchor_x_relative_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_y_relative_from: Option<String>,
+    #[serde(
+        rename = "__anchorAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) anchor_acquisition: Option<AnchorAcquisitionWire>,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum UnavailableDrawingResourceKind {
+    Image,
+    Chart,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UnavailableDrawingRun {
+    pub resource_kind: UnavailableDrawingResourceKind,
+    pub width_pt: f64,
+    pub height_pt: f64,
+    #[serde(
+        rename = "__anchorAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) anchor_acquisition: Option<AnchorAcquisitionWire>,
 }
 
 fn is_zero_f64(v: &f64) -> bool {
@@ -1805,8 +2687,9 @@ pub struct ChartRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_side: Option<String>,
     /// ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap` — whether this floating
-    /// object may overlap other floats. Spec default is true (attribute optional);
-    /// `false` mandates the renderer reposition the object to prevent any overlap.
+    /// object may overlap other floats. CT_Anchor requires the attribute;
+    /// parser-originated missing/invalid status is retained on the private wire.
+    /// This public boolean keeps the historical hand-built-model fallback.
     /// Inline charts carry true (the no-constraint value), which is omitted from
     /// JSON; the TypeScript side reads an absent value with `?? true`.
     #[serde(skip_serializing_if = "is_true")]
@@ -1836,6 +2719,11 @@ pub struct ChartRun {
     pub anchor_x_relative_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_y_relative_from: Option<String>,
+    #[serde(
+        rename = "__anchorAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) anchor_acquisition: Option<AnchorAcquisitionWire>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -1950,6 +2838,82 @@ pub struct DocTable {
     /// the table is not floating (no `tblp_pr`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlap: Option<String>,
+    /// Parser/layout acquisition facts which must retain authored presence and
+    /// lexical OOXML values. Kept off the stable TypeScript `DocTable` surface;
+    /// `parser-model.ts` snapshots this serde-only wire before layout.
+    #[serde(rename = "__tableLayout")]
+    pub table_layout: TableLayoutAcquisitionWire,
+}
+
+/// ECMA-376 CT_TblWidth as authored. `None` on either attribute is distinct
+/// from the element being absent (represented by the owning `Option`). Layout
+/// resolves the lexical kind only after its containing-block width is known.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableWidthAcquisitionWire {
+    pub kind: Option<String>,
+    pub value: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableLayoutKindAcquisitionWire {
+    pub kind: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableGridColumnAcquisitionWire {
+    /// Raw `gridCol/@w` twips token. Missing is not an inferred width: per
+    /// §17.4.16 it contributes zero until the table-width algorithm runs.
+    pub width: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableGridAcquisitionWire {
+    pub authored: bool,
+    pub columns: Vec<TableGridColumnAcquisitionWire>,
+    /// The grid may need augmentation when rows address more columns than
+    /// `tblGrid` authored (§17.4.17/§17.4.48). Preserve that lower bound rather
+    /// than manufacturing widths in the parser.
+    pub required_column_count: u32,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableMarginAcquisitionWire {
+    pub top: Option<TableWidthAcquisitionWire>,
+    pub bottom: Option<TableWidthAcquisitionWire>,
+    pub start: Option<TableWidthAcquisitionWire>,
+    pub end: Option<TableWidthAcquisitionWire>,
+    pub left: Option<TableWidthAcquisitionWire>,
+    pub right: Option<TableWidthAcquisitionWire>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableLayoutAcquisitionWire {
+    pub effective_style_id: Option<String>,
+    /// Whether Word treats this table as part of ordinary body flow after its
+    /// tblpPr compatibility exceptions have been applied. This is retained
+    /// separately from `DocTable::tblp_pr`: that public field preserves the
+    /// authored positioning payload, whose mere presence is not an effective
+    /// floating-status test ([MS-OI29500] 2.1.162(b-c)).
+    pub ordinary_flow: bool,
+    /// Parser-owned ECMA-376 Part 1 §17.4.37 logical-table membership. One id is
+    /// assigned per logical table; a standalone table receives its own id, so
+    /// directly adjacent source tables carrying the same id form one logical
+    /// table. `logical_row_offset`/`logical_total_rows` place this source table's
+    /// rows inside that logical table's row sequence.
+    pub logical_sequence_id: String,
+    pub logical_row_offset: usize,
+    pub logical_total_rows: usize,
+    pub grid: TableGridAcquisitionWire,
+    pub preferred_width: Option<TableWidthAcquisitionWire>,
+    pub layout: Option<TableLayoutKindAcquisitionWire>,
+    pub cell_spacing: Option<TableWidthAcquisitionWire>,
+    pub cell_margins: Option<TableMarginAcquisitionWire>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -1977,6 +2941,12 @@ pub struct BorderSpec {
 #[serde(rename_all = "camelCase")]
 pub struct DocTableRow {
     pub cells: Vec<DocTableCell>,
+    /// ECMA-376 §17.4.15: number of table-grid columns skipped before the first
+    /// real cell in this row. Omitted means zero.
+    pub grid_before: u32,
+    /// ECMA-376 §17.4.14: number of table-grid columns skipped after the last
+    /// real cell in this row. Omitted means zero.
+    pub grid_after: u32,
     /// pt, None = auto
     pub row_height: Option<f64>,
     /// ECMA-376 §17.4.80 w:trHeight/@hRule. "auto" (default) = treat row_height
@@ -1988,6 +2958,49 @@ pub struct DocTableRow {
     /// ECMA-376 §17.4.6 w:cantSplit. When true, this row must not be split
     /// across page boundaries.
     pub cant_split: bool,
+    #[serde(rename = "__tableRowLayout")]
+    pub table_row_layout: TableRowLayoutAcquisitionWire,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableRowHeightAcquisitionWire {
+    pub value: Option<String>,
+    pub rule: String,
+    /// `[MS-OI29500]` 2.1.180 gives Word a different omitted-hRule behavior;
+    /// retaining presence lets a later compatibility policy distinguish it
+    /// from an explicitly authored `auto` without guessing from the value.
+    pub rule_authored: bool,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePropertyExceptionAcquisitionWire {
+    pub preferred_width: Option<TableWidthAcquisitionWire>,
+    pub layout: Option<TableLayoutKindAcquisitionWire>,
+    pub justification: Option<String>,
+    pub indent: Option<TableWidthAcquisitionWire>,
+    pub borders: Option<TableBorders>,
+    pub cell_margins: Option<TableMarginAcquisitionWire>,
+    pub cell_spacing: Option<TableWidthAcquisitionWire>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableRowLayoutAcquisitionWire {
+    pub height: Option<TableRowHeightAcquisitionWire>,
+    /// ECMA-376 §17.4.27 direct alignment for this row. It precedes the
+    /// table-property exception and parent table alignment during acquisition.
+    pub justification: Option<String>,
+    pub before_width: Option<TableWidthAcquisitionWire>,
+    pub after_width: Option<TableWidthAcquisitionWire>,
+    pub cell_spacing: Option<TableWidthAcquisitionWire>,
+    /// Effective whole-table/conditional table-style spacing for this row.
+    /// Direct row, exception, and table properties remain separate higher layers.
+    pub style_cell_spacing: Option<TableWidthAcquisitionWire>,
+    /// Effective whole-table/conditional table-style margins for this row.
+    pub style_cell_margins: Option<TableMarginAcquisitionWire>,
+    pub exception: Option<TablePropertyExceptionAcquisitionWire>,
 }
 
 /// One block-level entry inside a table cell. ECMA-376 §17.4.7 (w:tc) allows
@@ -1995,8 +3008,10 @@ pub struct DocTableRow {
 #[derive(Serialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum CellElement {
-    Paragraph(DocParagraph),
-    Table(DocTable),
+    // Match `BodyElement`: nested cell block vectors must not inherit the full
+    // inline size of the paragraph model, and Serde still emits the same wire.
+    Paragraph(Box<DocParagraph>),
+    Table(Box<DocTable>),
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -2032,6 +3047,15 @@ pub struct DocTableCell {
     pub margin_left: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub margin_right: Option<f64>,
+    #[serde(rename = "__tableCellLayout")]
+    pub table_cell_layout: TableCellLayoutAcquisitionWire,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableCellLayoutAcquisitionWire {
+    pub preferred_width: Option<TableWidthAcquisitionWire>,
+    pub margins: Option<TableMarginAcquisitionWire>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

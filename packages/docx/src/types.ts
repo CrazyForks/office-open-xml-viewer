@@ -164,7 +164,8 @@ export interface HeaderFooter {
  *  DISPLAYED page number are carried:
  *  - `start` — the number shown on the FIRST page of the section (§17.6.12);
  *    absent ⇒ numbering continues from the previous section's highest number.
- *    Kept as a possibly-zero / possibly-negative integer (Word writes `start="0"`).
+ *    Kept as a possibly-zero / possibly-negative integer; zero is valid source
+ *    markup.
  *  - `fmt` — the ST_NumberFormat (§17.18.59) for the section's page numbers
  *    (decimal / upperRoman / lowerLetter / …); absent ⇒ decimal.
  *  `chapStyle`/`chapSep` (chapter-prefixed numbering) are out of scope for this
@@ -179,8 +180,8 @@ export interface PageNumType {
  *  section. Mirrors the Rust `PageBorders`. Each edge is a CT_Border (§17.18.4);
  *  the container carries the placement globals. Absent on {@link SectionProps}
  *  (`pageBorders` undefined) ⇒ no page border (the common case). Art borders
- *  (§17.18.2 decorative-image styles) are unsupported — the renderer draws only
- *  the standard line styles (single/double/dashed/dotted/thick/…). */
+ *  (§17.18.2 decorative-image styles) are unsupported — retained Canvas paint
+ *  draws only the standard line styles (single/double/dashed/dotted/thick/…). */
 export interface PageBorders {
   /** `@w:offsetFrom` (§17.18.63): "page" ⇒ each edge's `space` is from the PAGE
    *  edge; "text" (the default) ⇒ from the text margin. */
@@ -232,10 +233,9 @@ export interface LineNumbering {
  *  geometry: page size + margins + header/footer distances (pt). Mirrors the Rust
  *  `SectionGeom`. Carried on a {@link BodyElement} `sectionBreak` arm (`geom`) so a
  *  mid-body section keeps its own page size; the FINAL section's geometry lives on
- *  {@link DocxDocumentModel.section}. Also stamped per {@link PaginatedBodyElement}
- *  (`sectionGeom`) by the paginator so the renderer sizes each page from its own
- *  section. `orient` is omitted — Word swaps w/h for landscape, so verbatim w/h
- *  already give the correct dims.
+ *  {@link DocxDocumentModel.section}. Canonical layout retains the resolved page
+ *  box on each physical page. `orient` is omitted because the parsed landscape
+ *  geometry already carries the resolved width and height.
  *
  *  ⚠ Spread over the body-level {@link SectionProps} in `renderDocumentToCanvas`
  *  (`{ ...doc.section, ...pageGeom }`): only add per-section PAGE-BOX fields that
@@ -278,7 +278,7 @@ export interface SectionProps {
    *  SectionBreak marker. */
   sectionStart?: string | null;
   /** ECMA-376 §17.6.20 `<w:textDirection w:val>` — the section's flow direction,
-   *  using the TRANSITIONAL ST_TextDirection enum Word writes (Part 4 §14.11.7:
+   *  using the Transitional ST_TextDirection enum (Part 4 §14.11.7:
    *  `lrTb`|`tbRl`|`btLr`|`lrTbV`|`tbLrV`|`tbRlV`), NOT the Part 1 §17.18.93
    *  Strict set. Absent / `null` ⇒ "lrTb" (horizontal, left→right / top→bottom,
    *  the default). `"tbRl"` = vertical Japanese (glyphs stack top→bottom, lines
@@ -359,7 +359,12 @@ export interface ColumnGeom {
 export type BodyElement =
   | { type: 'paragraph' } & DocParagraph
   | { type: 'table' } & DocTable
-  | { type: 'pageBreak'; parity?: 'odd' | 'even' }
+  | {
+      type: 'pageBreak';
+      parity?: 'odd' | 'even';
+      /** The hard break followed visible content in the same source paragraph. */
+      sameParagraphAsPrevious?: boolean;
+    }
   /** ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` — force the following content
    *  into the next newspaper column (or the next page's first column when
    *  already in the last column). Hoisted to the body level by the parser. */
@@ -396,126 +401,23 @@ export type BodyElement =
        *  separately from `geom` because a section may inherit its geometry yet
        *  still restart / re-format its page numbers. */
       pageNumType?: PageNumType | null;
+      /** ECMA-376 §17.6.20 `<w:textDirection w:val>` — this ENDING section's
+       *  flow direction (TRANSITIONAL ST_TextDirection, same enum and semantics
+       *  as {@link SectionProps.textDirection}), so a vertical (tbRl/btLr)
+       *  non-final section can coexist with a horizontal final section (issue
+       *  #1000). Absent ⇒ horizontal ("lrTb" is collapsed by the parser).
+       *  Carried separately from `geom` (like `pageNumType`) because a section
+       *  may inherit its page geometry yet still set its own flow direction. */
+      textDirection?: string | null;
     };
 
-/** A BodyElement annotated with a line range to render. Set when the
- *  paginator splits a paragraph that doesn't fit on a single page —
- *  `lineSlice` constrains which laid-out line indices the renderer paints,
- *  and the renderer adjusts the starting Y so the slice's first line begins
- *  at the page's content top. `colIndex` records which newspaper column (0-based)
- *  the element was placed in (ECMA-376 §17.6.4); absent / 0 for single-column
- *  sections. */
-export type PaginatedBodyElement = BodyElement & {
-  lineSlice?: {
-    start: number;
-    end: number;
-    /** §17.6.4 remainder re-wrap: indices refer to the slice's OWN re-measured
-     *  partition, and `continues` marks that this partition is a paragraph
-     *  continuation even though `start === 0`. */
-    continues?: boolean;
-  };
-  /** An empty paragraph that carries a section break (an inkless paragraph
-   *  immediately followed by a `sectionBreak` element) has its spacing-BEFORE
-   *  suppressed — Word/LibreOffice render it flush below the preceding paragraph.
-   *  Stamped by the paginator because the paint pass receives per-page element
-   *  lists with the `sectionBreak` marker already consumed, so it cannot re-detect
-   *  the adjacency itself. Runtime-only — never emitted by the parser. See
-   *  `isSectionBreakSpacerAt` in renderer.ts. */
-  sectionBreakSpacer?: boolean;
-  /** A section-break spacer (see `sectionBreakSpacer`) that ALSO carries no
-   *  space-before of its own: Word renders no paragraph-mark line box for it at
-   *  a CONTINUOUS section break — the section mark collapses to zero height
-   *  rather than occupying a blank line. (A spacer WITH a space-before keeps its
-   *  line box; the before manifests as the blank line.) Stamped by the paginator
-   *  and skipped by both the fill and paint passes so they stay in lockstep. See
-   *  `isCollapsedContinuousSpacer` in renderer.ts. Runtime-only. */
-  collapsedSpacer?: boolean;
-  /** An inkless paragraph that immediately precedes a `collapsedSpacer`: it begins
-   *  the section-break empty run, which Word renders flush below the preceding
-   *  content, so the PREVIOUS paragraph's space-after is also dropped. Stamped by the
-   *  paginator (which sees the full body) and read by the paint pass, because the
-   *  collapsed spacer it looks ahead to can land on the next page's element list — so
-   *  paint cannot re-derive the adjacency from its per-page slice. Runtime-only. See
-   *  `leadsCollapsedRun` in renderer.ts. */
-  leadsCollapsedRun?: boolean;
-  /** ECMA-376 §17.3.1.29 + §17.3.2.41 — a fully-hidden paragraph (inkless AND its
-   *  mark is vanished) that the paginator collapsed to zero height. Stamped so the
-   *  paint pass skips it in lockstep, exactly like `collapsedSpacer`. Runtime-only.
-   *  See `isFullyHiddenParagraph` in renderer.ts. */
-  hiddenCollapsed?: boolean;
-  colIndex?: number;
-  /** ECMA-376 §17.6.4 — the column geometry of the SECTION this element belongs
-   *  to (per-section newspaper columns). Stamped by the paginator so the renderer
-   *  resolves `colIndex` against the right section's columns even when two
-   *  sections share a page (a "continuous" section break). Absent ⇒ the renderer
-   *  uses the page-level `columns` it was given (single-section / header / footer
-   *  paths), so single-section documents are unaffected. Runtime-only — never
-   *  emitted by the parser. */
-  colGeom?: ColumnGeom[];
-  /** ECMA-376 §17.6.4 — page-absolute Y (pt) of the TOP of the multi-column
-   *  region this element belongs to on its page. For a section started by a
-   *  "continuous" section break (§17.18.79) the columns begin partway down the
-   *  page (below the preceding single-column content), not at the page content
-   *  top; the paginator computes that origin once (front-loaded layout) and
-   *  stamps it so the renderer resets a column's vertical cursor to the REGION
-   *  top — never the page top. Also carries the region's bottom (max column
-   *  depth) onto the FIRST element of the following section so it clears all
-   *  columns. Absent ⇒ the renderer uses the page content top (single-column /
-   *  page-spanning section). Runtime-only — never emitted by the parser. */
-  colTopPt?: number;
-  /** ECMA-376 §17.10.1 — the resolved header/footer set + `<w:titlePg>` flag of
-   *  the SECTION this element belongs to. Stamped by the paginator (from the
-   *  upcoming `SectionBreak` marker, or the body-level section for the final
-   *  section) so the renderer picks the active section's header/footer per page —
-   *  mirroring how `colGeom` resolves per-section columns. Absent ⇒ the renderer
-   *  falls back to the body-level `doc.headers`/`doc.footers`/`section.titlePage`.
-   *  Runtime-only — never emitted by the parser. */
-  sectionHF?: { headers: HeadersFooters; footers: HeadersFooters; titlePage: boolean };
-  /** ECMA-376 §17.6.13 / §17.6.11 — the page geometry (size + margins) of the
-   *  SECTION this element belongs to. Stamped by the paginator (from the upcoming
-   *  `SectionBreak`'s `geom`, or the body-level section for the final section) so the
-   *  renderer sizes each page from its own section — mirroring how `sectionHF`
-   *  resolves per-section headers/footers and `colGeom` per-section columns. Absent ⇒
-   *  the renderer uses the body-level `doc.section` geometry (single-section docs are
-   *  unaffected). Runtime-only — never emitted by the parser. */
-  sectionGeom?: SectionGeom;
-  /** ECMA-376 §17.6.12 `<w:pgNumType>` — the page-numbering settings (start / fmt)
-   *  of the SECTION this element belongs to. Stamped by the paginator (from the
-   *  upcoming `SectionBreak`'s `pageNumType`, or the body-level section) so
-   *  `computePageNumbering` resolves each physical page's DISPLAYED number and
-   *  format. `null` ⇒ the section has no `<w:pgNumType>` (numbering continues;
-   *  decimal). Runtime-only — never emitted by the parser. */
-  sectionPageNumType?: PageNumType | null;
-  /** B2 table stage 1b — compute-once table layout for the LEGACY paint path
-   *  (floating tables, and the fallback for a block table the fragment-paint gate does
-   *  not cover). When this element is a table, the paginator stamps the per-grid-column
-   *  widths (pt) it resolved via {@link resolveColumnWidths}; the legacy paint pass
-   *  ({@link computeTableLayout}) reuses them (× the paint scale) when its own layout
-   *  inputs match `tableLayoutInputs`. PR 6 — a migrated block table paints from its
-   *  {@link import('./layout-fragments.js').TableFragment} instead, so it is NOT stamped
-   *  and its parsed element is never mutated with this runtime state; the stamp remains
-   *  for floating/fallback tables (whose slice elements are fresh clones, not the parsed
-   *  model). Absent ⇒ the legacy path resolves the columns itself. Runtime-only. */
-  tableColWidthsPt?: number[];
-  /** B2 table stage 1b — the per-row heights (pt) the paginator resolved via
-   *  {@link resolveTableRowHeights} (ST_HeightRule + §17.4.85 vMerge span), for the
-   *  LEGACY paint path only (see `tableColWidthsPt`). For a floating table split across
-   *  pages this holds THIS slice's rows' heights, in slice row order. A migrated block
-   *  table carries the heights on its {@link import('./layout-fragments.js').TableFragment}
-   *  instead. Runtime-only — never emitted by the parser. */
-  tableRowHeightsPt?: number[];
-  /** B2 table stage 1b — the scale-1 (pt-space) inputs the LEGACY paint reuse gate
-   *  verifies before reusing `tableColWidthsPt` / `tableRowHeightsPt`. `contentWPt` is
-   *  the content-band width the columns were fit to. Runtime-only. */
-  tableLayoutInputs?: {
-    /** Always 1 (paginator space). Present so the gate can assert it. */
-    scale: number;
-    /** The pt content-band width `resolveColumnWidths` was fit to. */
-    contentWPt: number;
-  };
-};
 
 export interface DocParagraph {
+  /**
+   * Authored `w14:paraId` for the source paragraph, preserved verbatim and
+   * absent when the source paragraph does not carry that identifier.
+   */
+  paragraphId?: string;
   /**
    * ECMA-376 §17.18.44 ST_Jc. Renderer honors left, start, center, right, end,
    * both, distribute. Other values (kashida variants, numTab, thaiDistribute)
@@ -554,7 +456,9 @@ export interface DocParagraph {
   shading?: string | null;
   /** Force a page break before this paragraph (w:pageBreakBefore) */
   pageBreakBefore?: boolean;
-  /** Suppress spacing between adjacent same-style paragraphs (w:contextualSpacing) */
+  /** ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — between adjacent same-style
+   *  paragraphs, `word-contextual-spacing-per-side` drops the toggling
+   *  paragraph's own contribution to the collapsed inter-paragraph gap. */
   contextualSpacing?: boolean;
   /** Keep paragraph on same page as the next paragraph (w:keepNext) */
   keepNext?: boolean;
@@ -567,6 +471,9 @@ export interface DocParagraph {
   markVanish?: boolean;
   /** Widow/orphan control (w:widowControl). ECMA-376 default is true. */
   widowControl?: boolean;
+  /** ECMA-376 §17.3.1.21 `<w:overflowPunct>` — permit one trailing
+   *  punctuation character beyond paragraph indents/margins. Omission is true. */
+  overflowPunct?: boolean;
   /** Paragraph borders (w:pBdr) */
   borders?: ParagraphBorders | null;
   /** Style ID of the applied paragraph style */
@@ -580,12 +487,12 @@ export interface DocParagraph {
    *  anchor-only paragraph marks in East Asian documents use this axis for line
    *  metrics instead of the ASCII fallback. */
   defaultFontFamilyEastAsia?: string | null;
-  /** ECMA-376 §17.3.1.29 — the paragraph MARK run's resolved `w:color` (direct
+  /** ECMA-376 §17.3.1.29 — the paragraph mark run's resolved `w:color` (direct
    *  pPr/rPr → pStyle chain → docDefaults; hex 6 without `#`, lowercased; an
-   *  explicit `auto` surfaces as absent, §17.3.2.6). Word formats a numbering
-   *  marker with the level rPr (§17.9.24) layered over the mark's run
-   *  properties, so the renderer uses this as the marker-color fallback when
-   *  {@link NumberingInfo.color} is absent. */
+   *  explicit `auto` surfaces as absent, §17.3.2.6). The numbering level rPr
+   *  (§17.9.24) layers over the mark's run properties, so the renderer uses
+   *  this as the marker-color fallback when {@link NumberingInfo.color} is
+   *  absent. */
   paragraphMarkColor?: string | null;
   /**
    * ECMA-376 §17.3.1.6 `<w:bidi>` — right-to-left paragraph. `true` = RTL,
@@ -685,7 +592,9 @@ export interface DocxRunBorder {
 export interface TabStop {
   /** tab stop position in pt (from the left of paragraph content area) */
   pos: number;
-  alignment: 'left' | 'center' | 'right' | 'decimal' | 'bar' | 'clear';
+  /** ECMA-376 ST_TabJc. `num` is the list tab between a numbering marker and
+   * paragraph contents; start/end are logical-direction aliases. */
+  alignment: 'left' | 'start' | 'center' | 'right' | 'end' | 'decimal' | 'bar' | 'clear' | 'num';
   leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'heavy' | 'middleDot';
 }
 
@@ -729,8 +638,8 @@ export interface NumberingInfo {
   /** ECMA-376 §17.9.24 — the numbering level rPr's `w:color` (hex 6 without
    *  `#`, lowercased). Colors the marker glyph only, never the paragraph's
    *  runs. Absent ⇒ the renderer falls back to
-   *  {@link DocParagraph.paragraphMarkColor} (§17.3.1.29 — Word layers the
-   *  level rPr over the paragraph mark's run properties) and finally to its
+   *  {@link DocParagraph.paragraphMarkColor} (§17.3.1.29 — the level rPr layers
+   *  over the paragraph mark's run properties) and finally to its
    *  default ink. An explicit `w:val="auto"` is absent here + {@link colorAuto}. */
   color?: string | null;
   /** ECMA-376 §17.3.2.6 / ST_HexColorAuto (§17.18.39) — true when the level
@@ -753,6 +662,7 @@ export interface NumberingInfo {
 
 export type DocRun =
   | { type: 'text' } & DocxTextRun
+  | { type: 'anchorHost' } & AnchorHostMetrics
   | { type: 'image' } & ImageRun
   | { type: 'chart' } & ChartRun
   | { type: 'break'; breakType: 'line' | 'page' | 'column' }
@@ -767,9 +677,9 @@ export type DocRun =
  *  core `renderChart` consumes (identical to what pptx/xlsx pass), so a docx
  *  chart draws at the same quality through the same code path. `widthPt`/
  *  `heightPt` are the `<wp:extent>` natural size. An inline chart flows as an
- *  inline box of that size; an anchored chart (§20.4.2.3) is painted via
- *  `registerAnchorFloats` when it wraps text, or by `renderAnchorImages` for
- *  wrapNone/no-wrap anchors — all paths use `renderChart`. */
+ *  inline box of that size; anchor acquisition retains an anchored chart
+ *  (§20.4.2.3) at its resolved page box while contributing wrap exclusions
+ *  when required — all paint paths use `renderChart`. */
 export interface ChartRun {
   chart: ChartModel;
   widthPt: number;
@@ -839,6 +749,20 @@ export type PathCmd =
   | { cmd: 'arcTo'; wr: number; hr: number; stAng: number; swAng: number }
   | { cmd: 'close' };
 
+/** Resolved formatting of the WordprocessingML anchor character that hosts a
+ * floating drawing. The drawing has zero inline advance, but these metrics still
+ * participate in the containing line's height and document-grid allocation. */
+export interface AnchorHostMetrics {
+  /** Effective `<w:sz>` in points. */
+  fontSize: number;
+  /** Resolved ascii/hAnsi font face. */
+  fontFamily?: string | null;
+  /** Resolved East Asian font face, retained for Far East line metrics. */
+  fontFamilyEastAsia?: string | null;
+  bold?: boolean;
+  italic?: boolean;
+}
+
 export interface ShapeRun {
   widthPt: number;
   heightPt: number;
@@ -898,6 +822,8 @@ export interface ShapeRun {
   strokeWidth?: number;
   /** `<a:ln><a:prstDash val>` — ECMA-376 §20.1.8.48. Absent = solid. */
   strokeDash?: string | null;
+  /** Normalized line cap: `butt` | `round` | `square`. */
+  strokeCap?: CanvasLineCap | null;
   /** `<a:ln><a:headEnd>` line-start decoration (ECMA-376 §20.1.8.3). */
   headEnd?: LineEnd | null;
   /** `<a:ln><a:tailEnd>` line-end decoration (ECMA-376 §20.1.8.3). */
@@ -1060,6 +986,18 @@ export interface ShapeText {
    *  base direction for the UAX#9 reordering pass (the body renderer reads the
    *  identical field). */
   bidi?: boolean;
+  /** ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — resolved through the style
+   *  chain in the parser. When set,
+   *  `word-contextual-spacing-per-side` drops this text-box paragraph's own
+   *  contribution against an adjacent paragraph with the same
+   *  {@link ShapeText.styleId}. Absent ⇒ no suppression. */
+  contextualSpacing?: boolean;
+  /** Resolved paragraph style id of this text-box paragraph — the explicit
+   *  `<w:pStyle>`, else the document default paragraph style, else "Normal" (the
+   *  same stable id {@link DocParagraph.styleId} carries). Paired with
+   *  {@link ShapeText.contextualSpacing} to group adjacent same-style paragraphs
+   *  for §17.3.1.9. */
+  styleId?: string | null;
   /** Zip path of an inline image inside this text-box paragraph
    *  (`<w:drawing><wp:inline><a:blip r:embed>`), e.g. `word/media/image1.emf`.
    *  Absent for a text-only paragraph. */
@@ -1273,8 +1211,12 @@ export interface RunRevision {
 
 export interface RubyAnnotation {
   text: string;
-  /** Annotation font size in pt. Word stores this as half-points in `<w:hps>`. */
+  /** Annotation font size in pt; `<w:hps>` stores half-points. */
   fontSizePt: number;
+  /** Distance “between the phonetic guide base text and the phonetic guide
+   *  text” in pt; `<w:hpsRaise>` stores half-points
+   *  (ECMA-376 §17.3.3.12). */
+  hpsRaisePt?: number;
 }
 
 /** ECMA-376 §17.18.24 ST_Em — the emphasis-mark styles a run may carry via
@@ -1303,8 +1245,8 @@ export interface ImageRun {
   /**
    * ECMA-376 §20.1.8.55 `<a:srcRect>` — the source-rectangle crop applied to
    * the decoded bitmap before it is drawn into the display box. The four values
-   * are inset FRACTIONS 0..1 of the source bitmap measured inward from each
-   * edge (`l`/`t` from left/top, `r`/`b` from right/bottom); the visible source
+   * are signed fractions of the source bitmap measured from each edge
+   * (`l`/`t` from left/top, `r`/`b` from right/bottom); the visible source
    * region is `[l, t, 1−r, 1−b]`. The parser converts the raw ST_Percentage
    * (1000ths of a percent) to fractions, so the renderer crops in bitmap pixels
    * (`sx = l*w`, `sy = t*h`, `sw = (1−l−r)*w`, `sh = (1−t−b)*h`) without unit
@@ -1313,6 +1255,10 @@ export interface ImageRun {
   srcRect?: { l: number; t: number; r: number; b: number } | null;
   widthPt: number;
   heightPt: number;
+  /** Effective DrawingML transform for grouped pictures. */
+  rotation?: number;
+  flipH?: boolean;
+  flipV?: boolean;
   /** true = wp:anchor (absolute positioned), false/undefined = wp:inline (flows with text) */
   anchor?: boolean;
   /** X offset in pt (anchor only) */
@@ -1399,9 +1345,10 @@ export interface ImageRun {
 // ===== Table =====
 
 /**
- * ECMA-376 §17.4.57 `<w:tblpPr>` — floating-table positioning. Present in
- * `<w:tblPr>` ⇒ the table FLOATS (out of the main text flow, absolutely
- * positioned by its top-left corner). All fields are optional in the source.
+ * ECMA-376 §17.4.57 `<w:tblpPr>` — authored floating-table positioning.
+ * Under `word-effective-floating-table-positioning`, lexical presence alone
+ * does not determine whether the table leaves ordinary flow.
+ * All fields are optional in the source.
  */
 export interface TblpPr {
   /** §17.4.57 minimum distance to wrapping text (dist padding), pt. Default 0. */
@@ -1413,9 +1360,9 @@ export interface TblpPr {
   horzAnchor: 'text' | 'margin' | 'page' | string;
   /** True iff the source `<w:tblpPr>` carried ANY horizontal positioning hint
    *  (horzAnchor, tblpX, or tblpXSpec). When false, no horizontal position was
-   *  given: ECMA-376's literal default is the page edge, but Word places such a
-   *  table at the anchor paragraph's text/column left. computeFloatTableBox uses
-   *  this flag to apply that Word-runtime placement. */
+   *  given. The retained floating-table resolver uses the text/column frame for
+   *  this compatibility default rather than claiming an application-specific
+   *  normative placement. */
   horzSpecified: boolean;
   /** §17.4.57 ST_VAnchor {text,margin,page}. Default 'page'. */
   vertAnchor: 'text' | 'margin' | 'page' | string;
@@ -1444,18 +1391,14 @@ export interface DocTable {
   /** ECMA-376 §17.4.50 `<w:tblInd>` — indentation added before the table's
    *  LEADING edge (left in an LTR table, right in an RTL/`bidiVisual` table), in
    *  pt. SIGNED: a negative value pulls the table outward past the leading margin
-   *  toward the page edge (Word writes this for a header banner that must reach
-   *  the physical page edge). `type="dxa"` only; `pct`/`auto` are dropped by the
+   *  toward the page edge. `type="dxa"` only; `pct`/`auto` are dropped by the
    *  parser per §17.4.50. Absent ⇒ no direct indent. The renderer applies it only
    *  when the resolved `jc` is left/leading (§17.4.50). */
   tblInd?: number;
   /** ECMA-376 §17.4.52 `<w:tblLayout w:type>` — 'fixed' | 'autofit'. Absent
-   *  (undefined) ⇒ spec default 'autofit'. Both paths size columns from the
-   *  tblGrid (§17.4.48) scaled to fit: 'fixed' uses the grid verbatim; 'autofit'
-   *  additionally lets content min-width grow a column. Per-cell `widthPt`/
-   *  `widthPct` (`<w:tcW>`) is NOT re-applied — Word bakes the resolved widths
-   *  into the saved grid (see resolveColumnWidths). Only a degenerate all-zero
-   *  grid falls back to tcW-preference sizing. */
+   *  (undefined) means the specification default, 'autofit'. The table grid is
+   *  the initial shared grid for §17.18.87; preferred table/cell widths remain
+   *  constraints on both layout modes. */
   layout?: string;
   /** ECMA-376 §17.4.63 `<w:tblW>` preferred table width (type="dxa"), pt. */
   widthPt?: number;
@@ -1468,8 +1411,9 @@ export interface DocTable {
    * is placed rightmost, and flips per-cell left/right borders accordingly.
    */
   bidiVisual?: boolean;
-  /** ECMA-376 §17.4.57 `<w:tblpPr>` — when present the table is FLOATING
-   *  (absolutely positioned, out of the main text flow). Absent ⇒ block table. */
+  /** ECMA-376 §17.4.57 `<w:tblpPr>` authored positioning payload. The lexical
+   *  payload remains available under `word-effective-floating-table-positioning`;
+   *  presence alone is not an effective-floating test. */
   tblpPr?: TblpPr;
   /** ECMA-376 §17.4.56 `<w:tblOverlap w:val>` — 'never' | 'overlap'. 'never' ⇒
    *  the floating table must be repositioned to avoid overlapping other floats.
@@ -1494,6 +1438,12 @@ export interface BorderSpec {
 
 export interface DocTableRow {
   cells: DocTableCell[];
+  /** ECMA-376 §17.4.15 `<w:gridBefore>` — shared table-grid columns skipped
+   *  before placing this row's first real cell. Omitted/zero means none. */
+  gridBefore?: number;
+  /** ECMA-376 §17.4.14 `<w:gridAfter>` — shared table-grid columns skipped
+   *  after this row's last real cell. Omitted/zero means none. */
+  gridAfter?: number;
   rowHeight: number | null;  // pt
   /** ECMA-376 §17.4.80 hRule. "auto" (default) = informational; "atLeast" =
    *  lower bound; "exact" = fixed clip. */
@@ -1516,15 +1466,10 @@ export interface DocTableCell {
   borders: CellBorders;
   background: string | null;
   vAlign: 'top' | 'center' | 'bottom';
-  /** ECMA-376 §17.4.71 `<w:tcW>` preferred cell width (type="dxa"), pt. A
-   *  PREFERRED width only: autofit column sizing is driven by the tblGrid
-   *  (§17.4.48), not by re-applying this (Word bakes the resolved widths into
-   *  the saved grid — see resolveColumnWidths). Consulted only for the
-   *  degenerate all-zero-grid fallback. */
+  /** ECMA-376 §17.4.71 `<w:tcW>` preferred cell width (type="dxa"), pt. This is
+   *  a preferred constraint, not an exact cell box width. */
   widthPt: number | null;
-  /** `<w:tcW>` type="pct": 50ths of a percent of available content width.
-   *  Resolved against the available width at render time. Preferred width only
-   *  (see `widthPt`). */
+  /** `<w:tcW>` type="pct": 50ths of a percent of the final table width. */
   widthPct?: number;
   /** Per-cell margins (pt) from `<w:tcPr><w:tcMar>` (ECMA-376 §17.4.42). Each
    *  edge overrides the table-level `cellMargin*` default when set; null/absent
@@ -1568,7 +1513,17 @@ export type WorkerResponse =
   | { type: 'parsed'; id: number; documentJson: ArrayBuffer }
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'markdownRendered'; id: number; markdown: string }
-  | { type: 'error'; id: number; message: string };
+  | {
+      type: 'error';
+      id: number;
+      message: string;
+      errorName?: string;
+      code?: string;
+      reason?: string;
+      outgoingColumnIndex?: number;
+      outgoingColumnCount?: number;
+      incomingColumnCount?: number;
+    };
 
 // ===== Public API types =====
 

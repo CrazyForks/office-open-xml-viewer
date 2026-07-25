@@ -4,19 +4,226 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
-## Unreleased
+## 0.73.2 — 2026-07-24
+
+Patch. Restores DOCX list-marker, table-pagination, and grouped-drawing geometry
+that regressed during the retained-layout migration.
+
+- **docx:** anchor right-to-left numbering markers to the retained aligned line
+  instead of the page edge, so bullets and item numbers stay attached to their
+  paragraph text.
+- **docx:** admit a merged table when its resolved row tracks fit the remaining
+  page, avoiding continuation pages that contain only overflowed gauge or bar
+  rows.
+- **docx:** reproduce Word's observed non-uniform scaling for directly grouped
+  leaves at exact odd quarter turns while keeping nested groups and the shared
+  DOCX/XLSX/PPTX DrawingML transform on the normative Annex L path. The
+  compatibility rule is deliberately scoped to the evidence available in Word.
+  (ECMA-376 Part 1 Annex L §L.4.7.4; [MS-OE376] §2.1.1360; #1037, #1096)
+
+## 0.73.1 — 2026-07-24
+
+Patch. Prevents compressed full-width punctuation from colliding with the
+following glyph in horizontal DOCX text.
+
+- **docx:** bound document-level full-width punctuation compression by both
+  adjacent glyph ink extents. A following glyph that extends left of its
+  advance origin can no longer overlap a closing parenthesis or other eligible
+  punctuation, including across source-run formatting boundaries. The
+  collision constraint is resolved once during layout with a linear grapheme
+  pass; paint remains measurement-free and vertical text retains its separate
+  geometry path. (§17.15.1.18, §17.18.7; [MS-OE376] §2.1.562; #1094)
+
+## 0.73.0 — 2026-07-24
+
+Minor. Completes the DOCX migration to one immutable layout-to-paint pipeline,
+then restores the full fidelity corpus through that architecture rather than
+reintroducing renderer-side measurement or legacy fallbacks. The release also
+adds bounded partial rendering for unsupported optional drawings, exposes stable
+source identities in text-run callbacks, and moves normal type-checking to
+TypeScript 7.
+
+**docx — retained layout architecture and fidelity**
+
+- Replace renderer-owned pagination and reduced-state fallback paths with one
+  retained, point-space `DocumentLayout`: immutable page/column transitions,
+  occurrence-owned paragraphs/tables/drawings, canonical page stories and
+  layers, deterministic convergence, and identical main-thread/worker layout
+  inputs. Final architecture and compatibility gates now fail closed if an
+  alternate layout path is introduced. Public DOCX declarations and worker
+  contracts remain compatible. (#1037, #1038–#1077)
+- Restore the parser and layout facts needed for Word-compatible pagination and
+  paint after the cutover: field/tab boundaries, numbering-indent provenance,
+  table/frame/border geometry, text-box and page-owned anchors, inherited shape
+  text color, section decorations, East Asian line metrics, and selected-font
+  ink. Canvas paint consumes retained geometry without re-measuring it.
+  (#1080, #1083, #1084)
+- Keep OpenType `vert` acquisition and painting on the same Canvas/font route;
+  retain vertical glyph advances and origins; avoid applying negative pitch
+  twice to brackets, punctuation, question/exclamation marks, long marks,
+  middle dots, and ellipses. Preserve Japanese punctuation/kana compression per
+  grapheme through wrapping, continuation, intrinsic measurement, and paint.
+  (§17.3.2.10, §17.6.20, §17.15.1.18; #1086, #1091, #1092)
+- Reduce repeated retained-layout work through immutable paragraph projection
+  caches and dense wrap-polygon memoization. Shared deeply frozen polygons now
+  compile once at O(V²) plus O(PV) validation instead of O(PV²), eliminating
+  the former O(V³) aggregate case when paragraph acquisitions scale with
+  polygon vertices. (#1076)
+
+**docx — failure containment**
+
+- Preserve surrounding document content when an optional VML text path is
+  unsupported or an image/chart relationship is unavailable but its authored
+  extent is valid. The canonical layout retains a diagnostic no-op node and its
+  geometry; invalid numeric geometry and structural failures remain fatal.
+  This is a bounded recovery policy, not catch-all exception suppression or a
+  legacy renderer fallback. (#1090, #1091; progresses #1088)
+
+**public callbacks and viewer fixes**
+
+- Text-run callbacks now expose stable source identities:
+  `DocxTextRunInfo.paragraphId` (`w14:paraId`),
+  `PptxTextRunInfo.shapeId` (`cNvPr@id`), and required
+  `XlsxTextRunInfo.sheetName` / `cellRef` values. (#1078, #1079)
+- XLSX built-in zoom controls explicitly use `type="button"`, preventing them
+  from submitting an ancestor HTML form. (#1087)
+
+**tooling and packaging**
+
+- Run project type-checks and declaration emission with the native TypeScript 7
+  CLI while isolating TypeScript 6 for tools that still require the legacy
+  JavaScript Compiler API. Remove duplicate CI package type-checks, replace
+  `vite-plugin-dts` / API Extractor with `rolldown-plugin-dts`, and preserve all
+  five published declaration entries and their TypeScript 5.9/6/7 compatibility.
+  On the measured Apple Silicon baseline, cold `pnpm typecheck` fell from
+  7.41 s to 1.51 s and cold `pnpm build` from 8.47 s to 1.79 s. (#1075)
+
+## 0.72.2 — 2026-07-13
+
+Patch (fixes on v0.72.1). Word-compatible docx layout geometry plus xlsx
+cacheless chart and RTL-anchor correctness.
+
+- **docx:** preserve floating-anchor host line metrics independently of the
+  drawing payload (picture / chart / shape / group); resolve installed normal
+  faces for eligible local metrics while keeping authored styled faces and
+  prioritizing embedded regular faces (§17.8.3.3), applied consistently to text,
+  floating-anchor hosts, and empty paragraph marks; include justified text and
+  picture list markers in paragraph border bounds (§17.9.7, §17.3.1.24); resolve
+  each emitted table page slice by the borders it actually paints without
+  assuming monotonic row heights (§17.4.66, §17.4.80); honor an explicit
+  `atLeast` grid minimum for a tall first line (observed Word behavior). No
+  sample-specific thresholds. (#1035)
+- **xlsx:** resolve cacheless legacy chart formulas through a shared DrawingML
+  resolver contract (category / value / series-name / scatter / bubble sources,
+  multi-level categories), with a bounded sparse worksheet-reference session
+  shared across charts and sparklines; mirror anchored objects and clipping
+  rectangles on right-to-left sheets without flipping content. (#1034)
+
+## 0.72.1 — 2026-07-13
+
+Patch (fix on v0.72.0). Preserves authored OOXML layout and grouped-drawing
+geometry that had been discarded or reconstructed from incomplete state before
+rendering, which shifted anchored content, lost legacy VML form shapes, and
+introduced pagination/border artifacts.
+
+- **docx:** preserve omitted-grid table borders, floating-layout constraints,
+  and line metrics consistently across measurement, pagination, and painting;
+  implement the legacy VML stroke/fill cascade (default colors, units, dashes,
+  endcaps, arrows, geometry) so authored form shapes render (ECMA-376 §17.4.14,
+  §17.4.15, §17.4.66, §17.4.85; Part 4 VML §19.1.2.21).
+- **DrawingML (docx / xlsx / pptx):** centralize group transforms in the shared
+  layer and propagate Annex L scale / rotation / flip semantics consistently
+  across all three formats (Annex L §L.4.7.4–L.4.7.6); carry pptx table, chart,
+  and media frame transforms through the parser contracts into rendering. No
+  document-path or sample-specific thresholds. (#1032)
+
+## 0.72.0 — 2026-07-13
+
+Minor. A large docx fidelity cycle centered on **vertical writing (縦書き)** and
+**line-layout correctness**: full tbRl/btLr section support with per-section text
+direction, vertical text boxes and vertical ruby, UAX#50 vertical glyph forms
+routed through the font's real `vert` glyphs, and Word-adjudicated docGrid /
+`contextualSpacing` / table pagination. International text gains dictionary line
+breaking for Thai/Lao/Khmer, grapheme-fill breaking for Myanmar/Tibetan, an
+extended UAX#14 no-break predicate, and true kashida justification. A per-font
+advance model closes the Canvas-vs-Word measurement gap, and the viewers add an
+`enableHyperlinks` switch and a shared zoom ladder on the xlsx chrome. ~140 merged
+PRs since 0.71.0.
+
+**docx — vertical writing (縦書き, §17.6.20 / §20.1.10.83)**
+
+- **Full vertical-section support.** Section-level `tbRl` and `btLr` now paginate
+  and paint through a single vertical path with per-section text direction and
+  per-page rotation, mixed vertical + final-horizontal sections, physical-margin
+  horizontal headers/footers (§17.10.1), upright block tables with horizontal
+  cells (§17.4.80), and physical-page anchor resolution (§20.4.3.x).
+- **Vertical text boxes.** `<wps:bodyPr vert>` parses into `ShapeRun.textVert`;
+  `vert` / `vert270` / `eaVert` text boxes render with the correct orientation,
+  including mongolianVert (column left→right), vertical ruby on the right half,
+  upright inline images, and cross-axis autofit grow/shrink for eaVert `spAutoFit`
+  boxes (#988, #1000).
+- **Real vertical glyphs.** The full Tu/Tr repertoire (brackets, long-vowel ー,
+  wave dashes, ：；〖〗) is drawn from the font's OpenType `vert` glyphs when the
+  surface can reach the feature, with measure == paint; the earlier manual
+  rotate/mirror/shear approximations are dropped where real glyphs exist (#969).
+
+**docx — line layout & pagination fidelity**
+
+- **docGrid cell counting (§17.6.5).** Character-grid line pitch is counted from
+  a deterministic design height rather than the substituted font's measured box,
+  fixing environment-dependent and scale-unstable page breaks (untabled East
+  Asian faces use the Word FE 1.3 × em design height); run character-grid
+  participation and the table line-grid compatibility setting are honored.
+- **`contextualSpacing` (§17.3.1.9).** Per-side subtraction semantics between
+  same-style paragraphs, now also honored inside text boxes.
+- **`fitText` (§17.3.2.14).** Parsed as a composite spec and laid out as fit
+  regions, with justify/overlay propagation and RTL residual-pad placement.
+- **Tables.** Over-tall `vMerge` spans split across pages with per-fragment
+  vAlign (§17.4.6/§17.4.85); shared and mid-row page-cut borders resolve as
+  §17.4.66 conflicts drawn at the winning cell extent; cell fragments become the
+  paint authority for sliced pieces.
+- Ruby carries uniform line height into continuations and honors
+  `w:rubyPr/w:hpsRaise` (§17.3.3); vanished-mark paragraphs collapse to zero
+  height (§17.3.2.41); a trailing empty paragraph grazing the bottom margin is
+  kept (#981); numbering markers color from the level and paragraph-mark rPr.
+
+**International text & line breaking**
+
+- **Dictionary line breaking** for Thai/Lao/Khmer, plus breaks at no-space
+  SEA ↔ Latin/CJK/digit transitions and mixed CJK+SEA runs (#959, #960).
+- **Grapheme-fill breaking** for Myanmar and Tibetan (#961).
+- The **UAX#14 no-break pair predicate** is extended beyond LB28 (#966).
+- **Kashida justification** via U+0640 tatweel insertion with a Word-parity
+  insertion-priority model (§17.18.44, #954, #724); `thaiDistribute` spreads
+  across Thai grapheme clusters and Word's SEA justified line fit is matched
+  (#991).
+- RTL fixes: independent `bCs`/`iCs` complex-script toggles (#937), numbered
+  hanging first line at the start indent, and trailing-whitespace placement.
+
+**Fonts & list numbering**
+
+- **Per-font advance model** — condensed-face profiles plus a Canvas-vs-Word
+  bias correction, closing measurement drift for present fonts (#794, #698).
+- **Cross-font metric emulation reverted** (PR #979 "Regime B"): a missing font
+  now falls back to a substitute with natural reflow (page counts may differ from
+  the authoring host, by design); the same-font Canvas-vs-Word bias correction
+  ("Regime A") is kept.
+- `decimalEnclosedCircle` and `aiueo(FullWidth)` list numbering formats.
+
+**pptx**
+
+- Absolute bullet size `buSzPts` (§21.1.2.4.10); bullet sub-properties cascade
+  property-wise, including `buClr` on auto-numbered bullets (§21.1.2.4.4).
+- UAX#50 vertical glyph orientation in the `eaVert` / stacked paths.
+- Duotone applied to picture-fill blips (§20.1.8.23, #889); RTL `tabLst` mirroring
+  (#831).
+
+**xlsx**
+
+- UAX#50 vertical glyph orientation in stacked cells; formula vertical-position
+  fix (#877); shared image cache across sheets (#781).
 
 **Viewers / interaction**
-
-- **XlsxViewer built-in +/- zoom buttons now walk the shared zoom ladder:**
-  the tab-bar steppers step through the IX9 `ZoomableViewer` presets
-  (25 → 33 → 50 → 67 → 75 → 90 → 100 → 110 → 125 → 150 → 175 → 200 → 250 →
-  300 → 400 %), exactly like the contract's `zoomIn()`/`zoomOut()`, instead of
-  the previous linear ±10 %. Behaviour change for existing users of the
-  built-in chrome: from 100 %, "+" still lands on 110 %, but subsequent steps
-  now follow the presets (125 %, 150 %, …) and an off-preset wheel-zoomed scale
-  snaps onto the ladder on the first step. The slider and `setScale` are
-  unchanged. (#842, IX9)
 
 - **Disable hyperlink interactivity:** every hyperlink-supporting viewer
   (`DocxViewer`, `DocxScrollViewer`, `PptxViewer`, `PptxScrollViewer`,
@@ -29,6 +236,23 @@ changes that remain compatible with existing API surfaces.
   scattering flag checks through the hit-test/click paths, so the existing
   `onHyperlinkClick` behaviour is unchanged when the option is omitted or `true`.
   (#891, IX1)
+
+- **XlsxViewer built-in +/- zoom buttons now walk the shared zoom ladder:**
+  the tab-bar steppers step through the IX9 `ZoomableViewer` presets
+  (25 → 33 → 50 → 67 → 75 → 90 → 100 → 110 → 125 → 150 → 175 → 200 → 250 →
+  300 → 400 %), exactly like the contract's `zoomIn()`/`zoomOut()`, instead of
+  the previous linear ±10 %. Behaviour change for existing users of the
+  built-in chrome: from 100 %, "+" still lands on 110 %, but subsequent steps
+  now follow the presets (125 %, 150 %, …) and an off-preset wheel-zoomed scale
+  snaps onto the ladder on the first step. The slider and `setScale` are
+  unchanged. (#842, IX9)
+
+- find / hyperlink / selection overlays track the canvas's actual CSS size for
+  responsive layouts.
+
+**Tooling & packaging**
+
+- The markdown package resolves its standalone WASM asset correctly (#730).
 
 ## 0.71.0 — 2026-07-06
 

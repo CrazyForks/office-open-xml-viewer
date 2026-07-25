@@ -10,22 +10,20 @@ import type { FloatTableBox } from './float-table-geometry.js';
 import type { FramePr, TblpPr } from './types.js';
 import type { FloatRect } from './float-layout.js';
 
-// #513 regression: the change-page MEASURE pass (computePages) must resolve an
+// #513 regression: the change-page measurement pass must resolve an
 // out-of-flow frame (§17.3.1.11 framePr) / floating table (§17.4.57 tblpPr) with
-// the SAME per-column content band the PAINT pass (renderBodyElements) uses, so
-// their FloatRect x / wrap side agree inside a multi-column (§17.6.4) section.
+// the same canonical point-space column band retained paint consumes, so their
+// FloatRect x / wrap side agree inside a multi-column (§17.6.4) section.
 //
-// The paint pass sets state.contentX/contentW = col.xPt × scale / col.wPt × scale
-// per element BEFORE resolving the float (renderer.ts ~2410). The measure pass
-// (measureState.scale = 1) now re-points measureState.contentX/contentW to
-// colX()/colW() via the withColumnBand helper. Both feed frameXContainer
+// Acquisition re-points contentX/contentW to colX()/colW() for each column.
+// Both frame and table geometry feed that band to frameXContainer
 // (hAnchor/horzAnchor="text") and floatTableWrapSide, which read contentX/contentW
 // directly. These tests pin that:
-//   (1) measure (column band, scale 1, pt) == paint (column band, scale 1, px)
+//   (1) both placement routes use the same point-space column band
 //       for box.x and the registered FloatRect x-range and wrap side; and
 //   (2) the OLD measure model (full band) would have diverged — guarding the fix.
 //
-// A 2-column page modeled at scale=1 so px == pt:
+// A 2-column page modeled directly in points:
 //   pageWidth=600, margins L/R/T/B = 60/60/72/72 ⇒ content band [60,540] (w=480).
 //   Two equal columns with a 24-wide gutter:
 //     col 0: x=60,  w=228   col 1: x=312, w=228.
@@ -33,7 +31,6 @@ import type { FloatRect } from './float-layout.js';
 // box must land at col1.x — NOT at the full band's left (60) the old code used.
 
 const PAGE = {
-  scale: 1,
   marginLeft: 60,
   marginRight: 60,
   marginTop: 72,
@@ -48,7 +45,6 @@ const COL0 = { xPt: 60, wPt: 228 };
 const COL1 = { xPt: 312, wPt: 228 };
 
 interface MinState {
-  scale: number;
   contentX: number;
   contentW: number;
   marginLeft: number;
@@ -75,7 +71,7 @@ function state(band: { contentX: number; contentW: number }): MinState {
 function paintBand(col: { xPt: number; wPt: number }, scale: number) {
   return { contentX: col.xPt * scale, contentW: col.wPt * scale };
 }
-// The measure pass (withColumnBand, scale=1) sets contentX/contentW = colX()/colW().
+// Acquisition sets contentX/contentW directly from the point-space column.
 function measureBand(col: { xPt: number; wPt: number }) {
   return { contentX: col.xPt, contentW: col.wPt };
 }
@@ -125,7 +121,7 @@ describe('measure/paint column-band parity for a horzAnchor="text" FRAME (§17.3
   const fp = frame({ hAnchor: 'text', x: 8, hRule: 'exact', h: 40, w: 120 });
   const paraTop = 300;
 
-  it('measure (scale=1 pt) box.x == paint (scale=1 px) box.x == column-1 left + offset', () => {
+  it('uses the same point-space column band for both geometry routes', () => {
     const paint = fbox(fp, state(paintBand(COL1, 1)), paraTop, 120, 40, 14);
     const measure = fbox(fp, state(measureBand(COL1)), paraTop, 120, 40, 14);
     // Both anchor against column 1's left edge (312) + the 8 offset.
@@ -183,11 +179,11 @@ describe('measure/paint column-band parity for a tblpPr FLOATING TABLE (§17.4.5
     const sidePaint = wrapSide(paint, state(paintBand(COL1, 1)));
     expect(sideMeasure).toBe(sidePaint);
 
-    // The OLD full-band wrap side would differ: against [60,540] (centre 300) the
-    // x=322 left edge is right-of-centre ⇒ 'left', but against column 1 (centre
-    // 426) the box straddles ⇒ 'bothSides'. This is the divergence the fix removes.
+    // Side selection is no longer a midpoint heuristic. Both bands pass the
+    // actual exclusion to the same widest-free-gap solver.
     const sideOld = wrapSide(measure, state(FULL_BAND));
-    expect(sideOld).not.toBe(sideMeasure);
+    expect(sideOld).toBe(sideMeasure);
+    expect(sideMeasure).toBe('bothSides');
   });
 
   it('the registered FloatRect x-range matches between measure and paint', () => {

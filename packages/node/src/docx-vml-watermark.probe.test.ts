@@ -26,16 +26,13 @@ import { describe, it, expect } from 'vitest';
 import { crc32 } from 'node:zlib';
 import { installImageBitmapShim, installOffscreenCanvasShim } from './render.ts';
 import type { NodeCanvasFactory } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import { importForTests, loadDocxRendererForTests, loadSkiaForTests } from './test-imports';
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas } = (skia ?? {}) as Skia;
 const docxMod = await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)');
-const rendererMod = await importForTests(
-  () => import('./../../docx/src/renderer.ts'),
-  'packages/docx/src/renderer.ts',
-);
+const rendererMod = await loadDocxRendererForTests();
 
 const factory: NodeCanvasFactory = {
   createCanvas: (w, h) =>
@@ -126,7 +123,8 @@ function watermarkDocx(): Uint8Array {
     'z-index:-251657216;mso-position-horizontal:center;mso-position-horizontal-relative:margin;' +
     'mso-position-vertical:center;mso-position-vertical-relative:margin" fillcolor="silver" stroked="f">' +
     '<v:fill opacity=".5"/>' +
-    '<v:textpath style="font-family:&quot;Calibri&quot;;font-size:1pt" string="DRAFT"/>' +
+    '<v:path textpathok="t"/>' +
+    '<v:textpath on="t" fitshape="t" style="font-family:&quot;Calibri&quot;;font-size:1pt" string="DRAFT"/>' +
     '</v:shape></w:pict></w:r></w:p></w:hdr>';
   return storedZip({
     '[Content_Types].xml': contentTypes,
@@ -144,23 +142,19 @@ interface Rendered {
 }
 
 async function render(): Promise<Rendered> {
-  const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => { section: { pageWidth: number; pageHeight: number } } };
+  const { parseDocx } = docxMod!;
   const doc = parseDocx(watermarkDocx());
-  const { renderDocumentToCanvas } = rendererMod as {
-    renderDocumentToCanvas: (
-      doc: unknown,
-      canvas: unknown,
-      pageIndex: number,
-      opts: { dpr: number; width: number },
-    ) => Promise<void>;
-  };
+  const { renderDocumentToCanvas } = rendererMod!;
   const widthPx = doc.section.pageWidth; // scale 1 px/pt
   const heightPx = doc.section.pageHeight;
   const canvas = new Canvas(Math.round(widthPx), Math.round(heightPx));
   const restoreImg = installImageBitmapShim(factory);
   const restoreOff = installOffscreenCanvasShim(factory);
   try {
-    await renderDocumentToCanvas(doc, canvas, 0, { dpr: 1, width: widthPx });
+    await renderDocumentToCanvas(doc, canvas as unknown as OffscreenCanvas, 0, {
+      dpr: 1,
+      width: widthPx,
+    });
   } finally {
     restoreOff();
     restoreImg();
@@ -183,6 +177,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod)('VML text watermark render (Â
     // (text). Neutral (near-grey) classification avoids counting anti-aliased
     // edges.
     let greyWatermark = 0;
+    let greyBelowCenter = 0;
     let darkText = 0;
     const greyLums: number[] = [];
     const x0 = 120, x1 = w - 120, y0 = 120, y1 = h - 120;
@@ -197,6 +192,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod)('VML text watermark render (Â
           darkText++;
         } else if (L >= 200 && L < 248) {
           greyWatermark++;
+          if (y >= h / 2) greyBelowCenter++;
           greyLums.push(L);
         }
       }
@@ -204,6 +200,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod)('VML text watermark render (Â
 
     // (a) the watermark is drawn â€” a meaningful count of grey pixels.
     expect(greyWatermark, 'watermark grey ink present in the page interior').toBeGreaterThan(500);
+    expect(greyBelowCenter, 'margin-centred watermark crosses the page centre').toBeGreaterThan(500);
 
     // (c) it is SEMI-TRANSPARENT: silver(192) over white(255) at Î±â‰ˆ0.5 â†’ â‰ˆ224.
     //     Median grey must sit in the blended band, well above opaque silver(192)

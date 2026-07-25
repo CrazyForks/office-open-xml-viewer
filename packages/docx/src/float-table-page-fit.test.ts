@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { computePages } from './renderer.js';
+import { layoutBodyModel } from './test-support/document-layout.test-support.js';
+import { tableFormatInput } from './parser-model.js';
+import type { TableFragmentLayout } from './layout/table-pagination.js';
+import type { LayoutPage, PaintNode } from './layout/types.js';
 import type {
   BodyElement,
   CellElement,
@@ -9,23 +12,17 @@ import type {
   DocxTextRun,
   SectionProps,
   TblpPr,
-  PaginatedBodyElement,
-} from './types';
+  } from './types';
 
 // Unit tests for the page-fit pagination of a page-overflowing FLOATING table
 // (ECMA-376 §17.4.57 `<w:tblpPr>`).
 //
-// HISTORY: PR #691 shipped "relocate the whole undivided floating table to the
-// next page". That was measured to be WRONG against Word: the Word-exported PDFs
-// of private/sample-18 + sample-21 (pdftotext bbox — see issue #674's reopening
-// comment) show Word SPLITS a page-overflowing vertAnchor="text" floating table
-// ROW BY ROW like a block table, spilling the remainder onto continuation pages,
-// and flows the anchor paragraph beside the FINAL continuation band from that
-// page's body TOP. The old whole-table-relocation tests are therefore replaced
-// here with row-split assertions. A page/margin-anchored floating table is still
-// NOT split — its absolute in-page y is instead clamped up into its container by
-// computeFloatTableBox (geometry; see float-table-geometry.test.ts), so it stays a
-// single element on its page.
+// A page-overflowing vertAnchor="text" floating table follows Word's observed
+// row-pagination behavior: it spills row-by-row onto continuation pages and the
+// anchor paragraph flows beside the terminal continuation band from that page's
+// body top. A page/margin-anchored floating table is still not split when its
+// complete box fits the page's text region; computeFloatTableBox clamps that box
+// into its absolute container instead.
 //
 // The stub canvas mirrors frame-keep-with-anchor.test.ts / pagination.test.ts:
 // glyph advance = charCount × fontPx and the font box = 0.8/0.2 em, so a single
@@ -147,54 +144,210 @@ function floatTableRows(tp: TblpPr, n: number, rowHPt: number): BodyElement {
   return { type: 'table', ...t } as unknown as BodyElement;
 }
 
+function floatingTableWithHeader(
+  tp: TblpPr,
+  bodyRowCount: number,
+  rowHeightPt: number,
+): BodyElement {
+  const rows = [
+    { ...row(rowHeightPt, 'header'), isHeader: true } as DocTableRow,
+    ...Array.from(
+      { length: bodyRowCount },
+      (_value, index) => row(rowHeightPt, `r${index + 1}`),
+    ),
+  ];
+  const table: DocTable = {
+    colWidths: [80],
+    rows,
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    cellMarginTop: 0,
+    cellMarginBottom: 0,
+    cellMarginLeft: 0,
+    cellMarginRight: 0,
+    jc: 'left',
+    tblpPr: tp,
+  };
+  return { type: 'table', ...table } as unknown as BodyElement;
+}
+
+function borderedFloatTableRows(
+  tp: TblpPr,
+  n: number,
+  rule: 'auto' | 'atLeast',
+): BodyElement {
+  const rows = Array.from({ length: n }, () => {
+    const source = row(rule === 'auto' ? 0 : 20);
+    return {
+      ...source,
+      cells: source.cells.map((sourceCell) => ({
+        ...sourceCell,
+        content: [],
+        ...(rule === 'auto' ? { marginTop: 10, marginBottom: 10 } : {}),
+      })),
+      rowHeight: rule === 'auto' ? null : 20,
+      rowHeightRule: rule,
+    } as DocTableRow;
+  });
+  const outer = { style: 'single', width: 4, color: '#000000' } as const;
+  const inside = { style: 'single', width: 1, color: '#000000' } as const;
+  const table: DocTable = {
+    colWidths: [80],
+    rows,
+    borders: {
+      top: outer,
+      bottom: outer,
+      left: null,
+      right: null,
+      insideH: inside,
+      insideV: null,
+    },
+    cellMarginTop: 0,
+    cellMarginBottom: 0,
+    cellMarginLeft: 0,
+    cellMarginRight: 0,
+    jc: 'left',
+    tblpPr: tp,
+  };
+  return { type: 'table', ...table } as unknown as BodyElement;
+}
+
+function mixedBoundaryFloatTable(tp: TblpPr): BodyElement {
+  const rules = [
+    { height: 10, rule: 'auto' },
+    { height: 1, rule: 'exact' },
+    { height: 10, rule: 'auto' },
+    { height: 1, rule: 'exact' },
+    { height: 10, rule: 'auto' },
+  ] as const;
+  const rows = rules.map(({ height, rule }) => {
+    const source = row(rule === 'auto' ? 0 : height);
+    return {
+      ...source,
+      cells: source.cells.map((sourceCell) => ({
+        ...sourceCell,
+        content: [],
+        ...(rule === 'auto' ? { marginTop: 5, marginBottom: 5 } : {}),
+      })),
+      rowHeight: rule === 'auto' ? null : height,
+      rowHeightRule: rule,
+    } as DocTableRow;
+  });
+  const outer = { style: 'single', width: 12, color: '#000000' } as const;
+  const table: DocTable = {
+    colWidths: [80],
+    rows,
+    borders: {
+      top: outer,
+      bottom: outer,
+      left: null,
+      right: null,
+      insideH: null,
+      insideV: null,
+    },
+    cellMarginTop: 0,
+    cellMarginBottom: 0,
+    cellMarginLeft: 0,
+    cellMarginRight: 0,
+    jc: 'left',
+    tblpPr: tp,
+  };
+  return { type: 'table', ...table } as unknown as BodyElement;
+}
+
 /** A floating table (`w:tblpPr`) of total height `tableHPt`, laid out as one
  *  exact-height row so its measured extent is deterministic. */
 function floatTable(tp: TblpPr, tableHPt: number): BodyElement {
   return floatTableRows(tp, 1, tableHPt);
 }
 
-/** True when an element is a floating table (identified by its tblpPr). */
-const isFloatTable = (el: PaginatedBodyElement): boolean =>
-  el.type === 'table' && (el as unknown as DocTable).tblpPr != null;
+/** An ordinary in-flow block table with one exact-height row. */
+function blockTable(tableHPt: number): BodyElement {
+  const table = floatTableRows(tblp(), 1, tableHPt) as unknown as DocTable & { type: 'table' };
+  const { tblpPr: _floating, ...block } = table;
+  return block as unknown as BodyElement;
+}
+
+function blockTableWithLines(lineCount: number): BodyElement {
+  const runs: DocRun[] = [];
+  for (let index = 0; index < lineCount; index += 1) {
+    runs.push(textRun('x', 20));
+    if (index + 1 < lineCount) runs.push({ type: 'break', breakType: 'line' });
+  }
+  const paragraph = {
+    ...para(),
+    runs,
+    defaultFontSize: 20,
+  } as unknown as CellElement;
+  const table = blockTable(0) as unknown as DocTable & { type: 'table' };
+  table.rows = [{
+    ...table.rows[0]!,
+    rowHeight: null,
+    rowHeightRule: 'auto',
+    cells: [{ ...table.rows[0]!.cells[0]!, content: [paragraph] }],
+  }];
+  return table as unknown as BodyElement;
+}
+
+const continuousBreak = (): BodyElement => ({
+  type: 'sectionBreak', kind: 'continuous', columns: null,
+} as BodyElement);
+
+function layoutPages(
+  body: BodyElement[],
+  pageSection: SectionProps,
+  measureContext: CanvasRenderingContext2D,
+): readonly LayoutPage[] {
+  return layoutBodyModel(body, pageSection, measureContext).pages;
+}
+
+/** True when a canonical table node originates from a floating body table. */
+const isFloatTable = (node: PaintNode): node is Extract<PaintNode, { kind: 'table' }> =>
+  node.kind === 'table' && !node.ordinaryFlow;
 
 /** True when a page holds a floating table (any slice). */
-const hasFloatTable = (page: PaginatedBodyElement[]): boolean => page.some(isFloatTable);
+const hasFloatTable = (page: LayoutPage): boolean => page.layers.body.some(isFloatTable);
 
 /** The row labels (r1, r2, …) of the floating-table slice(s) on a page, in order. */
-const floatRowsOn = (page: PaginatedBodyElement[]): string[] => {
+const textOf = (node: PaintNode): string => {
+  if (node.kind !== 'paragraph') return '';
+  return node.lines.flatMap((line) => line.placements)
+    .filter((placement) => placement.kind === 'text')
+    .map((placement) => placement.text)
+    .join('');
+};
+
+const floatRowsOn = (page: LayoutPage): string[] => {
   const out: string[] = [];
-  for (const el of page) {
-    if (!isFloatTable(el)) continue;
-    for (const r of (el as unknown as DocTable).rows) {
-      const c0 = r.cells[0]?.content?.[0] as unknown as DocParagraph | undefined;
-      const t = c0?.runs?.filter((x) => x.type === 'text').map((x) => (x as DocxTextRun).text).join('') ?? '';
-      out.push(t);
+  for (const node of page.layers.body) {
+    if (!isFloatTable(node)) continue;
+    for (const rowLayout of node.rows) {
+      const paragraphLayout = rowLayout.cells[0]?.blocks.find((block) => block.layout.kind === 'paragraph')?.layout;
+      out.push(paragraphLayout?.kind === 'paragraph' ? textOf(paragraphLayout) : '');
     }
   }
   return out;
 };
 
-/** Text of a paragraph element (joins its text runs). */
-const textOf = (el: PaginatedBodyElement): string =>
-  el.type === 'paragraph'
-    ? (el as unknown as DocParagraph).runs
-        .filter((r) => r.type === 'text')
-        .map((r) => (r as DocxTextRun).text)
-        .join('')
-    : '';
-
 /** True when a page holds the anchor paragraph (matched by its text). */
-const hasAnchorText = (page: PaginatedBodyElement[], text: string): boolean =>
-  page.some((el) => textOf(el) === text);
+const hasAnchorText = (page: LayoutPage, text: string): boolean =>
+  page.layers.body.some((node) => textOf(node) === text);
 
 /** The newspaper column an element landed in. */
-const colOf = (el: PaginatedBodyElement): number | undefined => el.colIndex;
+const colOf = (node: PaintNode | undefined): number | undefined => {
+  const column = node && /:column:(\d+)$/u.exec(node.flowDomainId)?.[1];
+  return column === undefined ? undefined : Number(column);
+};
 
 /** Find the (first) floating-table element on a page. */
-const floatTableEl = (page: PaginatedBodyElement[]): PaginatedBodyElement | undefined =>
-  page.find(isFloatTable);
+const floatTableEl = (page: LayoutPage): PaintNode | undefined =>
+  page.layers.body.find(isFloatTable);
 
-describe('computePages — floating-table page-fit / row-split (§17.4.57, Word ground truth)', () => {
+const retainedFloatFragment = (node: PaintNode): TableFragmentLayout => {
+  expect(node.kind).toBe('table');
+  return node as TableFragmentLayout;
+};
+
+describe('canonical layout — floating-table page-fit / row-split (§17.4.57, Word ground truth)', () => {
   // Content band 160×100, bodyTop 20. A vertAnchor="text" table's first slice sits
   // at its in-flow anchor (y=20N after N leading 20pt lines); it overflows once
   // 20N + tableH > 100 and is then SPLIT row-by-row, the remainder continuing at
@@ -211,7 +364,7 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 5, 20),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages.length).toBe(2);
     // Page 1: the two leading lines + a slice holding exactly the rows that fit.
     expect(floatRowsOn(pages[0])).toEqual(['r1', 'r2', 'r3']);
@@ -223,18 +376,190 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
     ]);
   });
 
-  it('(b) splits a tall floating table across pages until every row is placed (sample-21 shape)', () => {
+  it.each(['auto', 'atLeast'] as const)(
+    'keeps centered outer-border ink out of %s floating-slice flow',
+    (rule) => {
+      const source = borderedFloatTableRows(
+        tblp({ vertAnchor: 'text', tblpY: 0 }),
+        3,
+        rule,
+      ) as unknown as DocTable;
+      const body = [
+        source as unknown as BodyElement,
+        para({ text: 'anchor' }),
+      ];
+
+      expect(tableFormatInput(source).rows.map((format) => format.height?.rule ?? 'auto'))
+        .toEqual([rule, rule, rule]);
+
+      // §17.4.57 does not define a separate border reservation for floating
+      // overflow. The 44pt band therefore admits two 20pt row tracks; each slice
+      // still resolves its own 4pt outer rules as retained ink.
+      const pages = layoutPages(body, section({ pageHeight: 84 }), makeCtx());
+      const slices = pages
+        .flatMap((page) => page.layers.body.filter(isFloatTable));
+      const fragments = slices.map(retainedFloatFragment);
+
+      expect(fragments).toHaveLength(2);
+      expect(fragments.map((fragment) =>
+        fragment.rows.map((rowLayout) => rowLayout.logicalRowIndex)))
+        .toEqual([[0, 1], [2]]);
+      expect(fragments.map((fragment) =>
+        fragment.rows.map((rowLayout) => rowLayout.advancePt)))
+        .toEqual([[20, 20], [20]]);
+      expect(fragments.map((fragment) => fragment.advancePt)).toEqual([40, 20]);
+      expect(fragments.map((fragment) => fragment.flowBounds.heightPt)).toEqual([40, 20]);
+      expect(fragments.map((fragment) => fragment.inkBounds.heightPt)).toEqual([44, 24]);
+      for (const fragment of fragments) {
+        expect(fragment.inkBounds.yPt).toBe(fragment.flowBounds.yPt - 2);
+        expect(fragment.borders.filter((border) => border.edge === 'top')).toEqual([
+          expect.objectContaining({ widthPt: 4 }),
+        ]);
+        expect(fragment.borders.filter((border) => border.edge === 'bottom')).toEqual([
+          expect.objectContaining({ widthPt: 4 }),
+        ]);
+      }
+    },
+  );
+
+  it('fits mixed exact/auto floating rows by flow while retaining outer ink', () => {
+    const source = mixedBoundaryFloatTable(
+      tblp({ vertAnchor: 'text', tblpY: 0 }),
+    ) as unknown as DocTable;
+    const body = [
+      source as unknown as BodyElement,
+      para({ text: 'anchor' }),
+    ];
+
+    expect(tableFormatInput(source).rows.map((format) => format.height?.rule ?? 'auto'))
+      .toEqual(['auto', 'exact', 'auto', 'exact', 'auto']);
+
+    // The older nonmonotonic threshold came from border-in-flow geometry, not a
+    // recorded Office observation. The complete 32pt row-track allocation fits
+    // the band; centered 12pt outer rules extend only the retained ink box.
+    const pages = layoutPages(body, section({ pageHeight: 72 }), makeCtx());
+    const slices = pages.flatMap((page) => page.layers.body.filter(isFloatTable));
+    const fragments = slices.map(retainedFloatFragment);
+
+    expect(fragments).toHaveLength(1);
+    expect(fragments[0]?.rows.map((rowLayout) => rowLayout.advancePt))
+      .toEqual([10, 1, 10, 1, 10]);
+    expect(fragments[0]?.advancePt).toBe(32);
+    expect(fragments[0]?.flowBounds.heightPt).toBe(32);
+    expect(fragments[0]?.inkBounds.yPt).toBe((fragments[0]?.flowBounds.yPt ?? 0) - 6);
+    expect(fragments[0]?.inkBounds.heightPt).toBe(44);
+    expect(fragments[0]?.borders.filter((border) => border.edge === 'top')).toEqual([
+      expect.objectContaining({ widthPt: 12 }),
+    ]);
+    expect(fragments[0]?.borders.filter((border) => border.edge === 'bottom')).toEqual([
+      expect.objectContaining({ widthPt: 12 }),
+    ]);
+  });
+
+  it('repeats leading tblHeader rows with page-local ownership on floating continuations', () => {
+    const body = [
+      para({ text: 'a' }),
+      para({ text: 'b' }),
+      floatingTableWithHeader(
+        tblp({ vertAnchor: 'text', tblpY: 0 }),
+        5,
+        20,
+      ),
+      para({ text: 'anchor' }),
+    ];
+
+    const pages = layoutPages(body, section(), makeCtx());
+    const fragments = pages.flatMap((page) =>
+      page.layers.body.filter(isFloatTable).map(retainedFloatFragment));
+
+    expect(pages).toHaveLength(2);
+    expect(fragments.map((fragment) => fragment.rows.map((rowLayout) => [
+      rowLayout.logicalRowIndex,
+      rowLayout.ownership,
+    ]))).toEqual([
+      [[0, 'source'], [1, 'source'], [2, 'source']],
+      [[0, 'repeated-header'], [3, 'source'], [4, 'source'], [5, 'source']],
+    ]);
+  });
+
+  it('moves a following block table past a page-filling float across a continuous section', () => {
+    const body = [
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 5, 20),
+      continuousBreak(),
+      blockTable(90),
+    ];
+    const pages = layoutPages(body, section({ sectionStart: 'continuous' }), makeCtx());
+    expect(pages.length).toBe(2);
+    expect(hasFloatTable(pages[0])).toBe(true);
+    expect(pages[0].layers.body.filter((el) => el.kind === 'table' && !isFloatTable(el))).toHaveLength(0);
+    expect(pages[1].layers.body.filter((el) => el.kind === 'table' && !isFloatTable(el))).toHaveLength(1);
+  });
+
+  it('does not overlap a following block table with a terminal float continuation slice', () => {
+    const body = [
+      // Five rows fill page 1; the sixth occupies y=0..20 on page 2.
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 6, 20),
+      continuousBreak(),
+      // It fits a clean 100pt page, but not page 2 below the 20pt float slice.
+      blockTable(90),
+    ];
+    const pages = layoutPages(body, section({ sectionStart: 'continuous' }), makeCtx());
+    expect(pages.length).toBe(3);
+    expect(floatRowsOn(pages[1])).toEqual(['r6']);
+    expect(pages[1].layers.body.filter((el) => el.kind === 'table' && !isFloatTable(el))).toHaveLength(0);
+    expect(pages[2].layers.body.filter((el) => el.kind === 'table' && !isFloatTable(el))).toHaveLength(1);
+  });
+
+  it('rechecks the block-table position after each staggered float collision', () => {
+    const body = [
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 1, 15),
+      // The block table does not initially intersect this second band. Moving it
+      // below the first float creates the second collision.
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 20 }), 1, 15),
+      blockTable(10),
+    ];
+    const pages = layoutPages(body, section({ pageHeight: 80 }), makeCtx());
+
+    expect(pages.length).toBe(2);
+    expect(pages[0].layers.body.filter((el) => el.kind === 'table' && !isFloatTable(el))).toHaveLength(0);
+    expect(pages[1].layers.body.filter((el) => el.kind === 'table' && !isFloatTable(el))).toHaveLength(1);
+  });
+
+  it('collides a split block-table row using only its remaining continuation extent', () => {
+    const twoColumns = section({
+      columns: { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] },
+    });
+    const body = [
+      floatTableRows(tblp({
+        horzAnchor: 'page', vertAnchor: 'page', tblpX: 110, tblpY: 60,
+      }), 1, 10),
+      blockTableWithLines(6),
+    ];
+
+    const pages = layoutPages(body, twoColumns, makeCtx());
+    const blockSlices = pages[0]?.layers.body.filter(
+      (node): node is Extract<PaintNode, { kind: 'table' }> => (
+        node.kind === 'table' && node.ordinaryFlow
+      ),
+    ) ?? [];
+
+    expect(pages).toHaveLength(1);
+    expect(blockSlices).toHaveLength(2);
+    expect(blockSlices.map(colOf)).toEqual([0, 1]);
+    expect(blockSlices[1]?.flowBounds.yPt).toBeCloseTo(20, 6);
+  });
+
+  it('(b) splits a tall floating table across pages until every row is placed', () => {
     // A single leading 20pt line (anchor at y=20) then an 8-row table (20pt each ⇒
     // 160pt total, > the 100pt content area, so it needs 2 pages). Page 1's band
     // runs from the anchor (y=20) to the bottom (100) = 80pt ⇒ 4 rows (r1–r4);
-    // page 2 (fresh, full 100pt band) takes the remaining 4 (r5–r8). This is the
-    // reduced analogue of sample-21 (800pt/32 rows → r1–r23 then r24–r32).
+    // page 2 (fresh, full 100pt band) takes the remaining 4 (r5–r8).
     const body = [
       para({ text: 'a' }),
       floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 8, 20),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages.length).toBe(2);
     expect(floatRowsOn(pages[0])).toEqual(['r1', 'r2', 'r3', 'r4']);
     expect(floatRowsOn(pages[1])).toEqual(['r5', 'r6', 'r7', 'r8']);
@@ -251,13 +576,13 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 5, 20),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(hasAnchorText(pages[0], 'anchor')).toBe(false);
     expect(hasAnchorText(pages[1], 'anchor')).toBe(true);
     // The anchor paragraph is the FIRST paragraph on page 2 after the continuation
     // slice (the slice is pushed before the anchor so the wrap band is registered
     // first) — i.e. it starts at the body top beside the band, not after it.
-    const page2Types = pages[1].map((el) => (isFloatTable(el) ? 'slice' : textOf(el)));
+    const page2Types = pages[1].layers.body.map((el) => (isFloatTable(el) ? 'slice' : textOf(el)));
     expect(page2Types).toEqual(['slice', 'anchor']);
   });
 
@@ -273,35 +598,35 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       floatTableRows(tblp({ vertAnchor: 'text', horzAnchor: 'text', tblpY: 0 }), 5, 20),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, twoCol, makeCtx());
+    const pages = layoutPages(body, twoCol, makeCtx());
     // Still a single page (column 1 absorbed the remaining rows + the anchor).
     expect(pages.length).toBe(1);
     // The first slice sits in column 0, the continuation slice in column 1.
-    const slices = pages[0].filter(isFloatTable);
+    const slices = pages[0].layers.body.filter(isFloatTable);
     expect(slices.length).toBe(2);
     expect(colOf(slices[0])).toBe(0);
     expect(colOf(slices[1])).toBe(1);
     // The trailing anchor text follows the final band into column 1.
-    const anchor = pages[0].find((el) => textOf(el) === 'anchor');
+    const anchor = pages[0].layers.body.find((el) => textOf(el) === 'anchor');
     expect(anchor).toBeDefined();
-    expect(colOf(anchor as PaginatedBodyElement)).toBe(1);
+    expect(colOf(anchor)).toBe(1);
   });
 
   it('(f) keeps a text-anchored floating table as ONE element when every row fits (no split)', () => {
     // Only 1 leading line (anchor at y=20). A 3-row 20pt table (60pt) fits within
     // [20,100] ⇒ no split. Everything stays on page 1 as a single float element
-    // (sample-11 shape: a small vertAnchor="text" float near the page top must not
-    // be divided or relocated).
+    // A small vertAnchor="text" float near the page top must not be divided or
+    // relocated.
     const body = [
       para({ text: 'a' }),
       floatTableRows(tblp({ vertAnchor: 'text', tblpY: 1 }), 3, 20),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages.length).toBe(1);
     expect(floatRowsOn(pages[0])).toEqual(['r1', 'r2', 'r3']);
     // Exactly ONE floating-table element (not sliced).
-    const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
+    const floatCount = pages.reduce((s, p) => s + p.layers.body.filter(isFloatTable).length, 0);
     expect(floatCount).toBe(1);
     expect(hasAnchorText(pages[0], 'anchor')).toBe(true);
   });
@@ -319,11 +644,11 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 3, 30),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages.length).toBe(2);
     // No slice on page 1 (the four leading lines only).
     expect(hasFloatTable(pages[0])).toBe(false);
-    expect(pages[0].map(textOf)).toEqual(['a', 'b', 'c', 'd']);
+    expect(pages[0].layers.body.map(textOf)).toEqual(['a', 'b', 'c', 'd']);
     // All rows land on page 2 (a fresh full band fits them).
     expect(floatRowsOn(pages[1])).toEqual(['r1', 'r2', 'r3']);
     expect(hasAnchorText(pages[1], 'anchor')).toBe(true);
@@ -343,11 +668,11 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 1, 150),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     // Terminates with a bounded page count; the over-tall single row is placed once.
     expect(pages.length).toBe(2);
     expect(floatRowsOn(pages[1])).toEqual(['r1']);
-    const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
+    const floatCount = pages.reduce((s, p) => s + p.layers.body.filter(isFloatTable).length, 0);
     expect(floatCount).toBe(1);
   });
 
@@ -364,12 +689,12 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       floatTableRows(tblp({ vertAnchor: 'page', tblpY: 90 }), 2, 30),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages.length).toBe(1);
     expect(hasFloatTable(pages[0])).toBe(true);
     // Not sliced — both rows are on the single element.
     expect(floatRowsOn(pages[0])).toEqual(['r1', 'r2']);
-    const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
+    const floatCount = pages.reduce((s, p) => s + p.layers.body.filter(isFloatTable).length, 0);
     expect(floatCount).toBe(1);
     expect(hasAnchorText(pages[0], 'anchor')).toBe(true);
   });
@@ -385,19 +710,18 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       floatTableRows(tblp({ vertAnchor: 'margin', tblpY: 70 }), 2, 30),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages.length).toBe(1);
     expect(hasFloatTable(pages[0])).toBe(true);
     expect(floatRowsOn(pages[0])).toEqual(['r1', 'r2']);
-    const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
+    const floatCount = pages.reduce((s, p) => s + p.layers.body.filter(isFloatTable).length, 0);
     expect(floatCount).toBe(1);
   });
 
-  it('(d2) SPLITS a page-anchored floating table that is TALLER than the body content area (sample-28 p.15 shape)', () => {
+  it('(d2) SPLITS a page-anchored floating table that is TALLER than the body content area', () => {
     // vertAnchor="page", tblpY=10: 6 rows × 30pt = 180pt total. The body content
     // area is 100pt (pageH 140 − margins 20+20). A page-anchored table taller than
-    // the text region CANNOT fit even clamped to the top — so, like Word (sample-28
-    // p.15 competitor-info form: PDF splits it across pages 15→16), it ROW-SPLITS.
+    // the text region cannot fit even when clamped to the top, so Word row-splits it.
     // Slice 1 sits at its absolute tblpY (page-y 10 ⇒ content-relative −10, i.e. it
     // starts in the top margin band down through the body); continuation slices flow
     // from the next page's body top (tblpY=0). This is distinct from (d): there the
@@ -407,13 +731,13 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       floatTableRows(tblp({ vertAnchor: 'page', tblpY: 10 }), 6, 30),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     // Taller than one page ⇒ paginated across ≥ 2 pages, every row placed once.
     expect(pages.length).toBeGreaterThanOrEqual(2);
     const allRows = pages.flatMap((p) => floatRowsOn(p));
     expect(allRows).toEqual(['r1', 'r2', 'r3', 'r4', 'r5', 'r6']);
     // More than one slice (the table was divided, not crammed onto one page).
-    const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
+    const floatCount = pages.reduce((s, p) => s + p.layers.body.filter(isFloatTable).length, 0);
     expect(floatCount).toBeGreaterThanOrEqual(2);
     // The trailing anchor paragraph flows beside the FINAL band (last page).
     expect(hasAnchorText(pages[pages.length - 1], 'anchor')).toBe(true);
@@ -427,11 +751,11 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       floatTableRows(tblp({ vertAnchor: 'margin', tblpY: 0 }), 6, 30),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages.length).toBeGreaterThanOrEqual(2);
     const allRows = pages.flatMap((p) => floatRowsOn(p));
     expect(allRows).toEqual(['r1', 'r2', 'r3', 'r4', 'r5', 'r6']);
-    const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
+    const floatCount = pages.reduce((s, p) => s + p.layers.body.filter(isFloatTable).length, 0);
     expect(floatCount).toBeGreaterThanOrEqual(2);
   });
 
@@ -444,22 +768,22 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 5, 20),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(hasFloatTable(pages[0])).toBe(true);
     expect(hasFloatTable(pages[1])).toBe(true);
     // Two slices total (one per page).
-    const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
+    const floatCount = pages.reduce((s, p) => s + p.layers.body.filter(isFloatTable).length, 0);
     expect(floatCount).toBe(2);
-    // Each slice still carries a tblpPr so the paint pass diverts to renderFloatTable.
+    // Each slice remains an independently retained table occurrence.
     for (const p of pages) {
       const el = floatTableEl(p);
-      if (el) expect((el as unknown as DocTable).tblpPr).toBeDefined();
+      if (el) expect(el).toMatchObject({ kind: 'table', source: { path: [2] } });
     }
   });
 
-  it('(g) DEFERS a page-anchored floating table to the next page when its raw band intersects another table float already on the page (sample-28 projects-form shape)', () => {
-    // ── Two page-anchored floating tables whose raw bands collide (§17.4.56 / Word
-    //    ground truth, sample-28 pp.16→17) ──────────────────────────────────────
+  it('(g) DEFERS a page-anchored floating table when its raw band intersects an existing table float', () => {
+    // Two page-anchored floating tables whose raw bands collide (§17.4.56 and
+    // observed Word behavior).
     // Content band is 100pt (pageH 140 − margins 20+20), bodyTop 20.
     //
     // Table A: vertAnchor="page", tblpY=10, 4 rows × 30pt = 120pt > 100pt ⇒ it
@@ -473,10 +797,8 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
     //
     // If B is placed on page 2 (where A4's continuation band sits at content-y
     // 0 → 30), B's raw band (content-y 5 → 95) INTERSECTS A4's band — two floating
-    // tables overlapping. Word's PDF (sample-28: the previous-projects experience
-    // table lands on a FRESH page after the competitor-form residue, never stacked
-    // over it) defers the whole of B to the next page, where its absolute tblpY=25
-    // no longer collides with any other table float.
+    // tables overlapping. Word defers the whole of B to the next page, where its
+    // absolute tblpY=25 no longer collides with another table float.
     const body = [
       para({ text: 'a' }),
       floatTableRows(tblp({ vertAnchor: 'page', tblpY: 10 }), 4, 30), // Table A → r1..r4
@@ -484,12 +806,11 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       floatTableRows(tblp({ vertAnchor: 'page', tblpY: 25 }), 3, 30), // Table B → r1..r3
       para({ text: 'end' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
-
+    const pages = layoutPages(body, section(), makeCtx());
     // Page 2 (index 1) carries A's continuation (A4) but MUST NOT also carry any of
     // Table B — B is deferred so it never overlaps A4's band.
     const bandCollisionPage = pages[1];
-    const tableFloatsOnPage2 = bandCollisionPage.filter(isFloatTable);
+    const tableFloatsOnPage2 = bandCollisionPage.layers.body.filter(isFloatTable);
     // Exactly one table float on page 2 (A's continuation slice), not two stacked.
     expect(tableFloatsOnPage2.length).toBe(1);
     // And it is A's continuation (a single row on that band), not B.
@@ -498,11 +819,11 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
     // Table B is deferred to a LATER page and lands there as ONE un-split element
     // (its 90pt fits the 100pt region once it is on a clean page).
     const bPageIdx = pages.findIndex(
-      (p, i) => i > 1 && p.some(isFloatTable),
+      (p, i) => i > 1 && p.layers.body.some(isFloatTable),
     );
     expect(bPageIdx).toBeGreaterThan(1);
     const bPage = pages[bPageIdx];
-    const bFloats = bPage.filter(isFloatTable);
+    const bFloats = bPage.layers.body.filter(isFloatTable);
     expect(bFloats.length).toBe(1);
     expect(floatRowsOn(bPage)).toEqual(['r1', 'r2', 'r3']);
 
@@ -510,7 +831,7 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
     // assert every page has at most one floating-table element (each table's slice
     // owns its page's band alone here, since neither co-resident split occurs).
     for (const p of pages) {
-      expect(p.filter(isFloatTable).length).toBeLessThanOrEqual(1);
+      expect(p.layers.body.filter(isFloatTable).length).toBeLessThanOrEqual(1);
     }
   });
 });

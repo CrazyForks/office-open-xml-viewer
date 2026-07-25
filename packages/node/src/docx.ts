@@ -1,4 +1,5 @@
 import type { DocxDocumentModel } from '@silurus/ooxml-docx';
+import { normalizeDocxDocumentModel } from '../../docx/src/parser-model.ts';
 // @ts-ignore — wasm-pack generated JS without a d.ts entry for the bare module path
 import * as docxWasm from '../../docx/src/wasm/docx_parser.js';
 import { loadWasmModule, resolveWasm } from './wasm-loader.ts';
@@ -25,5 +26,7 @@ export function parseDocx(buffer: ArrayBuffer | Uint8Array | Buffer): DocxDocume
   const json = (docxWasm as unknown as { parse_docx: (b: Uint8Array) => Uint8Array }).parse_docx(
     bytes,
   );
-  return JSON.parse(new TextDecoder().decode(json)) as DocxDocumentModel;
+  return normalizeDocxDocumentModel(
+    JSON.parse(new TextDecoder().decode(json)) as DocxDocumentModel,
+  );
 }

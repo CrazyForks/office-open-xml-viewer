@@ -1,0 +1,921 @@
+import { expect, test, type Page } from '@playwright/test';
+
+interface InkSignature {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  centroidX: number;
+  centroidY: number;
+  alpha: number;
+}
+
+interface GlyphComparison {
+  ch: string;
+  changedByVert: boolean;
+  reachableByProbe: boolean;
+  subject: InkSignature;
+  reference: InkSignature;
+  pixelDifferenceRatio: number;
+}
+
+async function compareRendererWithFontVert(
+  page: Page,
+  family: string,
+  repertoire: string,
+): Promise<GlyphComparison[] | null> {
+  await page.goto('/tests/visual/vertical-vert-feature.html');
+  return page.evaluate(async ({ family, repertoire }) => {
+    await document.fonts.ready;
+    if (!document.fonts.check(`200px "${family}"`)) return null;
+
+    const { drawVerticalRun, verticalVertGlyphReachable } = await import('/src/vertical-text.ts');
+    const subject = document.querySelector('#subject') as HTMLCanvasElement;
+    const reference = document.querySelector('#reference') as HTMLCanvasElement;
+    const size = 420;
+    const fontPx = 200;
+    const originX = 210;
+    const startY = 40;
+
+    const prepare = (canvas: HTMLCanvasElement): CanvasRenderingContext2D => {
+      canvas.width = size;
+      canvas.height = size;
+      canvas.style.fontFeatureSettings = 'normal';
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) throw new Error('2D context unavailable');
+      ctx.clearRect(0, 0, size, size);
+      ctx.fillStyle = '#000';
+      ctx.font = `${fontPx}px "${family}"`;
+      return ctx;
+    };
+    const withVert = <T>(ctx: CanvasRenderingContext2D, draw: () => T): T => {
+      const canvas = ctx.canvas as HTMLCanvasElement;
+      const previous = canvas.style.fontFeatureSettings;
+      canvas.style.fontFeatureSettings = '"vert" 1';
+      ctx.font = ctx.font;
+      try {
+        return draw();
+      } finally {
+        canvas.style.fontFeatureSettings = previous;
+        ctx.font = ctx.font;
+      }
+    };
+    const featuredCell = (ctx: CanvasRenderingContext2D, ch: string) =>
+      withVert(ctx, () => {
+        const previousAlign = ctx.textAlign;
+        const previousBaseline = ctx.textBaseline;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const m = ctx.measureText(ch);
+        ctx.textAlign = previousAlign;
+        ctx.textBaseline = previousBaseline;
+        return { advance: m.width, origin: m.width / 2 };
+      });
+    const alpha = (ctx: CanvasRenderingContext2D): Uint8ClampedArray => {
+      const rgba = ctx.getImageData(0, 0, size, size).data;
+      const result = new Uint8ClampedArray(size * size);
+      for (let i = 0; i < result.length; i += 1) result[i] = rgba[i * 4 + 3];
+      return result;
+    };
+    const signature = (values: Uint8ClampedArray): InkSignature => {
+      let minX = size;
+      let maxX = -1;
+      let minY = size;
+      let maxY = -1;
+      let alphaSum = 0;
+      let weightedX = 0;
+      let weightedY = 0;
+      for (let y = 0; y < size; y += 1) {
+        for (let x = 0; x < size; x += 1) {
+          const value = values[y * size + x];
+          if (value === 0) continue;
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+          alphaSum += value;
+          weightedX += x * value;
+          weightedY += y * value;
+        }
+      }
+      if (alphaSum === 0) throw new Error('glyph produced no ink');
+      return {
+        minX,
+        maxX,
+        minY,
+        maxY,
+        centroidX: weightedX / alphaSum,
+        centroidY: weightedY / alphaSum,
+        alpha: alphaSum,
+      };
+    };
+
+    const comparisons: GlyphComparison[] = [];
+    for (const ch of repertoire) {
+      const probe = prepare(subject);
+      probe.textAlign = 'center';
+      probe.textBaseline = 'middle';
+      probe.fillText(ch, size / 2, size / 2);
+      const plainAlpha = alpha(probe);
+      probe.clearRect(0, 0, size, size);
+      withVert(probe, () => probe.fillText(ch, size / 2, size / 2));
+      const vertProbeAlpha = alpha(probe);
+      let probeDifference = 0;
+      for (let i = 0; i < plainAlpha.length; i += 1) {
+        probeDifference += Math.abs(plainAlpha[i] - vertProbeAlpha[i]);
+      }
+      const reachableByProbe = verticalVertGlyphReachable(probe, ch.codePointAt(0) ?? 0);
+
+      const subjectCtx = prepare(subject);
+      const cell = featuredCell(subjectCtx, ch);
+      subjectCtx.translate(originX, startY);
+      subjectCtx.rotate(Math.PI / 2);
+      drawVerticalRun(subjectCtx, ch, 0, 0, fontPx, 0);
+      subjectCtx.setTransform(1, 0, 0, 1, 0, 0);
+      const subjectAlpha = alpha(subjectCtx);
+
+      const referenceCtx = prepare(reference);
+      referenceCtx.textAlign = 'center';
+      referenceCtx.textBaseline = 'middle';
+      withVert(referenceCtx, () => referenceCtx.fillText(ch, originX, startY + cell.origin));
+      const referenceAlpha = alpha(referenceCtx);
+      let pixelDifference = 0;
+      let referenceWeight = 0;
+      for (let i = 0; i < subjectAlpha.length; i += 1) {
+        pixelDifference += Math.abs(subjectAlpha[i] - referenceAlpha[i]);
+        referenceWeight += referenceAlpha[i];
+      }
+      comparisons.push({
+        ch,
+        changedByVert: probeDifference > 0,
+        reachableByProbe,
+        subject: signature(subjectAlpha),
+        reference: signature(referenceAlpha),
+        pixelDifferenceRatio: pixelDifference / Math.max(1, referenceWeight),
+      });
+    }
+    return comparisons;
+  }, { family, repertoire });
+}
+
+test('layer A: the document font keeps Word-adjudicated vertical relationships', async ({ page }) => {
+  await page.goto('/tests/visual/vertical-vert-feature.html');
+  const result = await page.evaluate(async () => {
+    const family = 'Yu Mincho';
+    const fontPx = 200;
+    const columnX = 450;
+    const startY = 50;
+    await document.fonts.ready;
+    if (!document.fonts.check(`${fontPx}px "${family}"`)) return null;
+
+    const {
+      drawVerticalRun,
+      planVerticalRunWithCapability,
+      verticalVertGlyphReachable,
+    } = await import('/src/vertical-text.ts');
+    const canvas = document.querySelector('#subject') as HTMLCanvasElement;
+    const prepare = (): CanvasRenderingContext2D => {
+      canvas.width = 900;
+      canvas.height = 1100;
+      canvas.style.fontFeatureSettings = 'normal';
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) throw new Error('2D context unavailable');
+      ctx.fillStyle = '#000';
+      ctx.font = `${fontPx}px "${family}"`;
+      return ctx;
+    };
+    const withVert = <T>(ctx: CanvasRenderingContext2D, fn: () => T): T => {
+      const previous = canvas.style.fontFeatureSettings;
+      canvas.style.fontFeatureSettings = '"vert" 1';
+      ctx.font = ctx.font;
+      try {
+        return fn();
+      } finally {
+        canvas.style.fontFeatureSettings = previous;
+        ctx.font = ctx.font;
+      }
+    };
+    const cell = (ctx: CanvasRenderingContext2D, ch: string) =>
+      withVert(ctx, () => {
+        const previousAlign = ctx.textAlign;
+        const previousBaseline = ctx.textBaseline;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const m = ctx.measureText(ch);
+        ctx.textAlign = previousAlign;
+        ctx.textBaseline = previousBaseline;
+        return {
+          advance: m.width,
+          origin: m.width / 2,
+          asc: m.actualBoundingBoxAscent,
+          desc: m.actualBoundingBoxDescent,
+        };
+      });
+    const render = (ctx: CanvasRenderingContext2D, text: string) => {
+      ctx.translate(columnX, startY);
+      ctx.rotate(Math.PI / 2);
+      drawVerticalRun(ctx, text, 0, 0, fontPx, 0);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    };
+    const rangeInk = (ctx: CanvasRenderingContext2D, fromY: number, toY: number) => {
+      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let minX = canvas.width;
+      let maxX = -1;
+      let minY = canvas.height;
+      let maxY = -1;
+      let weight = 0;
+      let weightedX = 0;
+      let weightedY = 0;
+      for (let y = Math.max(0, Math.floor(fromY)); y < Math.min(canvas.height, Math.ceil(toY)); y += 1) {
+        for (let x = 0; x < canvas.width; x += 1) {
+          const alpha = data[(y * canvas.width + x) * 4 + 3];
+          if (alpha === 0) continue;
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+          weight += alpha;
+          weightedX += x * alpha;
+          weightedY += y * alpha;
+        }
+      }
+      if (weight === 0) throw new Error(`no ink in y range ${fromY}..${toY}`);
+      return {
+        minX,
+        maxX,
+        minY,
+        maxY,
+        centroidX: weightedX / weight,
+        centroidY: weightedY / weight,
+      };
+    };
+    const connectedInk = (ctx: CanvasRenderingContext2D) => {
+      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      const components: ReturnType<typeof rangeInk>[] = [];
+      let componentStart: number | null = null;
+      for (let y = 0; y < canvas.height; y += 1) {
+        let occupied = false;
+        for (let x = 0; x < canvas.width; x += 1) {
+          if (data[(y * canvas.width + x) * 4 + 3] !== 0) {
+            occupied = true;
+            break;
+          }
+        }
+        if (occupied && componentStart === null) componentStart = y;
+        if (!occupied && componentStart !== null) {
+          components.push(rangeInk(ctx, componentStart, y));
+          componentStart = null;
+        }
+      }
+      if (componentStart !== null) components.push(rangeInk(ctx, componentStart, canvas.height));
+      return components;
+    };
+    const pairedComponents = (ctx: CanvasRenderingContext2D, label: string) => {
+      const components = connectedInk(ctx);
+      if (components.length !== 2) {
+        throw new Error(`${label} produced ${components.length} connected y-components, expected 2`);
+      }
+      return components as [ReturnType<typeof rangeInk>, ReturnType<typeof rangeInk>];
+    };
+
+    const gapCtx = prepare();
+    const prolongedCell = cell(gapCtx, 'ー');
+    render(gapCtx, 'ーc');
+    const boundary = startY + prolongedCell.advance;
+    const prolonged = rangeInk(gapCtx, startY, boundary);
+    const latin = rangeInk(gapCtx, boundary, canvas.height);
+
+    const bracketCtx = prepare();
+    const openCell = cell(bracketCtx, '「');
+    const closeCell = cell(bracketCtx, '」');
+    render(bracketCtx, '「」');
+    // A designed closing-bracket poke may cross above its nominal cell start, so
+    // a cell-boundary split would assign that ink to the opening bracket. The
+    // font leaves empty scanlines between the two bands; use those components.
+    const [open, close] = pairedComponents(bracketCtx, 'bracket pair');
+
+    const punctuationCtx = prepare();
+    const commaCell = cell(punctuationCtx, '、');
+    const periodCell = cell(punctuationCtx, '。');
+    render(punctuationCtx, '、。');
+    const punctuationBoundary = startY + commaCell.advance;
+    // Corner punctuation can likewise poke before its cell. Component splitting
+    // preserves the full designed ink rather than clipping at either cell edge.
+    const [comma, period] = pairedComponents(punctuationCtx, 'punctuation pair');
+
+    const retainedCentroidX = (ch: string) => {
+      const ctx = prepare();
+      const [planned] = planVerticalRunWithCapability(
+        ctx,
+        ch,
+        fontPx,
+        0,
+        1,
+        true,
+        (cp) => verticalVertGlyphReachable(ctx, cp),
+      );
+      if (!planned) throw new Error(`no retained glyph for ${ch}`);
+      ctx.translate(columnX, startY);
+      ctx.rotate(Math.PI / 2);
+      ctx.translate(planned.originPt, 0);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      withVert(ctx, () => ctx.fillText(
+        planned.text,
+        planned.drawOffsetPt.xPt,
+        planned.drawOffsetPt.yPt,
+      ));
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      return rangeInk(ctx, 0, canvas.height).centroidX;
+    };
+    const retainedAcross = {
+      open: retainedCentroidX('（'),
+      close: retainedCentroidX('）'),
+      comma: retainedCentroidX('、'),
+      period: retainedCentroidX('。'),
+    };
+
+    return {
+      fontPx,
+      columnX,
+      retainedAcross,
+      punctuationCentroids: {
+        comma: comma.centroidX,
+        period: period.centroidX,
+      },
+      gapPx: latin.minY - prolonged.maxY - 1,
+      prolongedAspect: (prolonged.maxY - prolonged.minY + 1) / (prolonged.maxX - prolonged.minX + 1),
+      bracketBandSeparationPx:
+        (close.minY + close.maxY) / 2 - (open.minY + open.maxY) / 2,
+      bracketMetricSeparationPx:
+        (openCell.advance + closeCell.origin + (closeCell.desc - closeCell.asc) / 2 -
+          (openCell.origin + (openCell.desc - openCell.asc) / 2)),
+      bracketBands: [open, close].map((band) => ({
+        alongPx: band.maxY - band.minY + 1,
+        acrossPx: band.maxX - band.minX + 1,
+      })),
+      comma: {
+        rightOfColumn: comma.centroidX > columnX,
+        positionInCell: (comma.centroidY - startY) / commaCell.advance,
+      },
+      period: {
+        rightOfColumn: period.centroidX > columnX,
+        positionInCell: (period.centroidY - punctuationBoundary) / periodCell.advance,
+      },
+    };
+  });
+
+  test.skip(result === null, 'Yu Mincho is required for the real-document-font acceptance layer');
+  if (result === null) return;
+  expect(result.gapPx, 'the prolonged mark and following Latin ink have a visible gap').toBeGreaterThan(0);
+  expect(result.prolongedAspect, 'the feature-selected prolonged mark is a tall stroke').toBeGreaterThan(2);
+  // Compare bbox-band centres to the SAME face's featured A/D prediction. The
+  // two-pixel allowance is the 2px/pt AA noise observed by the wrapper; no
+  // cross-font or sample-specific placement constant participates.
+  expect(
+    Math.abs(result.bracketBandSeparationPx - result.bracketMetricSeparationPx),
+  ).toBeLessThanOrEqual(2);
+  // Independent cell origins are 1em apart; a <0.75em band separation pins the
+  // feature's optical pairing while leaving the exact placement to its A/D data.
+  expect(result.bracketBandSeparationPx).toBeLessThan(result.fontPx * 0.75);
+  for (const band of result.bracketBands) {
+    // The reachable `vert` form flips a horizontal bracket from tall/narrow to
+    // flat/wide. Exact aspect ratios vary by face; substitution failure would
+    // invert this relationship and leave `acrossPx < alongPx`.
+    expect(band.acrossPx, 'the bracket feature form is wider than tall').toBeGreaterThan(
+      band.alongPx,
+    );
+  }
+  for (const punctuation of [result.comma, result.period]) {
+    expect(punctuation.rightOfColumn).toBe(true);
+    expect(punctuation.positionInCell, 'corner punctuation stays in the leading cell third').toBeLessThan(1 / 3);
+  }
+  for (const retained of [result.retainedAcross.open, result.retainedAcross.close]) {
+    expect(
+      Math.abs(retained - result.columnX),
+      'retained vertical parentheses stay on the central column baseline',
+    ).toBeLessThan(result.fontPx * 0.05);
+  }
+  for (const [retained, direct] of [
+    [result.retainedAcross.comma, result.punctuationCentroids.comma],
+    [result.retainedAcross.period, result.punctuationCentroids.period],
+  ]) {
+    expect(
+      Math.abs(retained - direct),
+      'retained corner punctuation preserves the font vertical baseline',
+    ).toBeLessThan(result.fontPx * 0.05);
+  }
+});
+
+test('negative vertical pitch changes cell advance without shifting punctuation across the column', async ({ page }) => {
+  await page.goto('/tests/visual/vertical-vert-feature.html');
+  const result = await page.evaluate(async () => {
+    await document.fonts.ready;
+    const family = ['Yu Mincho', 'Hiragino Mincho ProN']
+      .find((candidate) => document.fonts.check(`48px "${candidate}"`));
+    if (!family) return null;
+
+    const { createLayoutServices } = await import('/src/layout-runtime.ts');
+    const { renderDocumentToCanvas } = await import('/src/renderer.ts');
+    const { selectDocumentLayoutPage } = await import('/src/layout/document-layout-variants.ts');
+    const canvas = document.querySelector('#subject') as HTMLCanvasElement;
+    const glyphs = [...'「」『』（）〔〕［］｛｝〈〉《》【】、。，．：；！？ー〜～…‥・'];
+
+    const makeModel = (text: string, charSpacing: number) => ({
+      section: {
+        pageWidth: 120, pageHeight: 120,
+        marginTop: 12, marginRight: 12, marginBottom: 12, marginLeft: 12,
+        headerDistance: 0, footerDistance: 0,
+        titlePage: false, evenAndOddHeaders: false, textDirection: 'tbRl',
+      },
+      body: [{
+        type: 'paragraph', alignment: 'left',
+        indentLeft: 0, indentRight: 0, indentFirst: 0,
+        spaceBefore: 0, spaceAfter: 0, lineSpacing: null,
+        numbering: null, tabStops: [],
+        runs: [{
+          type: 'text', text,
+          bold: false, italic: false, underline: false, strikethrough: false,
+          fontSize: 48, color: null,
+          fontFamily: family, fontFamilyEastAsia: family,
+          isLink: false, background: null, vertAlign: null, hyperlink: null,
+          charSpacing,
+        }],
+        defaultFontSize: 48, defaultFontFamily: family,
+        widowControl: false,
+      }],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    }) as never;
+
+    const render = async (text: string, charSpacing: number) => {
+      const model = makeModel(text, charSpacing);
+      const services = createLayoutServices(model);
+      await renderDocumentToCanvas(model, canvas, 0, {
+        dpr: 1, width: 120, layoutServices: services, defaultCurrentDateMs: 1,
+      });
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) throw new Error('2D context unavailable');
+      const rgba = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let inkSum = 0;
+      let weightedX = 0;
+      for (let y = 0; y < canvas.height; y += 1) {
+        for (let x = 0; x < canvas.width; x += 1) {
+          const offset = (y * canvas.width + x) * 4;
+          const alpha = rgba[offset + 3];
+          const ink = alpha * (765 - rgba[offset] - rgba[offset + 1] - rgba[offset + 2]) / 765;
+          if (ink === 0) continue;
+          inkSum += ink;
+          weightedX += x * ink;
+        }
+      }
+      if (inkSum === 0) throw new Error(`${text} produced no ink`);
+
+      const selection = selectDocumentLayoutPage(
+        services,
+        { defaultCurrentDateMs: 1 },
+        0,
+      );
+      const pending: unknown[] = [selection.page];
+      const seen = new Set<object>();
+      const retainedOps: { orientation: string; spacing: number }[] = [];
+      while (pending.length > 0) {
+        const value = pending.pop();
+        if (value === null || typeof value !== 'object' || seen.has(value)) continue;
+        seen.add(value);
+        const record = value as Record<string, unknown>;
+        if (
+          typeof record.glyphOrientation === 'string'
+          && typeof record.letterSpacingPt === 'number'
+        ) {
+          retainedOps.push({
+            orientation: record.glyphOrientation,
+            spacing: record.letterSpacingPt,
+          });
+        }
+        pending.push(...Object.values(record));
+      }
+      return { centroidX: weightedX / inkSum, retainedOps };
+    };
+
+    return Promise.all(glyphs.map(async (glyph) => {
+      const normal = await render(glyph, 0);
+      const compressed = await render(glyph, -6);
+      return {
+        glyph,
+        crossAxisDeltaPx: compressed.centroidX - normal.centroidX,
+        compressedOps: compressed.retainedOps,
+      };
+    }));
+  });
+
+  test.skip(result === null, 'a Japanese document font is required');
+  if (result === null) return;
+  for (const glyph of result) {
+    expect(
+      glyph.compressedOps.length,
+      `${glyph.glyph} has a retained vertical paint operation`,
+    ).toBeGreaterThan(0);
+    for (const operation of glyph.compressedOps) {
+      if (operation.orientation === 'sideways') continue;
+      expect(
+        operation.spacing,
+        `${glyph.glyph} retains upright/rotate pitch in cell geometry only`,
+      ).toBe(0);
+    }
+    expect(
+      Math.abs(glyph.crossAxisDeltaPx),
+      `${glyph.glyph} stays on the same vertical column under negative pitch`,
+    ).toBeLessThanOrEqual(1);
+  }
+});
+
+const VERT_REPERTOIRE = 'ー〜～、。「」（）：；！';
+for (const family of ['Yu Mincho', 'Hiragino Mincho ProN']) {
+  test(`layer A/B: ${family} reachable glyphs reproduce the font own vert design`, async ({ page }) => {
+    const comparisons = await compareRendererWithFontVert(page, family, VERT_REPERTOIRE);
+    test.skip(comparisons === null, `${family} is required for this host layer`);
+    if (comparisons === null) return;
+    const changed = comparisons.filter((comparison) => comparison.changedByVert);
+    expect(changed.length, `${family} exposes representative vert substitutions`).toBeGreaterThanOrEqual(9);
+    expect(changed.map((comparison) => comparison.ch)).not.toContain('；');
+    expect(changed.map((comparison) => comparison.ch)).not.toContain('！');
+    for (const comparison of comparisons) {
+      expect(
+        comparison.reachableByProbe,
+        `${family} production probe agrees with its direct vert raster for ${comparison.ch}`,
+      ).toBe(comparison.changedByVert);
+    }
+    expect(comparisons.find((comparison) => comparison.ch === '；')?.reachableByProbe).toBe(false);
+    expect(comparisons.find((comparison) => comparison.ch === '！')?.reachableByProbe).toBe(false);
+    for (const comparison of changed) {
+      expect(comparison.subject.centroidX).toBeCloseTo(comparison.reference.centroidX, 0);
+      expect(comparison.subject.centroidY).toBeCloseTo(comparison.reference.centroidY, 0);
+      expect(comparison.subject.maxX - comparison.subject.minX).toBeCloseTo(
+        comparison.reference.maxX - comparison.reference.minX,
+        0,
+      );
+      expect(comparison.subject.maxY - comparison.subject.minY).toBeCloseTo(
+        comparison.reference.maxY - comparison.reference.minY,
+        0,
+      );
+      expect(comparison.pixelDifferenceRatio).toBeLessThan(0.08);
+    }
+  });
+}
+
+test('public detached and Offscreen rendering reproduce layout-proven vert glyphs', async ({ page }) => {
+  await page.goto('/tests/visual/vertical-vert-feature.html');
+  const result = await page.evaluate(async () => {
+    await document.fonts.ready;
+    const {
+      planVerticalRunWithCapability,
+      verticalVertGlyphReachable,
+    } = await import('/src/vertical-text.ts');
+    const { createLayoutServices } = await import('/src/layout-runtime.ts');
+    const { verticalGlyphMeasurementServiceOf } =
+      await import('/src/layout/runtime-state.ts');
+    const { renderDocumentToCanvas } = await import('/src/renderer.ts');
+    const { selectDocumentLayoutPage } = await import('/src/layout/document-layout-variants.ts');
+    const subject = document.querySelector('#subject') as HTMLCanvasElement;
+    const reference = document.querySelector('#reference') as HTMLCanvasElement;
+    const probe = subject.getContext('2d');
+    if (!probe || typeof OffscreenCanvas === 'undefined') return null;
+
+    let selectedFamily: string | null = null;
+    for (const family of ['Yu Mincho', 'Hiragino Mincho ProN']) {
+      if (!document.fonts.check(`48px "${family}"`)) continue;
+      probe.font = `48px "${family}"`;
+      if ([...'ー（）'].every((ch) => (
+        verticalVertGlyphReachable(probe, ch.codePointAt(0) ?? 0)
+      ))) {
+        selectedFamily = family;
+        break;
+      }
+    }
+    if (!selectedFamily) return null;
+
+    const plan = (ctx: CanvasRenderingContext2D) => {
+      ctx.font = `48px "${selectedFamily}"`;
+      return planVerticalRunWithCapability(
+        ctx,
+        '（）',
+        48,
+        0,
+        1,
+        true,
+        (cp) => verticalVertGlyphReachable(ctx, cp),
+      ).map((cell) => ({
+        text: cell.text,
+        originPt: cell.originPt,
+        advancePt: cell.advancePt,
+        drawOffsetXPt: cell.drawOffsetPt.xPt,
+        verticalFeature: cell.verticalFeature,
+      }));
+    };
+    const detachedMeasureCanvas = document.createElement('canvas');
+    const detachedMeasure = detachedMeasureCanvas.getContext('2d');
+    if (!detachedMeasure) throw new Error('detached measure context unavailable');
+    const detachedPlan = plan(detachedMeasure);
+    const detachedMeasureConnectedAfter = detachedMeasureCanvas.isConnected;
+    const attachedMeasureCanvas = document.createElement('canvas');
+    attachedMeasureCanvas.style.position = 'fixed';
+    attachedMeasureCanvas.style.left = '-99999px';
+    document.body.appendChild(attachedMeasureCanvas);
+    const attachedMeasure = attachedMeasureCanvas.getContext('2d');
+    if (!attachedMeasure) throw new Error('attached measure context unavailable');
+    const attachedPlan = plan(attachedMeasure);
+    attachedMeasureCanvas.remove();
+
+    // The viewer can be hosted across realms (for example Storybook previews
+    // or an iframe integration). A canvas created by that realm is not an
+    // instanceof the parent window's HTMLCanvasElement, but it must acquire the
+    // same feature-backed plan while remaining caller-owned and detached.
+    const foreignFrame = document.createElement('iframe');
+    document.body.appendChild(foreignFrame);
+    const foreignDocument = foreignFrame.contentDocument;
+    if (!foreignDocument?.body) throw new Error('foreign document unavailable');
+    const foreignDetachedCanvas = foreignDocument.createElement('canvas');
+    const foreignDetachedMeasure = foreignDetachedCanvas.getContext('2d');
+    if (!foreignDetachedMeasure) throw new Error('foreign detached context unavailable');
+    const foreignDetachedPlan = plan(foreignDetachedMeasure);
+    const foreignDetachedConnectedAfter = foreignDetachedCanvas.isConnected;
+    const foreignAttachedCanvas = foreignDocument.createElement('canvas');
+    foreignDocument.body.appendChild(foreignAttachedCanvas);
+    const foreignAttachedMeasure = foreignAttachedCanvas.getContext('2d');
+    if (!foreignAttachedMeasure) throw new Error('foreign attached context unavailable');
+    const foreignAttachedPlan = plan(foreignAttachedMeasure);
+    foreignFrame.remove();
+
+    const textRun = {
+      type: 'text', text: 'ー（）日',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 48, color: null,
+      fontFamily: selectedFamily, fontFamilyEastAsia: selectedFamily,
+      isLink: false, background: null, vertAlign: null, hyperlink: null,
+    };
+    const model = {
+      section: {
+        pageWidth: 240, pageHeight: 180,
+        marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+        headerDistance: 0, footerDistance: 0,
+        titlePage: false, evenAndOddHeaders: false, textDirection: 'tbRl',
+      },
+      body: [{
+        type: 'paragraph', alignment: 'left',
+        indentLeft: 0, indentRight: 0, indentFirst: 0,
+        spaceBefore: 0, spaceAfter: 0, lineSpacing: null,
+        numbering: null, tabStops: [], runs: [textRun],
+        defaultFontSize: 48, defaultFontFamily: selectedFamily,
+        widowControl: false,
+      }],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    } as never;
+
+    const batchCanvas = document.createElement('canvas');
+    const batchContext = batchCanvas.getContext('2d');
+    if (!batchContext) throw new Error('batch measurement context unavailable');
+    batchContext.font = `48px "${selectedFamily}"`;
+    const batchServices = createLayoutServices(model, { measureContext: batchContext });
+    const batchMeasurement = verticalGlyphMeasurementServiceOf(batchServices);
+    const batchInput = {
+      text: '（'.repeat(20),
+      font: batchContext.font,
+      fontKerning: batchContext.fontKerning,
+      fontSizePt: 48,
+      letterSpacingPt: 0,
+      charScale: 1,
+      growTrRotateInk: true,
+      writingMode: 'vertical-rl' as const,
+    };
+    // Warm the shared feature probe before observing the caller-owned canvas.
+    batchMeasurement.planRun(batchInput);
+    let acquisitionMutationNodes = 0;
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        acquisitionMutationNodes += [...record.addedNodes, ...record.removedNodes]
+          .filter((node) => node === batchCanvas).length;
+      }
+    });
+    observer.observe(document.body, { childList: true });
+    batchContext.font = batchInput.font;
+    batchMeasurement.measureRunInkExtra(batchInput.text);
+    batchMeasurement.planRun(batchInput);
+    await Promise.resolve();
+    observer.disconnect();
+
+    const services = createLayoutServices(model);
+    const defaultCurrentDateMs = 1;
+    await renderDocumentToCanvas(model, subject, 0, {
+      dpr: 1, width: 240, layoutServices: services, defaultCurrentDateMs,
+    });
+    const selection = selectDocumentLayoutPage(
+      services,
+      { defaultCurrentDateMs },
+      0,
+    );
+    const pending: unknown[] = [selection.page];
+    const seen = new Set<object>();
+    const retainedGlyphs: Record<string, { upright: boolean; verticalFeature: boolean }> = {};
+    while (pending.length > 0) {
+      const value = pending.pop();
+      if (value === null || typeof value !== 'object' || seen.has(value)) continue;
+      seen.add(value);
+      const record = value as Record<string, unknown>;
+      if (
+        typeof record.text === 'string'
+        && [...'ー（）日'].includes(record.text)
+        && record.glyphOrientation === 'upright'
+      ) {
+        retainedGlyphs[record.text] = {
+          upright: true,
+          verticalFeature: record.verticalFeature === true,
+        };
+      }
+      pending.push(...Object.values(record));
+    }
+
+    const detached = document.createElement('canvas');
+    const detachedConnectedBefore = detached.isConnected;
+    await renderDocumentToCanvas(model, detached, 0, {
+      dpr: 1, width: 240, layoutServices: services, defaultCurrentDateMs,
+    });
+    const detachedConnectedAfter = detached.isConnected;
+    const detachedPixels = detached.getContext('2d')!.getImageData(
+      0, 0, detached.width, detached.height,
+    ).data;
+
+    const offscreen = new OffscreenCanvas(1, 1);
+    await renderDocumentToCanvas(model, offscreen, 0, {
+      dpr: 1, width: 240, layoutServices: services, defaultCurrentDateMs,
+    });
+    const bitmap = offscreen.transferToImageBitmap();
+    reference.width = offscreen.width;
+    reference.height = offscreen.height;
+    const referenceContext = reference.getContext('2d');
+    if (!referenceContext) throw new Error('bitmap comparison context unavailable');
+    referenceContext.drawImage(bitmap, 0, 0);
+    bitmap.close();
+
+    const html = subject.getContext('2d')!.getImageData(
+      0, 0, subject.width, subject.height,
+    ).data;
+    const projected = referenceContext.getImageData(
+      0, 0, reference.width, reference.height,
+    ).data;
+    const differenceRatio = (candidate: Uint8ClampedArray): number => {
+      let difference = 0;
+      let inkWeight = 0;
+      for (let index = 0; index < html.length; index += 4) {
+        difference += Math.abs(html[index]! - candidate[index]!)
+          + Math.abs(html[index + 1]! - candidate[index + 1]!)
+          + Math.abs(html[index + 2]! - candidate[index + 2]!);
+        inkWeight += 255 * 3 - html[index]! - html[index + 1]! - html[index + 2]!;
+      }
+      return difference / Math.max(1, inkWeight);
+    };
+    return {
+      family: selectedFamily,
+      detachedPlan,
+      attachedPlan,
+      foreignDetachedPlan,
+      foreignAttachedPlan,
+      foreignDetachedConnectedAfter,
+      detachedMeasureConnectedAfter,
+      acquisitionMutationNodes,
+      batchCanvasConnectedAfter: batchCanvas.isConnected,
+      retainedGlyphs,
+      detachedConnectedBefore,
+      detachedConnectedAfter,
+      dimensionsMatch:
+        subject.width === detached.width
+        && subject.height === detached.height
+        && subject.width === reference.width
+        && subject.height === reference.height,
+      detachedDifferenceRatio: differenceRatio(detachedPixels),
+      offscreenDifferenceRatio: differenceRatio(projected),
+    };
+  });
+
+  test.skip(result === null, 'a host font with a reachable OpenType vert glyph is required');
+  if (result === null) return;
+  expect(result.detachedPlan).toEqual(result.attachedPlan);
+  expect(result.foreignDetachedPlan).toEqual(result.foreignAttachedPlan);
+  expect(result.foreignDetachedConnectedAfter).toBe(false);
+  expect(result.detachedMeasureConnectedAfter).toBe(false);
+  // One attach/remove scope for run-width acquisition and one for run planning.
+  expect(result.acquisitionMutationNodes).toBe(4);
+  expect(result.batchCanvasConnectedAfter).toBe(false);
+  expect(result.retainedGlyphs).toEqual({
+    'ー': { upright: true, verticalFeature: true },
+    '（': { upright: true, verticalFeature: true },
+    '）': { upright: true, verticalFeature: true },
+    '日': { upright: true, verticalFeature: false },
+  });
+  expect(result.detachedConnectedBefore).toBe(false);
+  expect(result.detachedConnectedAfter).toBe(false);
+  expect(result.dimensionsMatch).toBe(true);
+  // Independent element-backed contexts can choose adjacent AA values. Five
+  // percent remains well below a horizontal/vertical glyph substitution while
+  // keeping the comparison sensitive to the actual `vert` outline.
+  expect(result.detachedDifferenceRatio).toBeLessThan(0.05);
+  expect(result.offscreenDifferenceRatio).toBeLessThan(0.05);
+});
+
+test('forced unreachable keeps FE/upright fallbacks and plain-rotates long marks', async ({ page }) => {
+  await page.goto('/tests/visual/vertical-vert-feature.html');
+  const result = await page.evaluate(async () => {
+    const { drawVerticalRunWithCapability } = await import('/src/vertical-text.ts');
+    const canvas = document.querySelector('#subject') as HTMLCanvasElement;
+    const measure = canvas.getContext('2d');
+    if (!measure) throw new Error('2D context unavailable');
+    measure.font = '48px serif';
+    const fills: string[] = [];
+    const rotations: number[] = [];
+    const scales: Array<[number, number]> = [];
+    const transforms: number[][] = [];
+    const ctx = {
+      canvas,
+      font: measure.font,
+      fillStyle: '#000',
+      textAlign: 'start' as CanvasTextAlign,
+      textBaseline: 'alphabetic' as CanvasTextBaseline,
+      save() {},
+      restore() {},
+      translate() {},
+      rotate(angle: number) { rotations.push(angle); },
+      scale(x: number, y: number) { scales.push([x, y]); },
+      transform(...values: number[]) { transforms.push(values); },
+      measureText(text: string) { return measure.measureText(text); },
+      fillText(text: string) { fills.push(text); },
+    } as unknown as CanvasRenderingContext2D;
+    drawVerticalRunWithCapability(
+      ctx,
+      '、。！；「」：ー〜～“”',
+      0,
+      0,
+      48,
+      0,
+      1,
+      false,
+      () => false,
+    );
+    return { fills, rotations, scales, transforms };
+  });
+
+  expect(result.fills).toEqual(['︑', '︒', '！', '；', '﹁', '﹂', '：', 'ー', '〜', '～', '“', '”']);
+  expect(result.rotations).toHaveLength(6); // FE punctuation, !, ;, and two FE brackets
+  expect(result.rotations.every((angle) => angle === -Math.PI / 2)).toBe(true);
+  expect(result.scales.some(([, y]) => y === -1)).toBe(false);
+  expect(result.transforms).toEqual([]);
+});
+
+test('feature acquisition restores a detached caller canvas after failure', async ({ page }) => {
+  await page.goto('/tests/visual/vertical-vert-feature.html');
+  const result = await page.evaluate(async () => {
+    const { withVertFeature } = await import('/src/vertical-text.ts');
+    const fragment = document.createDocumentFragment();
+    const before = document.createElement('span');
+    const canvas = document.createElement('canvas');
+    const after = document.createElement('span');
+    canvas.style.cssText =
+      'position:relative;left:7px;top:3px;opacity:0.75;pointer-events:auto;font-feature-settings:"kern" 1';
+    fragment.append(before, canvas, after);
+    const originalCssText = canvas.style.cssText;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('2D context unavailable');
+    let message = '';
+    try {
+      withVertFeature(ctx, () => {
+        if (!canvas.isConnected) throw new Error('canvas was not connected');
+        after.remove();
+        throw new Error('expected acquisition failure');
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    return {
+      message,
+      isConnected: canvas.isConnected,
+      parentRestored: canvas.parentNode === fragment,
+      orderRestored: [...fragment.childNodes].map((node) => (
+        node === before ? 'before' : node === canvas ? 'canvas' : 'after'
+      )),
+      cssRestored: canvas.style.cssText === originalCssText,
+      featureRestored: canvas.style.fontFeatureSettings,
+    };
+  });
+
+  expect(result).toEqual({
+    message: 'expected acquisition failure',
+    isConnected: false,
+    parentRestored: true,
+    orderRestored: ['before', 'canvas'],
+    cssRestored: true,
+    featureRestored: '"kern"',
+  });
+});

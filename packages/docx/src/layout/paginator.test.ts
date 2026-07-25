@@ -1,0 +1,980 @@
+import { describe, expect, it } from 'vitest';
+import {
+  createPageFlowSectionContext,
+  sectionContentStartBlockPt,
+  type PageFlowSectionContext,
+} from './context.js';
+import {
+  applyAuthoredBreak,
+  advanceColumnOrPage,
+  beginSection,
+  createPageFlowState,
+  placeFlowNode,
+  UnsupportedPageFlowTransitionError,
+} from './paginator.js';
+import type { DrawingLayout } from './types.js';
+
+function section(
+  sectionOccurrenceId: string,
+  options: Readonly<{
+    pageWidth?: number;
+    pageHeight?: number;
+    marginTop?: number;
+    marginBottom?: number;
+    columns?: readonly Readonly<{ xPt: number; wPt: number }>[];
+    textDirection?: string;
+    sectionBidi?: boolean;
+    grid?: Readonly<{
+      kind: 'none' | 'lines' | 'linesAndChars' | 'snapToChars';
+      linePitchPt: number | null;
+      charSpacePt: number | null;
+    }>;
+  }> = {},
+): PageFlowSectionContext {
+  return createPageFlowSectionContext({
+    sectionOccurrenceId,
+    geometry: {
+      pageWidth: options.pageWidth ?? 612,
+      pageHeight: options.pageHeight ?? 792,
+      marginTop: options.marginTop ?? 72,
+      marginRight: 72,
+      marginBottom: options.marginBottom ?? 72,
+      marginLeft: 72,
+      headerDistance: 36,
+      footerDistance: 36,
+    },
+    columns: options.columns ?? [{ xPt: 72, wPt: 468 }],
+    textDirection: options.textDirection ?? 'lrTb',
+    sectionBidi: options.sectionBidi ?? false,
+    grid: options.grid ?? { kind: 'none', linePitchPt: null, charSpacePt: null },
+  });
+}
+
+function drawingNode(id: string, advancePt: number): DrawingLayout {
+  const bounds = { xPt: 72, yPt: 120, widthPt: 80, heightPt: advancePt };
+  return {
+    kind: 'drawing',
+    id,
+    source: { story: 'body', storyInstance: 'body', path: [0] },
+    flowDomainId: 'page:0/region:0/column:0',
+    flowBounds: bounds,
+    inkBounds: bounds,
+    advancePt,
+    ordinaryFlow: true,
+    commands: [],
+  };
+}
+
+describe('immutable DOCX page-flow transitions', () => {
+  it('places a node by advancing the logical block cursor and deepest edge', () => {
+    const initial = createPageFlowState(section('section-0'), {
+      cursorBlockPt: 120,
+      deepestColumnBlockPt: 150,
+    });
+
+    const node = drawingNode('body/drawing/0', 48);
+    const transition = placeFlowNode(initial, node, 48);
+
+    expect(transition.state).toMatchObject({
+      cursorBlockPt: 168,
+      deepestColumnBlockPt: 168,
+      pageHasContent: true,
+    });
+    expect(transition.events).toEqual([{
+      type: 'place',
+      node,
+      blockStartPt: 120,
+      blockEndPt: 168,
+    }]);
+    expect(initial).toMatchObject({
+      cursorBlockPt: 120,
+      deepestColumnBlockPt: 150,
+    });
+    expect(Object.isFrozen(transition.events[0])).toBe(true);
+  });
+
+  it('rejects a negative logical block advance', () => {
+    const initial = createPageFlowState(section('section-0'));
+
+    expect(() => placeFlowNode(initial, drawingNode('body/drawing/0', 1), -1))
+      .toThrow(RangeError);
+  });
+
+  it('advances to the next column at the region top and retains the deepest completed block', () => {
+    const initial = createPageFlowState(section('section-0', {
+      columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+    }), {
+      cursorBlockPt: 240,
+      regionStartBlockPt: 108,
+      deepestColumnBlockPt: 260,
+    });
+
+    const transition = advanceColumnOrPage(initial, 'overflow');
+
+    expect(transition.state).toMatchObject({
+      pageIndex: 0,
+      columnIndex: 1,
+      cursorBlockPt: 108,
+      pageContentStartBlockPt: 72,
+      regionStartBlockPt: 108,
+      deepestColumnBlockPt: 260,
+      section: { sectionOccurrenceId: 'section-0' },
+    });
+    expect(transition.events).toEqual([{ type: 'next-column' }]);
+    expect(initial.columnIndex).toBe(0);
+    expect(Object.isFrozen(transition.state)).toBe(true);
+  });
+
+  it('starts and advances RTL sections in population order', () => {
+    const initial = createPageFlowState(section('section-rtl', {
+      columns: [
+        { xPt: 72, wPt: 142 },
+        { xPt: 235, wPt: 142 },
+        { xPt: 398, wPt: 142 },
+      ],
+      sectionBidi: true,
+    }));
+
+    expect(initial.columnIndex).toBe(2);
+    expect(advanceColumnOrPage(initial, 'overflow').state.columnIndex).toBe(1);
+  });
+
+  it('advances from the last column to a fresh page in the same section', () => {
+    const context = section('section-0', {
+      marginTop: -54,
+      columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+    });
+    const initial = createPageFlowState(context, {
+      pageIndex: 2,
+      columnIndex: 1,
+      cursorBlockPt: 700,
+      regionStartBlockPt: 108,
+      deepestColumnBlockPt: 700,
+    });
+
+    const transition = advanceColumnOrPage(initial, 'overflow');
+
+    expect(transition.state).toMatchObject({
+      pageIndex: 3,
+      columnIndex: 0,
+      cursorBlockPt: 54,
+      pageContentStartBlockPt: 54,
+      regionStartBlockPt: 54,
+      deepestColumnBlockPt: 54,
+      section: { sectionOccurrenceId: 'section-0' },
+    });
+    expect(transition.events).toEqual([{
+      type: 'next-page',
+      reason: 'overflow',
+      pageIndex: 3,
+      sectionOccurrenceId: 'section-0',
+      parityBlank: false,
+    }]);
+  });
+
+  it('honors an authored column break by advancing to the next column', () => {
+    const initial = createPageFlowState(section('section-0', {
+      columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+    }), {
+      cursorBlockPt: 312,
+      regionStartBlockPt: 96,
+      deepestColumnBlockPt: 312,
+    });
+
+    const transition = applyAuthoredBreak(initial, 'column');
+
+    expect(transition.state).toMatchObject({
+      pageIndex: 0,
+      columnIndex: 1,
+      cursorBlockPt: 96,
+      deepestColumnBlockPt: 312,
+    });
+    expect(transition.events).toEqual([{ type: 'next-column' }]);
+  });
+
+  it('honors an authored column break in the last column by opening a page', () => {
+    const initial = createPageFlowState(section('section-0', {
+      columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+    }), {
+      pageIndex: 4,
+      columnIndex: 1,
+      cursorBlockPt: 312,
+      deepestColumnBlockPt: 312,
+    });
+
+    const transition = applyAuthoredBreak(initial, 'column');
+
+    expect(transition.state).toMatchObject({
+      pageIndex: 5,
+      columnIndex: 0,
+      cursorBlockPt: 72,
+    });
+    expect(transition.events).toEqual([{
+      type: 'next-page',
+      reason: 'explicit-break',
+      pageIndex: 5,
+      sectionOccurrenceId: 'section-0',
+      parityBlank: false,
+    }]);
+  });
+
+  it('honors an authored page break independently of the active column', () => {
+    const initial = createPageFlowState(section('section-0', {
+      columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+    }), {
+      pageIndex: 2,
+      columnIndex: 0,
+      cursorBlockPt: 312,
+    });
+
+    const transition = applyAuthoredBreak(initial, 'page');
+
+    expect(transition.state).toMatchObject({
+      pageIndex: 3,
+      columnIndex: 0,
+      cursorBlockPt: 72,
+    });
+    expect(transition.events).toEqual([{
+      type: 'next-page',
+      reason: 'explicit-break',
+      pageIndex: 3,
+      sectionOccurrenceId: 'section-0',
+      parityBlank: false,
+    }]);
+  });
+
+  it.each([
+    ['odd', 1],
+    ['even', 0],
+  ] as const)(
+    'opens the immediate next physical %s page when authored parity already matches',
+    (parity, currentPageIndex) => {
+      const initial = createPageFlowState(section('section-0'), { pageIndex: currentPageIndex });
+
+      const transition = applyAuthoredBreak(initial, 'page', parity);
+
+      expect(transition.state.pageIndex).toBe(currentPageIndex + 1);
+      expect(transition.events).toEqual([{
+        type: 'next-page',
+        reason: 'explicit-break',
+        pageIndex: currentPageIndex + 1,
+        sectionOccurrenceId: 'section-0',
+        parityBlank: false,
+      }]);
+      expect(transition.events).not.toContainEqual(expect.objectContaining({ type: 'begin-section' }));
+    },
+  );
+
+  it.each([
+    ['odd', 0],
+    ['even', 1],
+  ] as const)(
+    'pads a mismatching immediate candidate before authored %s-page content',
+    (parity, currentPageIndex) => {
+      const initial = createPageFlowState(section('section-0'), { pageIndex: currentPageIndex });
+
+      const transition = applyAuthoredBreak(initial, 'page', parity);
+
+      expect(transition.state).toMatchObject({
+        pageIndex: currentPageIndex + 2,
+        section: { sectionOccurrenceId: 'section-0' },
+      });
+      expect(transition.events).toEqual([
+        {
+          type: 'next-page',
+          reason: 'parity',
+          pageIndex: currentPageIndex + 1,
+          sectionOccurrenceId: 'section-0',
+          parityBlank: true,
+        },
+        {
+          type: 'next-page',
+          reason: 'explicit-break',
+          pageIndex: currentPageIndex + 2,
+          sectionOccurrenceId: 'section-0',
+          parityBlank: false,
+        },
+      ]);
+      expect(transition.events).not.toContainEqual(expect.objectContaining({ type: 'begin-section' }));
+    },
+  );
+
+  it('records pageBreakBefore as its own authored page-advance reason', () => {
+    const initial = createPageFlowState(section('section-0'), {
+      pageIndex: 6,
+      cursorBlockPt: 312,
+    });
+
+    const transition = applyAuthoredBreak(initial, 'pageBreakBefore');
+
+    expect(transition.state.pageIndex).toBe(7);
+    expect(transition.events).toEqual([{
+      type: 'next-page',
+      reason: 'page-break-before',
+      pageIndex: 7,
+      sectionOccurrenceId: 'section-0',
+      parityBlank: false,
+    }]);
+  });
+
+  it('does not advance pageBreakBefore when its paragraph is already at page start', () => {
+    const initial = createPageFlowState(section('section-0'), { pageIndex: 6 });
+
+    const transition = applyAuthoredBreak(initial, 'pageBreakBefore');
+
+    expect(transition.state).toBe(initial);
+    expect(transition.events).toEqual([]);
+  });
+
+  it('does not advance pageBreakBefore from the first RTL population column', () => {
+    const initial = createPageFlowState(section('section-rtl', {
+      columns: [
+        { xPt: 72, wPt: 142 },
+        { xPt: 235, wPt: 142 },
+        { xPt: 398, wPt: 142 },
+      ],
+      sectionBidi: true,
+    }));
+
+    const transition = applyAuthoredBreak(initial, 'pageBreakBefore');
+
+    expect(initial.columnIndex).toBe(2);
+    expect(transition.state).toBe(initial);
+    expect(transition.events).toEqual([]);
+  });
+
+  it('keeps pageBreakBefore idempotent after prior-page content opened a fresh page', () => {
+    const placed = placeFlowNode(
+      createPageFlowState(section('section-0'), { pageIndex: 6 }),
+      drawingNode('body/drawing/0', 24),
+      24,
+    ).state;
+    const freshPage = applyAuthoredBreak(placed, 'page').state;
+
+    const transition = applyAuthoredBreak(freshPage, 'pageBreakBefore');
+
+    expect(freshPage.pageHasContent).toBe(false);
+    expect(transition.state).toBe(freshPage);
+    expect(transition.events).toEqual([]);
+  });
+
+  it('advances pageBreakBefore from a later column even when its cursor is at the region start', () => {
+    const initial = createPageFlowState(section('section-0', {
+      columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+    }));
+    const withPriorColumnContent = advanceColumnOrPage(
+      placeFlowNode(initial, drawingNode('body/drawing/0', 24), 24).state,
+      'overflow',
+    ).state;
+
+    const transition = applyAuthoredBreak(withPriorColumnContent, 'pageBreakBefore');
+
+    expect(withPriorColumnContent).toMatchObject({
+      columnIndex: 1,
+      cursorBlockPt: 72,
+      pageHasContent: true,
+    });
+    expect(transition.state).toMatchObject({ pageIndex: 1, columnIndex: 0 });
+    expect(transition.events[0]).toMatchObject({
+      type: 'next-page',
+      reason: 'page-break-before',
+    });
+  });
+
+  it('ignores lastRenderedPageBreak because it is cached layout, not an authored break', () => {
+    const initial = createPageFlowState(section('section-0'), {
+      pageIndex: 6,
+      cursorBlockPt: 312,
+    });
+
+    const transition = applyAuthoredBreak(initial, 'lastRenderedPageBreak');
+
+    expect(transition.state).toBe(initial);
+    expect(transition.events).toEqual([]);
+  });
+
+  it('starts a continuous section below both the live cursor and every completed column', () => {
+    const outgoing = section('section-0', {
+      columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+    });
+    const incoming = section('section-1', {
+      columns: [{ xPt: 72, wPt: 468 }],
+    });
+    const initial = createPageFlowState(outgoing, {
+      cursorBlockPt: 310,
+      regionStartBlockPt: 120,
+      deepestColumnBlockPt: 540,
+    });
+
+    const transition = beginSection(initial, incoming, 'continuous');
+
+    expect(transition.state).toMatchObject({
+      pageIndex: 0,
+      columnIndex: 0,
+      cursorBlockPt: 540,
+      pageContentStartBlockPt: 72,
+      regionStartBlockPt: 540,
+      deepestColumnBlockPt: 540,
+      section: { sectionOccurrenceId: 'section-1' },
+    });
+    expect(transition.events).toEqual([{
+      type: 'begin-section',
+      placement: 'same-page-block',
+      section: incoming,
+      targetColumnOrdinal: 0,
+      columnSubset: [0],
+    }]);
+  });
+
+  it('starts a continuous section on the next page when the current page owns a footnote reference', () => {
+    const outgoing = section('section-0');
+    const incoming = section('section-1');
+    const initial = createPageFlowState(outgoing, {
+      pageIndex: 2,
+      cursorBlockPt: 360,
+      deepestColumnBlockPt: 360,
+    });
+
+    const transition = beginSection(initial, incoming, 'continuous', {
+      hasFootnoteReferenceOnCurrentPage: true,
+    });
+
+    expect(transition.state).toMatchObject({
+      pageIndex: 3,
+      columnIndex: 0,
+      cursorBlockPt: 72,
+      section: { sectionOccurrenceId: 'section-1' },
+    });
+    expect(transition.events).toEqual([
+      {
+        type: 'next-page',
+        reason: 'section-break',
+        pageIndex: 3,
+        sectionOccurrenceId: 'section-1',
+        parityBlank: false,
+      },
+      { type: 'begin-section', section: incoming },
+    ]);
+  });
+
+  it('starts a next-column section in the following column on the same page', () => {
+    const outgoing = section('section-0', {
+      columns: [
+        { xPt: 72, wPt: 142 },
+        { xPt: 235, wPt: 142 },
+        { xPt: 398, wPt: 142 },
+      ],
+    });
+    const incoming = section('section-1', {
+      columns: [
+        { xPt: 72, wPt: 142 },
+        { xPt: 235, wPt: 142 },
+        { xPt: 398, wPt: 142 },
+      ],
+    });
+    const initial = createPageFlowState(outgoing, {
+      pageIndex: 2,
+      columnIndex: 0,
+      cursorBlockPt: 360,
+      deepestColumnBlockPt: 400,
+    });
+
+    const transition = beginSection(initial, incoming, 'nextColumn');
+
+    expect(transition.state).toMatchObject({
+      pageIndex: 2,
+      columnIndex: 1,
+      cursorBlockPt: 72,
+      regionStartBlockPt: 72,
+      columnSubset: [1, 2],
+      deepestColumnBlockPt: 400,
+      section: { sectionOccurrenceId: 'section-1' },
+    });
+    expect(transition.events).toEqual([
+      { type: 'next-column' },
+      {
+        type: 'begin-section',
+        placement: 'same-page-column',
+        section: incoming,
+        targetColumnOrdinal: 1,
+        columnSubset: [1, 2],
+        outgoingColumnSubset: [0],
+      },
+    ]);
+  });
+
+  it('preserves a mid-page region band when nextColumn changes section ownership', () => {
+    const columns = [
+      { xPt: 72, wPt: 142 },
+      { xPt: 235, wPt: 142 },
+      { xPt: 398, wPt: 142 },
+    ];
+    const outgoing = section('section-0', { columns });
+    const incoming = section('section-1', { columns });
+    const initial = createPageFlowState(outgoing, {
+      columnIndex: 0,
+      pageContentStartBlockPt: 72,
+      pageContentEndBlockPt: 720,
+      regionStartBlockPt: 240,
+      regionEndBlockPt: 720,
+      cursorBlockPt: 360,
+      deepestColumnBlockPt: 400,
+    });
+
+    const transition = beginSection(initial, incoming, 'nextColumn');
+
+    expect(transition.state).toMatchObject({
+      columnIndex: 1,
+      cursorBlockPt: 240,
+      regionStartBlockPt: 240,
+      regionEndBlockPt: 720,
+      columnSubset: [1, 2],
+    });
+  });
+
+  it('advances and maps RTL section columns by population order, not authored index order', () => {
+    const columns = [
+      { xPt: 72, wPt: 142 },
+      { xPt: 235, wPt: 142 },
+      { xPt: 398, wPt: 142 },
+    ];
+    const outgoing = section('section-0', { columns, sectionBidi: true });
+    const incoming = section('section-1', { columns, sectionBidi: true });
+    const initial = createPageFlowState(outgoing, {
+      columnIndex: 2,
+      cursorBlockPt: 360,
+      deepestColumnBlockPt: 400,
+    });
+
+    const transition = beginSection(initial, incoming, 'nextColumn');
+
+    expect(transition.state).toMatchObject({
+      columnIndex: 1,
+      columnSubset: [0, 1],
+    });
+    expect(transition.events.at(-1)).toEqual({
+      type: 'begin-section',
+      placement: 'same-page-column',
+      section: incoming,
+      targetColumnOrdinal: 1,
+      columnSubset: [0, 1],
+      outgoingColumnSubset: [2],
+    });
+  });
+
+  it.each([
+    { name: 'LTR to RTL', outgoingBidi: false, incomingBidi: true, columnIndex: 0 },
+    { name: 'RTL to LTR', outgoingBidi: true, incomingBidi: false, columnIndex: 2 },
+  ])('rejects $name nextColumn when the incoming suffix overlaps outgoing ownership', ({
+    outgoingBidi,
+    incomingBidi,
+    columnIndex,
+  }) => {
+    const columns = [
+      { xPt: 72, wPt: 142 },
+      { xPt: 235, wPt: 142 },
+      { xPt: 398, wPt: 142 },
+    ];
+    const outgoing = section('section-outgoing', { columns, sectionBidi: outgoingBidi });
+    const incoming = section('section-incoming', { columns, sectionBidi: incomingBidi });
+    const initial = createPageFlowState(outgoing, {
+      columnIndex,
+      cursorBlockPt: 360,
+      deepestColumnBlockPt: 400,
+    });
+
+    let error: unknown;
+    try {
+      beginSection(initial, incoming, 'nextColumn');
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(UnsupportedPageFlowTransitionError);
+    expect(error).toMatchObject({
+      code: 'NEXT_COLUMN_DESTINATION_UNAVAILABLE',
+      reason: 'physical-overlap',
+    });
+    expect(initial).toMatchObject({
+      columnIndex,
+      section: outgoing,
+      columnSubset: [0, 1, 2],
+    });
+  });
+
+  it('maps a following physical column to an exact incoming band even when counts differ', () => {
+    const outgoing = section('section-0', {
+      columns: [
+        { xPt: 72, wPt: 142 },
+        { xPt: 235, wPt: 142 },
+        { xPt: 398, wPt: 142 },
+      ],
+    });
+    const incoming = section('section-1', {
+      columns: [
+        { xPt: 235, wPt: 142 },
+        { xPt: 398, wPt: 142 },
+      ],
+    });
+    const initial = createPageFlowState(outgoing, {
+      columnIndex: 0,
+      cursorBlockPt: 360,
+      deepestColumnBlockPt: 400,
+    });
+
+    const transition = beginSection(initial, incoming, 'nextColumn');
+
+    expect(transition.state).toMatchObject({
+      columnIndex: 0,
+      columnSubset: [0, 1],
+    });
+    expect(transition.events.at(-1)).toMatchObject({
+      placement: 'same-page-column',
+      targetColumnOrdinal: 0,
+      columnSubset: [0, 1],
+      outgoingColumnSubset: [0],
+    });
+  });
+
+  it('uses only the retained incoming suffix before opening a full fresh page', () => {
+    const columns = [
+      { xPt: 72, wPt: 142 },
+      { xPt: 235, wPt: 142 },
+      { xPt: 398, wPt: 142 },
+    ];
+    const outgoing = section('section-0', { columns });
+    const incoming = section('section-1', { columns });
+    const initial = createPageFlowState(outgoing, {
+      columnIndex: 0,
+      cursorBlockPt: 360,
+      deepestColumnBlockPt: 400,
+    });
+    const entered = beginSection(initial, incoming, 'nextColumn').state;
+
+    const lastRetainedColumn = advanceColumnOrPage(entered, 'overflow').state;
+    const freshPage = advanceColumnOrPage(lastRetainedColumn, 'overflow').state;
+
+    expect(lastRetainedColumn).toMatchObject({
+      pageIndex: 0,
+      columnIndex: 2,
+      columnSubset: [1, 2],
+    });
+    expect(freshPage).toMatchObject({
+      pageIndex: 1,
+      columnIndex: 0,
+      columnSubset: [0, 1, 2],
+    });
+  });
+
+  it('maps vertical nextColumn by exact upright physical bands', () => {
+    const columns = [
+      { xPt: 54, wPt: 180 },
+      { xPt: 252, wPt: 180 },
+    ];
+    const outgoing = section('section-0', {
+      pageWidth: 612,
+      pageHeight: 792,
+      marginTop: 54,
+      marginBottom: 54,
+      columns,
+      textDirection: 'tbRl',
+    });
+    const incoming = section('section-1', {
+      pageWidth: 612,
+      pageHeight: 792,
+      marginTop: 54,
+      marginBottom: 54,
+      columns,
+      textDirection: 'tbRl',
+    });
+    const initial = createPageFlowState(outgoing, {
+      columnIndex: 0,
+      cursorBlockPt: 200,
+      deepestColumnBlockPt: 220,
+    });
+
+    expect(beginSection(initial, incoming, 'nextColumn').state)
+      .toMatchObject({ columnIndex: 1, columnSubset: [1] });
+  });
+
+  it.each([
+    {
+      name: 'changed column gap or width',
+      outgoing: section('section-out-gap', {
+        columns: [{ xPt: 72, wPt: 142 }, { xPt: 235, wPt: 142 }],
+      }),
+      incoming: section('section-in-gap', {
+        columns: [{ xPt: 72, wPt: 142 }, { xPt: 236, wPt: 141 }],
+      }),
+      reason: 'physical-column',
+    },
+    {
+      name: 'changed page extent',
+      outgoing: section('section-out-page', {
+        columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+      }),
+      incoming: section('section-in-page', {
+        pageWidth: 620,
+        columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+      }),
+      reason: 'page-extent',
+    },
+    {
+      name: 'changed writing mode',
+      outgoing: section('section-out-mode', {
+        columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+      }),
+      incoming: section('section-in-mode', {
+        columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+        textDirection: 'tbRl',
+      }),
+      reason: 'writing-mode',
+    },
+    {
+      name: 'changed block band',
+      outgoing: section('section-out-band', {
+        columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+      }),
+      incoming: section('section-in-band', {
+        marginBottom: 80,
+        columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+      }),
+      reason: 'block-band',
+    },
+    {
+      name: 'changed document grid',
+      outgoing: section('section-out-grid', {
+        columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+      }),
+      incoming: section('section-in-grid', {
+        columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+        grid: { kind: 'lines', linePitchPt: 12, charSpacePt: null },
+      }),
+      reason: 'grid',
+    },
+  ])('rejects nextColumn before state mutation for $name', ({ outgoing, incoming, reason }) => {
+    const initial = createPageFlowState(outgoing, {
+      columnIndex: 0,
+      cursorBlockPt: 360,
+      deepestColumnBlockPt: 400,
+    });
+
+    try {
+      beginSection(initial, incoming, 'nextColumn');
+      throw new Error('expected unsupported nextColumn');
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: 'NEXT_COLUMN_DESTINATION_UNAVAILABLE',
+        reason,
+      });
+    }
+    expect(initial).toMatchObject({
+      section: outgoing,
+      columnIndex: 0,
+      cursorBlockPt: 360,
+      deepestColumnBlockPt: 400,
+    });
+  });
+
+  it('advances nextColumn to the next page when the outgoing column has no same-page successor', () => {
+    const outgoing = section('section-0', {
+      columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+    });
+    const incoming = section('section-1', {
+      columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+    });
+    const initial = createPageFlowState(outgoing, {
+      pageIndex: 2,
+      columnIndex: 1,
+      cursorBlockPt: 360,
+      deepestColumnBlockPt: 400,
+    });
+
+    const result = beginSection(initial, incoming, 'nextColumn');
+
+    expect(result.state).toMatchObject({
+      pageIndex: 3,
+      columnIndex: 0,
+      pageHasContent: false,
+      section: incoming,
+    });
+    expect(result.events).toEqual([
+      {
+        type: 'next-page',
+        reason: 'section-break',
+        pageIndex: 3,
+        sectionOccurrenceId: 'section-1',
+        parityBlank: false,
+      },
+      { type: 'begin-section', section: incoming },
+    ]);
+  });
+
+  it('advances a single-column nextColumn to the incoming page geometry', () => {
+    const outgoing = section('section-0');
+    const incoming = section('section-1', {
+      pageWidth: 792,
+      pageHeight: 612,
+      marginTop: 54,
+      marginBottom: 54,
+      textDirection: 'tbRl',
+      grid: { kind: 'lines', linePitchPt: 14, charSpacePt: null },
+    });
+    const initial = createPageFlowState(outgoing, {
+      pageIndex: 0,
+      cursorBlockPt: 360,
+      deepestColumnBlockPt: 400,
+    });
+
+    const result = beginSection(initial, incoming, 'nextColumn');
+
+    expect(result.state).toMatchObject({
+      pageIndex: 1,
+      columnIndex: 0,
+      section: incoming,
+    });
+    expect(result.state.pageContentStartBlockPt).toBe(
+      sectionContentStartBlockPt(incoming),
+    );
+    expect(result.events.map(({ type }) => type)).toEqual([
+      'next-page',
+      'begin-section',
+    ]);
+  });
+
+  it('rejects nextColumn when the incoming section lacks the same-page successor index', () => {
+    const outgoing = section('section-0', {
+      columns: [
+        { xPt: 72, wPt: 142 },
+        { xPt: 235, wPt: 142 },
+        { xPt: 398, wPt: 142 },
+      ],
+    });
+    const incoming = section('section-1');
+    const initial = createPageFlowState(outgoing, {
+      pageIndex: 2,
+      columnIndex: 0,
+      cursorBlockPt: 360,
+      deepestColumnBlockPt: 400,
+    });
+
+    expect(() => beginSection(initial, incoming, 'nextColumn'))
+      .toThrowError(UnsupportedPageFlowTransitionError);
+    try {
+      beginSection(initial, incoming, 'nextColumn');
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: 'NEXT_COLUMN_DESTINATION_UNAVAILABLE',
+        outgoingColumnIndex: 0,
+        outgoingColumnCount: 3,
+        incomingColumnCount: 1,
+      });
+    }
+  });
+
+  it('rejects invalid page, column, and cursor state at construction', () => {
+    const twoColumns = section('section-0', {
+      columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
+    });
+
+    expect(() => createPageFlowState(twoColumns, { pageIndex: -1 })).toThrow(RangeError);
+    expect(() => createPageFlowState(twoColumns, { pageIndex: 1.5 })).toThrow(RangeError);
+    expect(() => createPageFlowState(twoColumns, { columnIndex: -1 })).toThrow(RangeError);
+    expect(() => createPageFlowState(twoColumns, { columnIndex: 2 })).toThrow(RangeError);
+    expect(() => createPageFlowState(twoColumns, { cursorBlockPt: Number.NaN })).toThrow(RangeError);
+    expect(() => createPageFlowState(twoColumns, {
+      regionStartBlockPt: 100,
+      cursorBlockPt: 99,
+    })).toThrow(RangeError);
+    expect(() => createPageFlowState(twoColumns, {
+      cursorBlockPt: 100,
+      deepestColumnBlockPt: 99,
+    })).toThrow(RangeError);
+  });
+
+  it('opens a fresh page for a next-page section', () => {
+    const initial = createPageFlowState(section('section-0'), {
+      pageIndex: 3,
+      cursorBlockPt: 420,
+      deepestColumnBlockPt: 420,
+    });
+    const incoming = section('section-1', { marginTop: 90 });
+
+    const transition = beginSection(initial, incoming, 'nextPage');
+
+    expect(transition.state).toMatchObject({
+      pageIndex: 4,
+      columnIndex: 0,
+      cursorBlockPt: 90,
+      pageContentStartBlockPt: 90,
+      regionStartBlockPt: 90,
+      deepestColumnBlockPt: 90,
+      section: { sectionOccurrenceId: 'section-1' },
+    });
+    expect(transition.events).toEqual([
+      {
+        type: 'next-page',
+        reason: 'section-break',
+        pageIndex: 4,
+        sectionOccurrenceId: 'section-1',
+        parityBlank: false,
+      },
+      { type: 'begin-section', section: incoming },
+    ]);
+  });
+
+  it.each([
+    ['oddPage', 0, 2],
+    ['evenPage', 1, 3],
+  ] as const)(
+    'keeps a parity-padding page in the outgoing section for %s',
+    (startType, currentPageIndex, incomingPageIndex) => {
+      const outgoing = section('section-0');
+      const incoming = section('section-1');
+      const initial = createPageFlowState(outgoing, { pageIndex: currentPageIndex });
+
+      const transition = beginSection(initial, incoming, startType);
+
+      expect(transition.state.pageIndex).toBe(incomingPageIndex);
+      expect(transition.events).toEqual([
+        {
+          type: 'next-page',
+          reason: 'parity',
+          pageIndex: incomingPageIndex - 1,
+          sectionOccurrenceId: 'section-0',
+          parityBlank: true,
+        },
+        {
+          type: 'next-page',
+          reason: 'section-break',
+          pageIndex: incomingPageIndex,
+          sectionOccurrenceId: 'section-1',
+          parityBlank: false,
+        },
+        { type: 'begin-section', section: incoming },
+      ]);
+    },
+  );
+
+  it('switches mixed section geometry and direction as one context', () => {
+    const initial = createPageFlowState(section('section-0'));
+    const incoming = section('section-1', {
+      pageWidth: 792,
+      pageHeight: 612,
+      marginTop: 48,
+      textDirection: 'tbRl',
+      columns: [{ xPt: 48, wPt: 516 }],
+    });
+
+    const transition = beginSection(initial, incoming, 'nextPage');
+
+    expect(transition.state.section).toBe(incoming);
+    expect(transition.state.section).toMatchObject({
+      sectionOccurrenceId: 'section-1',
+      geometry: { pageWidth: 792, pageHeight: 612, marginTop: 48 },
+      textDirection: 'tbRl',
+      columns: [{ xPt: 48, wPt: 516 }],
+    });
+    expect(transition.state.cursorBlockPt).toBe(48);
+  });
+});

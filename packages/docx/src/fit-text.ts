@@ -56,12 +56,11 @@ export function groupFitTextRegions(runs: FitTextRun[], scale: number): FitTextR
     const targetPx = (first.fitTextValTwips / 20) * scale;
     // ECMA-376 §17.3.2.14 requires the region to occupy exactly w:val and
     // describes compression as “decreasing the size of each character”.
-    // Word-observed multi-character expansion uses inter-character gaps; until
-    // compression ground truth is available, keep every glyph at its natural
-    // width and use the same gap formula. A one-character region has no gap, so
-    // its residual becomes cell padding AFTER the glyph instead of stretching or
-    // shrinking the glyph. A future ground-truth sample may replace that padding
-    // (and negative-gap compression) with character scaling.
+    // `word-fit-text-inter-character-expansion`: expand a multi-character region
+    // through inter-character gaps. Compression geometry remains unsupported;
+    // until separately adjudicated, keep each glyph at natural width and use the
+    // same gap formula. A one-character region has no gap, so its residual is
+    // trailing cell padding rather than glyph scaling.
     const perGapPx = charCount > 1 ? (targetPx - naturalPx) / (charCount - 1) : 0;
     const trailingPadPx = targetPx - naturalPx - Math.max(0, charCount - 1) * perGapPx;
 

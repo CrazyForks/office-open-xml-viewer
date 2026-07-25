@@ -1,21 +1,20 @@
 import { describe, it, expect } from 'vitest';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
 import { renderDocumentToCanvas } from './renderer.js';
 import type {
   BodyElement, CellElement, DocNote, DocParagraph, DocTable, DocTableCell,
   DocTableRow, DocxDocumentModel, SectionProps,
 } from './types';
 
-// ECMA-376 §17.11.10 — a footnote is drawn at the bottom of the page that holds
-// its reference, regardless of WHERE in the document story that reference sits.
+// ECMA-376 §17.11.21 / §17.18.34 — a footnote is drawn at the bottom of the
+// page that holds its reference, regardless of WHERE in the document story it sits.
 // A `<w:footnoteReference>` can appear inside a table cell (the cell paragraph
 // carries the noteRef run), so the footnote block must be drawn — and the body
 // area reserved — even when the only reference on a page lives in a table.
 //
-// Regression: `drawPageFootnotes` and the pagination reserve pass only scanned
-// TOP-LEVEL paragraphs, so a footnote referenced solely from a table cell had
-// its marker painted (the cell run draws normally) but its content silently
-// dropped (issue #840). Endnotes were unaffected because `drawEndnotes` draws
-// every note unconditionally without scanning the body for references.
+// Regression: note ownership must descend through table cells. A reference
+// nested in a cell was previously dropped from the page's retained notes layer.
 
 const TEST_FONT = 'Times New Roman';
 
@@ -115,7 +114,7 @@ async function renderPage0(doc: DocxDocumentModel): Promise<Call[]> {
   return calls;
 }
 
-describe('footnote referenced from a table cell (ECMA-376 §17.11.10)', () => {
+describe('footnote referenced from a table cell (ECMA-376 §17.11.21 / §17.18.34)', () => {
   const footnotes: DocNote[] = [
     { id: 'fn1', content: [para([textRun('NOTE')]) as unknown as BodyElement] },
   ];
@@ -194,5 +193,102 @@ describe('footnote referenced from a table cell (ECMA-376 §17.11.10)', () => {
     const body: BodyElement[] = [{ type: 'table', ...table } as unknown as BodyElement];
     const calls = await renderPage0(docWith(body, footnotes));
     expect(calls.filter((c) => c.text === 'NOTE').length).toBe(0);
+  });
+
+  it('remeasures a footnote PAGE field with its section display number', () => {
+    const notePage = para([{
+      type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: TEST_FONT, background: null, vertAlign: null,
+    }]);
+    const reference = para([
+      textRun('REFERENCE'),
+      textRun('', { noteRef: { kind: 'footnote', id: 'fn-page' }, vertAlign: 'super' }),
+    ]);
+    const model = docWith(
+      [reference as unknown as BodyElement],
+      [{ id: 'fn-page', content: [notePage as unknown as BodyElement] }],
+    );
+    model.section.pageNumType = { start: 10, fmt: 'upperRoman' };
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+    const base = createLayoutServices(model, { measureContext: ctx });
+    const shapedTexts: string[] = [];
+    const services = Object.freeze({
+      ...base,
+      text: Object.freeze({
+        ...base.text,
+        shape(request: Parameters<typeof base.text.shape>[0]) {
+          shapedTexts.push(request.text);
+          return base.text.shape(request);
+        },
+      }),
+    });
+
+    const globals = globalThis as unknown as { OffscreenCanvas?: unknown };
+    const previousOffscreenCanvas = globals.OffscreenCanvas;
+    globals.OffscreenCanvas = class {
+      getContext() { return ctx; }
+    };
+    try {
+      layoutDocument(model, services, { currentDateMs: 0 });
+    } finally {
+      if (previousOffscreenCanvas === undefined) delete globals.OffscreenCanvas;
+      else globals.OffscreenCanvas = previousOffscreenCanvas;
+    }
+
+    expect(shapedTexts).toContain('X');
+  });
+
+  it('uses the split-table page that retains the footnote reference', () => {
+    const notePage = para([{
+      type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: TEST_FONT, background: null, vertAlign: null,
+    }]);
+    const rows = Array.from({ length: 12 }, (_, rowIndex) => row([cell([para([
+      textRun(`ROW${rowIndex}`),
+      ...(rowIndex === 0
+        ? [textRun('', { noteRef: { kind: 'footnote', id: 'fn-page' }, vertAlign: 'super' })]
+        : []),
+    ]) as unknown as CellElement])]));
+    const model = docWith(
+      [{ type: 'table', ...tableOf(rows) } as unknown as BodyElement],
+      [{ id: 'fn-page', content: [notePage as unknown as BodyElement] }],
+    );
+    model.section.pageHeight = 80;
+    model.section.pageNumType = { start: 10, fmt: 'decimal' };
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+    const base = createLayoutServices(model, { measureContext: ctx });
+    const shapedTexts: string[] = [];
+    const services = Object.freeze({
+      ...base,
+      text: Object.freeze({
+        ...base.text,
+        shape(request: Parameters<typeof base.text.shape>[0]) {
+          shapedTexts.push(request.text);
+          return base.text.shape(request);
+        },
+      }),
+    });
+    const globals = globalThis as unknown as { OffscreenCanvas?: unknown };
+    const previousOffscreenCanvas = globals.OffscreenCanvas;
+    globals.OffscreenCanvas = class {
+      getContext() { return ctx; }
+    };
+    let layout: ReturnType<typeof layoutDocument>;
+    try {
+      layout = layoutDocument(model, services, { currentDateMs: 0 });
+    } finally {
+      if (previousOffscreenCanvas === undefined) delete globals.OffscreenCanvas;
+      else globals.OffscreenCanvas = previousOffscreenCanvas;
+    }
+
+    expect(layout.pages.length).toBeGreaterThan(1);
+    // The seed pass shapes physical page 1; the only converged displayed PAGE
+    // value must be row 0's 10, never a later terminal-slice page.
+    expect([...new Set(shapedTexts.filter((text) => /^\d+$/.test(text)))].sort())
+      .toEqual(['1', '10']);
   });
 });

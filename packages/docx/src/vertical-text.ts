@@ -12,25 +12,27 @@
 //   • vo=U  (upright): CJK ideographs, kana, Hangul, fullwidth forms. Drawn with
 //     a local −90° counter-rotation about the glyph's own centre, cancelling the
 //     page rotation so it stands UPRIGHT while still advancing down the line.
-//   • vo=Tu (transform, fallback upright): 、。，．！？ and small kana. UAX#50
-//     substitutes a vertical presentation glyph. For the CORNER-HANGING comma/full
-//     stop (、。， → U+FE10–FE12, core `verticalFormSubstitute`) we draw THAT code
-//     point upright and em-box-centred so the font's designed upper-right ink
-//     placement lands the punctuation in the cell corner as Word does. ！？ are
-//     NOT substituted — they stand upright and CENTRED, so the original fullwidth
-//     mark drawn upright is the correct vertical form (the FE15/FE16 forms are
-//     corner-designed in many fonts and would shift ！？ off-column). Where no
-//     form exists (．, small kana) we draw the original upright unchanged (．
-//     keeps a corner-nudge fallback).
-//   • vo=Tr (transform, fallback rotate): the fullwidth brackets （「」〈〉【】…, the
-//     white lenticular brackets 〖〗, and the fullwidth colon/semicolon ：； have a
-//     U+FE1x/FE3x vertical presentation form (core `verticalBracketFormSubstitute`);
+//   • vo=Tu (transform, fallback upright): 、。，．！？ and small kana. When
+//     this DOM canvas/font proves that `vert` changes the code point, the original
+//     character is drawn with its featured A/D placement. Otherwise the existing
+//     FE10–FE12 / centred-upright / corner-nudge machinery remains the fallback.
+//   • vo=Tr (transform, fallback rotate): the fullwidth brackets （「」〈〉【】… and
+//     the white lenticular brackets 〖〗 have a U+FE1x/FE3x vertical presentation
+//     form (core `verticalBracketFormSubstitute`) present in the substitute fonts;
 //     UAX#50 §5 makes Tr "substitute a vertical glyph, ROTATE only as fallback", so
-//     we SUBSTITUTE and draw them upright (Word/PowerPoint-verified, #969). Only Tr
-//     code points with NO vertical form — the ー prolonged sound mark and the quotes
-//     “” — take the ROTATE fallback: a plain `fillText` in the +90° page frame is
-//     already that 90° CW rotation, drawn CENTRED on the column axis so ー sits
-//     mid-column.
+//     we SUBSTITUTE and draw them upright (Word/PowerPoint-verified, #969). A
+//     reachable Tr code point instead uses its original `vert` glyph and featured
+//     cell. Unreachable Tr points keep the substitution/geometric fallbacks:
+//       – ROTATE (plain): the quotes “” and the fullwidth colon ：— drawn CENTRED on
+//         the column via a plain `fillText` in the +90° page frame. The rotation IS
+//         the font's designed vertical form for these (font-verified: the quotes'
+//         comma-hooks match, and the colon's FE13 side-by-side dots fall out of the
+//         base rotation since its FE13 form is absent from most render fonts).
+//       – ROTATE (plain): unreachable long-stroke marks ー 〜 ～ use the UAX #50 Tr
+//         fallback with no mirror/shear. Main-thread and worker/skia output may differ
+//         because only the DOM path can verify the font's real `vert` design.
+//       – UPRIGHT: the fullwidth semicolon ；, whose FE14 form is an upright dot-over-
+//         comma, not a rotation (issue #969 follow-up; core `verticalTrUprightFallback`).
 //   • vo=R  (rotated): Latin letters, Western digits, Latin punctuation. Stay
 //     SIDEWAYS (rotated with the page) — the conventional "縦中横 not applied"
 //     appearance — drawn as an ordinary contextual `fillText` at the alphabetic
@@ -46,16 +48,27 @@
 // resolved against the physical page then projected into the logical flow
 // (PDF-verified centroid); inline/anchored/float image uprighting; and the
 // vertical text-layer transform. Still approximated / deferred (flagged inline):
-// the `0.12em` upright-centring nudge and the Tu upper-right corner nudge are
-// font-dependent stage-1 heuristics; 縦中横 (tate-chū-yoko), `btLr` flow,
-// header/footer + tables in tbRl, and paragraph-relative vertical anchors are
-// follow-ups.
+// the U+FF0E Tu upper-right corner fallback is a font-dependent heuristic;
+// paragraph-relative vertical anchors are a follow-up. `btLr` shares the +90°
+// page FRAME but bypasses this module's
+// upright/substitute glyph handling entirely (issue #988 re-adjudication: every
+// glyph rides the page rotation — see BodyAcquisitionState.verticalAllRotated).
 
+import { wordPreservesVerticalTuCorner } from './layout/script-compatibility.js';
 import {
   verticalOrientation,
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
+  verticalTrUprightFallback,
+  measureVerticalVertGlyph,
+  verticalVertGlyphReachable,
+  withVertFeature,
 } from '@silurus/ooxml-core';
+
+// Browser acceptance tests load this source module through Vite's `/src` bridge;
+// re-export the exact production feature operations so they exercise the same
+// capability gate and restoration contract instead of test-local approximations.
+export { verticalVertGlyphReachable, withVertFeature } from '@silurus/ooxml-core';
 
 /** How a code point is painted inside the +90°-rotated vertical page:
  *   - `upright`  — counter-rotated −90° to stand up (vo=U, and vo=Tu).
@@ -73,8 +86,8 @@ export type VerticalDrawMode = 'upright' | 'rotate' | 'sideways';
  *   Tu → upright   (draw upright; the caller substitutes a vertical form glyph
  *                   via {@link verticalFormSubstitute} when one exists so the
  *                   comma/full stop land in the upper-right of the cell)
- *   Tr → rotate    (rotate 90° CW — the fallback when no vertical glyph is
- *                   reachable on a Canvas — centred on the column)
+ *   Tr → rotate    (rotate 90° CW — the fallback when the element/CSS route or
+ *                   that glyph's vertical coverage is unavailable — centred)
  *   R  → sideways  (leave rotated with the page: Latin/digits)
  *
  * @param cp A Unicode scalar value (e.g. from `String.prototype.codePointAt`).
@@ -169,6 +182,8 @@ export function splitVerticalOrientationRuns(
 }
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+type VertCapability = (cp: number) => boolean;
+const NO_VERT_CAPABILITY: VertCapability = () => false;
 
 /**
  * Cross-axis (column-thickness) offset, in px, from the alphabetic baseline to
@@ -234,6 +249,339 @@ function inkCenterAboveMiddlePx(ctx: Ctx2D, drawStr: string): number {
 }
 
 /**
+ * True for a vo=Tr code point that takes the GEOMETRIC ROTATE fallback in
+ * {@link drawVerticalRun} — i.e. `mode==='rotate'` with NO substituted vertical
+ * bracket form and NOT the upright-fallback semicolon. These are the marks drawn
+ * by a plain `fillText` in the +90° page frame: ー 〜 ～,
+ * the quotes “”, and the colon ：. This is the SINGLE predicate shared by the
+ * paint path and the {@link verticalRunInkExtraPx} measure path (issue #1014), so
+ * the two agree on which glyphs get the ink-sized cell.
+ *
+ * @param cp A Unicode scalar value.
+ */
+function isVerticalRotateFallback(cp: number): boolean {
+  return (
+    verticalDrawMode(cp) === 'rotate' &&
+    verticalBracketFormSubstitute(cp) === null &&
+    !verticalTrUprightFallback(cp)
+  );
+}
+
+/** Only UAX #50 transform classes may replace the manual fallback with a
+ * feature-selected glyph. U and R remain byte-identical regardless of what a
+ * capability callback reports. */
+function isVerticalVertCandidate(cp: number): boolean {
+  const vo = verticalOrientation(cp);
+  return vo === 'Tu' || vo === 'Tr';
+}
+
+/**
+ * Along-column ink geometry of a vo=Tr rotate-fallback glyph (issue #1014). The
+ * glyph is painted by a plain `fillText` in the +90°-rotated page frame, so its
+ * HORIZONTAL ink extent maps onto the ALONG-COLUMN axis (the advance axis). Read
+ * the tight horizontal ink box with a `center`/`middle` alignment:
+ *   - `extentPx` = actualBoundingBoxLeft + actualBoundingBoxRight — the ink width
+ *     along the column (used to size the cell so the ink cannot spill past it).
+ *   - `shiftPx`  = (actualBoundingBoxLeft − actualBoundingBoxRight)/2 — the local
+ *     along-column shift that re-centres the ink on the (grown) cell, since a
+ *     `center` draw centres the glyph's ADVANCE and an under-reported advance is
+ *     off-centre from the ink.
+ * Returns `null` when the Canvas does not report `actualBoundingBox*` (older
+ * engines / node mocks) so callers degrade to the advance-sized, advance-centred
+ * draw exactly as before this metric existed.
+ */
+function verticalRotateInkGeometry(
+  ctx: Ctx2D,
+  ch: string,
+): { extentPx: number; shiftPx: number } | null {
+  const prevAlign = ctx.textAlign;
+  const prevBaseline = ctx.textBaseline;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const m = ctx.measureText(ch);
+  ctx.textAlign = prevAlign;
+  ctx.textBaseline = prevBaseline;
+  const l = m.actualBoundingBoxLeft;
+  const r = m.actualBoundingBoxRight;
+  if (
+    typeof l !== 'number' ||
+    typeof r !== 'number' ||
+    !Number.isFinite(l) ||
+    !Number.isFinite(r)
+  ) {
+    return null;
+  }
+  return { extentPx: l + r, shiftPx: (l - r) / 2 };
+}
+
+interface RoutedVerticalGlyphCell {
+  naturalPx: number;
+  vert: ReturnType<typeof measureVerticalVertGlyph> | null;
+  rotateInkShiftPx: number;
+}
+
+export interface PlannedVerticalGlyphCell {
+  readonly range: Readonly<{ start: number; end: number }>;
+  readonly text: string;
+  readonly orientation: 'upright' | 'rotate' | 'sideways';
+  readonly originPt: number;
+  readonly advancePt: number;
+  readonly drawOffsetPt: Readonly<{ xPt: number; yPt: number }>;
+  readonly verticalFeature: boolean;
+  readonly blockAxisInkBounds?: Readonly<{ startPt: number; endPt: number }>;
+}
+
+function plannedVerticalBlockAxisInkBounds(
+  ctx: Ctx2D,
+  text: string,
+  orientation: PlannedVerticalGlyphCell['orientation'],
+  drawOffsetPt: Readonly<{ xPt: number; yPt: number }>,
+  charScale: number,
+  writingMode: 'horizontal-tb' | 'vertical-rl' | 'vertical-lr',
+  verticalFeature: boolean,
+): PlannedVerticalGlyphCell['blockAxisInkBounds'] {
+  const previousAlign = ctx.textAlign;
+  const previousBaseline = ctx.textBaseline;
+  const measure = (): TextMetrics => {
+    ctx.textAlign = orientation === 'sideways' ? 'left' : 'center';
+    ctx.textBaseline = orientation === 'sideways' ? 'alphabetic' : 'middle';
+    return ctx.measureText(text);
+  };
+  let metrics: TextMetrics;
+  try {
+    metrics = verticalFeature
+      ? withVertFeature(ctx as CanvasRenderingContext2D, measure)
+      : measure();
+  } finally {
+    ctx.textAlign = previousAlign;
+    ctx.textBaseline = previousBaseline;
+  }
+  if (orientation === 'upright') {
+    if (!Number.isFinite(metrics.actualBoundingBoxLeft)
+      || !Number.isFinite(metrics.actualBoundingBoxRight)) return undefined;
+    const leftPt = metrics.actualBoundingBoxLeft;
+    const rightPt = metrics.actualBoundingBoxRight;
+    // Paint applies rotate(-90deg) after the page transform. In vertical-rl,
+    // w:w scales glyph-local y (the cross axis), not local x (the logical block
+    // axis). Other frames scale local x, exactly as canvas-text does.
+    const blockScale = writingMode === 'vertical-rl' ? 1 : charScale;
+    const firstPt = -(drawOffsetPt.xPt - leftPt) * blockScale;
+    const secondPt = -(drawOffsetPt.xPt + rightPt) * blockScale;
+    return Object.freeze({
+      startPt: Math.min(firstPt, secondPt),
+      endPt: Math.max(firstPt, secondPt),
+    });
+  }
+  if (!Number.isFinite(metrics.actualBoundingBoxAscent)
+    || !Number.isFinite(metrics.actualBoundingBoxDescent)) return undefined;
+  const ascentPt = metrics.actualBoundingBoxAscent;
+  const descentPt = metrics.actualBoundingBoxDescent;
+  const firstPt = drawOffsetPt.yPt - ascentPt;
+  const secondPt = drawOffsetPt.yPt + descentPt;
+  return Object.freeze({
+    startPt: Math.min(firstPt, secondPt),
+    endPt: Math.max(firstPt, secondPt),
+  });
+}
+
+/** The single cell router shared by layout measurement and paint. */
+function routedVerticalGlyphCell(
+  ctx: Ctx2D,
+  ch: string,
+  cp: number,
+  vertCapability: VertCapability,
+  growRotateInk: boolean,
+): RoutedVerticalGlyphCell {
+  const plainAdvance = ctx.measureText(ch).width;
+  if (isVerticalVertCandidate(cp) && vertCapability(cp)) {
+    const vert = measureVerticalVertGlyph(ctx, ch);
+    return { naturalPx: vert.cellAdvancePx, vert, rotateInkShiftPx: 0 };
+  }
+  if (growRotateInk && isVerticalRotateFallback(cp)) {
+    const geom = verticalRotateInkGeometry(ctx, ch);
+    if (geom !== null && geom.extentPx > plainAdvance) {
+      return {
+        naturalPx: geom.extentPx,
+        vert: null,
+        rotateInkShiftPx: geom.shiftPx,
+      };
+    }
+  }
+  return { naturalPx: plainAdvance, vert: null, rotateInkShiftPx: 0 };
+}
+
+/** Resolve the legacy UAX #50/`vert` routing into immutable glyph cells for the
+ * retained layout pipeline. The returned plan contains every paint decision and
+ * metric; retained paint never probes fonts or remeasures text. */
+export function planVerticalRunWithCapability(
+  ctx: Ctx2D,
+  text: string,
+  fontPt: number,
+  letterSpacingPt: number,
+  charScale = 1,
+  growTrRotateInk = false,
+  vertCapability: VertCapability = NO_VERT_CAPABILITY,
+  writingMode: 'horizontal-tb' | 'vertical-rl' | 'vertical-lr' = 'vertical-rl',
+): readonly PlannedVerticalGlyphCell[] {
+  const cells: PlannedVerticalGlyphCell[] = [];
+  const emBoxCenterPt = emBoxCenterAboveBaselinePx(ctx, text, fontPt);
+  let ax = 0;
+  let sourceOffset = 0;
+  for (const piece of splitVerticalOrientationRuns(text)) {
+    if (piece.mode === 'sideways') {
+      const glyphCount = [...piece.text].length;
+      const advancePt = ctx.measureText(piece.text).width * charScale
+        + letterSpacingPt * glyphCount;
+      const drawOffsetPt = { xPt: 0, yPt: emBoxCenterPt };
+      const blockAxisInkBounds = plannedVerticalBlockAxisInkBounds(
+        ctx, piece.text, 'sideways', drawOffsetPt, charScale, writingMode, false,
+      );
+      cells.push({
+        range: { start: sourceOffset, end: sourceOffset + piece.text.length },
+        text: piece.text,
+        orientation: 'sideways',
+        originPt: ax,
+        advancePt,
+        drawOffsetPt,
+        verticalFeature: false,
+        ...(blockAxisInkBounds ? { blockAxisInkBounds } : {}),
+      });
+      ax += advancePt;
+      sourceOffset += piece.text.length;
+      continue;
+    }
+    for (const ch of piece.text) {
+      const cp = ch.codePointAt(0) ?? 0;
+      const mode = verticalDrawMode(cp);
+      const bracketCp = mode === 'rotate' ? verticalBracketFormSubstitute(cp) : null;
+      const uprightFallback = mode === 'rotate'
+        && bracketCp === null
+        && verticalTrUprightFallback(cp);
+      const routed = routedVerticalGlyphCell(ctx, ch, cp, vertCapability, growTrRotateInk);
+      const advancePt = routed.naturalPx * charScale + letterSpacingPt;
+      const range = { start: sourceOffset, end: sourceOffset + ch.length };
+      if (routed.vert !== null) {
+        const drawOffsetPt = { xPt: 0, yPt: 0 };
+        const blockAxisInkBounds = plannedVerticalBlockAxisInkBounds(
+          ctx, ch, 'upright', drawOffsetPt, charScale, writingMode, true,
+        );
+        cells.push({
+          range,
+          text: ch,
+          orientation: 'upright',
+          originPt: ax + routed.vert.originInCellPx * charScale,
+          advancePt,
+          drawOffsetPt,
+          verticalFeature: true,
+          ...(blockAxisInkBounds ? { blockAxisInkBounds } : {}),
+        });
+      } else if (mode === 'upright' || bracketCp !== null || uprightFallback) {
+        const puncCp = bracketCp !== null ? null : verticalFormSubstitute(cp);
+        const drawCp = bracketCp ?? puncCp;
+        const drawText = drawCp === null ? ch : String.fromCodePoint(drawCp);
+        const offset = drawCp === null ? verticalGlyphOffset(cp) : { dx: 0, dy: 0 };
+        const preserveCorner = wordPreservesVerticalTuCorner(puncCp);
+        const alongEm = offset.dy === 0 && !preserveCorner
+          ? inkCenterAboveMiddlePx(ctx, drawText) / fontPt
+          : 0;
+        const drawOffsetPt = {
+          xPt: offset.dx * fontPt,
+          yPt: (alongEm + offset.dy) * fontPt,
+        };
+        const blockAxisInkBounds = plannedVerticalBlockAxisInkBounds(
+          ctx, drawText, 'upright', drawOffsetPt, charScale, writingMode, false,
+        );
+        cells.push({
+          range,
+          text: drawText,
+          orientation: 'upright',
+          originPt: ax + advancePt / 2,
+          advancePt,
+          drawOffsetPt,
+          verticalFeature: false,
+          ...(blockAxisInkBounds ? { blockAxisInkBounds } : {}),
+        });
+      } else {
+        const drawOffsetPt = { xPt: 0, yPt: 0 };
+        const blockAxisInkBounds = plannedVerticalBlockAxisInkBounds(
+          ctx, ch, 'rotate', drawOffsetPt, charScale, writingMode, false,
+        );
+        cells.push({
+          range,
+          text: ch,
+          orientation: 'rotate',
+          originPt: ax + advancePt / 2 + charScale * routed.rotateInkShiftPx,
+          advancePt,
+          drawOffsetPt,
+          verticalFeature: false,
+          ...(blockAxisInkBounds ? { blockAxisInkBounds } : {}),
+        });
+      }
+      ax += advancePt;
+      sourceOffset += ch.length;
+    }
+  }
+  return cells;
+}
+
+/**
+ * ECMA-376 §17.6.20 (tbRl), issues #1014/#1024 — the along-column cell delta
+ * (px, before §17.3.2.43 `w:w` scaling and §17.3.2.35 pitch) beyond ordinary
+ * `measureText`. Reachable Tu/Tr glyphs contribute their feature advances;
+ * unreachable upright/transform glyphs contribute their manual per-glyph
+ * advances, with the positive #1014 ink-overrun growth where needed. Consecutive
+ * vo=R glyphs contribute one contextual sideways-piece advance, preserving the
+ * same shaping and kerning as paint. Subtracting the whole-string width removes
+ * only kern pairs that cross independent vertical-cell boundaries.
+ * Layout folds this into the
+ * segment's natural advance (`segAdvanceWidth`'s `naturalWidthPx`) so the grown
+ * cell {@link drawVerticalRun} paints is matched by the measured box — measure ==
+ * paint (wrapping, the next run's position, and the selection overlay all track
+ * the drawn cell). The value is the per-glyph cell sum minus the whole-string
+ * `measureText`: exactly 0 when neither route changes a cell AND the font applies
+ * no horizontal kern to the run (the common byte-identical path), and nonzero
+ * where the whole-string measure was kern-compressed but the vertical cells are
+ * not (issue #1024).
+ *
+ * The caller must set `ctx.font` (and any kerning state) for the run before
+ * calling, exactly as it does for the `measureText` that produces `naturalWidthPx`.
+ *
+ * @param ctx  2D context with the run's font selected.
+ * @param text The run's text.
+ */
+export function verticalRunInkExtraPxWithCapability(
+  ctx: Ctx2D,
+  text: string,
+  vertCapability: VertCapability,
+): number {
+  let routedWidth = 0;
+  for (const piece of splitVerticalOrientationRuns(text)) {
+    if (piece.mode === 'sideways') {
+      routedWidth += ctx.measureText(piece.text).width;
+      continue;
+    }
+    for (const ch of piece.text) {
+      const cp = ch.codePointAt(0) ?? 0;
+      const routed = routedVerticalGlyphCell(ctx, ch, cp, vertCapability, true);
+      routedWidth += routed.naturalPx;
+    }
+  }
+  // Canvas whole-string measurement may apply horizontal JIS punctuation kern
+  // pairs (for example 。「), but vertical paint advances those independent cells.
+  // Subtract the SAME whole width the caller adds so their sum is exactly the
+  // routed per-glyph width at every layout call site.
+  return routedWidth - ctx.measureText(text).width;
+}
+
+export function verticalRunInkExtraPx(ctx: Ctx2D, text: string): number {
+  return verticalRunInkExtraPxWithCapability(
+    ctx,
+    text,
+    (cp) => verticalVertGlyphReachable(ctx, cp),
+  );
+}
+
+/**
  * Draw one run's glyphs in vertical mode. The context is assumed to already be
  * in the page's SWAPPED logical frame (the +90° page rotation is installed by
  * `renderDocumentToCanvas`), so an ordinary `fillText` advances DOWN the line.
@@ -256,8 +604,18 @@ function inkCenterAboveMiddlePx(ctx: Ctx2D, drawStr: string): number {
  *                         delta + §17.3.2.35 `w:spacing` pitch (the layout's
  *                         `segLetterSpacingPx`); 0 for the common path.
  * @param charScale        ECMA-376 §17.3.2.43 `w:w` fraction; 1 by default.
+ * @param growTrRotateInk  issue #1014 — when true, a vo=Tr GEOMETRIC rotate-fallback
+ *                         glyph (ー 〜 ～ “” ：) whose substitute font under-reports
+ *                         its advance is sized to its along-column INK extent (and
+ *                         ink-centred) so its ink cannot spill past the cell into the
+ *                         next run. MUST be set ONLY where the layout advance was
+ *                         grown by the SAME deficit ({@link verticalRunInkExtraPx},
+ *                         gated on `LayoutTextSeg.verticalRun`) so paint == measure;
+ *                         the caller passes `s.verticalRun === true`. Default false
+ *                         keeps the advance-sized, advance-centred draw byte-identical
+ *                         (markers and unwired vertical text boxes).
  */
-export function drawVerticalRun(
+export function drawVerticalRunWithCapability(
   ctx: Ctx2D,
   text: string,
   x: number,
@@ -265,6 +623,8 @@ export function drawVerticalRun(
   fontPx: number,
   letterSpacingPx: number,
   charScale = 1,
+  growTrRotateInk = false,
+  vertCapability: VertCapability = NO_VERT_CAPABILITY,
 ): void {
   const prevAlign = ctx.textAlign;
   const prevBaseline = ctx.textBaseline;
@@ -283,19 +643,83 @@ export function drawVerticalRun(
   // the cross axis.
   const scaled = charScale !== 1;
   let ax = 0; // cumulative advance from run left (logical +x)
-  for (const ch of text) {
+  for (const piece of splitVerticalOrientationRuns(text)) {
+    if (piece.mode === 'sideways') {
+      // vo=R remains horizontal text inside the rotated page frame. Paint the
+      // maximal piece in one call so contextual shaping/kerning is identical to
+      // the advance used by layout (and therefore to btLr's rotated-horizontal
+      // frame). Letter spacing is applied inside the shaped piece, while the
+      // trailing pitch remains part of the explicit cell advance as before.
+      const naturalPx = ctx.measureText(piece.text).width;
+      const glyphCount = [...piece.text].length;
+      const pieceAdvance = naturalPx * charScale + letterSpacingPx * glyphCount;
+      const prevLetterSpacing = ctx.letterSpacing;
+      ctx.textAlign = prevAlign;
+      ctx.textBaseline = 'alphabetic';
+      ctx.save();
+      if (scaled) {
+        ctx.translate(x + ax, 0);
+        ctx.scale(charScale, 1);
+        ctx.letterSpacing = `${letterSpacingPx / charScale}px`;
+        ctx.fillText(piece.text, 0, baseline + emBoxCenterPx);
+      } else {
+        ctx.letterSpacing = `${letterSpacingPx}px`;
+        ctx.fillText(piece.text, x + ax, baseline + emBoxCenterPx);
+      }
+      ctx.restore();
+      ctx.letterSpacing = prevLetterSpacing;
+      ax += pieceAdvance;
+      continue;
+    }
+    for (const ch of piece.text) {
     const cp = ch.codePointAt(0) ?? 0;
     const mode = verticalDrawMode(cp);
+    // A vo=Tr code point with a substituted Unicode vertical presentation form — the
+    // brackets （）「」〈〉… and the white lenticular 〖〗 (#969) — is SUBSTITUTED and
+    // drawn upright, exactly like the upright cells — UAX#50 §5 Tr means "substitute a
+    // vertical glyph; rotate only as fallback". Tr code points with NO substituted form
+    // (ー, quotes “”, and the colon ：/ semicolon ；whose FE13/FE14 forms are absent
+    // from most render fonts) take a geometric fallback below (rotate, or — for ；—
+    // upright).
+    const bracketCp = mode === 'rotate' ? verticalBracketFormSubstitute(cp) : null;
+    // A vo=Tr code point with NO substituted vertical form whose fallback is
+    // UPRIGHT rather than the generic UAX#50 §5 ROTATE — the fullwidth semicolon
+    // ；(FF1B), whose FE14 vertical form is an upright dot-over-comma, not a
+    // rotation (UAX #50 / issue #969). It draws upright exactly
+    // like the vo=U / vo=Tu cells; the colon ：is NOT here (its FE13 form IS a 90°
+    // rotation, so it takes the rotate branch below → side-by-side dots).
+    const uprightFallback = mode === 'rotate' && bracketCp === null && verticalTrUprightFallback(cp);
     // Advance/width uses the ORIGINAL code point (measure == draw, and the text
     // model / selection / find keep the original character — see the module doc).
-    const adv = ctx.measureText(ch).width * charScale + letterSpacingPx;
-    // A vo=Tr code point with a Unicode vertical presentation form — the brackets
-    // （）「」〈〉… and the colon/semicolon/white-lenticular ：；〖〗 (#969) — is
-    // SUBSTITUTED and drawn upright, exactly like the upright cells — UAX#50 §5
-    // Tr means "substitute a vertical glyph; rotate only as fallback". Only Tr
-    // code points with NO vertical form (ー, quotes “”) keep the rotate fallback.
-    const bracketCp = mode === 'rotate' ? verticalBracketFormSubstitute(cp) : null;
-    if (mode === 'upright' || bracketCp !== null) {
+    // #1014: a vo=Tr GEOMETRIC rotate-fallback glyph (ー 〜 ～ “” ：) is painted by a
+    // plain `fillText` in the +90° page frame, so its HORIZONTAL ink maps onto the
+    // along-column (advance) axis. When a substitute font UNDER-REPORTS the advance
+    // (Chrome), that ink spills PAST the advance-sized cell into the next run. Size
+    // the cell to the along-column INK extent instead so the ink is contained; the
+    // SAME per-glyph deficit is folded into the layout advance by
+    // `verticalRunInkExtraPx` (measure == draw). NO-OP unless the ink exceeds the
+    // advance (every real font here reports ink ≤ advance ⇒ byte-identical), and only
+    // for the geometric rotate branch (substituted/upright Tr glyphs keep their path).
+    const routedCell = routedVerticalGlyphCell(ctx, ch, cp, vertCapability, growTrRotateInk);
+    const vertCell = routedCell.vert;
+    const cellNaturalPx = routedCell.naturalPx;
+    const rotateInkShiftPx = routedCell.rotateInkShiftPx;
+    const adv = cellNaturalPx * charScale + letterSpacingPx;
+    if (vertCell !== null) {
+      // Preserve the feature glyph's asymmetric A/D placement by keeping its
+      // origin at the nominal half-advance measured under the same composed
+      // `vert` state as paint. Designed ink may poke into a neighbour cell;
+      // letter spacing follows the cell and does not move the origin.
+      const cx = x + ax + vertCell.originInCellPx * charScale;
+      ctx.save();
+      ctx.translate(cx, baseline);
+      ctx.rotate(-Math.PI / 2);
+      if (scaled) ctx.scale(1, charScale);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      withVertFeature(ctx, () => ctx.fillText(ch, 0, 0));
+      ctx.restore();
+    } else if (mode === 'upright' || bracketCp !== null || uprightFallback) {
       // vo=U / Tu, or a substituted Tr bracket. Counter-rotate −90° about the
       // cell centre so the glyph (which the page rotation would otherwise lay on
       // its side) stands upright. For corner-hanging Tu punctuation with a Unicode
@@ -322,16 +746,16 @@ export function drawVerticalRun(
       // the old `+0.12em` font-tuned heuristic. Skipped when the ． corner nudge is
       // active (`off.dy`), which is a self-contained upper-right cell placement.
       //
-      // NOT applied to a substituted Tu punctuation form (comma/full stop 、。，
-      // → FE10–FE12): those glyphs are DESIGNED with their ink in the cell's
-      // upper-right corner (JIS X 4051 §4.3 kutōten placement — Word keeps them
-      // there, PDF-verified on sample-26: 、 ink at −0.32em along-column). Ink-
+      // Under `word-vertical-tu-corner-placement`, this is NOT applied to a
+      // substituted Tu punctuation form (comma/full stop 、。， → FE10–FE12):
+      // those glyphs are designed with their ink in the cell's upper-right
+      // corner (JIS X 4051 §4.3 kutōten placement). Ink-
       // centring would force that intentional offset back to the geometric cell
       // centre, dropping the comma/full stop LOW — the reported "、。 sit too low"
       // defect (#771). Drawing them em-box-centred preserves the font's corner
       // design. The Tr brackets DO get the correction: their two halves must sit a
       // full cell apart and the font centres the em box, not the ink (#792).
-      const isPunctSubstitute = puncCp !== null;
+      const isPunctSubstitute = wordPreservesVerticalTuCorner(puncCp);
       const alongEm =
         off.dy === 0 && !isPunctSubstitute
           ? inkCenterAboveMiddlePx(ctx, drawStr) / fontPx
@@ -349,52 +773,66 @@ export function drawVerticalRun(
       ctx.fillText(drawStr, off.dx * fontPx, (alongEm + off.dy) * fontPx);
       ctx.restore();
     } else if (mode === 'rotate') {
-      // vo=Tr with NO vertical form: ー (U+30FC) and the double quotes “”. UAX#50's
-      // Tr fallback (no vertical glyph reachable on a Canvas) is to ROTATE the
-      // glyph 90° CW. A plain `fillText` in the +90° page frame IS that rotation;
-      // centre it on the column with `center`/`middle` at the cell centre. (The
-      // bracket forms never reach here — they were substituted and drawn upright
-      // above; a rotated bracket's ink offset is not measurable from a Canvas.)
+      // vo=Tr with NO substituted vertical form and NOT the upright-fallback
+      // semicolon: ー (U+30FC), the wave dash / tilde 〜 ～, the double quotes “”,
+      // and the fullwidth colon ：(FF1A). UAX#50's Tr fallback (no vertical glyph
+      // available through the element/CSS route) is to ROTATE the glyph 90° CW;
+      // a plain `fillText` in the +90° page frame IS that rotation, centred with
+      // `center`/`middle` at the cell centre. For the colon this reproduces FE13's
+      // design directly (the two vertically stacked dots become side by side);
+      // for quotes, the rotation follows the font's designed vertical form.
+      //
+      // An unreachable `ー〜～` uses this same plain UAX #50 Tr rotation. The removed
+      // #1017/#1023 mirror/shear extrapolated an inaccessible glyph design from two
+      // Mincho fonts; worker/skia may therefore differ visibly from the real DOM
+      // `vert` path, which is a documented limitation rather than a fabricated form.
       const cx = x + ax + adv / 2;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      if (scaled) {
+      // #1014: `rotateInkShiftPx` (glyph-space, non-zero ONLY when the cell was grown
+      // to the ink extent above) re-centres the ink on the grown cell — a `center`
+      // draw centres the glyph's ADVANCE, and an under-reported advance is off-centre
+      // from the ink. It is applied separately on the advance OUTPUT axis before
+      // the §17.3.2.43 `w:w` matrix. Zero leaves advance centring unchanged.
+      if (scaled || rotateInkShiftPx !== 0) {
         ctx.save();
         ctx.translate(cx, baseline);
-        ctx.scale(charScale, 1);
+        if (rotateInkShiftPx !== 0) ctx.translate(charScale * rotateInkShiftPx, 0);
+        ctx.transform(charScale, 0, 0, 1, 0, 0);
         ctx.fillText(ch, 0, 0);
         ctx.restore();
       } else {
         ctx.fillText(ch, cx, baseline);
       }
-    } else {
-      // vo=R (Latin/digit): drawn SIDEWAYS (rotated with the page). Keep the
-      // caller's alphabetic baseline and position the glyph's left at the current
-      // advance, but shift the cross axis by the em-box centre so the glyph's ink
-      // centres on the SAME column centreline the upright cells use — otherwise a
-      // baseline-anchored sideways glyph sits ~0.38em off (its ink is above the
-      // baseline), the "電話 / 03-…" left-right drift. A group of consecutive
-      // sideways glyphs would ideally be one fillText for shaping, but per-glyph
-      // keeps the advance model uniform and Latin advances are context-free enough
-      // at these sizes.
-      // `alphabetic` baseline pins the em-box-centre shift (emBoxCenterPx is
-      // measured relative to the alphabetic baseline).
-      ctx.textAlign = prevAlign;
-      ctx.textBaseline = 'alphabetic';
-      if (scaled) {
-        ctx.save();
-        ctx.translate(x + ax, 0);
-        ctx.scale(charScale, 1);
-        ctx.fillText(ch, 0, baseline + emBoxCenterPx);
-        ctx.restore();
-      } else {
-        ctx.fillText(ch, x + ax, baseline + emBoxCenterPx);
-      }
     }
     ax += adv;
+    }
   }
   ctx.textAlign = prevAlign;
   ctx.textBaseline = prevBaseline;
+}
+
+export function drawVerticalRun(
+  ctx: Ctx2D,
+  text: string,
+  x: number,
+  baseline: number,
+  fontPx: number,
+  letterSpacingPx: number,
+  charScale = 1,
+  growTrRotateInk = false,
+): void {
+  drawVerticalRunWithCapability(
+    ctx,
+    text,
+    x,
+    baseline,
+    fontPx,
+    letterSpacingPx,
+    charScale,
+    growTrRotateInk,
+    (cp) => verticalVertGlyphReachable(ctx, cp),
+  );
 }
 
 /**
@@ -415,11 +853,9 @@ export function drawVerticalRun(
  *     cross-column (the glyphs' own left→right width) and local +y is the
  *     along-column (the text's height). Drawn `center`/`middle`, so the run's
  *     em box centres on the cell centre AND on the column centre-line.
- *   - `charScale` (§17.3.2.43 `w:w`) compresses the glyphs' WIDTH via
- *     `ctx.scale(charScale, 1)` in the upright local frame — i.e. across the
- *     column — matching Word (PDF-verified on sample-26: "２９" at w:w=67 spans
- *     ≈15.6 pt wide inside a 12 pt cell). It does NOT change the along-column
- *     cell height.
+ *   - `charScale` (§17.3.2.43 `w:w`) compresses glyph width through
+ *     `ctx.scale(charScale, 1)` in the upright local frame, across the column.
+ *     It does not change the along-column cell height.
  *   - `vertCompress` (§17.3.2.10) compresses the run's HEIGHT to one cell so the
  *     rotated text never grows the line: if the run's natural upright height
  *     (`fontBoundingBox*`) exceeds one em, scale the along-column axis down to
@@ -529,7 +965,7 @@ export function drawUprightBox(
   ctx.restore();
 }
 
-/** A rectangle `{ x, y, w, h }` in some coordinate frame (px). */
+/** A rectangle `{ x, y, w, h }` in one coordinate frame and linear unit. */
 export interface Box {
   x: number;
   y: number;
@@ -542,16 +978,19 @@ export interface Box {
  * layout frame the vertical (tbRl) renderer flows text in (ECMA-376 §17.6.20 +
  * §20.4.3.x).
  *
- * A `<wp:positionH>` / `<wp:positionV>` anchor is resolved against the PHYSICAL
- * page — Word places the drawing layer before/independently of the text-flow
- * rotation, so the image stays upright at physical `(px, py, w, h)` exactly as in
+ * Under `word-vertical-section-physical-drawing-layer`, a
+ * `<wp:positionH>` / `<wp:positionV>` anchor resolves against the physical page
+ * independently of text-flow rotation, so the image stays upright at
+ * physical `(physicalX, physicalY, width, height)` exactly as in
  * a horizontal document. The body text, however, is laid out in the logical frame
- * that the page paint transform `physical = (cssWidth − logical.y, logical.x)`
+ * that the page transform `physical = (physicalPageWidth − logical.y, logical.x)`
  * maps to physical. Inverting that transform (`logical.x = physical.y`,
- * `logical.y = cssWidth − physical.x`) projects the physical image rectangle onto
+ * `logical.y = physicalPageWidth − physical.x`) projects the physical rectangle onto
  * the logical frame:
- *   - logical x-range = `[py, py + h]`         (physical y ↦ logical x, downward)
- *   - logical y-range = `[cssWidth − (px + w), cssWidth − px]`
+ *   - logical x-range = `[physicalY, physicalY + height]`
+ *                                               (physical y ↦ logical x, downward)
+ *   - logical y-range = `[physicalPageWidth − (physicalX + width),
+ *                         physicalPageWidth − physicalX]`
  *                                               (physical x ↦ logical y, reversed)
  * so the logical box has `w ↔ h` swapped: logical width = physical height and
  * logical height = physical width.
@@ -562,57 +1001,20 @@ export interface Box {
  * from one box, the wrap band and the painted image stay locked together
  * (packages/docx/CLAUDE.md — no duplicated geometry).
  *
- * @param px         Physical left of the image box (px).
- * @param py         Physical top of the image box (px).
- * @param w          Physical image width (px).
- * @param h          Physical image height (px).
- * @param cssWidthPx The canvas CSS width in px (= physical page width) — the
- *                   `translate(cssWidth, 0)` term of the page transform.
+ * Acquisition passes canonical points; the algebra remains valid for any
+ * consistent linear unit.
  */
 export function physicalToLogicalAnchorBox(
-  px: number,
-  py: number,
-  w: number,
-  h: number,
-  cssWidthPx: number,
+  physicalX: number,
+  physicalY: number,
+  width: number,
+  height: number,
+  physicalPageWidth: number,
 ): Box {
   return {
-    x: py,
-    y: cssWidthPx - (px + w),
-    w: h,
-    h: w,
+    x: physicalY,
+    y: physicalPageWidth - (physicalX + width),
+    w: height,
+    h: width,
   };
-}
-
-/**
- * CSS placement (top-left + transform) for one vertical-page text-selection
- * overlay span (ECMA-376 §17.6.20 tbRl). The renderer emits each run's geometry
- * in the SWAPPED LOGICAL frame (`onTextRun` reports logical `x`/`y`/`w`/`h`); the
- * canvas is the PHYSICAL landscape page rotated +90° at paint. A DOM overlay span
- * is horizontal text, so to land it on the drawn (rotated) glyphs we place it at
- * the physical point the logical top-left maps to and rotate it +90° about that
- * corner — matching the page transform.
- *
- * Page transform: `physical = (cssWidth − logical.y, logical.x)`. The logical
- * run top-left `(x, y)` therefore lands at physical `(cssWidth − y, x)`. Applying
- * `transform: rotate(90deg)` with `transform-origin: top left` sends the span's
- * own advance axis (+x local) to physical +y (down the column) and its line-box
- * thickness (+y local) to physical −x — exactly the drawn run's footprint, so the
- * transparent span overlays the glyphs and native selection/search hit-tests land
- * correctly. (CJK glyphs are drawn upright while the span text is rotated sideways;
- * the span still covers the same cell rectangle, which is what selection needs.
- * Per-glyph upright overlay spans are a follow-up.)
- *
- * @returns `{ left, top }` in physical CSS px and the `transform` string, or
- *          `null` when `!vertical` (horizontal pages place the span at `(x, y)`
- *          untransformed — the byte-identical legacy path).
- */
-export function verticalTextLayerPlacement(
-  x: number,
-  y: number,
-  cssWidthPx: number,
-  vertical: boolean,
-): { left: number; top: number; transform: string } | null {
-  if (!vertical) return null;
-  return { left: cssWidthPx - y, top: x, transform: 'rotate(90deg)' };
 }

@@ -106,6 +106,18 @@ describe('computeLineVisualOrder', () => {
     expect(rtl).toEqual([true, true]);
   });
 
+  it('keeps leading neutral punctuation with its RTL word under an LTR paragraph base', () => {
+    const { order, rtl } = computeLineVisualOrder(
+      [{ text: ':مرحبا ' }, { text: 'في ' }, { text: 'العالم' }],
+      false,
+    );
+    // The colon resolves to the LTR paragraph level, but Canvas paints the
+    // whole first slice RTL. Its ordering level must therefore come from the
+    // same odd-level content rather than stranding the slice at the left edge.
+    expect(order).toEqual([2, 1, 0]);
+    expect(rtl).toEqual([true, true, true]);
+  });
+
   it('orders an embedded LTR run inside an RTL line', () => {
     // logical: Hebrew, Latin, Hebrew (base RTL) -> visual L→R: [2,1,0]
     const { order, rtl } = computeLineVisualOrder(
@@ -168,12 +180,10 @@ describe('computeLineVisualOrder', () => {
     expect(order).toEqual([2, 1, 0]);
   });
 
-  it('orders an AN-classified date to Word ordering (2026-02-28)', () => {
-    // sample-7 date cell: logical "28-02-2026" in an Arabic complex-script run
-    // (w:rtl, w:lang w:bidi="ae-AR"). The renderer pre-splits it into digit-
-    // group / separator segments and tags each with `digitsAsAN`. Under the
-    // RTL cell base, classifying the European digits as AN reorders the groups
-    // to Word's "2026-02-28" (UAX#9 §4.3 HL1 higher-level protocol).
+  it('orders an AN-classified date as 2026-02-28', () => {
+    // A logical "28-02-2026" in an Arabic complex-script run is pre-split into
+    // digit-group and separator segments tagged `digitsAsAN`. Under the RTL
+    // base, UAX #9 §4.3 HL1 reorders those groups to "2026-02-28".
     const segs = [
       { text: '28', rtl: true, digitsAsAN: true },
       { text: '-', rtl: true, digitsAsAN: true },

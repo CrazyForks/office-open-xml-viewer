@@ -81,6 +81,7 @@ export {
 // spreads this into its own map; script-fallback Noto faces live in
 // SCRIPT_GOOGLE_FONTS below.
 export { GOOGLE_FONT_SUBSTITUTES } from './fonts/google-fonts';
+export { canvasFontString, createCanvasFontRoute, type CanvasFontRoute } from './fonts/canvas-route';
 export {
   classifyCjkFont,
   classifyFontGeneric,
@@ -113,6 +114,12 @@ export {
 } from './shape/custgeom-endpoints';
 export { hexToRgba, relativeLuma, autoContrastColor, resolveFill, applyStroke } from './shape/paint';
 export { buildShapePath, drawStar, drawPolygon, ooxmlArcTo } from './shape/preset';
+export {
+  paintDrawingMLShape,
+  type DrawingMLShapeFill,
+  type DrawingMLShapeGeometry,
+  type DrawingMLShapePaintPlan,
+} from './shape/drawingml-shape';
 export { drawArrowHead, lineEndRetract, retractLineEndpoint } from './shape/arrow';
 // Shared embedded-SVG decoder (Microsoft asvg:svgBlip extension) — used by all
 // three renderers to prefer the vector original over the raster fallback.
@@ -382,6 +389,7 @@ export {
   isSeaGraphemeExtend,
   containsSeaScript,
   isGraphemeFillText,
+  isDictionarySeaText,
   seaWordBreakOffsets,
   seaTransitionOffsets,
   seaMixedBreakOffsets,
@@ -396,9 +404,18 @@ export {
   verticalOrientation,
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
+  verticalTrUprightFallback,
+  verticalTrLongMark,
   VO_UNICODE_VERSION,
 } from './text/vertical-orientation';
 export type { VerticalOrientation } from './text/vertical-orientation';
+export {
+  measureVerticalVertGlyph,
+  verticalVertGlyphReachable,
+  withVertFeature,
+  withVertFeatureCanvasScope,
+} from './text/vertical-vert-feature';
+export type { VerticalGlyphCellMetrics } from './text/vertical-vert-feature';
 // Shared Excel serial-date → UTC `Date` conversion (ECMA-376 §18.17.4.1),
 // with the 1900 Lotus leap-year-bug compat and 1900/1904 date-system select.
 // Used by the xlsx cell formatter and the core chart date formatter.
@@ -480,6 +497,16 @@ export {
   intendedSingleLinePx,
   correctLineMetrics,
 } from './text/line-metrics';
+// Exact local-font metric probing. Shared contract for docx/xlsx/pptx; format
+// packages supply only their evidence-backed Office line-height policy.
+export {
+  loadLocalFontMetrics,
+  unloadLocalFontMetrics,
+  normalizeLocalFontMetricFamily,
+  type LocalFontMetricRequest,
+  type ResolvedLocalFontMetric,
+  type LoadedLocalFontMetrics,
+} from './fonts/local-metrics';
 // Format-agnostic same-font Canvas-vs-Word line-fit bias. Consumers keep their
 // layout/paint wiring local, while the metric provenance and normalized family
 // matching remain shared data.

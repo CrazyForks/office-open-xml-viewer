@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-core",
   "private": true,
-  "version": "0.71.0",
+  "version": "0.73.2",
   "description": "Shared rendering primitives and types (internal workspace package of @silurus/ooxml)",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
@@ -32,7 +32,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
-    "typescript": "^6.0.2",
+    "@typescript/native": "npm:typescript@^7.0.2",
     "esbuild": "^0.25.0",
     "@mathjax/src": "^4.0.0",
     "@mathjax/mathjax-stix2-font": "^4.1.0"

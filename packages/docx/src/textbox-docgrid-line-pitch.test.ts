@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { measureShapeTextAutoFitHeight, renderShapeText } from './renderer.js';
-import { shapeRenderState } from './line-layout.js';
-import type { RenderState } from './renderer.js';
+import {
+  acquireAndPaintShapeTextBox,
+  acquireShapeTextBoxForTest,
+  shapeAcquisitionState,
+  type ShapeAcquisitionTestState,
+} from './retained-shape-textbox.test-support.js';
 import type { ShapeRun, ShapeText } from './types';
 
 // ECMA-376 §17.6.5 `<w:docGrid w:type="lines" w:linePitch>` — a document with a
@@ -58,14 +61,17 @@ function makeRecordingCanvas(): { ctx: CanvasRenderingContext2D; fillTexts: Fill
 
 /** A no-fill/no-line 10 pt text box whose single EA block wraps into ≥2 lines in
  *  a narrow box (mock measureText is chars × px). The text is CJK so the line is
- *  classified East Asian for docGrid cell rounding (EAST_ASIAN_RE). */
+ *  classified East Asian for docGrid cell rounding (EAST_ASIAN_RE). The family
+ *  is deliberately NOT in the core metric table (游明朝 is, since issue #1013)
+ *  so the natural box stays the mock's flat 1.0×em — the grid snap alone
+ *  accounts for any growth. */
 function eaTextbox(): ShapeRun {
   const text = 'あいうえおかきくけこさしすせそたちつてと';
   const block: ShapeText = {
     text,
     fontSizePt: 10,
     alignment: 'left',
-    runs: [{ text, fontSizePt: 10, fontFamily: '游明朝', fontFamilyEastAsia: '游明朝' }],
+    runs: [{ text, fontSizePt: 10, fontFamily: 'テスト明朝', fontFamilyEastAsia: 'テスト明朝' }],
   } as ShapeText;
   return {
     type: 'shape',
@@ -81,10 +87,23 @@ function eaTextbox(): ShapeRun {
 /** State carrying the section docGrid (like the production render threads). */
 function stateWithGrid(
   ctx: CanvasRenderingContext2D,
-  grid: { type: string | null; linePitchPt: number | null } | undefined,
-): RenderState {
-  const base = shapeRenderState(ctx, 1, {}, new Map());
-  return { ...base, docGrid: grid } as unknown as RenderState;
+  grid: {
+    type: 'default' | 'lines' | 'linesAndChars' | 'snapToChars' | null;
+    linePitchPt: number | null;
+  } | undefined,
+): ShapeAcquisitionTestState {
+  const base = shapeAcquisitionState(ctx, {});
+  const kind = grid?.type == null || grid.type === 'default' ? 'none' : grid.type;
+  return {
+    ...base,
+    sectionLayout: {
+      grid: {
+        kind,
+        linePitchPt: grid?.linePitchPt ?? null,
+        charSpacePt: null,
+      },
+    },
+  };
 }
 
 /** Vertical delta between the first two DISTINCT baseline y values = the first
@@ -126,9 +145,9 @@ describe('text-box lines snap to the section docGrid line pitch (ECMA-376 §17.6
   const PITCH = 18;      // 360 twips
   const NATURAL = 10;    // mock 1.0×em at 10 pt
 
-  it('renderShapeText snaps each EA line to the grid pitch (was natural, too tight)', () => {
+  it('snaps each EA line to the grid pitch (was natural, too tight)', () => {
     const { ctx, fillTexts } = makeRecordingCanvas();
-    renderShapeText(eaTextbox(), 0, 0, 60, 400, ctx, 1, {}, new Map(),
+    acquireAndPaintShapeTextBox(eaTextbox(), 0, 0, 60, 400, ctx, 1, {}, new Map(),
       stateWithGrid(ctx, { type: 'lines', linePitchPt: PITCH }));
     // Each line occupies exactly one grid cell (18 pt), NOT the 10 pt natural box.
     expect(firstLineHeight(fillTexts)).toBeCloseTo(PITCH, 3);
@@ -136,18 +155,23 @@ describe('text-box lines snap to the section docGrid line pitch (ECMA-376 §17.6
 
   it('is inert when the section declares no line grid (natural spacing preserved)', () => {
     const { ctx, fillTexts } = makeRecordingCanvas();
-    renderShapeText(eaTextbox(), 0, 0, 60, 400, ctx, 1, {}, new Map(),
+    acquireAndPaintShapeTextBox(eaTextbox(), 0, 0, 60, 400, ctx, 1, {}, new Map(),
       stateWithGrid(ctx, { type: 'default', linePitchPt: null }));
     expect(firstLineHeight(fillTexts)).toBeCloseTo(NATURAL, 3);
   });
 
-  it('measureShapeTextAutoFitHeight totals the grid-snapped line heights', () => {
+  it('retained spAutoFit acquisition totals the grid-snapped line heights', () => {
     const { ctx } = makeRecordingCanvas();
     const shape = eaTextbox();
+    shape.textAutofit = 'sp';
     const gridState = stateWithGrid(ctx, { type: 'lines', linePitchPt: PITCH });
     const flatState = stateWithGrid(ctx, { type: 'default', linePitchPt: null });
-    const hGrid = measureShapeTextAutoFitHeight(shape, 60, ctx, 1, {}, new Map(), gridState);
-    const hFlat = measureShapeTextAutoFitHeight(shape, 60, ctx, 1, {}, new Map(), flatState);
+    const hGrid = acquireShapeTextBoxForTest(
+      shape, 0, 0, 60, 400, ctx, 1, {}, gridState,
+    )?.flowBounds.heightPt ?? 0;
+    const hFlat = acquireShapeTextBoxForTest(
+      shape, 0, 0, 60, 400, ctx, 1, {}, flatState,
+    )?.flowBounds.heightPt ?? 0;
     // The grid total is a whole number of 18 pt cells; the flat total is the same
     // line count at 10 pt — so the grid path is strictly taller by 8 pt / line.
     const lineCount = Math.round(hFlat / NATURAL);
@@ -158,35 +182,37 @@ describe('text-box lines snap to the section docGrid line pitch (ECMA-376 §17.6
 
   // §17.3.3.25 ruby in a text box flows through the SAME shared line engine as
   // body ruby, so a ruby line must take lineBoxHeight's ruby branch (measured
-  // glyph box), NOT the plain-EA em cell count. With the mock's 1.0×em box an
-  // 18 pt ruby base on an 18 pt pitch measures exactly one cell — the em rule
-  // (floor(18/18)+1 = 2 cells = 36 pt) would open a spurious extra cell under
-  // every ruby line. `line.hasRuby` (built by layoutLines from the run's ruby
-  // annotation) must reach lineBoxHeight in BOTH text-box paths.
-  it('renderShapeText keeps a ruby line on its measured glyph box (1 cell), not the em cell count', () => {
+  // glyph box), NOT the plain-EA design-height cell count. The ruby box keeps
+  // 游明朝 (tabled since issue #1013): its 18 pt design line is 25.79 pt, so
+  // the plain-EA rule would round to ceil(25.79/18) = 2 cells = 36 pt — while
+  // the ruby branch keeps the measured 1.0×em glyph box, exactly one 18 pt
+  // cell. `line.hasRuby` (built by layoutLines from the run's ruby annotation)
+  // must reach lineBoxHeight in BOTH text-box paths.
+  it('keeps a ruby line on its measured glyph box (1 cell), not the design cell count', () => {
     const { ctx, fillTexts } = makeRecordingCanvas();
-    renderShapeText(rubyTextbox(), 0, 0, 60, 400, ctx, 1, {}, new Map(),
+    acquireAndPaintShapeTextBox(rubyTextbox(), 0, 0, 60, 400, ctx, 1, {}, new Map(),
       stateWithGrid(ctx, { type: 'lines', linePitchPt: PITCH }));
     // Ruby annotations draw at their own y; measure the BASE lines only (18 px
     // mock font). Base baselines are 18 pt apart (1 cell), not 36 (2 cells).
     const baseYs = [...new Set(
-      fillTexts.filter((f) => f.text !== 'るび').map((f) => f.y),
+      fillTexts.filter((f) => !/[るび]/.test(f.text)).map((f) => f.y),
     )].sort((a, b) => a - b);
     expect(baseYs.length).toBeGreaterThanOrEqual(2);
     expect(baseYs[1] - baseYs[0]).toBeCloseTo(PITCH, 3);
   });
 
-  it('measureShapeTextAutoFitHeight totals ruby lines at the measured glyph box (1 cell each)', () => {
+  it('retained spAutoFit acquisition totals ruby lines at the measured glyph box (1 cell each)', () => {
     const { ctx } = makeRecordingCanvas();
     const shape = rubyTextbox();
+    shape.textAutofit = 'sp';
     const gridState = stateWithGrid(ctx, { type: 'lines', linePitchPt: PITCH });
-    const flatState = stateWithGrid(ctx, { type: 'default', linePitchPt: null });
-    const hGrid = measureShapeTextAutoFitHeight(shape, 60, ctx, 1, {}, new Map(), gridState);
-    const hFlat = measureShapeTextAutoFitHeight(shape, 60, ctx, 1, {}, new Map(), flatState);
-    // Off-grid each 18 pt line is its 18 px natural box, so the line count is
-    // hFlat / 18; on-grid each ruby line is ONE 18 pt cell — identical total.
-    const lineCount = Math.round(hFlat / 18);
-    expect(lineCount).toBeGreaterThanOrEqual(2);
-    expect(hGrid).toBeCloseTo(lineCount * PITCH, 3);
+    const hGrid = acquireShapeTextBoxForTest(
+      shape, 0, 0, 60, 400, ctx, 1, {}, gridState,
+    )?.flowBounds.heightPt ?? 0;
+    // rubyTextbox lands each of its three runs on its own line (3 × 18 pt runs
+    // exactly fill the 60 pt width). Each ruby line is ONE 18 pt cell (its
+    // measured 1.0×em glyph box), not the 2 cells the 游明朝 design height
+    // (25.79 pt) would claim through the plain-EA rule.
+    expect(hGrid).toBeCloseTo(3 * PITCH, 3);
   });
 });

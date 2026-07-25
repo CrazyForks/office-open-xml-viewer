@@ -80,6 +80,14 @@ export interface Paragraph extends CoreParagraph {
    * emits an effective boolean.
    */
   eaLnBrk: boolean;
+  /**
+   * `<a:pPr defTabSz>` (ECMA-376 §21.1.2.2.7) — the default tab-stop interval in
+   * EMU. When a `\t` has no reachable explicit `a:tabLst` stop, it advances to
+   * the next multiple of this grid (issue #1006). Absent ⇒ the renderer uses the
+   * PowerPoint universal default of 914400 EMU (1 inch). Omitted from JSON when
+   * the parser found no explicit value.
+   */
+  defTabSz?: number;
 }
 
 /**
@@ -223,6 +231,9 @@ export interface MediaElement {
   y: number;
   width: number;
   height: number;
+  rotation: number;
+  flipH: boolean;
+  flipV: boolean;
   /** "audio" or "video" */
   mediaKind: 'audio' | 'video';
   /** Poster image zip path (e.g. "ppt/media/image2.png"). Empty when no poster. */
@@ -420,6 +431,9 @@ export interface TableElement {
   y: number;
   width: number;
   height: number;
+  rotation: number;
+  flipH: boolean;
+  flipV: boolean;
   /** Column widths in EMU */
   cols: number[];
   rows: TableRow[];
@@ -468,6 +482,9 @@ export interface ChartElement {
   y: number;
   width: number;
   height: number;
+  rotation: number;
+  flipH: boolean;
+  flipV: boolean;
   /**
    * The chart payload, already in the canonical {@link ChartModel} shape emitted
    * by the Rust parser (`ooxml_common::chart::ChartModel`). Passed straight to
@@ -540,8 +557,8 @@ export interface PictureElement {
    */
   prstAdjust?: number[];
   /**
-   * ECMA-376 §20.1.8.55 a:srcRect — source image crop as fractions (0..1) of the
-   * source width/height, measured inward from each edge. Omitted when the image
+   * ECMA-376 §20.1.8.55 a:srcRect — source image crop as signed fractions of the
+   * source width/height, measured from each edge. Omitted when the image
    * is not cropped; when present the parser emits all four edges (absent edges
    * default to 0), so the renderer reads them without a fallback.
    */
