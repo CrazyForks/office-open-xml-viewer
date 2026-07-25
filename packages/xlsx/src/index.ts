@@ -74,6 +74,15 @@ export type {
   // Slicers.
   SlicerAnchor,
   SlicerItem,
+  // Metadata-only pivot facts (reachable via Worksheet.pivotTables).
+  PivotTableMetadata,
+  PivotLocation,
+  PivotPageField,
+  PivotDataField,
+  PivotCacheSource,
+  PivotMetadataStatus,
+  PivotPartialReason,
+  PivotDiagnostic,
   // Sparklines (reachable via Worksheet sparkline groups).
   SparklineGroup,
   Sparkline,
