@@ -372,12 +372,12 @@ impl ooxml_common::chart::ColorResolver for XlsxColorResolver<'_> {
         resolve_fill_color(&node, self.theme_colors)
     }
 
-    /// Shape fills (marker / dPt / errBars) resolve through the FULL DrawingML
-    /// color grammar (transforms included), matching the historical
+    /// Shape fills (series / marker / dPt / errBars) resolve through the FULL
+    /// DrawingML color grammar (transforms included), matching the historical
     /// `extract_solid_fill_in_drawingml` path so a scheme-color marker with a
     /// `lumMod`/`lumOff` tint renders at the right strength. This is deliberately
-    /// heavier than [`Self::resolve_solid_fill`] (which xlsx keeps transform-free
-    /// for series/legend/axis/title fills for byte-compatibility).
+    /// heavier than [`Self::resolve_solid_fill`] (which xlsx keeps for callers
+    /// that pass an already-selected solidFill node).
     fn resolve_shape_fill(&self, parent: roxmltree::Node<'_, '_>) -> Option<String> {
         extract_solid_fill_in_drawingml(&parent, self.theme_colors)
     }
@@ -521,6 +521,41 @@ mod solid_fill_color_tests {
         let doc = Document::parse(&xml).unwrap();
         let out = extract_solid_fill_in_drawingml(&doc.root_element(), &theme());
         assert_eq!(out.as_deref(), Some("FF8000"));
+    }
+
+    /// A chart series is a DrawingML shape too: its `<c:spPr>` fill must retain
+    /// color transforms such as `lumMod` (§20.1.2.3.20). Excel commonly writes
+    /// a grey series as `bg1` (white) with a 65% luminance modulation.
+    #[test]
+    fn chart_series_scheme_fill_applies_lummod() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+                              xmlns:a="{A_NS}">
+                 <c:chart><c:plotArea><c:barChart>
+                   <c:barDir val="col"/>
+                   <c:grouping val="clustered"/>
+                   <c:ser>
+                     <c:idx val="0"/><c:order val="0"/>
+                     <c:spPr><a:solidFill><a:schemeClr val="bg1">
+                       <a:lumMod val="65000"/>
+                     </a:schemeClr></a:solidFill></c:spPr>
+                     <c:val><c:numLit><c:ptCount val="1"/>
+                       <c:pt idx="0"><c:v>1</c:v></c:pt>
+                     </c:numLit></c:val>
+                   </c:ser>
+                 </c:barChart></c:plotArea></c:chart>
+               </c:chartSpace>"#
+        );
+        let doc = Document::parse(&xml).unwrap();
+        let mut colors = theme();
+        colors[1] = "#FFFFFF".into();
+        let resolver = XlsxColorResolver {
+            theme_colors: &colors,
+            theme_major_font_latin: None,
+            theme_minor_font_latin: None,
+        };
+        let chart = ooxml_common::chart::parse_chart_part(doc.root_element(), &resolver).unwrap();
+        assert_eq!(chart.series[0].color.as_deref(), Some("A6A6A6"));
     }
 }
 
