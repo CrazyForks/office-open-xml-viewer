@@ -215,6 +215,31 @@ describe('computeChartFrame — cartesian', () => {
     });
   });
 
+  it('keeps an inner manual-layout data region within the measured outer gutters', () => {
+    const chart = model({
+      plotAreaManualLayout: {
+        layoutTarget: 'inner',
+        xMode: 'edge',
+        yMode: 'edge',
+        x: 0.01,
+        y: 0.02,
+        w: 0.8,
+        h: 0.8,
+      },
+    });
+    const frame = computeChartFrame(chart, X, Y, W, H, PTPX, {
+      titleTopPadFrac: 0.02,
+      titleBottomPadFrac: 0.025,
+      legendSideReserveFrac: 0.22,
+      pad: { t: 20, r: 10, b: 30, l: 40 },
+      honorPlotAreaManualLayout: true,
+    });
+    expect(frame.plotRect.px0).toBe(X + 40);
+    expect(frame.plotRect.py0).toBe(Y + 20);
+    expect(frame.plotRect.pw).toBeCloseTo(X + 0.81 * W - (X + 40));
+    expect(frame.plotRect.ph).toBeCloseTo(Y + 0.82 * H - (Y + 20));
+  });
+
   it('ignores plotArea manual layout when the flag is off', () => {
     const chart = model({
       plotAreaManualLayout: { xMode: 'edge', yMode: 'edge', x: 0.1, y: 0.2, w: 0.7, h: 0.6 },
