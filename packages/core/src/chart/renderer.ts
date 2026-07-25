@@ -686,19 +686,57 @@ interface ValueAxisPlan {
   frac: (v: number) => number;
 }
 
+/** Convert an OOXML percent-axis value (stored as a 0..1 ratio) into the
+ * renderer's percentStacked geometry space (0..100 percentage points). */
+function valueAxisUnitInRendererSpace(
+  value: number | null | undefined,
+  percentStacked: boolean,
+): number | null | undefined {
+  return value == null || !percentStacked ? value : value * 100;
+}
+
+/** Format a primary value-axis tick from the renderer's data space. For a
+ * percentStacked chart the plotted values are percentage points, while the
+ * axis numFmt still expects the OOXML ratio (0.5 → 50%). */
+function formatPrimaryValueAxisTick(
+  chart: ChartModel,
+  value: number,
+  percentStacked: boolean,
+): string {
+  return formatChartValWithCode(
+    percentStacked ? value / 100 : value,
+    percentStacked ? (chart.valAxisFormatCode ?? '0%') : chart.valAxisFormatCode,
+    chart.date1904,
+  );
+}
+
 /** Build a {@link ValueAxisPlan} for the primary value axis. `dataMin`/`dataMax`
  *  are the raw data extents already massaged by the caller (0-anchoring, pct
  *  normalization, explicit valMin/valMax). `axisLenPt` drives the auto major
  *  unit. Reversal is read from the chart's value-axis orientation. */
 function planValueAxis(
-  chart: ChartModel, dataMin: number, dataMax: number, axisLenPt?: number,
+  chart: ChartModel,
+  dataMin: number,
+  dataMax: number,
+  axisLenPt?: number,
+  percentStacked = false,
 ): ValueAxisPlan {
   const reversed = valAxisReversed(chart);
   const logBase = chart.valAxisLogBase;
+  // c:valAx values remain ratios for percentStacked charts, but all plotted
+  // geometry in this renderer is expressed as percentage points. Explicit
+  // bounds/units therefore cross the same ×100 boundary as the series values.
+  // With no explicit bounds, percentStacked uses its exact normalized extent
+  // (0..100 or -100..100) instead of adding ordinary numeric-axis headroom.
+  const explicitMin = valueAxisUnitInRendererSpace(chart.valMin, percentStacked)
+    ?? (percentStacked ? dataMin : chart.valMin);
+  const explicitMax = valueAxisUnitInRendererSpace(chart.valMax, percentStacked)
+    ?? (percentStacked ? dataMax : chart.valMax);
+  const majorUnit = valueAxisUnitInRendererSpace(chart.valAxisMajorUnit, percentStacked);
   if (logBase != null && isFinite(logBase) && logBase >= 2) {
     // Logarithmic axis (ECMA-376 §21.2.2.98): bounds snap to powers of the base,
     // gridlines fall on those decades, values map in log space.
-    const { min, max, lines } = logAxisScale(dataMin, dataMax, logBase, chart.valMin, chart.valMax);
+    const { min, max, lines } = logAxisScale(dataMin, dataMax, logBase, explicitMin, explicitMax);
     return {
       min, max,
       step: lines.length > 1 ? lines[1] - lines[0] : max - min,
@@ -708,7 +746,7 @@ function planValueAxis(
     };
   }
   const { min, max, step } = valueAxisScale(
-    dataMin, dataMax, chart.valMin, chart.valMax, axisLenPt, chart.valAxisMajorUnit,
+    dataMin, dataMax, explicitMin, explicitMax, axisLenPt, majorUnit,
   );
   const range = (max - min) || 1;
   const majorLines: number[] = [];
@@ -718,7 +756,7 @@ function planValueAxis(
   // declares `<c:minorGridlines>` AND a positive `<c:minorUnit>`; the minor lines
   // between the majors are the interior multiples of the minor unit.
   const minorLines: number[] = [];
-  const mu = chart.valAxisMinorUnit;
+  const mu = valueAxisUnitInRendererSpace(chart.valAxisMinorUnit, percentStacked);
   if (chart.valAxisMinorGridlines && mu != null && isFinite(mu) && mu > 0 && mu < step) {
     for (let v = min + mu; v < max - 1e-9; v += mu) {
       // Skip values that coincide with a major line.
@@ -1213,12 +1251,16 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     dataMax = dataMax > 0 ? 100 : 0;
     dataMin = dataMin < 0 ? -100 : 0;
   }
-  if (chart.valMax != null) dataMax = chart.valMax;
-  if (chart.valMin != null) dataMin = chart.valMin;
+  if (chart.valMax != null) {
+    dataMax = pct ? chart.valMax * 100 : chart.valMax;
+  }
+  if (chart.valMin != null) {
+    dataMin = pct ? chart.valMin * 100 : chart.valMin;
+  }
   if (dataMax === 0 && dataMin === 0) dataMax = 1;
   // `planValueAxis` folds in the CH6 major unit / logBase / orientation; with
   // none set it is byte-identical to `valueAxisScale` + a linear map.
-  const plan = planValueAxis(chart, dataMin, dataMax, valAxisLenPt);
+  const plan = planValueAxis(chart, dataMin, dataMax, valAxisLenPt, pct);
   const { min: axMin, max: axMax, step } = plan;
 
   // Secondary value-axis scale (combo charts). INDEPENDENT of the primary: its
@@ -1232,7 +1274,9 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const sStep = secScale ? secScale.step : 1;
 
   const secTickFontPx = Math.max(8, Math.min(11, h / 20));
-  const tickFontPx = Math.max(8, Math.min(11, phEst / 20));
+  const measuredValTickFontPx = chart.valAxisFontSizeHpt != null
+    ? valAxLabelFontPx
+    : Math.max(8, Math.min(11, phEst / 20));
   const prevFont = ctx.font;
   // Primary value-axis label band (column charts only; horizontal bars keep a
   // wider left band for the category labels).
@@ -1240,14 +1284,12 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   if (!isH && !chart.valAxisHidden) {
     // Measure with the same face the value-axis ticks draw with (below), so the
     // reserved gutter width matches the painted labels when a real face is set.
-    ctx.font = `${tickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+    ctx.font = `${measuredValTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     let wmax = 0;
     const vSteps = Math.round((axMax - axMin) / step);
     for (let si = 0; si <= vSteps; si++) {
       const val = axMin + si * step;
-      const label = pct
-        ? `${Math.round(val)}%`
-        : formatChartValWithCode(val, chart.valAxisFormatCode, chart.date1904);
+      const label = formatPrimaryValueAxisTick(chart, val, pct);
       wmax = Math.max(wmax, ctx.measureText(label).width);
     }
     valLabelBandW = wmax + 16; // ~12px tick+gap to the axis + ~4px to the title
@@ -1339,7 +1381,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const grid = valGridStroke(chart, ptToPx);
   const steps = Math.round(axRange / step);
   ctx.textBaseline = 'middle';
-  ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+  const drawnValTickFontPx = chart.valAxisFontSizeHpt != null
+    ? valAxLabelFontPx
+    : Math.max(8, Math.min(11, ph / 20));
+  ctx.font = `${drawnValTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
   // Honor `<c:valAx><c:txPr>…<a:solidFill>` when present (ECMA-376 §21.2.2.*);
   // otherwise keep the neutral gray default.
   const valLabelColor = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
@@ -1362,9 +1407,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       // The zero line is the emphasized gridline (`si === 0` was that line only
       // while the axis was anchored at 0; with a negative minimum it moves up).
       const isZero = Math.abs(val) < step * 1e-9;
-      const label = pct
-        ? `${Math.round(val)}%`
-        : formatChartValWithCode(val, chart.valAxisFormatCode, chart.date1904);
+      const label = formatPrimaryValueAxisTick(chart, val, pct);
       if (!isH) {
         const gy = valY(val);
         if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, isZero, grid);
@@ -1891,9 +1934,9 @@ function renderLineChart(
   // minimum so `logAxisScale` can floor it to a decade. Linear axes keep the
   // historical 0-anchor for positive data (byte-stable).
   const isLogAxis = chart.valAxisLogBase != null && chart.valAxisLogBase >= 2;
-  if (chart.valMin != null) dataMin = chart.valMin;
+  if (chart.valMin != null) dataMin = pct ? chart.valMin * 100 : chart.valMin;
   else if (dataMin > 0 && !isLogAxis) dataMin = 0;
-  if (chart.valMax != null) dataMax = chart.valMax;
+  if (chart.valMax != null) dataMax = pct ? chart.valMax * 100 : chart.valMax;
   else if (dataMax < 0) dataMax = 0;
   if (dataMax === dataMin) dataMax = dataMin + 1;
 
@@ -1901,7 +1944,7 @@ function renderLineChart(
   // auto major unit, same model as the bar/column renderer). `planValueAxis`
   // folds in the CH6 major unit / logBase / orientation; with none set it is
   // byte-identical to the old `valueAxisScale` + linear `toY`.
-  const plan = planValueAxis(chart, dataMin, dataMax, ph / ptToPx);
+  const plan = planValueAxis(chart, dataMin, dataMax, ph / ptToPx, pct);
   if (plan.max - plan.min === 0) return;
 
   const toY = (v: number) => py0 + ph - plan.frac(v) * ph;
@@ -1936,7 +1979,7 @@ function renderLineChart(
       if (drawLabels) {
         ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
         ctx.textAlign = 'right';
-        ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
+        ctx.fillText(formatPrimaryValueAxisTick(chart, v, pct), px0 - 6, gy);
       }
     }
   }
@@ -2483,12 +2526,21 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // percentStacked always tops out at exactly 100% (each category's Σ|v|
   // normalizes to 100), matching the bar/line percentStacked axis convention.
   if (pct) dataMax = dataMax > 0 ? 100 : 0;
-  if (chart.valMax != null) dataMax = chart.valMax;
+  if (chart.valMax != null) dataMax = pct ? chart.valMax * 100 : chart.valMax;
   if (dataMax === 0) dataMax = 1;
   // Area anchors the value axis at 0; ignore the returned min. Value axis is
   // vertical → length = plot height (axis-length-aware auto major unit). An
   // explicit `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto step.
-  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax, ph / ptToPx, chart.valAxisMajorUnit);
+  const explicitMax = pct ? dataMax : chart.valMax;
+  const majorUnit = valueAxisUnitInRendererSpace(chart.valAxisMajorUnit, pct);
+  const { max: axMax, step } = valueAxisScale(
+    0,
+    dataMax,
+    undefined,
+    explicitMax,
+    ph / ptToPx,
+    majorUnit,
+  );
 
   // crossBetween="between" (Office's default; ECMA-376 §21.2.2.32 leaves the
   // default application-defined) gives each category a band of width pw/n and
@@ -2529,7 +2581,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     // the minor unit that don't coincide with a major line — same computation as
     // planValueAxis (renderer.ts ~686-696) used by bar/line/stock, with the area
     // axis anchored at min = 0. Fixes #883 (area previously ignored minor lines).
-    const mu = chart.valAxisMinorUnit;
+    const mu = valueAxisUnitInRendererSpace(chart.valAxisMinorUnit, pct);
     if (chart.valAxisMinorGridlines && mu != null && isFinite(mu) && mu > 0 && mu < step) {
       for (let v = mu; v < axMax - 1e-9; v += mu) {
         if (Math.abs(v / step - Math.round(v / step)) > 1e-6) {
@@ -2693,7 +2745,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, valLineColor, valLineW);
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
-      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
+      ctx.fillText(formatPrimaryValueAxisTick(chart, v, pct), px0 - 6, gy);
     }
   }
   // Category-axis baseline + value-axis rule. `<c:*Ax><c:spPr><a:ln><a:noFill>`

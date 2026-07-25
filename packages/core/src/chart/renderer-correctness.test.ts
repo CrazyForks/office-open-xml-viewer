@@ -13,7 +13,14 @@ import { renderChart } from './renderer.js';
 import { formatChartValWithCode } from './chart-number-format.js';
 
 interface RectCall { x: number; y: number; w: number; h: number; fs: string }
-interface TextCall { text: string; x: number; y: number; align: string; baseline: string }
+interface TextCall {
+  text: string;
+  x: number;
+  y: number;
+  align: string;
+  baseline: string;
+  font?: string;
+}
 
 interface Recorded {
   ctx: CanvasRenderingContext2D;
@@ -57,7 +64,14 @@ function recordingCtx(): Recorded {
             rects.push({ x, y, w, h, fs: String(state.fillStyle) });
         case 'fillText':
           return (text: string, x: number, y: number) =>
-            texts.push({ text, x, y, align: String(state.textAlign), baseline: String(state.textBaseline) });
+            texts.push({
+              text,
+              x,
+              y,
+              align: String(state.textAlign),
+              baseline: String(state.textBaseline),
+              font: String(state.font),
+            });
         case 'createLinearGradient':
         case 'createRadialGradient':
           return () => ({ addColorStop() {} });
@@ -341,6 +355,76 @@ describe('CH6 — negative bar data-label placement mirrors the positive convent
 describe('CH7 — percentStacked normalizes signed values against per-category Σ|v| (§21.2.2.76)', () => {
   // Positive contributions stack up/right, negatives down/left; each series is
   // normalized to (v / Σ|v|)·100 so the axis spans −100..100.
+  it.each([
+    'stackedBarPct',
+    'stackedLinePct',
+    'stackedAreaPct',
+  ] as const)('%s scales fractional OOXML axis units to percentage points', chartType => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType,
+      categories: ['A', 'B'],
+      series: [
+        series({ name: 'S1', values: [25, 75] }),
+        series({ name: 'S2', values: [75, 25] }),
+      ],
+      // The chart stores percent-axis values as ratios. The renderer's stacked
+      // geometry uses percentage points internally, so 0.5 must become the
+      // 50-point interval Excel displays as 50%, not a 0.5-point interval.
+      valAxisMajorUnit: 0.5,
+      valAxisFormatCode: '0%',
+    }), RECT, 1);
+
+    const labels = rec.texts
+      .map(t => t.text)
+      .filter(t => /^-?\d+(?:\.\d+)?%$/.test(t));
+    expect(labels).toEqual(['0%', '50%', '100%']);
+  });
+
+  it('column percent-axis labels honor the font size declared in valAx txPr', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBarPct',
+      categories: ['A'],
+      series: [
+        series({ name: 'S1', values: [25] }),
+        series({ name: 'S2', values: [75] }),
+      ],
+      valAxisMajorUnit: 0.5,
+      valAxisFormatCode: '0%',
+      // DrawingML run sizes are hundredths of a point: 1100 = 11 pt.
+      valAxisFontSizeHpt: 1100,
+    }), RECT, 4 / 3);
+
+    const percentLabels = rec.texts.filter(t => /^(?:0|50|100)%$/.test(t.text));
+    expect(percentLabels).toHaveLength(3);
+    for (const label of percentLabels) {
+      const fontPx = Number(/^([\d.]+)px/.exec(label.font ?? '')?.[1]);
+      expect(fontPx).toBeCloseTo(11 * 4 / 3, 5);
+    }
+  });
+
+  it('scales explicit fractional percent-axis bounds before plotting', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBarPct',
+      categories: ['A'],
+      series: [
+        series({ name: 'S1', values: [25] }),
+        series({ name: 'S2', values: [75] }),
+      ],
+      valMin: 0,
+      valMax: 1,
+      valAxisMajorUnit: 0.5,
+      valAxisFormatCode: '0%',
+    }), RECT, 1);
+
+    const labels = rec.texts
+      .map(t => t.text)
+      .filter(t => /^-?\d+(?:\.\d+)?%$/.test(t));
+    expect(labels).toEqual(['0%', '50%', '100%']);
+  });
+
   it('vertical percentStacked: positives stack above zero, negatives below, normalized to Σ|v|', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
