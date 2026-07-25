@@ -74,6 +74,8 @@ export type {
   // Slicers.
   SlicerAnchor,
   SlicerItem,
+  SlicerStyle,
+  SlicerElementStyle,
   // Metadata-only pivot facts (reachable via Worksheet.pivotTables).
   PivotTableMetadata,
   PivotLocation,

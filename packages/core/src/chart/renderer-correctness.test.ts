@@ -273,6 +273,30 @@ describe('CH6 — negative bar data-label placement mirrors the positive convent
     return best as RectCall;
   };
 
+  it('honors an explicit non-bold series data-label run property', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A'],
+      series: [series({
+        name: 'S',
+        values: [37],
+        seriesDataLabels: {
+          showVal: true,
+          showCatName: false,
+          showSerName: false,
+          showPercent: false,
+          fontBold: false,
+          fontSizeHpt: 1100,
+          position: 'outEnd',
+        },
+      })],
+      showDataLabels: true,
+    }), RECT, 1);
+    const label = labelPos(rec, '37');
+    expect(label.font).toBe('11px sans-serif');
+  });
+
   describe('vertical columns', () => {
     for (const pos of ['outEnd', 'inEnd', 'inBase', 'ctr']) {
       it(`${pos}: the negative label mirrors the positive label across the zero line`, () => {
@@ -3239,5 +3263,32 @@ describe('CH — combo bar+line primary value axis spans BOTH the bars and the p
     expect(withoutLine.length).toBe(2);
     expect(withLine[0].h).toBeCloseTo(withoutLine[0].h, 4);
     expect(withLine[1].h).toBeCloseTo(withoutLine[1].h, 4);
+  });
+});
+
+describe('CH — combo chart legends reflect each series chart group', () => {
+  it('draws the line-series legend key as a line inside a bar+line chart', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      series: [
+        series({ name: 'Amount', seriesType: 'bar', values: [20, 30] }),
+        series({ name: 'Time', seriesType: 'line', values: [5, 10] }),
+      ],
+      showLegend: true,
+      legendPos: 'b',
+    }), RECT, 1);
+
+    const lineLabel = rec.texts.find(t => t.text === 'Time');
+    expect(lineLabel).toBeDefined();
+    const lineKey = rec.segments.find(seg =>
+      seg.length === 2 &&
+      Math.abs(seg[0].y - (lineLabel as TextCall).y) < 0.01 &&
+      Math.abs(seg[1].y - (lineLabel as TextCall).y) < 0.01 &&
+      Math.abs(seg[1].x - seg[0].x - 10) < 0.01 &&
+      seg[1].x < (lineLabel as TextCall).x,
+    );
+    expect(lineKey).toBeDefined();
   });
 });

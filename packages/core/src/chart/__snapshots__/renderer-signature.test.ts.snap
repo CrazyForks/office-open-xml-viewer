@@ -940,7 +940,13 @@ set fillStyle=#333
 set textAlign=left
 fillText "Rev" 529.2,207.2 fs=#333 font=12px sans-serif al=left bl=middle
 set fillStyle=#ED7D31
-fillRect 515.2,217.2,10,12 fs=#ED7D31
+set strokeStyle=#ED7D31
+set lineWidth=1.8
+beginPath
+moveTo 515.2,223.2
+lineTo 525.2,223.2
+stroke ss=#ED7D31 lw=1.8 dash=
+set lineWidth=1
 set fillStyle=#333
 fillText "Margin" 529.2,223.2 fs=#333 font=12px sans-serif al=left bl=middle
 restore"

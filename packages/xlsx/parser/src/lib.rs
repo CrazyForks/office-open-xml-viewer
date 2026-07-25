@@ -291,7 +291,7 @@ fn parse_sheet_with(
     ws.comment_refs = ws.comments.iter().map(|c| c.cell_ref.clone()).collect();
     ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
     ws.tables = load_sheet_tables(archive, &sheet_path, theme_colors);
-    ws.slicers = load_sheet_slicers(archive, &sheet_path);
+    ws.slicers = load_sheet_slicers(archive, &sheet_path, theme_colors);
     (ws.pivot_tables, ws.pivot_diagnostics) = load_sheet_pivots(archive, &sheet_path);
     ws.sparkline_groups = load_sheet_sparklines(
         archive,

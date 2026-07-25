@@ -29,7 +29,7 @@ export interface DrawingMLShapePaintPlan {
   readonly rect: Readonly<{ x: number; y: number; w: number; h: number }>;
   readonly geometry: DrawingMLShapeGeometry;
   readonly fill: DrawingMLShapeFill | null;
-  readonly stroke: Readonly<Stroke> | null;
+  readonly stroke: DeepReadonly<Stroke> | null;
   readonly transform: Readonly<{
     rotationDeg: number;
     flipH: boolean;
@@ -55,6 +55,19 @@ function retractableLeader(geometry: string): boolean {
     || geometry === 'line'
     || geometry === 'straightconnector1'
     || geometry.startsWith('bentconnector');
+}
+
+function applyDrawingMLStroke(
+  ctx: CanvasRenderingContext2D,
+  stroke: Stroke,
+  unitToDevice: number,
+  rect: DrawingMLShapePaintPlan['rect'],
+): void {
+  applyStroke(ctx, stroke, unitToDevice);
+  if (stroke.fill) {
+    const paint = resolveFill(stroke.fill as Fill, ctx, rect.x, rect.y, rect.w, rect.h);
+    if (paint) ctx.strokeStyle = paint;
+  }
 }
 
 function paintConnectorEnds(
@@ -89,7 +102,7 @@ function paintConnectorEnds(
         lineEndRetract(stroke.headEnd, stroke, unitToDevice),
       );
     }
-    applyStroke(ctx, stroke, unitToDevice);
+    applyDrawingMLStroke(ctx, stroke, unitToDevice, plan.rect);
     ctx.beginPath();
     ctx.moveTo(points[0].x, points[0].y);
     for (let index = 1; index < points.length; index++) {
@@ -166,7 +179,7 @@ export function paintDrawingMLShape(
     const stroke = plan.stroke as Stroke | null;
     const applyAndStroke = stroke
       ? () => {
-          applyStroke(ctx, stroke, unitToDevice);
+          applyDrawingMLStroke(ctx, stroke, unitToDevice, plan.rect);
           ctx.stroke();
         }
       : null;

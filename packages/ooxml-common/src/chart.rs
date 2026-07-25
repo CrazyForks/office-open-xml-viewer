@@ -796,12 +796,12 @@ pub trait ColorResolver {
     /// including `lumMod`/`lumOff`/`tint`/`shade` transforms.
     ///
     /// This is the resolver used for chart *shape* fills that sit one level
-    /// below their container — marker fill/line (`<c:marker><c:spPr>` /
-    /// `…<a:ln>`), per-point fills (`<c:dPt><c:spPr>`) and error-bar strokes
+    /// below their container — series fills/lines (`<c:ser><c:spPr>` /
+    /// `…<a:ln>`), marker fill/line (`<c:marker><c:spPr>` / `…<a:ln>`),
+    /// per-point fills (`<c:dPt><c:spPr>`) and error-bar strokes
     /// (`<c:errBars><c:spPr>` / `…<a:ln>`). It is intentionally distinct from
-    /// [`ColorResolver::resolve_solid_fill`]: some resolvers (xlsx) resolve
-    /// *series* fills through a lighter, transform-free path for historical
-    /// byte-compatibility, while shape fills always want the full grammar.
+    /// [`ColorResolver::resolve_solid_fill`] so resolvers can route every shape
+    /// through the complete DrawingML color-transform grammar.
     ///
     /// The default implementation finds the direct-child `<a:solidFill>` and
     /// delegates to [`ColorResolver::resolve_solid_fill`], which is correct for
@@ -3729,19 +3729,17 @@ pub fn parse_chart_part_with_references(
                 .children()
                 .find(|n| n.is_element() && n.tag_name().name() == "spPr")
                 .and_then(|sp| {
-                    sp.children()
-                        .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
-                        .or_else(|| {
-                            sp.children()
-                                .find(|n| n.is_element() && n.tag_name().name() == "ln")
-                                .and_then(|ln| {
-                                    ln.children().find(|n| {
-                                        n.is_element() && n.tag_name().name() == "solidFill"
-                                    })
-                                })
-                        })
+                    if sp
+                        .children()
+                        .any(|n| n.is_element() && n.tag_name().name() == "solidFill")
+                    {
+                        color_resolver.resolve_shape_fill(sp)
+                    } else {
+                        sp.children()
+                            .find(|n| n.is_element() && n.tag_name().name() == "ln")
+                            .and_then(|ln| color_resolver.resolve_shape_fill(ln))
+                    }
                 })
-                .and_then(|fill| color_resolver.resolve_solid_fill(fill))
                 .or_else(|| color_resolver.resolve_series_accent(series_idx));
 
             // §21.2.2.198 series-level `<c:spPr><a:ln>`: an explicit `<a:noFill/>`

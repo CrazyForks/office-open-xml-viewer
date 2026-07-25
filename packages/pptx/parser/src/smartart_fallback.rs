@@ -377,7 +377,9 @@ fn emit_placeholder(gf_xfrm: &Transform, out: &mut Vec<SlideElement>) -> bool {
     shape.stroke = Some(Stroke {
         color: "808080".into(),
         width: 9525,
+        fill: None,
         dash_style: None,
+        line_cap: None,
         head_end: None,
         tail_end: None,
         cmpd: None,

@@ -3387,6 +3387,52 @@ mod tests {
         assert!(s.cmpd.is_none());
     }
 
+    /// ECMA-376 §20.1.8.38 CT_LineProperties permits the same fill choices as
+    /// shapes, including gradFill. A gradient line must remain a visible
+    /// stroke instead of being discarded for lacking solidFill.
+    #[test]
+    fn test_parse_gradient_stroke() {
+        let theme = HashMap::new();
+        let xml = r#"
+          <ln xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"
+              w="76200" cap="rnd">
+            <gradFill rotWithShape="1">
+              <gsLst>
+                <gs pos="19000"><srgbClr val="112233"><alpha val="0"/></srgbClr></gs>
+                <gs pos="100000"><srgbClr val="AABBCC"/></gs>
+              </gsLst>
+              <lin ang="5400000" scaled="1"/>
+            </gradFill>
+            <headEnd type="arrow" w="lg" len="sm"/>
+          </ln>
+        "#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let stroke =
+            parse_stroke(doc.root_element(), &theme).expect("gradient stroke should parse");
+
+        assert_eq!(stroke.width, 76200);
+        assert_eq!(stroke.color, "AABBCC");
+        assert_eq!(
+            stroke.head_end.as_ref().map(|end| end.kind.as_str()),
+            Some("arrow")
+        );
+        match stroke.fill {
+            Some(Fill::Gradient {
+                stops,
+                angle,
+                grad_type,
+            }) => {
+                assert_eq!(angle, 90.0);
+                assert_eq!(grad_type, "linear");
+                assert_eq!(stops.len(), 2);
+                assert_eq!(stops[0].position, 0.19);
+                assert_eq!(stops[0].color, "11223300");
+                assert_eq!(stops[1].color, "AABBCC");
+            }
+            other => panic!("expected gradient stroke fill, got {other:?}"),
+        }
+    }
+
     #[test]
     fn master_body_style_per_level_font_sizes() {
         // ECMA-376 §21.1.2.4: each list level has its own defRPr sz. A 2nd-level

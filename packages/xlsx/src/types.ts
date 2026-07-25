@@ -276,11 +276,29 @@ export interface SlicerAnchor {
   toRowOff: number;
   caption: string;
   items: SlicerItem[];
+  /** Resolved custom slicer style. Absent means use the built-in fallback. */
+  style?: SlicerStyle;
 }
 
 export interface SlicerItem {
   name: string;
   selected: boolean;
+}
+
+export interface SlicerStyle {
+  whole?: SlicerElementStyle;
+  header?: SlicerElementStyle;
+  selectedItemWithData?: SlicerElementStyle;
+  unselectedItemWithData?: SlicerElementStyle;
+}
+
+export interface SlicerElementStyle {
+  fontColor?: string;
+  fontSize?: number;
+  fontBold?: boolean;
+  fontFamily?: string;
+  fillColor?: string;
+  borderColor?: string;
 }
 
 export interface TableInfo {

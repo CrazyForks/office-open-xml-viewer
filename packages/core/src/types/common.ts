@@ -182,6 +182,8 @@ export interface Stroke {
   color: string;
   /** Width in EMU */
   width: number;
+  /** Authored non-solid DrawingML line paint. Solid lines use `color`. */
+  fill?: Exclude<Fill, { fillType: 'image' } | { fillType: 'none' }>;
   /** OOXML prstDash value: "dash", "dot", "dashDot", "lgDash", "lgDashDot", etc. */
   dashStyle?: string;
   /** Canvas line cap normalized from DrawingML/VML (`flat` → `butt`). */

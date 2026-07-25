@@ -389,7 +389,9 @@ pub(crate) fn parse_shape(
                 Stroke {
                     color: c,
                     width,
+                    fill: None,
                     dash_style: None,
+                    line_cap: None,
                     head_end: None,
                     tail_end: None,
                     cmpd: None,
@@ -1069,7 +1071,9 @@ pub(crate) fn parse_table_styles_xml(
                     return Some(Stroke {
                         color,
                         width,
+                        fill: None,
                         dash_style: None,
+                        line_cap: None,
                         head_end: None,
                         tail_end: None,
                         cmpd: None,
@@ -1355,7 +1359,9 @@ pub(crate) fn parse_table(
                 let thin = Stroke {
                     color: "A0A096".to_string(),
                     width: 9525,
+                    fill: None,
                     dash_style: None,
+                    line_cap: None,
                     head_end: None,
                     tail_end: None,
                     cmpd: None,
@@ -2307,7 +2313,9 @@ fn parse_connector(
                 Stroke {
                     color: c,
                     width,
+                    fill: None,
                     dash_style: None,
+                    line_cap: None,
                     head_end: None,
                     tail_end: None,
                     cmpd: None,
@@ -2317,9 +2325,7 @@ fn parse_connector(
     });
 
     // Merge <a:ln> attributes onto style_stroke: <a:ln> commonly contains only
-    // arrow ends (headEnd/tailEnd) while the color/width come from lnRef.
-    // parse_stroke() alone drops the whole stroke when solidFill is absent,
-    // which leaves connectors invisible on slides that rely on style_ref.
+    // arrow ends (headEnd/tailEnd) while the paint/width come from lnRef.
     let ln_node = child(sp_pr, "ln");
     let stroke: Option<Stroke> = match ln_node {
         None => style_stroke,
@@ -2328,10 +2334,16 @@ fn parse_connector(
                 None
             } else {
                 let ln_width = attr_i64(&ln, "w");
-                let ln_color = child(ln, "solidFill").and_then(|n| parse_color_node(n, theme));
+                let parsed = parse_stroke(ln, theme);
                 let ln_dash = child(ln, "prstDash")
                     .and_then(|n| attr(&n, "val"))
                     .filter(|v| v != "solid");
+                let ln_cap = attr(&ln, "cap").and_then(|cap| match cap.as_str() {
+                    "rnd" => Some("round".to_owned()),
+                    "sq" => Some("square".to_owned()),
+                    "flat" => Some("butt".to_owned()),
+                    _ => None,
+                });
                 let ln_head = child(ln, "headEnd")
                     .map(parse_arrow_end)
                     .filter(|a| a.kind != "none");
@@ -2339,23 +2351,34 @@ fn parse_connector(
                     .map(parse_arrow_end)
                     .filter(|a| a.kind != "none");
                 let ln_cmpd = attr(&ln, "cmpd").filter(|v| v != "sng");
-                match (ln_color, style_stroke) {
-                    (Some(c), base) => Some(Stroke {
-                        color: c,
+                match (parsed, style_stroke) {
+                    (Some(authored), base) => Some(Stroke {
+                        color: authored.color,
                         width: ln_width
                             .unwrap_or_else(|| base.as_ref().map(|s| s.width).unwrap_or(9525)),
-                        dash_style: ln_dash
+                        fill: authored.fill,
+                        dash_style: authored
+                            .dash_style
                             .or_else(|| base.as_ref().and_then(|s| s.dash_style.clone())),
-                        head_end: ln_head
+                        line_cap: authored
+                            .line_cap
+                            .or_else(|| base.as_ref().and_then(|s| s.line_cap.clone())),
+                        head_end: authored
+                            .head_end
                             .or_else(|| base.as_ref().and_then(|s| s.head_end.clone())),
-                        tail_end: ln_tail
+                        tail_end: authored
+                            .tail_end
                             .or_else(|| base.as_ref().and_then(|s| s.tail_end.clone())),
-                        cmpd: ln_cmpd.or_else(|| base.as_ref().and_then(|s| s.cmpd.clone())),
+                        cmpd: authored
+                            .cmpd
+                            .or_else(|| base.as_ref().and_then(|s| s.cmpd.clone())),
                     }),
                     (None, Some(base)) => Some(Stroke {
                         color: base.color,
                         width: ln_width.unwrap_or(base.width),
+                        fill: base.fill,
                         dash_style: ln_dash.or(base.dash_style),
+                        line_cap: ln_cap.or(base.line_cap),
                         head_end: ln_head.or(base.head_end),
                         tail_end: ln_tail.or(base.tail_end),
                         cmpd: ln_cmpd.or(base.cmpd),

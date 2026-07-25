@@ -338,7 +338,12 @@ function drawLegendSwatch(
  *  swatch color is resolved exactly like the mark it represents (slice / bar /
  *  line). See {@link legendEntryColor}. `marker` is set only for markers-only
  *  scatter series, whose key is a point glyph instead of the line swatch (#803). */
-interface LegendEntry { label: string; color: string; marker: LegendMarker | null }
+interface LegendEntry {
+  label: string;
+  color: string;
+  marker: LegendMarker | null;
+  swatchStyle: LegendSwatchStyle;
+}
 
 /** Build the legend entries for a chart. Pie/doughnut legends are
  *  category-driven (one row per data point of the first series, labeled by
@@ -361,12 +366,16 @@ function buildLegendEntries(
       label: (cats[i] ?? `Item ${i + 1}`).toString(),
       color: legendEntryColor(chartType, series, i, varyByPoint),
       marker: null, // pie/doughnut/varyColors keys are always filled swatches.
+      swatchStyle: legendSwatchStyle(chartType),
     }));
   }
   return series.map((s, i) => ({
     label: s.name || `Series ${i + 1}`,
     color: legendEntryColor(chartType, series, i),
     marker: legendMarkerFor(chartType, scatterStyle, series, i),
+    // A combo chart has multiple chart groups under one plotArea. The legend
+    // key describes the individual series' group, not the first/primary group.
+    swatchStyle: legendSwatchStyle(s.seriesType ?? chartType),
   }));
 }
 
@@ -400,7 +409,6 @@ function drawLegend(
   chartCategories: string[] = [],
 ): void {
   const sw = 10; const gap = 4;
-  const swatchStyle = legendSwatchStyle(chartType);
   const entries = buildLegendEntries(series, chartType, scatterStyle, varyByPoint, chartCategories);
   const boldPrefix = style.bold ? 'bold ' : '';
   if (orient === 'horizontal') {
@@ -424,7 +432,7 @@ function drawLegend(
     let rx = lx + (lw - total) / 2;
     const ry = ly + lh / 2;
     for (let i = 0; i < entries.length; i++) {
-      drawLegendSwatch(ctx, swatchStyle, entries[i].color, rx, ry - fontSize / 2, sw, fontSize, entries[i].marker);
+      drawLegendSwatch(ctx, entries[i].swatchStyle, entries[i].color, rx, ry - fontSize / 2, sw, fontSize, entries[i].marker);
       ctx.fillStyle = style.color; ctx.textAlign = 'left';
       ctx.fillText(labels[i], rx + sw + gap, ry);
       rx += itemWidths[i] + itemGap;
@@ -440,7 +448,7 @@ function drawLegend(
   const maxTextPx = lw - sw - gap;
   let ry = ly + (lh - rowH * entries.length) / 2;
   for (let i = 0; i < entries.length; i++) {
-    drawLegendSwatch(ctx, swatchStyle, entries[i].color, lx, ry, sw, fontSize, entries[i].marker);
+    drawLegendSwatch(ctx, entries[i].swatchStyle, entries[i].color, lx, ry, sw, fontSize, entries[i].marker);
     ctx.fillStyle = style.color; ctx.textAlign = 'left';
     ctx.fillText(elideToWidth(ctx, entries[i].label, maxTextPx), lx + sw + gap, ry + fontSize / 2);
     ry += rowH;
@@ -1583,15 +1591,18 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
           // `<c:dLbls><c:txPr>...<a:defRPr@sz>` (hundredths of a point). When
           // the file specifies one we honor it; otherwise the proportional
           // heuristic keeps small bars readable.
-          const lsz = chart.dataLabelFontSizeHpt
-            ? (chart.dataLabelFontSizeHpt / 100) * ptToPx
+          const seriesLabels = s.seriesDataLabels;
+          const sizeHpt = seriesLabels?.fontSizeHpt ?? chart.dataLabelFontSizeHpt;
+          const lsz = sizeHpt
+            ? (sizeHpt / 100) * ptToPx
             : Math.max(7, Math.min(11, barW * 0.6));
-          ctx.font = `bold ${lsz}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
+          const bold = seriesLabels?.fontBold ?? true;
+          ctx.font = `${bold ? 'bold ' : ''}${lsz}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
           const text = pct
             ? `${Math.round(sv)}%`
             : formatChartValWithCode(
                 sv,
-                chart.dataLabelFormatCode ?? s.valFormatCode ?? null,
+                seriesLabels?.formatCode ?? chart.dataLabelFormatCode ?? s.valFormatCode ?? null,
                 chart.date1904,
               );
           // drawBarDataLabel takes (bx, by, barL=length, barW=thickness). For
@@ -1605,8 +1616,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
             ctx, text,
             bx, by, barH, barW,
             'vertical',
-            chart.dataLabelPosition ?? null,
-            s.labelColor ?? chart.dataLabelFontColor ?? null,
+            seriesLabels?.position ?? chart.dataLabelPosition ?? null,
+            seriesLabels?.fontColor ?? s.labelColor ?? chart.dataLabelFontColor ?? null,
             negative,
           );
         }
@@ -1626,23 +1637,26 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         ctx.fillStyle = color;
         ctx.fillRect(bx, by, barL, barW);
         if (chart.showDataLabels && sv !== 0) {
-          const lsz = chart.dataLabelFontSizeHpt
-            ? (chart.dataLabelFontSizeHpt / 100) * ptToPx
+          const seriesLabels = s.seriesDataLabels;
+          const sizeHpt = seriesLabels?.fontSizeHpt ?? chart.dataLabelFontSizeHpt;
+          const lsz = sizeHpt
+            ? (sizeHpt / 100) * ptToPx
             : Math.max(7, Math.min(11, barW * 0.6));
-          ctx.font = `bold ${lsz}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
+          const bold = seriesLabels?.fontBold ?? true;
+          ctx.font = `${bold ? 'bold ' : ''}${lsz}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
           const text = pct
             ? `${Math.round(sv)}%`
             : formatChartValWithCode(
                 sv,
-                chart.dataLabelFormatCode ?? s.valFormatCode ?? null,
+                seriesLabels?.formatCode ?? chart.dataLabelFormatCode ?? s.valFormatCode ?? null,
                 chart.date1904,
               );
           drawBarDataLabel(
             ctx, text,
             bx, by, barL, barW,
             'horizontal',
-            chart.dataLabelPosition ?? null,
-            s.labelColor ?? chart.dataLabelFontColor ?? null,
+            seriesLabels?.position ?? chart.dataLabelPosition ?? null,
+            seriesLabels?.fontColor ?? s.labelColor ?? chart.dataLabelFontColor ?? null,
             negative,
           );
         }
