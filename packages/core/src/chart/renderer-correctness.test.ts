@@ -20,6 +20,7 @@ interface TextCall {
   align: string;
   baseline: string;
   font?: string;
+  width?: number;
 }
 
 interface Recorded {
@@ -48,17 +49,18 @@ function recordingCtx(): Recorded {
     const m = /(\d+(?:\.\d+)?)px/.exec(font);
     return m ? parseFloat(m[1]) : 10;
   };
+  const textWidth = (text: string): number => {
+    const px = fontPx(String(state.font));
+    let w = 0;
+    for (const ch of String(text)) w += ch.charCodeAt(0) > 0x2e7f ? px : px * 0.6;
+    return w;
+  };
   const handler: ProxyHandler<Record<string, unknown>> = {
     get(_t, prop: string) {
       if (prop in state && typeof state[prop] !== 'function') return state[prop];
       switch (prop) {
         case 'measureText':
-          return (t: string) => {
-            const px = fontPx(String(state.font));
-            let w = 0;
-            for (const ch of String(t)) w += ch.charCodeAt(0) > 0x2e7f ? px : px * 0.6;
-            return { width: w };
-          };
+          return (t: string) => ({ width: textWidth(t) });
         case 'fillRect':
           return (x: number, y: number, w: number, h: number) =>
             rects.push({ x, y, w, h, fs: String(state.fillStyle) });
@@ -71,6 +73,7 @@ function recordingCtx(): Recorded {
               align: String(state.textAlign),
               baseline: String(state.textBaseline),
               font: String(state.font),
+              width: textWidth(text),
             });
         case 'createLinearGradient':
         case 'createRadialGradient':
@@ -402,6 +405,38 @@ describe('CH7 — percentStacked normalizes signed values against per-category �
       const fontPx = Number(/^([\d.]+)px/.exec(label.font ?? '')?.[1]);
       expect(fontPx).toBeCloseTo(11 * 4 / 3, 5);
     }
+  });
+
+  it('keeps explicit-size value-axis labels inside an inner manual-layout chart frame', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBarPct',
+      categories: ['A'],
+      series: [
+        series({ name: 'S1', values: [25] }),
+        series({ name: 'S2', values: [75] }),
+      ],
+      valAxisMajorUnit: 0.5,
+      valAxisFormatCode: '0%',
+      valAxisFontSizeHpt: 1100,
+      // ECMA-376 §21.2.2.89: an inner target describes the data region,
+      // excluding axes and labels. Those labels must still remain inside the
+      // chart frame when their actual DrawingML font metrics need more room.
+      plotAreaManualLayout: {
+        layoutTarget: 'inner',
+        xMode: 'edge',
+        yMode: 'edge',
+        x: 0.055,
+        y: 0.046,
+        w: 0.728,
+        h: 0.784,
+      },
+    }), RECT, 4 / 3);
+
+    const label = rec.texts.find(t => t.text === '100%');
+    expect(label).toBeDefined();
+    expect(label!.align).toBe('right');
+    expect(label!.x - (label!.width ?? 0)).toBeGreaterThanOrEqual(RECT.x + 4);
   });
 
   it('scales explicit fractional percent-axis bounds before plotting', () => {

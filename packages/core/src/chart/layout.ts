@@ -385,10 +385,28 @@ export function computeChartFrame(
     }
     const pml = params.honorPlotAreaManualLayout ? chart.plotAreaManualLayout : null;
     if (pml && pml.w != null && pml.h != null) {
-      px0 = x + pml.x * w;
-      py0 = y + pml.y * h;
-      pw = pml.w * w;
-      ph = pml.h * h;
+      const manualLeft = x + pml.x * w;
+      const manualTop = y + pml.y * h;
+      const manualRight = manualLeft + pml.w * w;
+      const manualBottom = manualTop + pml.h * h;
+      if (pml.layoutTarget === 'inner') {
+        // ECMA-376 §21.2.2.89: an "inner" manual layout describes only the
+        // data region, excluding axes and labels. Browser font metrics can
+        // require slightly more gutter than the producer reserved, so keep
+        // that outer content inside the chart frame without moving the
+        // declared plot's right/bottom edges.
+        px0 = Math.max(manualLeft, x + pad.l);
+        py0 = Math.max(manualTop, y + pad.t);
+        const right = Math.min(manualRight, x + w - pad.r);
+        const bottom = Math.min(manualBottom, y + h - pad.b);
+        pw = Math.max(0, right - px0);
+        ph = Math.max(0, bottom - py0);
+      } else {
+        px0 = manualLeft;
+        py0 = manualTop;
+        pw = pml.w * w;
+        ph = pml.h * h;
+      }
     } else {
       px0 = x + pad.l;
       py0 = y + pad.t;
