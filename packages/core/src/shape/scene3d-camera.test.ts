@@ -40,6 +40,15 @@ describe('computeScene3dQuad', () => {
     expect(q.isIdentity).toBe(true);
   });
 
+  it('recognizes every named perspective preset as perspective projection', () => {
+    const cam: CameraInput = {
+      prst: 'perspectiveContrastingLeftFacing',
+      rot: { lat: 30, lon: 40, rev: 350 },
+    };
+    const q = computeScene3dQuad(cam, W, H);
+    expect(q.isAffine).toBe(false);
+  });
+
   it('lon>0 turns the right edge TOWARD the viewer (right edge nearer/taller)', () => {
     // A pure longitude (Y-axis) turn. With lon > 0 the right edge comes toward
     // the viewer and the left edge recedes (file-angle convention — see the
@@ -140,28 +149,25 @@ describe('computeScene3dQuad', () => {
     expect(gap(qw)).toBeGreaterThan(gap(qb));
   });
 
-  it('zoom keeps the quad centred (refit absorbs uniform scale)', () => {
-    // The refit pins the projected quad's bounding-box centre to the element's
-    // bbox centre, so a uniform zoom does not shift the quad.
-    const cam: CameraInput = { prst: 'perspectiveFront', rot: { lat: 20, lon: 10, rev: 0 }, zoom: 2 };
-    const q = computeScene3dQuad(cam, W, H);
-    const xs = q.corners.map((c) => c.x);
-    const ys = q.corners.map((c) => c.y);
-    const bbCx = (Math.min(...xs) + Math.max(...xs)) / 2;
-    const bbCy = (Math.min(...ys) + Math.max(...ys)) / 2;
-    expect(bbCx).toBeCloseTo(W / 2, 3);
-    expect(bbCy).toBeCloseTo(H / 2, 3);
+  it('camera zoom changes the projected extent instead of being cancelled', () => {
+    const base: CameraInput = {
+      prst: 'perspectiveFront',
+      rot: { lat: 20, lon: 10, rev: 0 },
+    };
+    const zoomed: CameraInput = { ...base, zoom: 2 };
+    const extent = (q: ReturnType<typeof computeScene3dQuad>): number => {
+      const xs = q.corners.map((c) => c.x);
+      return Math.max(...xs) - Math.min(...xs);
+    };
+    expect(extent(computeScene3dQuad(zoomed, W, H)))
+      .toBeCloseTo(2 * extent(computeScene3dQuad(base, W, H)), 6);
   });
 
-  it('projected quad fits inside the original bounding box', () => {
+  it('does not refit a tilted projection into the original 2-D box', () => {
     const cam: CameraInput = { prst: 'perspectiveRelaxed', rot: { lat: 330, lon: 20, rev: 347 } };
     const q = computeScene3dQuad(cam, W, H);
-    for (const c of q.corners) {
-      expect(c.x).toBeGreaterThanOrEqual(-0.001);
-      expect(c.x).toBeLessThanOrEqual(W + 0.001);
-      expect(c.y).toBeGreaterThanOrEqual(-0.001);
-      expect(c.y).toBeLessThanOrEqual(H + 0.001);
-    }
+    expect(q.corners.some((c) => c.x < 0 || c.x > W || c.y < 0 || c.y > H))
+      .toBe(true);
   });
 
   it('snapshot — sample-11 slide-3 camera (perspectiveRelaxed lat330 lon20 rev347)', () => {

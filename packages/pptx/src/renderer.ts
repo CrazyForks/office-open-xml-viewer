@@ -2294,6 +2294,24 @@ function shapeDefaultTextColor(el: ShapeElement, rc: RenderContext): string | nu
   return null;
 }
 
+/**
+ * DrawingML camera projection consumes the shape-local face after xfrm flips;
+ * the ordinary 2-D rotation remains outside the projected face. Keeping this
+ * split explicit prevents a post-projection flip from mirroring the camera
+ * footprint itself.
+ */
+export function splitScene3dShapeTransform(
+  rotation: number,
+  flipH: boolean,
+  flipV: boolean,
+): { outerRotation: number; localFlipH: boolean; localFlipV: boolean } {
+  return {
+    outerRotation: rotation,
+    localFlipH: flipH,
+    localFlipV: flipV,
+  };
+}
+
 function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }, onTextRun?: TextRunCallback, fetchImage?: FetchImage) {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
@@ -2326,8 +2344,8 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   // A text-bearing shape with a non-identity 3-D camera is rendered to a local
   // offscreen (fill + stroke + TEXT), optionally bevel-shaded, then warped onto
   // the live ctx through the camera homography — the same pipeline the picture
-  // path uses. The element's 2-D rotation/flip stays on the live ctx so the warp
-  // composes inside it ("scene3d first, then xfrm", §20.1.5.5).
+  // path uses. Authored flips are part of the local face before projection;
+  // the element's 2-D rotation stays on the live ctx outside the warp.
   //
   // LIMITATION (documented, not silent): the HTML text-selection overlay tracks
   // glyphs by their un-projected layout rect and CSS transforms; it cannot
@@ -2354,14 +2372,14 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       scale,
       ctxDevScale,
     );
-    // Apply the element's own rotation/flip on the live ctx; the warp composes
-    // inside it.
+    const sceneTransform =
+      splitScene3dShapeTransform(el.rotation, el.flipH, el.flipV);
+    // Apply the element's 2-D rotation on the live ctx; the warp composes
+    // inside it. Flips stay with the local face below.
     ctx.save();
-    if (el.rotation !== 0 || el.flipH || el.flipV) {
+    if (sceneTransform.outerRotation !== 0) {
       ctx.translate(x + w / 2, y + h / 2);
-      ctx.rotate((el.rotation * Math.PI) / 180);
-      if (el.flipH) ctx.scale(-1, 1);
-      if (el.flipV) ctx.scale(1, -1);
+      ctx.rotate((sceneTransform.outerRotation * Math.PI) / 180);
       ctx.translate(-(x + w / 2), -(y + h / 2));
     }
     // Local copy with the camera and 2-D placement neutralised: rendered at the
@@ -2372,8 +2390,8 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       x: 0,
       y: 0,
       rotation: 0,
-      flipH: false,
-      flipV: false,
+      flipH: sceneTransform.localFlipH,
+      flipV: sceneTransform.localFlipV,
       scene3d: undefined,
     };
     const ok = projectScene3dPaint(
@@ -4067,8 +4085,8 @@ function projectScene3dPaint(
   // Edge margin (see Project3dOpts.edgePadCss). Quantised to whole device px so
   // the body lands on the same pixel grid as the unpadded layout, then mapped
   // onto the destination by extrapolating the camera quad through its own
-  // homography (computeScene3dQuad re-fits to the box it is given, so it must
-  // NOT be called with the padded size). Degenerate extrapolation → pad 0.
+  // homography. The camera is defined for the authored w×h face, so it must not
+  // be recomputed from the padded raster size. Degenerate extrapolation → pad 0.
   let padDev = Math.max(0, Math.ceil((opts.edgePadCss ?? 0) * devScale));
   const quad = computeScene3dQuad(camera, w, h);
   let quadCorners = quad.corners;

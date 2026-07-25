@@ -397,10 +397,9 @@ function affineScale(m: Affine): number {
  * Used to grow a shape's offscreen by an edge margin (for the centre-aligned
  * border's outer half, the outside-aligned contour, and the extrusion sweep —
  * all of which extend past the shape's bounding box) WITHOUT re-deriving the
- * camera quad at the padded size: `computeScene3dQuad` re-fits its projection
- * to the box it is given, so calling it with a padded box would change the
- * geometry instead of just extending it. Extrapolating the existing quad keeps
- * the body's projection bit-identical and maps the margin consistently.
+ * camera from the padded raster size. Extrapolating the authored face's
+ * existing quad keeps the body's projection bit-identical and maps the margin
+ * consistently.
  *
  * Returns null when the quad is degenerate or the extrapolated corner would
  * cross the projection horizon (homography denominator ≤ 0) — callers should

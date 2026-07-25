@@ -125,9 +125,10 @@ interface PresetDef {
 const DEFAULT_PERSP_FOV = 26;
 
 /**
- * Preset camera table. Only the presets we can render in Phase A (planar
- * homography) are enumerated with their orientation; everything else falls back
- * to `orthographicFront` (identity) so an unknown/legacy preset never throws.
+ * Preset camera table. Only presets whose default orientation is implemented
+ * are enumerated. Other standard `perspective*` presets still use perspective
+ * projection when an authored `<a:rot>` supplies their orientation; unrelated
+ * unknown/legacy presets fall back to `orthographicFront` without throwing.
  *
  * Orientation sign convention. Object axes: +X right, +Y down, +Z toward the
  * viewer (depth = d − z, so a corner with larger +z projects larger). The
@@ -251,14 +252,21 @@ function buildRotation(preset: PresetDef, rot: RotInput | undefined): Mat3 {
   return mul3(rotZ(-rev), mul3(rotX(-lat), rotY(-lon)));
 }
 
-/** Look up a preset def, falling back to orthographicFront for unknown names. */
+/** Look up a preset while retaining the projection family encoded by its
+ * standard name. An explicit `<a:rot>` replaces the missing preset orientation,
+ * so the perspectiveFront lens is the neutral fallback for that family. */
 function presetDef(prst: string): PresetDef {
-  return PRESETS[prst] ?? PRESETS.orthographicFront;
+  const known = PRESETS[prst];
+  if (known) return known;
+  if (prst.startsWith('perspective')) return PRESETS.perspectiveFront;
+  return PRESETS.orthographicFront;
 }
 
 /**
  * Project a planar shape (the w×h rectangle) through the camera and return the
- * four projected corners, refit into the original w×h bounding box.
+ * four projected corners in shape-local coordinates. A tilted camera can
+ * legitimately project outside the original 2-D box; forcing it back into
+ * that box would cancel camera zoom and shrink the authored 3-D scene.
  *
  * @param camera  parsed <a:camera> (prst / fov / zoom / rot, angles in degrees).
  * @param w       shape width in CSS pixels.
@@ -329,31 +337,9 @@ export function computeScene3dQuad(camera: CameraInput, w: number, h: number): S
   // Apply zoom about the centre.
   projected = projected.map(([px, py]) => [px * zoom, py * zoom] as [number, number]);
 
-  // Refit the projected quad into the original w×h box: scale uniformly so the
-  // quad's bounding box matches w×h, then translate so its centre sits at the
-  // box centre (w/2, h/2). Uniform scale preserves the projected shape's aspect
-  // (we never stretch x and y independently).
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const [px, py] of projected) {
-    if (px < minX) minX = px;
-    if (py < minY) minY = py;
-    if (px > maxX) maxX = px;
-    if (py > maxY) maxY = py;
-  }
-  const projW = maxX - minX || 1;
-  const projH = maxY - minY || 1;
-  const fit = Math.min(w / projW, h / projH);
-  // Centre of the projected quad's bounding box; this is the point we pin to the
-  // element's bbox centre so the projected shape stays inside its footprint.
-  const projCx = (minX + maxX) / 2;
-  const projCy = (minY + maxY) / 2;
-
   const corners = projected.map(([px, py]) => ({
-    x: w / 2 + (px - projCx) * fit,
-    y: h / 2 + (py - projCy) * fit,
+    x: w / 2 + px,
+    y: h / 2 + py,
   })) as [Vec2, Vec2, Vec2, Vec2];
 
   // Affine test: a quad is a parallelogram iff (C0 + C2) == (C1 + C3) (the
