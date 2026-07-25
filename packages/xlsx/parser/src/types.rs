@@ -946,6 +946,11 @@ pub struct SlicerAnchor {
     /// with the ghost style. When the cache selection state is unavailable,
     /// all items are emitted as selected (Excel's default).
     pub items: Vec<SlicerItem>,
+    /// Resolved custom slicer style from SpreadsheetML `<tableStyles>` plus
+    /// the Office 2010 `x14:slicerStyles` extension. Absent for built-in or
+    /// unresolved styles, in which case the renderer uses its default skin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<SlicerStyle>,
 }
 
 #[derive(Debug, Serialize)]
@@ -953,6 +958,36 @@ pub struct SlicerAnchor {
 pub struct SlicerItem {
     pub name: String,
     pub selected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SlicerStyle {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whole: Option<SlicerElementStyle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<SlicerElementStyle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_item_with_data: Option<SlicerElementStyle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unselected_item_with_data: Option<SlicerElementStyle>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SlicerElementStyle {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_color: Option<String>,
 }
 
 /// An image anchored to a rectangular range of cells

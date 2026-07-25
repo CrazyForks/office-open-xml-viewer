@@ -2,7 +2,7 @@ import type {
   Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
-  Run, GradientFillSpec, ShapeInfo, SlicerItem,
+  Run, GradientFillSpec, ShapeInfo, SlicerItem, SlicerStyle, SlicerElementStyle,
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
 import { placePhoneticRuns } from './phonetic.js';
@@ -4547,8 +4547,8 @@ function renderCharts(
 // button per saved item using the selection flags from the slicerCache. The
 // visual language (pale blue outline, white "selected" buttons on a darker
 // background, gray "deselected" buttons) intentionally mirrors Excel's
-// default slicer style — the workbook may ship a custom `slicerStyle` but
-// rendering that is deferred (the built-in look is already recognisable).
+// default slicer style. Custom styles resolve from the workbook's standard
+// table-style dxfs (frame/header) plus x14 slicer-style dxfs (item states).
 
 const SLICER_HEADER_FONT = '600 12px "Meiryo UI", "Segoe UI", sans-serif';
 const SLICER_ITEM_FONT   = '11px "Meiryo UI", "Segoe UI", sans-serif';
@@ -4613,13 +4613,13 @@ function renderSlicers(
     ctx.rect(clipX, scrollAreaY, scrollAreaW, scrollAreaH);
     ctx.clip();
 
-    drawSlicerFrame(ctx, anchor.caption, anchor.items, x, y, w, h, cs);
+    drawSlicerFrame(ctx, anchor.caption, anchor.items, x, y, w, h, cs, anchor.style);
 
     ctx.restore();
   }
 }
 
-function drawSlicerFrame(
+export function drawSlicerFrame(
   ctx: CanvasRenderingContext2D,
   caption: string,
   items: SlicerItem[],
@@ -4628,20 +4628,29 @@ function drawSlicerFrame(
   w: number,
   h: number,
   cs: number,
+  style?: SlicerStyle,
 ): void {
-  // Outer frame (white with a soft gray hairline).
-  ctx.fillStyle = SLICER_BG;
+  const custom = style != null;
+  // Outer frame. For a custom style, an absent border/fill contributes no
+  // formatting (§18.5.1.2); do not invent the fallback gray hairline.
+  ctx.fillStyle = style?.whole?.fillColor ?? SLICER_BG;
   ctx.fillRect(x, y, w, h);
-  ctx.strokeStyle = SLICER_BORDER;
-  ctx.lineWidth = 1;
-  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  const outerBorder = custom ? style.whole?.borderColor : SLICER_BORDER;
+  if (outerBorder) {
+    ctx.strokeStyle = outerBorder;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  }
 
   // Header band with caption.
   const headerH = Math.max(20 * cs, 14);
-  ctx.fillStyle = SLICER_HEADER_BG;
-  ctx.fillRect(x + 1, y + 1, w - 2, headerH);
-  ctx.fillStyle = SLICER_HEADER_FG;
-  ctx.font = scaleFont(SLICER_HEADER_FONT, cs);
+  const headerFill = custom ? style.header?.fillColor : SLICER_HEADER_BG;
+  if (headerFill) {
+    ctx.fillStyle = headerFill;
+    ctx.fillRect(x + 1, y + 1, w - 2, headerH);
+  }
+  ctx.fillStyle = style?.header?.fontColor ?? SLICER_HEADER_FG;
+  ctx.font = slicerFont(style?.header, SLICER_HEADER_FONT, cs);
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
   const headerPad = 6 * cs;
@@ -4673,14 +4682,72 @@ function drawSlicerFrame(
     const item = items[i];
     const iy = listY + i * (itemH + gap);
     const selected = item.selected;
-    ctx.fillStyle = selected ? SLICER_ITEM_SEL_BG : SLICER_ITEM_OFF_BG;
-    ctx.fillRect(listX, iy, listW, itemH);
-    ctx.strokeStyle = selected ? SLICER_ITEM_SEL_BD : SLICER_ITEM_OFF_BD;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(listX + 0.5, iy + 0.5, listW - 1, itemH - 1);
-    ctx.fillStyle = selected ? SLICER_ITEM_SEL_FG : SLICER_ITEM_OFF_FG;
+    const itemStyle = selected
+      ? style?.selectedItemWithData
+      : style?.unselectedItemWithData;
+    const fill = itemStyle?.fillColor ??
+      (selected ? SLICER_ITEM_SEL_BG : SLICER_ITEM_OFF_BG);
+    const border = custom
+      ? itemStyle?.borderColor
+      : (selected ? SLICER_ITEM_SEL_BD : SLICER_ITEM_OFF_BD);
+    ctx.fillStyle = fill;
+    if (custom) {
+      roundedRectPath(ctx, listX, iy, listW, itemH, Math.min(4 * cs, itemH / 4));
+      ctx.fill();
+      if (border) {
+        ctx.strokeStyle = border;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    } else {
+      ctx.fillRect(listX, iy, listW, itemH);
+      if (border) {
+        ctx.strokeStyle = border;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(listX + 0.5, iy + 0.5, listW - 1, itemH - 1);
+      }
+    }
+    ctx.font = slicerFont(itemStyle, SLICER_ITEM_FONT, cs);
+    ctx.fillStyle = itemStyle?.fontColor ??
+      (selected ? SLICER_ITEM_SEL_FG : SLICER_ITEM_OFF_FG);
     drawClippedText(ctx, item.name, listX + itemPad, iy + itemH / 2 + 1, listW - 2 * itemPad);
   }
+}
+
+function roundedRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number,
+): void {
+  const r = Math.max(0, Math.min(radius, w / 2, h / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function slicerFont(
+  style: SlicerElementStyle | undefined,
+  fallback: string,
+  cs: number,
+): string {
+  if (!style) return scaleFont(fallback, cs);
+  const size = Math.round((style.fontSize ?? 11) * cs);
+  const weight = style.fontBold ? 'bold ' : '';
+  const family = style.fontFamily
+    ? `"${style.fontFamily}", "Segoe UI", sans-serif`
+    : '"Meiryo UI", "Segoe UI", sans-serif';
+  return `${weight}${size}px ${family}`;
 }
 
 function scaleFont(css: string, cs: number): string {

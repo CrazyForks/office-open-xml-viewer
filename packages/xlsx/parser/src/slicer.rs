@@ -1,5 +1,5 @@
-use crate::resolve_zip_path;
 use crate::types::*;
+use crate::{parse_color, resolve_zip_path};
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{is_x_ns, is_xdr_ns};
 use ooxml_common::zip::read_zip_string;
@@ -131,6 +131,7 @@ pub(crate) fn load_all_slicer_caches(
 pub(crate) struct SlicerDef {
     caption: String,
     cache: String,
+    style: String,
 }
 
 pub(crate) fn parse_slicers_xml(xml: &str) -> HashMap<String, SlicerDef> {
@@ -145,8 +146,16 @@ pub(crate) fn parse_slicers_xml(xml: &str) -> HashMap<String, SlicerDef> {
         let name = slicer.attribute("name").unwrap_or("").to_string();
         let caption = slicer.attribute("caption").unwrap_or("").to_string();
         let cache = slicer.attribute("cache").unwrap_or("").to_string();
+        let style = slicer.attribute("style").unwrap_or("").to_string();
         if !name.is_empty() {
-            out.insert(name, SlicerDef { caption, cache });
+            out.insert(
+                name,
+                SlicerDef {
+                    caption,
+                    cache,
+                    style,
+                },
+            );
         }
     }
     out
@@ -155,6 +164,7 @@ pub(crate) fn parse_slicers_xml(xml: &str) -> HashMap<String, SlicerDef> {
 pub(crate) fn load_sheet_slicers(
     archive: &mut crate::XlsxZip,
     sheet_path: &str, // e.g. "worksheets/sheet1.xml"
+    theme_colors: &[String],
 ) -> Vec<SlicerAnchor> {
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
         return Vec::new();
@@ -208,6 +218,7 @@ pub(crate) fn load_sheet_slicers(
     // 3. Resolve caches (and their backing pivot fields) once.
     let slicer_caches = load_all_slicer_caches(archive);
     let pivot_fields = load_all_pivot_cache_fields(archive);
+    let slicer_styles = load_slicer_styles(archive, theme_colors);
 
     // 4. Walk each drawing and pick up slicer graphicFrames.
     let mut out: Vec<SlicerAnchor> = Vec::new();
@@ -221,6 +232,7 @@ pub(crate) fn load_sheet_slicers(
             &slicer_defs,
             &slicer_caches,
             &pivot_fields,
+            &slicer_styles,
         ));
     }
     out
@@ -231,6 +243,7 @@ pub(crate) fn parse_slicer_anchors(
     slicer_defs: &HashMap<String, SlicerDef>,
     slicer_caches: &HashMap<String, SlicerCacheInfo>,
     pivot_fields: &PivotCacheFields,
+    slicer_styles: &HashMap<String, SlicerStyle>,
 ) -> Vec<SlicerAnchor> {
     let Ok(doc) = parse_guarded(drawing_xml) else {
         return Vec::new();
@@ -364,9 +377,175 @@ pub(crate) fn parse_slicer_anchors(
             to_row_off: to.3,
             caption,
             items,
+            style: slicer_styles.get(&slicer_def.style).cloned(),
         });
     }
     out
+}
+
+fn load_slicer_styles(
+    archive: &mut crate::XlsxZip,
+    theme_colors: &[String],
+) -> HashMap<String, SlicerStyle> {
+    let Ok(xml) = read_zip_string(archive, "xl/styles.xml") else {
+        return HashMap::new();
+    };
+    parse_slicer_styles_xml(&xml, theme_colors)
+}
+
+/// Resolve the custom slicer skin split across SpreadsheetML
+/// `<tableStyles>` (whole/header) and the Office 2010 `x14:slicerStyles`
+/// extension (item states). Both sets reference different dxf collections.
+fn parse_slicer_styles_xml(xml: &str, theme_colors: &[String]) -> HashMap<String, SlicerStyle> {
+    let Ok(doc) = parse_guarded(xml) else {
+        return HashMap::new();
+    };
+    let root = doc.root_element();
+    let standard_dxfs: Vec<_> = root
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "dxfs")
+        .map(|n| {
+            n.children()
+                .filter(|c| c.is_element() && c.tag_name().name() == "dxf")
+                .collect()
+        })
+        .unwrap_or_default();
+    let extension_dxfs: Vec<_> = doc
+        .descendants()
+        .find(|n| {
+            n.is_element()
+                && n.tag_name().name() == "dxfs"
+                && n.tag_name()
+                    .namespace()
+                    .is_some_and(|ns| ns.contains("/spreadsheetml/2009/9/"))
+        })
+        .map(|n| {
+            n.children()
+                .filter(|c| c.is_element() && c.tag_name().name() == "dxf")
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut out: HashMap<String, SlicerStyle> = HashMap::new();
+    for table_style in root.descendants().filter(|n| {
+        n.is_element() && n.tag_name().name() == "tableStyle" && is_x_ns(n.tag_name().namespace())
+    }) {
+        let Some(name) = table_style.attribute("name") else {
+            continue;
+        };
+        for element in table_style
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "tableStyleElement")
+        {
+            let Some(dxf_id) = element
+                .attribute("dxfId")
+                .and_then(|value| value.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            let Some(dxf) = standard_dxfs.get(dxf_id) else {
+                continue;
+            };
+            let style = parse_slicer_element_style(*dxf, theme_colors);
+            let entry = out.entry(name.to_string()).or_default();
+            match element.attribute("type") {
+                Some("wholeTable") => entry.whole = Some(style),
+                Some("headerRow") => entry.header = Some(style),
+                _ => {}
+            }
+        }
+    }
+
+    for slicer_style in doc.descendants().filter(|n| {
+        n.is_element()
+            && n.tag_name().name() == "slicerStyle"
+            && n.tag_name()
+                .namespace()
+                .is_some_and(|ns| ns.contains("/spreadsheetml/2009/9/"))
+    }) {
+        let Some(name) = slicer_style.attribute("name") else {
+            continue;
+        };
+        for element in slicer_style
+            .descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "slicerStyleElement")
+        {
+            let Some(dxf_id) = element
+                .attribute("dxfId")
+                .and_then(|value| value.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            let Some(dxf) = extension_dxfs.get(dxf_id) else {
+                continue;
+            };
+            let style = parse_slicer_element_style(*dxf, theme_colors);
+            let entry = out.entry(name.to_string()).or_default();
+            match element.attribute("type") {
+                Some("selectedItemWithData") => entry.selected_item_with_data = Some(style),
+                Some("unselectedItemWithData") => entry.unselected_item_with_data = Some(style),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+fn parse_slicer_element_style(
+    dxf: roxmltree::Node<'_, '_>,
+    theme_colors: &[String],
+) -> SlicerElementStyle {
+    let mut style = SlicerElementStyle::default();
+    for child in dxf.children().filter(|n| n.is_element()) {
+        match child.tag_name().name() {
+            "font" => {
+                for property in child.children().filter(|n| n.is_element()) {
+                    match property.tag_name().name() {
+                        "color" => style.font_color = parse_color(&property, theme_colors),
+                        "sz" => {
+                            style.font_size = property
+                                .attribute("val")
+                                .and_then(|value| value.parse().ok())
+                        }
+                        "b" => style.font_bold = Some(crate::styles::parse_st_on_off(&property)),
+                        "name" => {
+                            style.font_family = property.attribute("val").map(ToString::to_string)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "fill" => {
+                if let Some(pattern) = child
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "patternFill")
+                {
+                    if pattern.attribute("patternType") == Some("solid") {
+                        style.fill_color = pattern
+                            .children()
+                            .find(|n| n.is_element() && n.tag_name().name() == "fgColor")
+                            .and_then(|color| parse_color(&color, theme_colors));
+                    }
+                }
+            }
+            "border" => {
+                style.border_color = child
+                    .children()
+                    .filter(|n| {
+                        n.is_element()
+                            && matches!(n.tag_name().name(), "left" | "right" | "top" | "bottom")
+                            && n.attribute("style").is_some()
+                    })
+                    .find_map(|edge| {
+                        edge.children()
+                            .find(|n| n.is_element() && n.tag_name().name() == "color")
+                            .and_then(|color| parse_color(&color, theme_colors))
+                    });
+            }
+            _ => {}
+        }
+    }
+    style
 }
 
 /// §20.1.2.2.8 — an `<xdr:cNvPr hidden="1">` slicer graphicFrame is not
@@ -416,6 +595,7 @@ mod hidden_tests {
             SlicerDef {
                 caption: "Region".to_string(),
                 cache: "Slicer_Region".to_string(),
+                style: String::new(),
             },
         );
         m
@@ -429,6 +609,7 @@ mod hidden_tests {
                 &slicer_defs(),
                 &HashMap::new(),
                 &PivotCacheFields::default(),
+                &HashMap::new(),
             );
             assert!(out.is_empty(), "hidden slicer emitted (attr={attr})");
         }
@@ -442,9 +623,67 @@ mod hidden_tests {
                 &slicer_defs(),
                 &HashMap::new(),
                 &PivotCacheFields::default(),
+                &HashMap::new(),
             );
             assert_eq!(out.len(), 1, "visible slicer dropped (attr={attr})");
         }
+    }
+
+    #[test]
+    fn custom_slicer_style_resolves_header_and_item_dxfs() {
+        let xml = r#"
+          <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                      xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">
+            <dxfs count="1"><dxf>
+              <font><b val="0"/><sz val="12"/><color theme="4"/><name val="Meiryo UI"/></font>
+            </dxf></dxfs>
+            <tableStyles count="1">
+              <tableStyle name="CustomSlicer" table="0">
+                <tableStyleElement type="headerRow" dxfId="0"/>
+              </tableStyle>
+            </tableStyles>
+            <extLst><ext uri="custom">
+              <x14:dxfs count="1"><x14:dxf>
+                <x14:font><x14:color theme="4"/></x14:font>
+                <x14:fill><x14:patternFill patternType="solid"><x14:fgColor auto="1"/></x14:patternFill></x14:fill>
+                <x14:border>
+                  <x14:left style="thin"><x14:color theme="4"/></x14:left>
+                  <x14:right style="thin"><x14:color theme="4"/></x14:right>
+                  <x14:top style="thin"><x14:color theme="4"/></x14:top>
+                  <x14:bottom style="thin"><x14:color theme="4"/></x14:bottom>
+                </x14:border>
+              </x14:dxf></x14:dxfs>
+              <x14:slicerStyles><x14:slicerStyle name="CustomSlicer">
+                <x14:slicerStyleElements>
+                  <x14:slicerStyleElement type="selectedItemWithData" dxfId="0"/>
+                </x14:slicerStyleElements>
+              </x14:slicerStyle></x14:slicerStyles>
+            </ext></extLst>
+          </styleSheet>"#;
+        let theme = vec![
+            "#000000".into(),
+            "#FFFFFF".into(),
+            "#222222".into(),
+            "#EEEEEE".into(),
+            "#5C7D21".into(),
+        ];
+        let styles = parse_slicer_styles_xml(xml, &theme);
+        let style = styles.get("CustomSlicer").expect("custom slicer style");
+        let header = style.header.as_ref().expect("header dxf");
+        assert_eq!(header.font_color.as_deref(), Some("#5C7D21"));
+        assert_eq!(header.font_size, Some(12.0));
+        assert_eq!(header.font_bold, Some(false));
+        assert_eq!(header.font_family.as_deref(), Some("Meiryo UI"));
+        let selected = style
+            .selected_item_with_data
+            .as_ref()
+            .expect("selected item dxf");
+        assert_eq!(selected.font_color.as_deref(), Some("#5C7D21"));
+        assert_eq!(selected.border_color.as_deref(), Some("#5C7D21"));
+        assert_eq!(
+            selected.fill_color, None,
+            "auto fill retains white fallback"
+        );
     }
 }
 
