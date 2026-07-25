@@ -225,10 +225,36 @@ pub(crate) fn parse_stroke(
         return None;
     }
     let width = attr_i64(&ln_node, "w").unwrap_or(9525);
-    let color = child(ln_node, "solidFill").and_then(|n| parse_color_node(n, theme))?;
+    // CT_LineProperties uses EG_LineFillProperties (§20.1.8.38), so a line can
+    // carry the same solid/gradient/pattern paints as a shape. Keep a solid
+    // fallback colour for arrowheads and consumers that do not yet understand
+    // non-solid line paint.
+    let parsed_fill = parse_fill(ln_node, theme)?;
+    let color = match &parsed_fill {
+        Fill::Solid { color } => color.clone(),
+        Fill::Gradient { stops, .. } => stops
+            .iter()
+            .rev()
+            .find(|stop| !stop.color.ends_with("00"))
+            .or_else(|| stops.last())
+            .map(|stop| stop.color.clone())?,
+        Fill::Pattern { fg, .. } => fg.clone(),
+        Fill::None | Fill::Image { .. } => return None,
+    };
+    let fill = match parsed_fill {
+        Fill::Gradient { .. } | Fill::Pattern { .. } => Some(parsed_fill),
+        Fill::Solid { .. } => None,
+        Fill::None | Fill::Image { .. } => unreachable!(),
+    };
     let dash_style = child(ln_node, "prstDash")
         .and_then(|n| attr(&n, "val"))
         .filter(|v| v != "solid");
+    let line_cap = attr(&ln_node, "cap").and_then(|cap| match cap.as_str() {
+        "rnd" => Some("round".to_owned()),
+        "sq" => Some("square".to_owned()),
+        "flat" => Some("butt".to_owned()),
+        _ => None,
+    });
     // Arrow ends — only emit when type != "none"
     let head_end = child(ln_node, "headEnd")
         .map(parse_arrow_end)
@@ -242,7 +268,9 @@ pub(crate) fn parse_stroke(
     Some(Stroke {
         color,
         width,
+        fill,
         dash_style,
+        line_cap,
         head_end,
         tail_end,
         cmpd,

@@ -169,7 +169,9 @@ fn stroke(color: &str) -> Stroke {
     Stroke {
         color: color.to_owned(),
         width: 12700,
+        fill: None,
         dash_style: None,
+        line_cap: None,
         head_end: None,
         tail_end: None,
         cmpd: None,

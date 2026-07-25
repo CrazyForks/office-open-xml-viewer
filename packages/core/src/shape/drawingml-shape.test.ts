@@ -97,6 +97,47 @@ describe('shared DrawingML shape painter', () => {
     ]));
   });
 
+  it('uses an authored DrawingML gradient as the line paint', () => {
+    const plan: DrawingMLShapePaintPlan = {
+      rect: { x: 10, y: 20, w: 100, h: 50 },
+      geometry: { kind: 'preset', name: 'ellipse', adjustments: [] },
+      fill: null,
+      stroke: {
+        color: 'AABBCC',
+        width: 2,
+        lineCap: 'round',
+        fill: {
+          fillType: 'gradient',
+          angle: 90,
+          gradType: 'linear',
+          stops: [
+            { position: 0.19, color: '11223300' },
+            { position: 1, color: 'AABBCC' },
+          ],
+        },
+      },
+      transform: { rotationDeg: 0, flipH: true, flipV: false },
+    };
+    const { ctx, operations } = recordingContext();
+
+    paintDrawingMLShape(ctx, plan, 1);
+
+    const gradientOp = operations.find(({ name }) => name === 'createLinearGradient');
+    expect(gradientOp?.args).toHaveLength(4);
+    expect(gradientOp?.args.map(Number)).toEqual([
+      expect.closeTo(60),
+      expect.closeTo(20),
+      expect.closeTo(60),
+      expect.closeTo(70),
+    ]);
+    expect(operations).toEqual(expect.arrayContaining([
+      { name: 'addColorStop', args: [0.19, 'rgba(17,34,51,0)'] },
+      { name: 'addColorStop', args: [1, 'rgba(170,187,204,1)'] },
+      { name: 'lineCap', args: ['round'] },
+      { name: 'stroke', args: [] },
+    ]));
+  });
+
   it('preserves arbitrary adjustment counts for preset geometry', () => {
     const adjustments = Array.from({ length: 12 }, (_, index) => index * 1000);
     const plan: DrawingMLShapePaintPlan = {

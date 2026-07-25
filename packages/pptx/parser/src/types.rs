@@ -742,9 +742,17 @@ pub(crate) struct ArrowEnd {
 pub(crate) struct Stroke {
     pub(crate) color: String,
     pub(crate) width: i64,
+    /// Non-solid line paint. Solid lines keep using `color` to preserve the
+    /// compact historical wire shape; gradient/pattern lines retain their
+    /// authored fill here.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) fill: Option<Fill>,
     /// OOXML prstDash value: "dash", "dot", "dashDot", "lgDash", "lgDashDot", "sysDash", "sysDot", etc.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) dash_style: Option<String>,
+    /// DrawingML cap normalized to the Canvas vocabulary.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) line_cap: Option<String>,
     /// Arrow at the start of the line (headEnd)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) head_end: Option<ArrowEnd>,
