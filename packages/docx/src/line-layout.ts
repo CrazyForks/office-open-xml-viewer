@@ -1094,18 +1094,43 @@ function tightHorizontalGraphemeInk(
   };
 }
 
+function contextualHorizontalGraphemeAdvances(
+  segment: LayoutTextSeg,
+): ReadonlyMap<number, number> | undefined {
+  if (!segment.textLayoutService || !segment.textShapeRequest || segment.text.length === 0) {
+    return undefined;
+  }
+  const shaped = segment.textLayoutService.shape({
+    ...segment.textShapeRequest,
+    text: segment.text,
+    measure: true,
+    clusterGeometry: true,
+  });
+  if (!shaped.clusters?.length) return undefined;
+  const scale = segment.charScale ?? 1;
+  const advances = new Map<number, number>();
+  for (const cluster of shaped.clusters) {
+    if (!Number.isFinite(cluster.advancePt)) return undefined;
+    advances.set(cluster.range.end, cluster.advancePt * scale);
+  }
+  return advances;
+}
+
 /**
  * Bound document-level punctuation compression by the adjacent glyphs' tight
- * horizontal ink. The punctuation's own trailing sidebearing is not the whole
- * collision equation: a following glyph may extend left of its advance origin.
- * Resolve this after all source runs have been segmented so a formatting seam
- * cannot reintroduce the overlap.
+ * horizontal ink and contextual advance. Canvas shaping can already kern a
+ * punctuation pair down to the retained half-cell; subtracting the isolated
+ * glyph's removable sidebearing again would collapse the second mark to zero
+ * advance. A following glyph's left ink edge also participates in the collision
+ * equation. Resolve this after all source runs have been segmented so a
+ * formatting seam cannot reintroduce the overlap.
  */
 function retainHorizontalPunctuationInkClearance(segs: LayoutSeg[]): void {
   let pending: Readonly<{
     segment: LayoutTextSeg;
     compressionIndex: number;
     ink: Readonly<{ advancePt: number; xMinPt: number; xMaxPt: number }>;
+    contextualAdvancePt: number;
   }> | undefined;
   const adjustedBySegment = new Map<
     LayoutTextSeg,
@@ -1121,6 +1146,9 @@ function retainHorizontalPunctuationInkClearance(segs: LayoutSeg[]): void {
     const compressionIndexByEnd = new Map(
       compressions.map((compression, index) => [compression.end, index]),
     );
+    const contextualAdvances = compressions.length > 0
+      ? contextualHorizontalGraphemeAdvances(segment)
+      : undefined;
     const boundaries = [0, ...graphemeClusterOffsets(segment.text), segment.text.length];
     for (let index = 0; index < boundaries.length - 1; index += 1) {
       const start = boundaries[index]!;
@@ -1136,14 +1164,23 @@ function retainHorizontalPunctuationInkClearance(segs: LayoutSeg[]): void {
             ...compression,
           }));
         const compression = adjustments[pending.compressionIndex]!;
+        const retainedExtentPt = Math.max(
+          0,
+          pending.ink.advancePt + compression.adjustmentPt,
+        );
+        const retainedExtentAdjustmentPt = Math.min(
+          0,
+          retainedExtentPt - pending.contextualAdvancePt,
+        );
         const collisionSafeAdjustmentPt = Math.min(
           0,
           pending.ink.xMaxPt
             - currentInk.xMinPt
-            - pending.ink.advancePt,
+            - pending.contextualAdvancePt,
         );
         const adjustmentPt = Math.max(
           compression.adjustmentPt,
+          retainedExtentAdjustmentPt,
           collisionSafeAdjustmentPt,
         );
         if (adjustmentPt !== compression.adjustmentPt) {
@@ -1155,7 +1192,13 @@ function retainHorizontalPunctuationInkClearance(segs: LayoutSeg[]): void {
         }
       }
       pending = compressionIndex !== undefined && currentInk
-        ? { segment, compressionIndex, ink: currentInk }
+        ? {
+            segment,
+            compressionIndex,
+            ink: currentInk,
+            contextualAdvancePt:
+              contextualAdvances?.get(end) ?? currentInk.advancePt,
+          }
         : undefined;
     }
   }

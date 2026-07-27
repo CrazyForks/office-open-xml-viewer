@@ -43,7 +43,8 @@ interface FillCall {
 }
 
 function makeRecordingCanvas(options: Readonly<{
-  followingGlyphLeftOverhangPx?: number;
+  followingGlyphLeftInsetPx?: number;
+  closingPunctuationPairKerningPx?: number;
 }> = {}): { canvas: HTMLCanvasElement; fills: FillCall[] } {
   let font = `${FONT_PX}px serif`;
   let letterSpacing = '0px';
@@ -61,11 +62,15 @@ function makeRecordingCanvas(options: Readonly<{
     fontKerning: 'auto',
     measureText: (s: string) => {
       const p = px();
-      const w = [...s].length * p;
+      const pairCount = s.match(/。）/gu)?.length ?? 0;
+      const w = [...s].length * p
+        - pairCount * (options.closingPunctuationPairKerningPx ?? 0);
       return {
         width: w,
         actualBoundingBoxLeft:
-          s === 'に' ? options.followingGlyphLeftOverhangPx ?? 0 : 0,
+          s === '次'
+            ? -(options.followingGlyphLeftInsetPx ?? 0)
+            : 0,
         // The punctuation fixture exposes a selected-glyph right ink edge at
         // half its full-width cell. Other text fills its complete advance.
         actualBoundingBoxRight:
@@ -215,23 +220,26 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
     expect(following.x - first.x).toBeCloseTo(30, 5);
   });
 
-  it('keeps a compressed closing parenthesis clear of the following CJK glyph ink', async () => {
-    const followingGlyphLeftOverhangPx = 4;
-    const { canvas, fills } = makeRecordingCanvas({ followingGlyphLeftOverhangPx });
+  it('does not compress a contextually half-width closing parenthesis to zero advance', async () => {
+    const followingGlyphLeftInsetPx = 3;
+    const { canvas, fills } = makeRecordingCanvas({
+      followingGlyphLeftInsetPx,
+      closingPunctuationPairKerningPx: 10,
+    });
     const model = {
-      ...doc([para([textRun('ます。）に')])], section()),
+      ...doc([para([textRun('本文。）次')])], section()),
       settings: { characterSpacingControl: 'compressPunctuation' },
     } as DocxDocumentModel;
 
     await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
 
     const closingParenthesis = drawOf(fills, '）');
-    const following = drawOf(fills, 'に');
+    const following = drawOf(fills, '次');
     const closingInkRightPx = closingParenthesis.x + FONT_PX / 2;
-    const followingInkLeftPx = following.x - followingGlyphLeftOverhangPx;
+    const followingInkLeftPx = following.x + followingGlyphLeftInsetPx;
 
-    expect(closingParenthesis.letterSpacing).toBe('-6px');
-    expect(following.x - closingParenthesis.x).toBeCloseTo(14, 5);
+    expect(closingParenthesis.letterSpacing).toBe('0px');
+    expect(following.x - closingParenthesis.x).toBeCloseTo(10, 5);
     expect(followingInkLeftPx).toBeGreaterThanOrEqual(closingInkRightPx);
   });
 
