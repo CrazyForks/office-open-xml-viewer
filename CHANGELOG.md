@@ -4,6 +4,35 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.74.0 — 2026-07-27
+
+Minor. Exposes saved XLSX pivot-table metadata for read-only inspection and
+improves authored chart, slicer, and DrawingML fidelity across XLSX and PPTX.
+The release also strengthens DOCX punctuation-collision regression coverage and
+documents the project's read-only scope.
+
+- **xlsx:** expose immutable saved pivot-table identity, placement, field,
+  cache-source, status, and diagnostic facts through
+  `Worksheet.pivotTables` / `pivotDiagnostics`. Saved worksheet cells and
+  styles remain authoritative; refresh, recalculation, filtering,
+  restructuring, and interactivity remain out of scope. Validate package
+  relationship facts strictly and report malformed or unsupported cache links
+  without trusting suffix-matched relationship types. (ECMA-376 §18.10; #997)
+- **xlsx:** resolve custom slicer frame, header, and item-state styles from
+  SpreadsheetML table-style DXFs and the Office 2010 slicer-style extension.
+  (#1101)
+- **charts:** preserve authored series styling, percent-axis display units and
+  label sizing, and manual-layout axis-label gutters instead of clipping labels
+  to the plot frame. (#1099–#1101)
+- **pptx:** render gradient shape strokes and preserve the projected extent of
+  DrawingML 3D camera scenes. (#1101)
+- **docx:** add an end-to-end paint regression that protects the retained
+  layout clearance between compressed closing punctuation and a following
+  glyph with left overhang. (#1103)
+- **docs:** define the repository as a read-only viewer project and clarify the
+  boundary between supported inspection interactions and out-of-scope editing
+  or round-tripping. (#1098)
+
 ## 0.73.2 — 2026-07-24
 
 Patch. Restores DOCX list-marker, table-pagination, and grouped-drawing geometry
