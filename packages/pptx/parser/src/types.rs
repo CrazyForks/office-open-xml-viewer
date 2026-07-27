@@ -1394,7 +1394,7 @@ mod group_transform_tests {
             (mapped.x, mapped.y, mapped.cx, mapped.cy),
             (105, 105, 40, 10)
         );
-        assert_eq!(mapped.rot, 105.0);
+        assert_eq!(mapped.rot, 75.0);
         assert!(mapped.flip_h);
         assert!(mapped.flip_v);
     }
@@ -1461,17 +1461,17 @@ mod group_transform_tests {
             apply_group_transform_to_element(element, &group);
             match element {
                 SlideElement::Table(frame) => {
-                    assert_eq!(frame.rotation, 105.0);
+                    assert_eq!(frame.rotation, 75.0);
                     assert!(frame.flip_h);
                     assert!(frame.flip_v);
                 }
                 SlideElement::Chart(frame) => {
-                    assert_eq!(frame.rotation, 105.0);
+                    assert_eq!(frame.rotation, 75.0);
                     assert!(frame.flip_h);
                     assert!(frame.flip_v);
                 }
                 SlideElement::Media(frame) => {
-                    assert_eq!(frame.rotation, 105.0);
+                    assert_eq!(frame.rotation, 75.0);
                     assert!(frame.flip_h);
                     assert!(frame.flip_v);
                 }

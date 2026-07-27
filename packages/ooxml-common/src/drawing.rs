@@ -80,6 +80,25 @@ pub struct DrawingRect {
     pub flip_v: bool,
 }
 
+/// Compose the orientation terms from the Annex L transform matrices.
+///
+/// A reflection reverses rotation direction (`F × R(θ) = R(-θ) × F`), while
+/// two reflections preserve it. The parent reflection must therefore be
+/// applied to the child's authored rotation before the angles are combined.
+fn compose_rotation(
+    parent_rotation: f64,
+    parent_flip_h: bool,
+    parent_flip_v: bool,
+    child_rotation: f64,
+) -> f64 {
+    let child_direction = if parent_flip_h ^ parent_flip_v {
+        -1.0
+    } else {
+        1.0
+    };
+    parent_rotation + child_direction * child_rotation
+}
+
 impl DrawingGroupTransform {
     pub const IDENTITY: Self = Self {
         scale_x: 1.0,
@@ -145,7 +164,12 @@ impl DrawingGroupTransform {
         Self {
             scale_x: self.scale_x * child.scale_x,
             scale_y: self.scale_y * child.scale_y,
-            rotation_degrees: self.rotation_degrees + child.rotation_degrees,
+            rotation_degrees: compose_rotation(
+                self.rotation_degrees,
+                self.flip_h,
+                self.flip_v,
+                child.rotation_degrees,
+            ),
             flip_h: self.flip_h ^ child.flip_h,
             flip_v: self.flip_v ^ child.flip_v,
             m11: self.m11 * child.m11 + self.m12 * child.m21,
@@ -181,7 +205,12 @@ impl DrawingGroupTransform {
             y: center_y - mapped_height / 2.0,
             width: mapped_width,
             height: mapped_height,
-            rotation_degrees: self.rotation_degrees + rect.rotation_degrees,
+            rotation_degrees: compose_rotation(
+                self.rotation_degrees,
+                self.flip_h,
+                self.flip_v,
+                rect.rotation_degrees,
+            ),
             flip_h: self.flip_h ^ rect.flip_h,
             flip_v: self.flip_v ^ rect.flip_v,
         }
@@ -325,8 +354,52 @@ mod tests {
         assert!((mapped.y - 105.0).abs() < 1e-6);
         assert!((mapped.width - 40.0).abs() < 1e-6);
         assert!((mapped.height - 10.0).abs() < 1e-6);
-        assert!((mapped.rotation_degrees - 105.0).abs() < 1e-6);
+        assert!((mapped.rotation_degrees - 75.0).abs() < 1e-6);
         assert!(mapped.flip_h);
         assert!(mapped.flip_v);
+    }
+
+    #[test]
+    fn reflected_group_reverses_nested_and_leaf_rotation_direction() {
+        let reflected = DrawingGroupTransform::from_group(DrawingGroupSpec {
+            off_x: 0.0,
+            off_y: 0.0,
+            ext_x: 100.0,
+            ext_y: 100.0,
+            child_off_x: 0.0,
+            child_off_y: 0.0,
+            child_ext_x: 100.0,
+            child_ext_y: 100.0,
+            rotation_degrees: 0.0,
+            flip_h: true,
+            flip_v: false,
+        });
+        let nested = reflected.compose_group(DrawingGroupSpec {
+            off_x: 0.0,
+            off_y: 0.0,
+            ext_x: 100.0,
+            ext_y: 100.0,
+            child_off_x: 0.0,
+            child_off_y: 0.0,
+            child_ext_x: 100.0,
+            child_ext_y: 100.0,
+            rotation_degrees: 330.0,
+            flip_h: false,
+            flip_v: false,
+        });
+        let mapped = reflected.apply_rect(DrawingRect {
+            x: 10.0,
+            y: 20.0,
+            width: 30.0,
+            height: 40.0,
+            rotation_degrees: 330.0,
+            flip_h: true,
+            flip_v: false,
+        });
+
+        assert!((nested.rotation_degrees + 330.0).abs() < 1e-6);
+        assert!((mapped.rotation_degrees + 330.0).abs() < 1e-6);
+        assert!(!mapped.flip_h);
+        assert!(!mapped.flip_v);
     }
 }

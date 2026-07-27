@@ -24177,7 +24177,7 @@ mod wgp_shape_transform_tests {
         assert!((shape.anchor_y_pt - 105.0).abs() < 1e-6);
         assert!((shape.width_pt - 40.0).abs() < 1e-6);
         assert!((shape.height_pt - 10.0).abs() < 1e-6);
-        assert!((shape.rotation - 105.0).abs() < 1e-6);
+        assert!((shape.rotation - 75.0).abs() < 1e-6);
         assert!(shape.flip_h);
         assert!(shape.flip_v);
     }
@@ -24216,7 +24216,7 @@ mod wgp_shape_transform_tests {
         assert!((image.anchor_y_pt - 105.0).abs() < 1e-6);
         assert!((image.width_pt - 40.0).abs() < 1e-6);
         assert!((image.height_pt - 10.0).abs() < 1e-6);
-        assert!((image.rotation - 105.0).abs() < 1e-6);
+        assert!((image.rotation - 75.0).abs() < 1e-6);
         assert!(image.flip_h);
         assert!(image.flip_v);
     }
