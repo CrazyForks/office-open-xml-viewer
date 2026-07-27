@@ -4,6 +4,18 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.74.2 — 2026-07-27
+
+Patch. Prevents contextually kerned Japanese closing punctuation from collapsing
+onto the following glyph.
+
+- **docx:** constrain document-level punctuation compression by the contextual
+  shaped-cluster advance as well as adjacent tight ink. When Canvas has already
+  kerned a closing punctuation pair to the retained half-cell, the layout engine
+  no longer subtracts the isolated glyph's sidebearing a second time. Paint
+  remains measurement-free and consumes the corrected immutable layout.
+  (ECMA-376 §17.15.1.18; [MS-OE376] §2.1.562; #1107)
+
 ## 0.74.1 — 2026-07-27
 
 Patch. Restores authored rotation for descendants of reflected DrawingML groups.
