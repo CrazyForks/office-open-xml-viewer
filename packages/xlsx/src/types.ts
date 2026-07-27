@@ -1,4 +1,10 @@
-import type { ChartModel, MathNode, SpaceLine } from '@silurus/ooxml-core';
+import type {
+  ChartModel,
+  MathNode,
+  ParserResourceLimits,
+  SpaceLine,
+} from '@silurus/ooxml-core';
+import type { WorkerErrorPayload } from '@silurus/ooxml-core/worker';
 
 export interface Workbook {
   sheets: SheetMeta[];
@@ -1064,7 +1070,13 @@ export interface RenderViewportOptions {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number }
+  | {
+      type: 'parse';
+      id: number;
+      data: ArrayBuffer;
+      maxZipEntryBytes?: number;
+      parserResourceLimits?: ParserResourceLimits;
+    }
   /** Parse one sheet lazily. Deliberately carries NO `data`: the worker already
    *  retained the whole-workbook buffer on the preceding `parse`, so re-sending
    *  it here would structured-clone the entire file per sheet switch for no
@@ -1076,6 +1088,7 @@ export type WorkerRequest =
       sheetIndex: number;
       sheetName: string;
       maxZipEntryBytes?: number;
+      parserResourceLimits?: ParserResourceLimits;
     }
   /** Pull one embedded image's raw bytes by zip path from the buffer the worker
    *  retained at parse time. Twin of pptx/docx `extractImage`; xlsx uses the
@@ -1096,4 +1109,4 @@ export type WorkerResponse =
   | { type: 'parsedSheet'; id: number; worksheetJson: ArrayBuffer }
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'markdownRendered'; id: number; markdown: string }
-  | { type: 'error'; id: number; message: string };
+  | ({ type: 'error'; id: number } & WorkerErrorPayload);

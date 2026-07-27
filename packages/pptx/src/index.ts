@@ -26,7 +26,15 @@ export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core
 // Typed load-time error surfaced by PptxPresentation.load (e.g. a
 // password-protected or legacy-binary .ppt file). Re-exported so
 // `@silurus/ooxml/pptx` consumers can narrow on `err.code`.
-export { OoxmlError, type OoxmlErrorCode } from '@silurus/ooxml-core';
+export {
+  OoxmlError,
+  ParserResourceLimitError,
+  type OoxmlErrorCode,
+  type OoxmlErrorSource,
+  type OoxmlErrorStage,
+  type ParserResourceLimitErrorDetails,
+  type ParserResourceLimits,
+} from '@silurus/ooxml-core';
 export type {
   Presentation,
   Slide,

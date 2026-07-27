@@ -1,4 +1,11 @@
-import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
+import {
+  decodeDataUrl,
+  WasmParserHost,
+} from '@silurus/ooxml-core';
+import {
+  parserResourceLimitsForWasm,
+  serializeWorkerError,
+} from '@silurus/ooxml-core/worker';
 import type { WorkerRequest, WorkerResponse } from './types';
 import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 
@@ -48,6 +55,9 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
+      const [maxParsedPart, maxOperation] = parserResourceLimitsForWasm(
+        req.parserResourceLimits,
+      );
       const bytes = new Uint8Array(req.buffer);
       // Both the construction and `parse()` run under `host.run` so a trap in
       // EITHER poisons + recycles the instance (and frees the archive). Adopting
@@ -57,7 +67,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       // buffer, so forward it to the main thread as a transferable — no clone,
       // no decode here. The single decode + JSON.parse happens once, on main.
       const json = host.run(() => {
-        const archive = new PptxArchive(bytes, max);
+        const archive = new PptxArchive(bytes, max, maxParsedPart, maxOperation);
         host.setArchive(archive);
         return archive.parse();
       });
@@ -105,11 +115,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       return;
     }
   } catch (err) {
-    const msg: WorkerResponse = {
-      kind: 'error',
-      id,
-      message: err instanceof Error ? err.message : String(err),
-    };
+    const msg: WorkerResponse = { kind: 'error', id, ...serializeWorkerError(err) };
     self.postMessage(msg);
   }
 };

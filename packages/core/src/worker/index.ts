@@ -15,3 +15,10 @@ export {
   type WasmInitInput,
   type WasmParserHostOptions,
 } from './wasm-guard.js';
+export {
+  deserializeWorkerError,
+  parseResourceLimitError,
+  serializeWorkerError,
+  type WorkerErrorPayload,
+} from './error-wire.js';
+export { parserResourceLimitsForWasm } from './parser-resource-limits.js';

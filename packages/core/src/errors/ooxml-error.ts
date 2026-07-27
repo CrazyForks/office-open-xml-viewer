@@ -24,6 +24,24 @@ export type OoxmlErrorCode =
   | 'legacy-binary-format'
   | 'not-ooxml';
 
+export type OoxmlErrorStage =
+  | 'container'
+  | 'decompression'
+  | 'parsing'
+  | 'serialization'
+  | 'layout'
+  | 'rendering'
+  | 'worker';
+
+export type OoxmlErrorSource =
+  | 'container'
+  | 'zip-part'
+  | 'parser'
+  | 'serializer'
+  | 'layout'
+  | 'renderer'
+  | 'worker';
+
 /**
  * Typed error thrown by the docx / pptx / xlsx `load()` factories for failures
  * that carry a stable, programmatic {@link OoxmlErrorCode} (e.g. a
@@ -46,5 +64,42 @@ export class OoxmlError extends Error {
     // Restore the prototype chain for environments that down-level `extends
     // Error` (e.g. older TS `target`), so `instanceof OoxmlError` holds.
     Object.setPrototypeOf(this, OoxmlError.prototype);
+  }
+}
+
+export interface ParserResourceLimitErrorDetails {
+  stage: OoxmlErrorStage;
+  source: OoxmlErrorSource;
+  part: string;
+  metric: string;
+  limit: number;
+  observed: number;
+}
+
+/**
+ * Deterministic parser rejection caused by an opt-in inflated-I/O budget.
+ *
+ * This is separate from {@link OoxmlError}: extending the pre-existing closed
+ * `OoxmlErrorCode` union would break downstream exhaustive switches.
+ */
+export class ParserResourceLimitError extends Error {
+  readonly code = 'parser-resource-limit' as const;
+  readonly stage: OoxmlErrorStage;
+  readonly source: OoxmlErrorSource;
+  readonly part: string;
+  readonly metric: string;
+  readonly limit: number;
+  readonly observed: number;
+
+  constructor(message: string, details: ParserResourceLimitErrorDetails) {
+    super(message);
+    this.name = 'ParserResourceLimitError';
+    this.stage = details.stage;
+    this.source = details.source;
+    this.part = details.part;
+    this.metric = details.metric;
+    this.limit = details.limit;
+    this.observed = details.observed;
+    Object.setPrototypeOf(this, ParserResourceLimitError.prototype);
   }
 }

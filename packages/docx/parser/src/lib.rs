@@ -17,11 +17,23 @@ mod xml_util;
 /// thread does a single `TextDecoder.decode` + `JSON.parse`, collapsing three
 /// serializations (Rust String → JsString → structured clone) into one decode.
 #[wasm_bindgen]
-pub fn parse_docx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<Vec<u8>, JsValue> {
+pub fn parse_docx(
+    data: &[u8],
+    max_zip_entry_bytes: Option<u64>,
+    max_parsed_part_inflated_bytes: Option<u64>,
+    max_operation_inflated_bytes: Option<u64>,
+) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
-    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    let doc = parser::parse_from_bytes(data)
-        .map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?;
+    let guard = ooxml_common::zip::scoped_limits(
+        max_zip_entry_bytes,
+        max_parsed_part_inflated_bytes,
+        max_operation_inflated_bytes,
+    );
+    let doc = parser::parse_from_bytes(data);
+    if let Some(error) = guard.resource_limit_error() {
+        return Err(JsValue::from_str(&error));
+    }
+    let doc = doc.map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?;
     serde_json::to_vec(&doc).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
 
@@ -74,6 +86,8 @@ pub struct DocxArchive {
     /// throwing an opaque error the viewer can't turn into a placeholder page.
     archive: Result<parser::Zip, String>,
     max: Option<u64>,
+    max_parsed_part_inflated_bytes: Option<u64>,
+    max_operation_inflated_bytes: Option<u64>,
 }
 
 #[wasm_bindgen]
@@ -89,7 +103,12 @@ impl DocxArchive {
     /// the `Cursor` could own its backing store, transiently doubling WASM
     /// linear memory to ~2x the file size during construction.
     #[wasm_bindgen(constructor)]
-    pub fn new(data: Vec<u8>, max_zip_entry_bytes: Option<u64>) -> Result<DocxArchive, JsValue> {
+    pub fn new(
+        data: Vec<u8>,
+        max_zip_entry_bytes: Option<u64>,
+        max_parsed_part_inflated_bytes: Option<u64>,
+        max_operation_inflated_bytes: Option<u64>,
+    ) -> Result<DocxArchive, JsValue> {
         console_error_panic_hook::set_once();
         // RB7 (MAJOR): a truncated / corrupt CONTAINER is deferred, not thrown, so
         // `parse()` can degrade it to a placeholder document instead of the
@@ -97,6 +116,8 @@ impl DocxArchive {
         Ok(DocxArchive {
             archive: parser::open_zip(data),
             max: max_zip_entry_bytes,
+            max_parsed_part_inflated_bytes,
+            max_operation_inflated_bytes,
         })
     }
 
@@ -105,12 +126,19 @@ impl DocxArchive {
     /// same serializer, same error strings. When the CONTAINER failed to open
     /// (RB7 MAJOR) the model is a degraded placeholder tagged with the container.
     pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let guard = ooxml_common::zip::scoped_limits(
+            self.max,
+            self.max_parsed_part_inflated_bytes,
+            self.max_operation_inflated_bytes,
+        );
         let doc = match self.archive.as_mut() {
-            Ok(zip) => parser::parse(zip)
-                .map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?,
-            Err(e) => parser::degraded_container_document(e.clone()),
+            Ok(zip) => parser::parse(zip),
+            Err(e) => Ok(parser::degraded_container_document(e.clone())),
         };
+        if let Some(error) = guard.resource_limit_error() {
+            return Err(JsValue::from_str(&error));
+        }
+        let doc = doc.map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?;
         serde_json::to_vec(&doc).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
     }
 
@@ -130,11 +158,19 @@ impl DocxArchive {
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
     /// free `docx_to_markdown`. A corrupt container degrades to an empty document.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let guard = ooxml_common::zip::scoped_limits(
+            self.max,
+            self.max_parsed_part_inflated_bytes,
+            self.max_operation_inflated_bytes,
+        );
         let doc = match self.archive.as_mut() {
-            Ok(zip) => parser::parse(zip).map_err(|e| JsValue::from_str(&e))?,
-            Err(e) => parser::degraded_container_document(e.clone()),
+            Ok(zip) => parser::parse(zip),
+            Err(e) => Ok(parser::degraded_container_document(e.clone())),
         };
+        if let Some(error) = guard.resource_limit_error() {
+            return Err(JsValue::from_str(&error));
+        }
+        let doc = doc.map_err(|e| JsValue::from_str(&e))?;
         Ok(markdown::render_document(&doc))
     }
 }

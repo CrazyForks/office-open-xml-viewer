@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { OoxmlError, type OoxmlErrorCode } from './ooxml-error';
+import {
+  OoxmlError,
+  ParserResourceLimitError,
+  type OoxmlErrorCode,
+} from './ooxml-error';
 
 describe('OoxmlError', () => {
   it('is an Error subclass carrying a machine-readable code', () => {
@@ -18,10 +22,36 @@ describe('OoxmlError', () => {
   });
 
   it('keeps the code readonly at the type level and reflects each variant', () => {
-    const codes: OoxmlErrorCode[] = ['encrypted', 'legacy-binary-format', 'not-ooxml'];
+    const codes: OoxmlErrorCode[] = [
+      'encrypted',
+      'legacy-binary-format',
+      'not-ooxml',
+    ];
     for (const code of codes) {
       expect(new OoxmlError(code, code).code).toBe(code);
     }
+  });
+
+  it('uses a separate additive error class for parser resource diagnostics', () => {
+    const err = new ParserResourceLimitError('too large', {
+      stage: 'decompression',
+      source: 'zip-part',
+      part: 'word/document.xml',
+      metric: 'parsed-part-inflated-bytes',
+      limit: 10,
+      observed: 11,
+    });
+    expect(err).toBeInstanceOf(Error);
+    expect(err).toBeInstanceOf(ParserResourceLimitError);
+    expect(err.code).toBe('parser-resource-limit');
+    expect(err).toMatchObject({
+      stage: 'decompression',
+      source: 'zip-part',
+      part: 'word/document.xml',
+      metric: 'parsed-part-inflated-bytes',
+      limit: 10,
+      observed: 11,
+    });
   });
 
   it('captures a stack trace', () => {

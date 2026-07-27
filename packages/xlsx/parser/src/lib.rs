@@ -1,10 +1,14 @@
-use std::collections::{BTreeMap, HashMap};
-use std::io::{Cursor, Read};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
+use std::io::Cursor;
 use wasm_bindgen::prelude::*;
 
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{attr_ns, is_r_ns, is_x_ns, relationships};
-use ooxml_common::zip::read_zip_string;
+use ooxml_common::zip::{read_zip_string, read_zip_string_head};
+use quick_xml::events::Event;
+use quick_xml::name::{PrefixDeclaration, ResolveResult};
+use quick_xml::NsReader;
 
 mod markdown;
 mod pivot;
@@ -64,6 +68,21 @@ const CONTAINER_PART: &str = "(zip container)";
 /// pre-parenthesized constant).
 pub(crate) fn open_zip(data: Vec<u8>) -> Result<XlsxZip, String> {
     zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("{CONTAINER_PART}: {e}"))
+}
+
+/// Resource-budget failures are deterministic policy outcomes, not corrupt
+/// optional parts. Prefer the shared ZIP reader's latched error over any
+/// lenient placeholder/empty fallback produced deeper in the compatibility
+/// parser.
+fn prefer_resource_limit<T>(
+    guard: &ooxml_common::zip::Guard,
+    result: Result<T, JsValue>,
+) -> Result<T, JsValue> {
+    if let Some(error) = guard.resource_limit_error() {
+        Err(JsValue::from_str(&error))
+    } else {
+        result
+    }
 }
 
 /// A placeholder [`ParsedWorkbook`] for a xlsx whose ZIP CONTAINER could not be
@@ -128,11 +147,22 @@ const INDEXED_COLORS: &[&str] = &[
 /// thread does a single `TextDecoder.decode` + `JSON.parse`, collapsing three
 /// serializations (Rust String → JsString → structured clone) into one decode.
 #[wasm_bindgen]
-pub fn parse_xlsx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<Vec<u8>, JsValue> {
+pub fn parse_xlsx(
+    data: &[u8],
+    max_zip_entry_bytes: Option<u64>,
+    max_parsed_part_inflated_bytes: Option<u64>,
+    max_operation_inflated_bytes: Option<u64>,
+) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
-    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    let wb = parse_xlsx_inner(data).map_err(|e| JsValue::from_str(&e))?;
-    serde_json::to_vec(&wb).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
+    let guard = ooxml_common::zip::scoped_limits(
+        max_zip_entry_bytes,
+        max_parsed_part_inflated_bytes,
+        max_operation_inflated_bytes,
+    );
+    let result = parse_xlsx_inner(data)
+        .and_then(|wb| serde_json::to_vec(&wb).map_err(|e| format!("serialize error: {e}")))
+        .map_err(|e| JsValue::from_str(&e));
+    prefer_resource_limit(&guard, result)
 }
 
 /// Workbook-level parts that every `parse_sheet` needs but that do NOT change
@@ -248,12 +278,11 @@ fn parse_sheet_with(
     // after (images / charts / comments / …) is already lenient (returns empty
     // on error), so it stays outside this guard.
     let sheet_read_parse = read_zip_string(archive, &sheet_part).and_then(|xml| {
-        parse_worksheet(&xml, &shared.shared_strings, theme_colors, name)
-            .map(|parsed| (xml, parsed))
+        parse_worksheet_with_shell(&xml, &shared.shared_strings, theme_colors, name)
             .map_err(|e| e.to_string())
     });
-    let (sheet_xml, (mut ws, hyperlink_rids)) = match sheet_read_parse {
-        Ok((xml, parsed)) => (xml, parsed),
+    let (mut ws, hyperlink_rids, sheet_shell_xml) = match sheet_read_parse {
+        Ok(parsed) => parsed,
         Err(detail) => {
             let ws = Worksheet::placeholder(name, format!("{sheet_part}: {detail}"));
             return serde_json::to_vec(&ws).map_err(|e| JsValue::from_str(&e.to_string()));
@@ -265,14 +294,17 @@ fn parse_sheet_with(
     // Embedded OLE object previews (the `<oleObjects>` collection, §18.3.1.60)
     // draw through the same image
     // list; their preview parts are referenced from the worksheet XML + rels.
-    ws.images
-        .extend(load_sheet_ole_images(archive, &sheet_path, &sheet_xml));
+    ws.images.extend(load_sheet_ole_images(
+        archive,
+        &sheet_path,
+        &sheet_shell_xml,
+    ));
     let mut reference_session = WorksheetReferenceSession::default();
-    ws.charts = load_sheet_charts(
+    let charts = load_sheet_charts(
         archive,
         &sheet_path,
         Some(ChartReferenceContext {
-            sheet_xml: &sheet_xml,
+            worksheet: &ws,
             sheet_name: name,
             sheets: &shared.sheets,
             workbook_rels: &rels_doc,
@@ -285,6 +317,7 @@ fn parse_sheet_with(
             shared.theme_fonts.1.as_deref(),
         ),
     );
+    ws.charts = charts;
     ws.shape_groups = load_sheet_shape_groups(archive, &sheet_path, theme_colors);
     ws.hyperlinks = load_hyperlinks(archive, &sheet_path, hyperlink_rids);
     ws.comments = load_sheet_comments(archive, &sheet_path);
@@ -293,9 +326,10 @@ fn parse_sheet_with(
     ws.tables = load_sheet_tables(archive, &sheet_path, theme_colors);
     ws.slicers = load_sheet_slicers(archive, &sheet_path, theme_colors);
     (ws.pivot_tables, ws.pivot_diagnostics) = load_sheet_pivots(archive, &sheet_path);
-    ws.sparkline_groups = load_sheet_sparklines(
+    let sparkline_groups = load_sheet_sparklines(
         archive,
-        &sheet_xml,
+        &sheet_shell_xml,
+        &ws,
         name,
         &shared.sheets,
         &rels_doc,
@@ -303,6 +337,7 @@ fn parse_sheet_with(
         &shared.shared_strings,
         &mut reference_session,
     );
+    ws.sparkline_groups = sparkline_groups;
     let (df_family, df_size) = parse_default_font(archive);
     ws.default_font_family = df_family;
     ws.default_font_size = df_size;
@@ -322,23 +357,33 @@ pub fn parse_sheet(
     sheet_index: u32,
     name: &str,
     max_zip_entry_bytes: Option<u64>,
+    max_parsed_part_inflated_bytes: Option<u64>,
+    max_operation_inflated_bytes: Option<u64>,
 ) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
-    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    // #774: mirror `parse_xlsx_inner` — a corrupt CONTAINER degrades the sheet to
-    // the container-tagged placeholder so the viewer paints its overlay instead of
-    // the constructor / read throwing an opaque error.
-    let mut archive = match open_zip(data.to_vec()) {
-        Ok(zip) => zip,
-        Err(e) => {
-            let ws = degraded_container_sheet(e);
-            return serde_json::to_vec(&ws).map_err(|e| JsValue::from_str(&e.to_string()));
-        }
-    };
-    // The free function rebuilds the shared parts per call (behavior unchanged).
-    // `XlsxArchive::parse_sheet` reuses a cached `WorkbookShared` instead.
-    let shared = WorkbookShared::load(&mut archive).map_err(|e| JsValue::from_str(&e))?;
-    parse_sheet_with(&mut archive, &shared, sheet_index, name)
+    let guard = ooxml_common::zip::scoped_limits(
+        max_zip_entry_bytes,
+        max_parsed_part_inflated_bytes,
+        max_operation_inflated_bytes,
+    );
+    let result = (|| {
+        // #774: mirror `parse_xlsx_inner` — a corrupt CONTAINER degrades the
+        // sheet to the container-tagged placeholder so the viewer paints its
+        // overlay instead of the constructor / read throwing an opaque error.
+        let mut archive = match open_zip(data.to_vec()) {
+            Ok(zip) => zip,
+            Err(e) => {
+                let ws = degraded_container_sheet(e);
+                return serde_json::to_vec(&ws).map_err(|e| JsValue::from_str(&e.to_string()));
+            }
+        };
+        // The free function rebuilds the shared parts per call (behavior
+        // unchanged). `XlsxArchive::parse_sheet` reuses a cached
+        // `WorkbookShared` instead.
+        let shared = WorkbookShared::load(&mut archive).map_err(|e| JsValue::from_str(&e))?;
+        parse_sheet_with(&mut archive, &shared, sheet_index, name)
+    })();
+    prefer_resource_limit(&guard, result)
 }
 
 fn parse_xlsx_inner_with(
@@ -402,15 +447,8 @@ fn read_zip_entry_head(
     name: &str,
     max_bytes: u64,
 ) -> Result<String, String> {
-    let mut file = archive
-        .by_name(name)
-        .map_err(|e| format!("entry '{}' not found: {}", name, e))?;
-    let mut buf = Vec::new();
-    file.by_ref()
-        .take(max_bytes)
-        .read_to_end(&mut buf)
-        .map_err(|e| e.to_string())?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    let max_bytes = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+    read_zip_string_head(archive, name, max_bytes)
 }
 
 /// Extract the resolved tab color from the head of a worksheet XML. Locates the
@@ -924,21 +962,1352 @@ fn parse_si_node(node: &roxmltree::Node, theme_colors: &[String]) -> SharedStrin
 /// A `<hyperlink>` may carry `rid`, `location`, or both, so both are optional.
 type HyperlinkRids = Vec<(u32, u32, Option<String>, Option<String>, Option<String>)>;
 
-fn parse_worksheet(
+/// The memory-bounded portion of a worksheet parse.
+///
+/// ECMA-376 Part 1 §18.3.1.99 / `CT_Worksheet` defines exactly one
+/// `sheetData` (§18.3.1.80), whose `CT_SheetData` content is an unbounded
+/// sequence of `CT_Row` / `row` (§18.3.1.73). Building one roxmltree node arena
+/// for that sequence
+/// multiplies the already-inflated XML cost for large sheets. We therefore
+/// stream only `sheetData`, parse bounded batches of complete rows with the
+/// existing row/cell implementation, and return a shell XML with the
+/// `sheetData` interior removed for the worksheet-level roxmltree pass.
+///
+/// The public `Worksheet` model is deliberately unchanged. Its rows (and the
+/// later serde JSON buffer) still scale with the cell count; this removes the
+/// additional full-sheet XML tree rather than claiming constant-memory parsing.
+#[derive(Debug)]
+struct StreamedSheetData {
+    shell_xml: String,
+    rows: Vec<Row>,
+    row_heights: BTreeMap<u32, f64>,
+}
+
+const MCE_NS: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+
+fn resolved_namespace_is(
+    namespace: &ResolveResult<'_>,
+    predicate: impl FnOnce(&str) -> bool,
+) -> bool {
+    match namespace {
+        ResolveResult::Bound(namespace) => std::str::from_utf8(namespace.as_ref())
+            .ok()
+            .map(predicate)
+            .unwrap_or(false),
+        ResolveResult::Unbound | ResolveResult::Unknown(_) => false,
+    }
+}
+
+/// Keep each temporary roxmltree arena small while amortizing its allocation
+/// across many ordinary rows. A single unusually large `CT_Row` remains the
+/// indivisible upper bound because its rich-string and formula descendants must
+/// be interpreted together.
+const STREAMED_ROW_BATCH_BYTES: usize = 1024 * 1024;
+const STREAMED_ROW_BATCH_ROWS: usize = 512;
+const STREAMED_ROWS_ARENA_OVERHEAD: usize = "<streamed-rows></streamed-rows>".len();
+
+struct PendingStreamedRow {
+    start: usize,
+    end: usize,
+    namespaces: Vec<(Option<String>, String)>,
+    processed_xml: Option<String>,
+}
+
+impl PendingStreamedRow {
+    fn projected_arena_bytes(&self) -> usize {
+        let row_bytes = self
+            .processed_xml
+            .as_ref()
+            .map_or_else(|| self.end.saturating_sub(self.start), String::len);
+        let namespace_bytes = self.namespaces.iter().fold(0usize, |total, (prefix, uri)| {
+            let declaration_bytes = match prefix {
+                // ` xmlns:{prefix}="{escaped-uri}"`
+                Some(prefix) => 10usize
+                    .saturating_add(prefix.len())
+                    .saturating_add(quick_xml::escape::escape(uri).len()),
+                // ` xmlns="{escaped-uri}"`
+                None => 9usize.saturating_add(quick_xml::escape::escape(uri).len()),
+            };
+            total.saturating_add(declaration_bytes)
+        });
+        row_bytes
+            .saturating_add(namespace_bytes)
+            .saturating_add("<streamed-row></streamed-row>".len())
+    }
+}
+
+struct ActiveStreamedRow {
+    depth: usize,
+    start: usize,
+    namespaces: Vec<(Option<String>, String)>,
+    omitted_range_start: usize,
+    insertion_start: usize,
+}
+
+#[derive(Clone, Default)]
+struct StreamedMceScope {
+    ignorable: HashSet<String>,
+    process_content: HashSet<(String, String)>,
+}
+
+enum StreamedElementKind {
+    Retained {
+        namespace: Option<String>,
+        local_name: String,
+        opaque: bool,
+    },
+    Unwrapped,
+    Ignored,
+    AlternateContent {
+        selected_branch: bool,
+        seen_choice: bool,
+        seen_fallback: bool,
+    },
+    AlternateBranch {
+        selected: bool,
+    },
+}
+
+struct StreamedElementFrame {
+    start: usize,
+    start_tag_end: usize,
+    kind: StreamedElementKind,
+    scope: StreamedMceScope,
+    visible: bool,
+    retained_namespaces: Option<Vec<(Option<String>, String)>>,
+}
+
+impl StreamedElementFrame {
+    fn children_are_visible(&self) -> bool {
+        self.visible
+            && !matches!(
+                self.kind,
+                StreamedElementKind::Ignored
+                    | StreamedElementKind::AlternateBranch { selected: false }
+            )
+    }
+
+    fn is_opaque(&self) -> bool {
+        matches!(
+            self.kind,
+            StreamedElementKind::Retained { opaque: true, .. }
+        )
+    }
+}
+
+fn streamed_namespace_uri(namespace: &ResolveResult<'_>) -> Result<Option<String>, String> {
+    match namespace {
+        ResolveResult::Bound(namespace) => std::str::from_utf8(namespace.as_ref())
+            .map(|namespace| Some(namespace.to_string()))
+            .map_err(|e| e.to_string()),
+        ResolveResult::Unbound => Ok(None),
+        ResolveResult::Unknown(prefix) => Err(format!(
+            "worksheet XML uses unbound namespace prefix {}",
+            String::from_utf8_lossy(prefix.as_ref())
+        )),
+    }
+}
+
+fn worksheet_understands_ns(namespace: &str) -> bool {
+    is_x_ns(Some(namespace)) || xlsx_understands_ns(namespace)
+}
+
+/// SpreadsheetML designates `extLst` as an application-defined extension
+/// element (Part 1 §10 and §18.2.10). Per Part 3 §§8 and 9.1, MCE processing is
+/// suspended for the complete contents of this element. Ordinary worksheet,
+/// row, and cell content is not an extension boundary and remains processed.
+fn worksheet_is_application_defined_extension_element(
+    namespace: Option<&str>,
+    local_name: &str,
+) -> bool {
+    namespace.is_some_and(|namespace| is_x_ns(Some(namespace))) && local_name == "extLst"
+}
+
+fn streamed_mce_qnames(
+    value: &str,
+    bindings: &[(Option<String>, String)],
+    attribute_name: &str,
+) -> Result<Vec<(String, String)>, String> {
+    value
+        .split_whitespace()
+        .map(|name| {
+            let (prefix, local_name) = name.split_once(':').ok_or_else(|| {
+                format!("worksheet MCE {attribute_name} name must be namespace-qualified: {name}")
+            })?;
+            if prefix.is_empty() || local_name.is_empty() || local_name.contains(':') {
+                return Err(format!(
+                    "worksheet MCE {attribute_name} contains invalid QName: {name}"
+                ));
+            }
+            let namespace = bindings
+                .iter()
+                .find_map(|(bound_prefix, namespace)| {
+                    (bound_prefix.as_deref() == Some(prefix)).then(|| namespace.clone())
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "worksheet MCE {attribute_name} uses unbound namespace prefix: {prefix}"
+                    )
+                })?;
+            Ok((namespace, local_name.to_string()))
+        })
+        .collect()
+}
+
+fn streamed_mce_prefixes(
+    value: &str,
+    bindings: &[(Option<String>, String)],
+    attribute_name: &str,
+) -> Result<Vec<String>, String> {
+    value
+        .split_whitespace()
+        .map(|prefix| {
+            bindings
+                .iter()
+                .find_map(|(bound_prefix, namespace)| {
+                    (bound_prefix.as_deref() == Some(prefix)).then(|| namespace.clone())
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "worksheet MCE {attribute_name} uses unbound namespace prefix: {prefix}"
+                    )
+                })
+        })
+        .collect()
+}
+
+struct StreamedMceAttributes {
+    scope: StreamedMceScope,
+    must_understand: Vec<String>,
+}
+
+fn streamed_mce_attributes(
+    reader: &NsReader<&[u8]>,
+    element: &quick_xml::events::BytesStart<'_>,
+    inherited: &StreamedMceScope,
+) -> Result<StreamedMceAttributes, String> {
+    let bindings = current_namespace_bindings(reader)?;
+    let mut scope = inherited.clone();
+    let mut must_understand = Vec::new();
+    let mut declared_process_content = Vec::new();
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|e| format!("worksheet MCE attribute: {e}"))?;
+        let (namespace, local_name) = reader.resolve_attribute(attribute.key);
+        if !resolved_namespace_is(&namespace, |namespace| namespace == MCE_NS) {
+            continue;
+        }
+        let value = attribute
+            .unescape_value()
+            .map_err(|e| format!("worksheet MCE attribute value: {e}"))?
+            .into_owned();
+        match local_name.as_ref() {
+            b"Ignorable" => {
+                scope
+                    .ignorable
+                    .extend(streamed_mce_prefixes(&value, &bindings, "Ignorable")?);
+            }
+            b"ProcessContent" => {
+                declared_process_content.extend(streamed_mce_qnames(
+                    &value,
+                    &bindings,
+                    "ProcessContent",
+                )?);
+            }
+            b"MustUnderstand" => {
+                must_understand = streamed_mce_prefixes(&value, &bindings, "MustUnderstand")?;
+            }
+            _ => {}
+        }
+    }
+    for (namespace, local_name) in declared_process_content {
+        if namespace == MCE_NS || !scope.ignorable.contains(&namespace) {
+            return Err(format!(
+                "worksheet MCE ProcessContent namespace must be declared Ignorable: {namespace}"
+            ));
+        }
+        scope.process_content.insert((namespace, local_name));
+    }
+    Ok(StreamedMceAttributes {
+        scope,
+        must_understand,
+    })
+}
+
+fn check_streamed_must_understand(namespaces: &[String]) -> Result<(), String> {
+    if let Some(namespace) = namespaces
+        .iter()
+        .find(|namespace| !worksheet_understands_ns(namespace))
+    {
+        Err(format!(
+            "worksheet MCE MustUnderstand namespace is not understood: {namespace}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn streamed_processes_content(scope: &StreamedMceScope, namespace: &str, local_name: &str) -> bool {
+    scope
+        .process_content
+        .contains(&(namespace.to_string(), local_name.to_string()))
+        || scope
+            .process_content
+            .contains(&(namespace.to_string(), "*".to_string()))
+}
+
+fn ensure_unwrapped_element_has_no_xml_context_attributes(
+    reader: &NsReader<&[u8]>,
+    element: &quick_xml::events::BytesStart<'_>,
+) -> Result<(), String> {
+    const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|e| format!("worksheet MCE attribute: {e}"))?;
+        let (namespace, local_name) = reader.resolve_attribute(attribute.key);
+        if resolved_namespace_is(&namespace, |namespace| namespace == XML_NS)
+            && matches!(local_name.as_ref(), b"base" | b"lang" | b"space")
+        {
+            return Err(
+                "worksheet MCE ProcessContent element cannot carry xml:base, xml:lang, or xml:space"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn moved_element_namespace_insertion(
+    element: &quick_xml::events::BytesStart<'_>,
+    element_namespaces: &[(Option<String>, String)],
+    processed_parent_namespaces: &[(Option<String>, String)],
+) -> Result<String, String> {
+    let mut locally_declared = HashSet::new();
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|e| format!("worksheet namespace attribute: {e}"))?;
+        let key = attribute.key.as_ref();
+        if key == b"xmlns" {
+            locally_declared.insert(None);
+        } else if let Some(prefix) = key.strip_prefix(b"xmlns:") {
+            locally_declared.insert(Some(
+                std::str::from_utf8(prefix)
+                    .map_err(|e| e.to_string())?
+                    .to_string(),
+            ));
+        }
+    }
+    let mut insertion = String::new();
+    for (prefix, namespace) in element_namespaces {
+        let parent_preserves_binding =
+            processed_parent_namespaces
+                .iter()
+                .any(|(parent_prefix, parent_namespace)| {
+                    parent_prefix == prefix && parent_namespace == namespace
+                });
+        if locally_declared.contains(prefix) || parent_preserves_binding {
+            continue;
+        }
+        match prefix {
+            Some(prefix) => write!(
+                insertion,
+                " xmlns:{}=\"{}\"",
+                prefix,
+                quick_xml::escape::escape(namespace)
+            ),
+            None => write!(
+                insertion,
+                " xmlns=\"{}\"",
+                quick_xml::escape::escape(namespace)
+            ),
+        }
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(insertion)
+}
+
+fn merge_omitted_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    ranges.sort_unstable_by_key(|range| range.0);
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        if start >= end {
+            continue;
+        }
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+fn build_streamed_shell(
+    xml: &str,
+    omitted_ranges: Vec<(usize, usize)>,
+    mut insertions: Vec<(usize, String)>,
+) -> String {
+    let omitted_ranges = merge_omitted_ranges(omitted_ranges);
+    insertions.sort_unstable_by_key(|insertion| insertion.0);
+    let omitted_bytes = omitted_ranges
+        .iter()
+        .map(|(start, end)| end.saturating_sub(*start))
+        .sum::<usize>();
+    let inserted_bytes = insertions
+        .iter()
+        .map(|(_, insertion)| insertion.len())
+        .sum::<usize>();
+    let mut shell = String::with_capacity(
+        xml.len()
+            .saturating_sub(omitted_bytes)
+            .saturating_add(inserted_bytes),
+    );
+    let mut copied_through = 0usize;
+    let mut insertion_index = 0usize;
+    for (omitted_start, omitted_end) in omitted_ranges {
+        while insertion_index < insertions.len() && insertions[insertion_index].0 <= omitted_start {
+            let (position, insertion) = &insertions[insertion_index];
+            if *position >= copied_through {
+                shell.push_str(&xml[copied_through..*position]);
+                shell.push_str(insertion);
+                copied_through = *position;
+            }
+            insertion_index += 1;
+        }
+        if copied_through < omitted_start {
+            shell.push_str(&xml[copied_through..omitted_start]);
+        }
+        copied_through = copied_through.max(omitted_end);
+    }
+    while insertion_index < insertions.len() {
+        let (position, insertion) = &insertions[insertion_index];
+        if *position >= copied_through {
+            shell.push_str(&xml[copied_through..*position]);
+            shell.push_str(insertion);
+            copied_through = *position;
+        }
+        insertion_index += 1;
+    }
+    shell.push_str(&xml[copied_through..]);
+    shell
+}
+
+fn build_streamed_fragment(
+    xml: &str,
+    start: usize,
+    end: usize,
+    omitted_ranges: &[(usize, usize)],
+    insertions: &[(usize, String)],
+) -> Option<String> {
+    let fragment_ranges = omitted_ranges
+        .iter()
+        .filter(|(range_start, range_end)| *range_start >= start && *range_end <= end)
+        .map(|(range_start, range_end)| (range_start - start, range_end - start))
+        .collect::<Vec<_>>();
+    let fragment_insertions = insertions
+        .iter()
+        .filter(|(position, _)| *position >= start && *position <= end)
+        .map(|(position, insertion)| (position - start, insertion.clone()))
+        .collect::<Vec<_>>();
+    if fragment_ranges.is_empty() && fragment_insertions.is_empty() {
+        None
+    } else {
+        Some(build_streamed_shell(
+            &xml[start..end],
+            fragment_ranges,
+            fragment_insertions,
+        ))
+    }
+}
+
+/// Apply the same application-configuration predicate as the shared DOM MCE
+/// selector without materializing the potentially large `sheetData` subtree.
+///
+/// ECMA-376 Part 3 §9.3 and §7.6 define `Requires` as namespace prefixes:
+/// every prefix must resolve to a namespace understood by this XLSX parser.
+fn streamed_choice_is_understood(
+    reader: &NsReader<&[u8]>,
+    choice: &quick_xml::events::BytesStart<'_>,
+) -> Result<bool, String> {
+    let mut requires = None;
+    for attribute in choice.attributes() {
+        let attribute = attribute.map_err(|e| format!("worksheet MCE Choice attribute: {e}"))?;
+        if attribute.key.as_ref() == b"Requires" {
+            requires = Some(
+                attribute
+                    .unescape_value()
+                    .map_err(|e| format!("worksheet MCE Requires: {e}"))?
+                    .into_owned(),
+            );
+        }
+    }
+    let requires = requires.ok_or_else(|| {
+        "worksheet MCE Choice must have a non-empty Requires attribute".to_string()
+    })?;
+    let prefixes: Vec<&str> = requires.split_whitespace().collect();
+    if prefixes.is_empty() {
+        return Err("worksheet MCE Choice must have a non-empty Requires attribute".to_string());
+    }
+    let bindings = current_namespace_bindings(reader)?;
+    Ok(prefixes.iter().all(|required| {
+        bindings.iter().any(|(prefix, namespace)| {
+            prefix.as_deref() == Some(*required) && worksheet_understands_ns(namespace)
+        })
+    }))
+}
+
+/// Append a tiny namespace-preserving wrapper around one raw `<row>`.
+///
+/// Namespace declarations are inherited in XML, so a raw row slice is not
+/// necessarily a standalone document (`<x:row>` commonly inherits `xmlns:x`
+/// from `<x:worksheet>`). `NsReader::prefixes` exposes the effective bindings at
+/// the row start. Re-declaring those bindings on a neutral wrapper preserves the
+/// row's expanded names, including Strict/Transitional SpreadsheetML, MCE
+/// wrappers, extension prefixes, and `xml:space` semantics, without copying any
+/// sibling row.
+fn append_wrapped_row(
+    fragment: &mut String,
+    row_xml: &str,
+    namespaces: &[(Option<String>, String)],
+) -> Result<(), String> {
+    fragment.push_str("<streamed-row");
+    for (prefix, namespace) in namespaces {
+        match prefix {
+            Some(prefix) => write!(
+                fragment,
+                " xmlns:{}=\"{}\"",
+                prefix,
+                quick_xml::escape::escape(namespace)
+            ),
+            None => write!(
+                fragment,
+                " xmlns=\"{}\"",
+                quick_xml::escape::escape(namespace)
+            ),
+        }
+        .map_err(|e| e.to_string())?;
+    }
+    fragment.push('>');
+    fragment.push_str(row_xml);
+    fragment.push_str("</streamed-row>");
+    Ok(())
+}
+
+fn flush_streamed_rows(
+    xml: &str,
+    pending: &mut Vec<PendingStreamedRow>,
+    prev_row_idx: &mut u32,
+    shared_strings: &[SharedString],
+    theme_colors: &[String],
+) -> Result<Vec<Row>, String> {
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+    let content_bytes = pending.iter().fold(0usize, |total, row| {
+        total.saturating_add(row.projected_arena_bytes())
+    });
+    let mut fragment =
+        String::with_capacity(content_bytes.saturating_add(STREAMED_ROWS_ARENA_OVERHEAD));
+    fragment.push_str("<streamed-rows>");
+    for row in pending.iter() {
+        let row_xml = row
+            .processed_xml
+            .as_deref()
+            .unwrap_or(&xml[row.start..row.end]);
+        append_wrapped_row(&mut fragment, row_xml, &row.namespaces)?;
+    }
+    fragment.push_str("</streamed-rows>");
+    let doc = parse_guarded(&fragment).map_err(|e| e.to_string())?;
+    let mut rows = Vec::with_capacity(pending.len());
+    for wrapper in doc
+        .root_element()
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "streamed-row")
+    {
+        let row_node = wrapper
+            .children()
+            .find(|node| {
+                node.is_element()
+                    && node.tag_name().name() == "row"
+                    && is_x_ns(node.tag_name().namespace())
+            })
+            .ok_or_else(|| "streamed worksheet row lost its SpreadsheetML namespace".to_string())?;
+        rows.push(parse_row_node(
+            &row_node,
+            prev_row_idx,
+            shared_strings,
+            theme_colors,
+        ));
+    }
+    if rows.len() != pending.len() {
+        return Err("streamed worksheet row batch changed row cardinality".to_string());
+    }
+    pending.clear();
+    Ok(rows)
+}
+
+fn parse_row_node(
+    node: &roxmltree::Node<'_, '_>,
+    prev_row_idx: &mut u32,
+    shared_strings: &[SharedString],
+    theme_colors: &[String],
+) -> Row {
+    // ECMA-376 §18.3.1.73 makes `@r` optional; honor an explicit value when
+    // present. When omitted, take the running previous row + 1 (implicit
+    // sequential numbering — the de-facto consumer convention; the spec only
+    // grants the optionality). An explicit value also re-anchors the counter.
+    let row_idx = resolve_implicit_ordinal(
+        node.attribute("r").and_then(|s| s.parse::<u32>().ok()),
+        prev_row_idx,
+    );
+    let hidden = attr_bool(node, "hidden").unwrap_or(false);
+    // ECMA-376 §18.3.1.73 `<row>@ht` is the row height in points.
+    // `customHeight` describes how it was set and does not gate the value.
+    let height = if hidden {
+        Some(0.0)
+    } else {
+        node.attribute("ht").and_then(|s| s.parse().ok())
+    };
+    let outline_level = node
+        .attribute("outlineLevel")
+        .and_then(|s| s.parse::<u8>().ok())
+        .unwrap_or(0)
+        .min(7);
+    let collapsed = attr_bool(node, "collapsed").unwrap_or(false);
+    let row_ph = attr_bool(node, "ph").unwrap_or(false);
+    let cells = parse_row_cells(node, row_idx, row_ph, shared_strings, theme_colors);
+    Row {
+        index: row_idx,
+        height,
+        cells,
+        outline_level,
+        collapsed,
+        hidden,
+    }
+}
+
+fn current_namespace_bindings(
+    reader: &NsReader<&[u8]>,
+) -> Result<Vec<(Option<String>, String)>, String> {
+    reader
+        .prefixes()
+        .map(|(prefix, namespace)| {
+            let prefix = match prefix {
+                PrefixDeclaration::Default => None,
+                PrefixDeclaration::Named(prefix) => Some(
+                    std::str::from_utf8(prefix)
+                        .map_err(|e| e.to_string())?
+                        .to_string(),
+                ),
+            };
+            let namespace = std::str::from_utf8(namespace.as_ref())
+                .map_err(|e| e.to_string())?
+                .to_string();
+            Ok((prefix, namespace))
+        })
+        .collect()
+}
+
+fn classify_streamed_element(
+    reader: &NsReader<&[u8]>,
+    element: &quick_xml::events::BytesStart<'_>,
+    namespace: Option<&str>,
+    local_name: &str,
+    frames: &mut [StreamedElementFrame],
+    visible: bool,
+) -> Result<(StreamedElementKind, StreamedMceScope), String> {
+    let inherited = frames
+        .last()
+        .map(|frame| &frame.scope)
+        .cloned()
+        .unwrap_or_default();
+    if !visible {
+        return Ok((StreamedElementKind::Ignored, inherited));
+    }
+    if frames.last().is_some_and(StreamedElementFrame::is_opaque) {
+        return Ok((
+            StreamedElementKind::Retained {
+                namespace: namespace.map(str::to_string),
+                local_name: local_name.to_string(),
+                opaque: true,
+            },
+            inherited,
+        ));
+    }
+
+    let is_mc = namespace == Some(MCE_NS);
+    let parent_is_alternate_content = frames
+        .last()
+        .is_some_and(|frame| matches!(frame.kind, StreamedElementKind::AlternateContent { .. }));
+    if parent_is_alternate_content
+        && worksheet_is_application_defined_extension_element(namespace, local_name)
+    {
+        return Err(
+            "worksheet MCE AlternateContent may contain only Choice/Fallback children after Ignorable processing"
+                .to_string(),
+        );
+    }
+    if worksheet_is_application_defined_extension_element(namespace, local_name)
+        && !parent_is_alternate_content
+    {
+        // Part 3 §§8 and 9.1: the extension element itself, including its
+        // attributes, is passed through without MCE processing.
+        return Ok((
+            StreamedElementKind::Retained {
+                namespace: namespace.map(str::to_string),
+                local_name: local_name.to_string(),
+                opaque: true,
+            },
+            inherited,
+        ));
+    }
+
+    let attributes = streamed_mce_attributes(reader, element, &inherited)?;
+    if parent_is_alternate_content {
+        if !is_mc || !matches!(local_name, "Choice" | "Fallback") {
+            let ignored = namespace.is_some_and(|namespace| {
+                attributes.scope.ignorable.contains(namespace)
+                    && !worksheet_understands_ns(namespace)
+                    && !streamed_processes_content(&attributes.scope, namespace, local_name)
+            });
+            if ignored {
+                return Ok((StreamedElementKind::Ignored, attributes.scope));
+            }
+            return Err(
+                "worksheet MCE AlternateContent may contain only Choice/Fallback children after Ignorable processing"
+                    .to_string(),
+            );
+        }
+
+        let alternate = frames.last_mut().expect("AlternateContent parent checked");
+        let StreamedElementKind::AlternateContent {
+            selected_branch,
+            seen_choice,
+            seen_fallback,
+        } = &mut alternate.kind
+        else {
+            unreachable!("AlternateContent parent checked")
+        };
+        let selected = if local_name == "Choice" {
+            if *seen_fallback {
+                return Err(
+                    "worksheet MCE Choice cannot follow Fallback in AlternateContent".to_string(),
+                );
+            }
+            *seen_choice = true;
+            !*selected_branch && streamed_choice_is_understood(reader, element)?
+        } else {
+            if !*seen_choice {
+                return Err(
+                    "worksheet MCE AlternateContent must contain at least one Choice before Fallback"
+                        .to_string(),
+                );
+            }
+            if *seen_fallback {
+                return Err(
+                    "worksheet MCE AlternateContent may contain at most one Fallback".to_string(),
+                );
+            }
+            *seen_fallback = true;
+            !*selected_branch
+        };
+        if selected {
+            *selected_branch = true;
+            check_streamed_must_understand(&attributes.must_understand)?;
+        }
+        return Ok((
+            StreamedElementKind::AlternateBranch { selected },
+            attributes.scope,
+        ));
+    }
+
+    if is_mc && local_name == "AlternateContent" {
+        check_streamed_must_understand(&attributes.must_understand)?;
+        return Ok((
+            StreamedElementKind::AlternateContent {
+                selected_branch: false,
+                seen_choice: false,
+                seen_fallback: false,
+            },
+            attributes.scope,
+        ));
+    }
+
+    let ignored_namespace = namespace.filter(|namespace| {
+        attributes.scope.ignorable.contains(*namespace) && !worksheet_understands_ns(namespace)
+    });
+    if let Some(namespace) = ignored_namespace {
+        if streamed_processes_content(&attributes.scope, namespace, local_name) {
+            ensure_unwrapped_element_has_no_xml_context_attributes(reader, element)?;
+            check_streamed_must_understand(&attributes.must_understand)?;
+            return Ok((StreamedElementKind::Unwrapped, attributes.scope));
+        }
+        return Ok((StreamedElementKind::Ignored, attributes.scope));
+    }
+
+    check_streamed_must_understand(&attributes.must_understand)?;
+    Ok((
+        StreamedElementKind::Retained {
+            namespace: namespace.map(str::to_string),
+            local_name: local_name.to_string(),
+            opaque: false,
+        },
+        attributes.scope,
+    ))
+}
+
+struct StreamedProcessedParent {
+    depth: usize,
+    namespace: Option<String>,
+    local_name: String,
+    namespaces: Vec<(Option<String>, String)>,
+}
+
+fn retained_streamed_parent(frames: &[StreamedElementFrame]) -> Option<StreamedProcessedParent> {
+    frames
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, frame)| match &frame.kind {
+            StreamedElementKind::Retained {
+                namespace,
+                local_name,
+                ..
+            } if frame.visible => Some(StreamedProcessedParent {
+                depth: index + 1,
+                namespace: namespace.clone(),
+                local_name: local_name.clone(),
+                namespaces: frame.retained_namespaces.clone().unwrap_or_default(),
+            }),
+            _ => None,
+        })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamedHostRole {
+    Worksheet,
+    SheetData,
+    Row,
+    Other,
+}
+
+/// Validate one retained element against the worksheet host schema after MCE
+/// logical reparenting. Start and empty-element events share this decision;
+/// callers only differ in how they stream a non-empty sheetData or row.
+/// Descendants of an application-defined extension element are opaque payload,
+/// not host-schema children; the `extLst` boundary itself is still validated.
+fn validate_streamed_host_element(
+    namespace: Option<&str>,
+    local_name: &str,
+    opaque: &mut bool,
+    inside_opaque_extension: bool,
+    parent: Option<&StreamedProcessedParent>,
+    processed_root_count: &mut usize,
+    sheet_data_count: &mut usize,
+) -> Result<StreamedHostRole, String> {
+    if inside_opaque_extension {
+        return Ok(StreamedHostRole::Other);
+    }
+    let is_spreadsheetml = namespace.is_some_and(|namespace| is_x_ns(Some(namespace)));
+    *opaque = *opaque || worksheet_is_application_defined_extension_element(namespace, local_name);
+
+    match parent {
+        None => {
+            *processed_root_count += 1;
+            if *processed_root_count > 1 || !is_spreadsheetml || local_name != "worksheet" {
+                return Err(
+                    "MCE-processed worksheet root must be exactly one SpreadsheetML worksheet"
+                        .to_string(),
+                );
+            }
+            Ok(StreamedHostRole::Worksheet)
+        }
+        Some(parent)
+            if parent
+                .namespace
+                .as_deref()
+                .is_some_and(|namespace| is_x_ns(Some(namespace)))
+                && parent.local_name == "worksheet" =>
+        {
+            if is_spreadsheetml && local_name == "sheetData" {
+                *sheet_data_count += 1;
+                if *sheet_data_count > 1 {
+                    return Err(
+                        "MCE-processed worksheet must contain exactly one non-nested sheetData"
+                            .to_string(),
+                    );
+                }
+                Ok(StreamedHostRole::SheetData)
+            } else {
+                Ok(StreamedHostRole::Other)
+            }
+        }
+        Some(parent)
+            if parent
+                .namespace
+                .as_deref()
+                .is_some_and(|namespace| is_x_ns(Some(namespace)))
+                && parent.local_name == "sheetData" =>
+        {
+            if is_spreadsheetml && local_name == "sheetData" {
+                return Err(
+                    "MCE-processed worksheet sheetData must be a direct child of worksheet"
+                        .to_string(),
+                );
+            }
+            if !is_spreadsheetml || local_name != "row" {
+                return Err(
+                    "MCE-processed sheetData may contain only direct SpreadsheetML row children"
+                        .to_string(),
+                );
+            }
+            Ok(StreamedHostRole::Row)
+        }
+        _ if is_spreadsheetml && local_name == "sheetData" => {
+            Err("MCE-processed worksheet sheetData must be a direct child of worksheet".to_string())
+        }
+        _ => Ok(StreamedHostRole::Other),
+    }
+}
+
+#[derive(Default)]
+struct StreamedRowBatch {
+    pending: Vec<PendingStreamedRow>,
+    pending_bytes: usize,
+    max_pending_bytes: usize,
+    previous_index: u32,
+    heights: BTreeMap<u32, f64>,
+}
+
+impl StreamedRowBatch {
+    fn push(&mut self, row: PendingStreamedRow) {
+        if self.pending.is_empty() {
+            self.pending_bytes = STREAMED_ROWS_ARENA_OVERHEAD;
+        }
+        self.pending_bytes = self
+            .pending_bytes
+            .saturating_add(row.projected_arena_bytes());
+        self.max_pending_bytes = self.max_pending_bytes.max(self.pending_bytes);
+        self.pending.push(row);
+    }
+
+    fn would_exceed_byte_ceiling(&self, row: &PendingStreamedRow) -> bool {
+        !self.pending.is_empty()
+            && self
+                .pending_bytes
+                .saturating_add(row.projected_arena_bytes())
+                > STREAMED_ROW_BATCH_BYTES
+    }
+
+    fn should_dispatch(&self) -> bool {
+        self.pending_bytes >= STREAMED_ROW_BATCH_BYTES
+            || self.pending.len() >= STREAMED_ROW_BATCH_ROWS
+    }
+
+    fn dispatch(
+        &mut self,
+        xml: &str,
+        shared_strings: &[SharedString],
+        theme_colors: &[String],
+        visit_row: &mut impl FnMut(Row) -> Result<(), String>,
+    ) -> Result<(), String> {
+        for row in flush_streamed_rows(
+            xml,
+            &mut self.pending,
+            &mut self.previous_index,
+            shared_strings,
+            theme_colors,
+        )? {
+            if let Some(height) = row.height {
+                self.heights.insert(row.index, height);
+            }
+            visit_row(row)?;
+        }
+        self.pending_bytes = 0;
+        Ok(())
+    }
+
+    fn push_bounded(
+        &mut self,
+        row: PendingStreamedRow,
+        xml: &str,
+        shared_strings: &[SharedString],
+        theme_colors: &[String],
+        visit_row: &mut impl FnMut(Row) -> Result<(), String>,
+    ) -> Result<(), String> {
+        // Account for the generated projection and inherited namespace wrapper,
+        // not just raw source bytes. Dispatch before crossing the deterministic
+        // arena ceiling. As with the pre-existing row streamer, one unusually
+        // large row is indivisible and may itself exceed the ceiling.
+        if self.would_exceed_byte_ceiling(&row) {
+            self.dispatch(xml, shared_strings, theme_colors, visit_row)?;
+        }
+        self.push(row);
+        if self.should_dispatch() {
+            self.dispatch(xml, shared_strings, theme_colors, visit_row)?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct StreamedWorksheetRows {
+    pub(crate) shell_xml: String,
+    pub(crate) row_heights: BTreeMap<u32, f64>,
+    #[cfg(test)]
+    max_row_batch_bytes: usize,
+}
+
+/// Stream the MCE-processed `CT_SheetData` rows through a bounded batch parser.
+///
+/// ECMA-376 Part 3 §§9.2–9.4 define the processed infoset against which the
+/// host schema is validated. The visitor therefore sees only rows whose
+/// `AlternateContent` branch is selected and rows exposed by an ignorable
+/// `ProcessContent` wrapper. It can project row/cell data without retaining the
+/// complete `Vec<Row>`.
+pub(crate) fn stream_worksheet_rows(
+    xml: &str,
+    shared_strings: &[SharedString],
+    theme_colors: &[String],
+    mut visit_row: impl FnMut(Row) -> Result<(), String>,
+) -> Result<StreamedWorksheetRows, String> {
+    let mut reader = NsReader::from_str(xml);
+    // Cell text, formulas, rich strings, CDATA and `xml:space` must reach the
+    // established roxmltree row parser byte-for-byte.
+    reader.config_mut().trim_text(false);
+
+    let mut frames: Vec<StreamedElementFrame> = Vec::new();
+    let mut processed_root_count = 0usize;
+    let mut sheet_data_count = 0usize;
+    let mut sheet_data_interior: Option<(usize, usize)> = None;
+    let mut omitted_ranges: Vec<(usize, usize)> = Vec::new();
+    let mut namespace_insertions: Vec<(usize, String)> = Vec::new();
+    let mut active_row: Option<ActiveStreamedRow> = None;
+    let mut row_batch = StreamedRowBatch::default();
+
+    loop {
+        let event_start = reader.buffer_position() as usize;
+        let (namespace, event) = {
+            let (namespace, event) = reader
+                .read_resolved_event()
+                .map_err(|e| format!("worksheet XML stream: {e}"))?;
+            (streamed_namespace_uri(&namespace)?, event.into_owned())
+        };
+        let event_end = reader.buffer_position() as usize;
+
+        match event {
+            Event::Start(start) => {
+                let depth = frames.len() + 1;
+                let local_name = std::str::from_utf8(start.local_name().as_ref())
+                    .map_err(|e| e.to_string())?
+                    .to_string();
+                let visible = frames
+                    .last()
+                    .is_none_or(StreamedElementFrame::children_are_visible);
+                let inside_opaque_extension =
+                    frames.last().is_some_and(StreamedElementFrame::is_opaque);
+                let physical_parent_depth = frames.len();
+                let processed_parent = retained_streamed_parent(&frames);
+                let (mut kind, scope) = classify_streamed_element(
+                    &reader,
+                    &start,
+                    namespace.as_deref(),
+                    &local_name,
+                    &mut frames,
+                    visible,
+                )?;
+                let mut retained_namespaces = None;
+
+                if visible {
+                    if let StreamedElementKind::Retained {
+                        namespace: retained_namespace,
+                        local_name: retained_local_name,
+                        opaque,
+                    } = &mut kind
+                    {
+                        let element_namespaces = current_namespace_bindings(&reader)?;
+                        let role = validate_streamed_host_element(
+                            retained_namespace.as_deref(),
+                            retained_local_name,
+                            opaque,
+                            inside_opaque_extension,
+                            processed_parent.as_ref(),
+                            &mut processed_root_count,
+                            &mut sheet_data_count,
+                        )?;
+                        match role {
+                            StreamedHostRole::SheetData => {
+                                sheet_data_interior = Some((depth, event_end));
+                            }
+                            StreamedHostRole::Row => {
+                                active_row = Some(ActiveStreamedRow {
+                                    depth,
+                                    start: event_start,
+                                    namespaces: element_namespaces.clone(),
+                                    omitted_range_start: omitted_ranges.len(),
+                                    insertion_start: namespace_insertions.len(),
+                                });
+                            }
+                            StreamedHostRole::Worksheet | StreamedHostRole::Other => {}
+                        }
+
+                        let processed_parent_depth =
+                            processed_parent.as_ref().map_or(0, |parent| parent.depth);
+                        if processed_parent_depth != physical_parent_depth {
+                            let parent_namespaces = processed_parent
+                                .as_ref()
+                                .map_or(&[][..], |parent| parent.namespaces.as_slice());
+                            let insertion = moved_element_namespace_insertion(
+                                &start,
+                                &element_namespaces,
+                                parent_namespaces,
+                            )?;
+                            if !insertion.is_empty() {
+                                namespace_insertions.push((event_end - 1, insertion));
+                            }
+                        }
+                        retained_namespaces = Some(element_namespaces);
+                    }
+                }
+                frames.push(StreamedElementFrame {
+                    start: event_start,
+                    start_tag_end: event_end,
+                    kind,
+                    scope,
+                    visible,
+                    retained_namespaces,
+                });
+            }
+            Event::Empty(empty) => {
+                let local_name = std::str::from_utf8(empty.local_name().as_ref())
+                    .map_err(|e| e.to_string())?
+                    .to_string();
+                let visible = frames
+                    .last()
+                    .is_none_or(StreamedElementFrame::children_are_visible);
+                let inside_opaque_extension =
+                    frames.last().is_some_and(StreamedElementFrame::is_opaque);
+                let physical_parent_depth = frames.len();
+                let processed_parent = retained_streamed_parent(&frames);
+                let (mut kind, _) = classify_streamed_element(
+                    &reader,
+                    &empty,
+                    namespace.as_deref(),
+                    &local_name,
+                    &mut frames,
+                    visible,
+                )?;
+                match &mut kind {
+                    StreamedElementKind::Retained {
+                        namespace: retained_namespace,
+                        local_name: retained_local_name,
+                        opaque,
+                    } if visible => {
+                        let element_namespaces = current_namespace_bindings(&reader)?;
+                        let role = validate_streamed_host_element(
+                            retained_namespace.as_deref(),
+                            retained_local_name,
+                            opaque,
+                            inside_opaque_extension,
+                            processed_parent.as_ref(),
+                            &mut processed_root_count,
+                            &mut sheet_data_count,
+                        )?;
+                        if role == StreamedHostRole::Row {
+                            row_batch.push_bounded(
+                                PendingStreamedRow {
+                                    start: event_start,
+                                    end: event_end,
+                                    namespaces: element_namespaces.clone(),
+                                    processed_xml: None,
+                                },
+                                xml,
+                                shared_strings,
+                                theme_colors,
+                                &mut visit_row,
+                            )?;
+                        }
+                        let processed_parent_depth =
+                            processed_parent.as_ref().map_or(0, |parent| parent.depth);
+                        if processed_parent_depth != physical_parent_depth {
+                            let parent_namespaces = processed_parent
+                                .as_ref()
+                                .map_or(&[][..], |parent| parent.namespaces.as_slice());
+                            let insertion = moved_element_namespace_insertion(
+                                &empty,
+                                &element_namespaces,
+                                parent_namespaces,
+                            )?;
+                            if !insertion.is_empty() {
+                                namespace_insertions.push((event_end - 2, insertion));
+                            }
+                        }
+                    }
+                    StreamedElementKind::Retained { .. } => {}
+                    StreamedElementKind::AlternateContent {
+                        seen_choice: false, ..
+                    } => {
+                        return Err(
+                            "worksheet MCE AlternateContent must contain at least one Choice"
+                                .to_string(),
+                        );
+                    }
+                    _ => omitted_ranges.push((event_start, event_end)),
+                }
+            }
+            Event::End(end) => {
+                let depth = frames.len();
+                let local_name = std::str::from_utf8(end.local_name().as_ref())
+                    .map_err(|e| e.to_string())?
+                    .to_string();
+                let completed_row = match active_row.take() {
+                    Some(row)
+                        if depth == row.depth
+                            && namespace
+                                .as_deref()
+                                .is_some_and(|namespace| is_x_ns(Some(namespace)))
+                            && local_name == "row" =>
+                    {
+                        Some(row)
+                    }
+                    Some(row) => {
+                        active_row = Some(row);
+                        None
+                    }
+                    None => None,
+                };
+                let frame = frames.pop().ok_or_else(|| {
+                    "worksheet XML stream ended an element without a matching start".to_string()
+                })?;
+                if let Some((sheet_depth, interior_start)) = sheet_data_interior {
+                    if depth == sheet_depth
+                        && matches!(
+                            &frame.kind,
+                            StreamedElementKind::Retained {
+                                namespace,
+                                local_name,
+                                ..
+                            } if namespace
+                                .as_deref()
+                                .is_some_and(|namespace| is_x_ns(Some(namespace)))
+                                && local_name == "sheetData"
+                        )
+                    {
+                        omitted_ranges.push((interior_start, event_start));
+                        sheet_data_interior = None;
+                    }
+                }
+                match frame.kind {
+                    StreamedElementKind::Retained { .. } => {}
+                    StreamedElementKind::Ignored
+                    | StreamedElementKind::AlternateBranch { selected: false } => {
+                        omitted_ranges.push((frame.start, event_end));
+                    }
+                    StreamedElementKind::Unwrapped
+                    | StreamedElementKind::AlternateBranch { selected: true } => {
+                        omitted_ranges.push((frame.start, frame.start_tag_end));
+                        omitted_ranges.push((event_start, event_end));
+                    }
+                    StreamedElementKind::AlternateContent {
+                        seen_choice: true, ..
+                    } => {
+                        omitted_ranges.push((frame.start, frame.start_tag_end));
+                        omitted_ranges.push((event_start, event_end));
+                    }
+                    StreamedElementKind::AlternateContent {
+                        seen_choice: false, ..
+                    } => {
+                        return Err(
+                            "worksheet MCE AlternateContent must contain at least one Choice"
+                                .to_string(),
+                        );
+                    }
+                }
+                if let Some(row) = completed_row {
+                    let processed_xml = build_streamed_fragment(
+                        xml,
+                        row.start,
+                        event_end,
+                        &omitted_ranges[row.omitted_range_start..],
+                        &namespace_insertions[row.insertion_start..],
+                    );
+                    // The final shell removes the complete sheetData interior,
+                    // so row-local edits are no longer needed after producing
+                    // this bounded row projection.
+                    omitted_ranges.truncate(row.omitted_range_start);
+                    namespace_insertions.truncate(row.insertion_start);
+                    row_batch.push_bounded(
+                        PendingStreamedRow {
+                            start: row.start,
+                            end: event_end,
+                            namespaces: row.namespaces,
+                            processed_xml,
+                        },
+                        xml,
+                        shared_strings,
+                        theme_colors,
+                        &mut visit_row,
+                    )?;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    if !frames.is_empty() {
+        return Err("worksheet XML stream ended with unclosed elements".to_string());
+    }
+    if processed_root_count != 1 {
+        return Err(
+            "MCE-processed worksheet root must be exactly one SpreadsheetML worksheet".to_string(),
+        );
+    }
+    if sheet_data_count != 1 {
+        return Err("MCE-processed worksheet must contain exactly one sheetData".to_string());
+    }
+    row_batch.dispatch(xml, shared_strings, theme_colors, &mut visit_row)?;
+    #[cfg(test)]
+    let max_row_batch_bytes = row_batch.max_pending_bytes;
+    Ok(StreamedWorksheetRows {
+        shell_xml: build_streamed_shell(xml, omitted_ranges, namespace_insertions),
+        row_heights: row_batch.heights,
+        #[cfg(test)]
+        max_row_batch_bytes,
+    })
+}
+
+fn stream_sheet_data(
+    xml: &str,
+    shared_strings: &[SharedString],
+    theme_colors: &[String],
+) -> Result<StreamedSheetData, String> {
+    let mut rows = Vec::new();
+    let streamed = stream_worksheet_rows(xml, shared_strings, theme_colors, |row| {
+        rows.push(row);
+        Ok(())
+    })?;
+    Ok(StreamedSheetData {
+        shell_xml: streamed.shell_xml,
+        rows,
+        row_heights: streamed.row_heights,
+    })
+}
+
+fn parse_worksheet_with_shell(
     xml: &str,
     shared_strings: &[SharedString],
     theme_colors: &[String],
     name: &str,
-) -> Result<(Worksheet, HyperlinkRids), String> {
+) -> Result<(Worksheet, HyperlinkRids, String), String> {
+    let streamed = stream_sheet_data(xml, shared_strings, theme_colors)?;
     // Guard against a pathologically deep worksheet XML: the nesting-depth
     // pre-check now lives inside `parse_guarded`, which rejects an over-deep
     // part before roxmltree's tree builder can recurse and overflow the fixed
     // WASM stack. See `ooxml_common::depth::parse_guarded`.
-    let doc = parse_guarded(xml).map_err(|e| e.to_string())?;
+    let doc = parse_guarded(&streamed.shell_xml).map_err(|e| e.to_string())?;
 
-    let mut rows = Vec::new();
+    let rows = streamed.rows;
     let mut col_widths: BTreeMap<u32, f64> = BTreeMap::new();
-    let mut row_heights: BTreeMap<u32, f64> = BTreeMap::new();
+    let row_heights = streamed.row_heights;
     // Outline (grouping) metadata — ECMA-376 §18.3.1.13 (col) / §18.3.1.73
     // (row) / §18.3.1.61 (outlinePr). Only non-default entries are recorded so
     // an outline-free sheet keeps empty maps / a `None` outlinePr (byte-stable
@@ -971,8 +2340,6 @@ fn parse_worksheet(
     // row's number + 1 (the first row is 1), and an explicit `@r` re-anchors
     // this counter. `prev_row_idx == 0` means "no row yet", so the first
     // implicit row lands at index 1.
-    let mut prev_row_idx: u32 = 0;
-
     // Pre-scan worksheet-level extLst for x14:dataBar extension attributes.
     // Excel 2010+ stores the `gradient` flag on `<x14:dataBar>` inside
     // `<extLst>/<ext>/<x14:conditionalFormattings>/<x14:conditionalFormatting>
@@ -1265,60 +2632,6 @@ fn parse_worksheet(
                     }
                 }
             }
-            "row" if is_x_ns(node.tag_name().namespace()) => {
-                // §18.3.1.73 makes `@r` optional; honor an explicit value when
-                // present. When omitted, take the running previous row + 1
-                // (implicit sequential numbering — the de-facto consumer
-                // convention; the spec only grants the optionality). An explicit
-                // value also re-anchors the counter for following implicit rows.
-                // Routed through the shared primitive so this and the sparkline
-                // data path (`extract_range_values`) cannot drift.
-                let row_idx = resolve_implicit_ordinal(
-                    node.attribute("r").and_then(|s| s.parse::<u32>().ok()),
-                    &mut prev_row_idx,
-                );
-                let hidden = attr_bool(&node, "hidden").unwrap_or(false);
-                // ECMA-376 §18.3.1.73 `<row>@ht` is the row height in points.
-                // Gating the value on `@customHeight="1"` (0.37.0) was too
-                // strict — `demo/sample-1` sheets 2-5 store `ht="36.95"` on
-                // row 2 without `customHeight`, and Excel renders that row at
-                // ~49 px (36.95 pt × 4/3), not the workbook default. Always
-                // honor `ht` when present; `customHeight` is metadata about
-                // *how* the height was set (user-edited vs auto-fit) and
-                // doesn't gate the value itself.
-                let height: Option<f64> = if hidden {
-                    Some(0.0)
-                } else {
-                    node.attribute("ht").and_then(|s| s.parse().ok())
-                };
-                if let Some(h) = height {
-                    row_heights.insert(row_idx, h);
-                }
-                // §18.3.1.73 outline metadata: `outlineLevel` (0-7) and the
-                // summary-row `collapsed` flag. `hidden` is surfaced explicitly
-                // (not just as `height == 0`) so the gutter can distinguish a
-                // collapsed-detail row from a deliberately zero-height row.
-                let outline_level = node
-                    .attribute("outlineLevel")
-                    .and_then(|s| s.parse::<u8>().ok())
-                    .unwrap_or(0)
-                    .min(7);
-                let collapsed = attr_bool(&node, "collapsed").unwrap_or(false);
-                // ECMA-376 §18.3.1.73 `<row ph="1">` — the row-level furigana
-                // display toggle. Every cell in the row shows its phonetic hint
-                // unless the cell overrides with its own `@ph`. Threaded into
-                // `parse_row_cells` so each cell resolves the effective value.
-                let row_ph = attr_bool(&node, "ph").unwrap_or(false);
-                let cells = parse_row_cells(&node, row_idx, row_ph, shared_strings, theme_colors);
-                rows.push(Row {
-                    index: row_idx,
-                    height,
-                    cells,
-                    outline_level,
-                    collapsed,
-                    hidden,
-                });
-            }
             "conditionalFormatting" if is_x_ns(node.tag_name().namespace()) => {
                 let sqref = node.attribute("sqref").map(parse_sqref).unwrap_or_default();
                 let mut rules: Vec<CfRule> = Vec::new();
@@ -1596,52 +2909,65 @@ fn parse_worksheet(
 
     let data_validations = parse_data_validations(doc.root_element());
 
-    Ok((
-        Worksheet {
-            name: name.to_string(),
-            rows,
-            col_widths,
-            row_heights,
-            col_outline_levels,
-            col_collapsed,
-            col_hidden,
-            default_col_width,
-            default_row_height,
-            merge_cells,
-            freeze_rows,
-            freeze_cols,
-            conditional_formats,
-            images: Vec::new(),
-            charts: Vec::new(),
-            shape_groups: Vec::new(),
-            show_zeros,
-            show_gridlines,
-            right_to_left,
-            outline_pr,
-            tab_color,
-            auto_filter,
-            hyperlinks: Vec::new(),
-            comment_refs: Vec::new(),
-            comments: Vec::new(),
-            data_validations,
-            defined_names: Vec::new(),
-            tables: Vec::new(),
-            slicers: Vec::new(),
-            pivot_tables: Vec::new(),
-            pivot_diagnostics: Vec::new(),
-            sparkline_groups: Vec::new(),
-            default_font_family: None,
-            default_font_size: None,
-            // Set by `parse_sheet_with` from the workbook-level `<workbookPr
-            // date1904>` (ECMA-376 §18.2.28); a bare `parse_worksheet` (tests)
-            // defaults to the 1900 date system.
-            date1904: false,
-            // A successfully parsed sheet carries no error (RB7). Only the
-            // `Worksheet::placeholder` path sets this.
-            parse_error: None,
-        },
-        hyperlink_rids,
-    ))
+    let worksheet = Worksheet {
+        name: name.to_string(),
+        rows,
+        col_widths,
+        row_heights,
+        col_outline_levels,
+        col_collapsed,
+        col_hidden,
+        default_col_width,
+        default_row_height,
+        merge_cells,
+        freeze_rows,
+        freeze_cols,
+        conditional_formats,
+        images: Vec::new(),
+        charts: Vec::new(),
+        shape_groups: Vec::new(),
+        show_zeros,
+        show_gridlines,
+        right_to_left,
+        outline_pr,
+        tab_color,
+        auto_filter,
+        hyperlinks: Vec::new(),
+        comment_refs: Vec::new(),
+        comments: Vec::new(),
+        data_validations,
+        defined_names: Vec::new(),
+        tables: Vec::new(),
+        slicers: Vec::new(),
+        pivot_tables: Vec::new(),
+        pivot_diagnostics: Vec::new(),
+        sparkline_groups: Vec::new(),
+        default_font_family: None,
+        default_font_size: None,
+        // Set by `parse_sheet_with` from the workbook-level `<workbookPr
+        // date1904>` (ECMA-376 §18.2.28); a bare `parse_worksheet` (tests)
+        // defaults to the 1900 date system.
+        date1904: false,
+        // A successfully parsed sheet carries no error (RB7). Only the
+        // `Worksheet::placeholder` path sets this.
+        parse_error: None,
+    };
+    // `doc` borrows the shell. End that borrow before moving the small shell to
+    // ancillary OLE/sparkline readers so they never rebuild a DOM over the
+    // original, potentially huge `sheetData`.
+    drop(doc);
+    Ok((worksheet, hyperlink_rids, streamed.shell_xml))
+}
+
+#[cfg(test)]
+fn parse_worksheet(
+    xml: &str,
+    shared_strings: &[SharedString],
+    theme_colors: &[String],
+    name: &str,
+) -> Result<(Worksheet, HyperlinkRids), String> {
+    parse_worksheet_with_shell(xml, shared_strings, theme_colors, name)
+        .map(|(worksheet, hyperlinks, _shell)| (worksheet, hyperlinks))
 }
 
 /// Parse a .rels file into rId → Target map.
@@ -2151,6 +3477,7 @@ fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> 
 fn load_sheet_sparklines(
     archive: &mut XlsxZip,
     sheet_xml: &str,
+    current_worksheet: &Worksheet,
     current_sheet_name: &str,
     sheets: &[SheetMeta],
     rels_doc: &roxmltree::Document,
@@ -2219,7 +3546,7 @@ fn load_sheet_sparklines(
                 let values = resolve_worksheet_reference(
                     archive,
                     f_text,
-                    sheet_xml,
+                    current_worksheet,
                     current_sheet_name,
                     sheets,
                     rels_doc,
@@ -2414,6 +3741,603 @@ fn parse_row_cells(
     cells
 }
 
+#[cfg(test)]
+mod worksheet_streaming_tests {
+    use super::*;
+
+    fn dom_rows(
+        xml: &str,
+        shared_strings: &[SharedString],
+        theme_colors: &[String],
+    ) -> (Vec<Row>, BTreeMap<u32, f64>) {
+        let doc = parse_guarded(xml).expect("legacy full worksheet DOM parses");
+        let mut previous_row = 0;
+        let mut heights = BTreeMap::new();
+        let rows = doc
+            .descendants()
+            .filter(|node| {
+                node.is_element()
+                    && node.tag_name().name() == "row"
+                    && is_x_ns(node.tag_name().namespace())
+            })
+            .map(|node| {
+                let row = parse_row_node(&node, &mut previous_row, shared_strings, theme_colors);
+                if let Some(height) = row.height {
+                    heights.insert(row.index, height);
+                }
+                row
+            })
+            .collect();
+        (rows, heights)
+    }
+
+    fn assert_streamed_rows_match_dom(xml: &str) {
+        let streamed = stream_sheet_data(xml, &[], &[]).expect("streaming parse succeeds");
+        let (dom_rows, dom_heights) = dom_rows(xml, &[], &[]);
+        assert_eq!(
+            serde_json::to_value(&streamed.rows).expect("streamed rows serialize"),
+            serde_json::to_value(&dom_rows).expect("DOM rows serialize")
+        );
+        assert_eq!(streamed.row_heights, dom_heights);
+        let shell = parse_guarded(&streamed.shell_xml).expect("worksheet shell stays valid");
+        assert!(!shell
+            .descendants()
+            .any(|node| node.tag_name().name() == "row"));
+    }
+
+    #[test]
+    fn stream_matches_dom_for_rich_inline_cells_and_implicit_references() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+          <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+            <sheetData>
+              <row r="3" ht="21.5" outlineLevel="2" collapsed="1" ph="1">
+                <c t="inlineStr"><is>
+                  <r><rPr><b/><color rgb="FF112233"/></rPr><t xml:space="preserve"> A &amp; </t></r>
+                  <r><t><![CDATA[B < C]]></t></r>
+                  <rPh sb="0" eb="1"><t>えー</t></rPh>
+                  <phoneticPr fontId="2" type="Hiragana" alignment="center"/>
+                </is></c>
+                <c r="C3" t="str" ph="0"><f>CONCAT(&quot;x&quot;,&quot;y&quot;)</f><v>x&amp;y</v></c>
+                <c><v>42.25</v></c>
+              </row>
+              <row hidden="true"><c t="b"><v>true</v></c><c t="e"><v>#N/A</v></c></row>
+              <row/>
+            </sheetData>
+            <mergeCells count="1"><mergeCell ref="A3:D3"/></mergeCells>
+          </worksheet>"#;
+        assert_streamed_rows_match_dom(xml);
+    }
+
+    #[test]
+    fn strict_prefixed_stream_selects_first_understood_mce_choice() {
+        // Part 3 §9.3: skip the unknown first Choice, select the first Choice
+        // whose complete Requires set is understood, then ignore later choices
+        // and Fallback. The raw DOM intentionally is not the oracle here because
+        // it contains all branches before MCE preprocessing.
+        let xml = r#"<x:worksheet
+            xmlns:x="http://purl.oclc.org/ooxml/spreadsheetml/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"
+            xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"
+            mc:Ignorable="x15 x14">
+          <x:sheetData>
+            <mc:AlternateContent>
+              <mc:Choice Requires="x15">
+                <x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t>unknown</x:t></x:is></x:c></x:row>
+              </mc:Choice>
+              <mc:Choice Requires="x14">
+                <x:row r="4"><x:c r="A4" t="inlineStr"><x:is><x:t>selected</x:t></x:is></x:c></x:row>
+              </mc:Choice>
+              <mc:Choice Requires="x14">
+                <x:row r="5"><x:c r="A5" t="inlineStr"><x:is><x:t>later</x:t></x:is></x:c></x:row>
+              </mc:Choice>
+              <mc:Fallback>
+                <x:row><x:c t="str"><x:v>fallback</x:v></x:c></x:row>
+              </mc:Fallback>
+            </mc:AlternateContent>
+          </x:sheetData>
+          <x:hyperlinks><x:hyperlink ref="A1" location="Target!A1"/></x:hyperlinks>
+        </x:worksheet>"#;
+        let streamed = stream_sheet_data(xml, &[], &[]).expect("MCE worksheet streams");
+        assert_eq!(streamed.rows.len(), 1);
+        assert_eq!(streamed.rows[0].index, 4);
+        assert!(matches!(
+            &streamed.rows[0].cells[0].value,
+            CellValue::Text { text, .. } if text == "selected"
+        ));
+    }
+
+    #[test]
+    fn mce_unknown_choice_selects_fallback_only() {
+        let xml = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:future="urn:example:future">
+          <x:sheetData>
+            <mc:AlternateContent>
+              <mc:Choice Requires="future">
+                <x:row r="1"><x:c r="A1"><x:v>1</x:v></x:c></x:row>
+              </mc:Choice>
+              <mc:Fallback>
+                <x:row r="2"><x:c r="A2"><x:v>2</x:v></x:c></x:row>
+              </mc:Fallback>
+            </mc:AlternateContent>
+          </x:sheetData>
+        </x:worksheet>"#;
+        let streamed = stream_sheet_data(xml, &[], &[]).expect("MCE fallback streams");
+        assert_eq!(streamed.rows.len(), 1);
+        assert_eq!(streamed.rows[0].index, 2);
+    }
+
+    #[test]
+    fn mce_alternate_content_can_supply_the_processed_document_root() {
+        // Part 3 §§7.5, 9.3–9.4: AlternateContent is replaced by the selected
+        // branch content before the host schema sees the document element.
+        // All namespace declarations intentionally live on the removed wrapper.
+        let xml = r#"<mc:AlternateContent
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:future="urn:example:future">
+          <mc:Choice Requires="future">
+            <x:notAWorksheet/>
+          </mc:Choice>
+          <mc:Fallback>
+            <x:worksheet>
+              <x:sheetData>
+                <x:row r="7"><x:c r="A7"><x:v>42</x:v></x:c></x:row>
+              </x:sheetData>
+            </x:worksheet>
+          </mc:Fallback>
+        </mc:AlternateContent>"#;
+        let streamed = stream_sheet_data(xml, &[], &[]).expect("selected root is processed");
+        assert_eq!(streamed.rows.len(), 1);
+        assert_eq!(streamed.rows[0].index, 7);
+        let shell = parse_guarded(&streamed.shell_xml).expect("processed shell is namespace-valid");
+        assert_eq!(shell.root_element().tag_name().name(), "worksheet");
+        assert!(is_x_ns(shell.root_element().tag_name().namespace()));
+    }
+
+    #[test]
+    fn mce_alternate_content_can_supply_direct_sheet_data() {
+        // The physical parent is Choice, but §9.4 removes both
+        // AlternateContent and the selected branch wrapper. CT_Worksheet
+        // therefore sees sheetData as a direct child.
+        let xml = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">
+          <mc:AlternateContent>
+            <mc:Choice Requires="x14">
+              <x:sheetData>
+                <x:row r="3"><x:c r="A3" t="str"><x:v>selected</x:v></x:c></x:row>
+              </x:sheetData>
+            </mc:Choice>
+            <mc:Fallback><x:sheetData/></mc:Fallback>
+          </mc:AlternateContent>
+        </x:worksheet>"#;
+        let streamed = stream_sheet_data(xml, &[], &[]).expect("selected sheetData is direct");
+        assert_eq!(streamed.rows.len(), 1);
+        assert_eq!(streamed.rows[0].index, 3);
+        let shell = parse_guarded(&streamed.shell_xml).expect("processed shell parses");
+        let root = shell.root_element();
+        let sheet_data = root
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "sheetData")
+            .expect("processed direct sheetData");
+        assert_eq!(sheet_data.parent_element(), Some(root));
+    }
+
+    #[test]
+    fn mce_process_content_unwraps_ignorable_row_container() {
+        // Part 3 §9.2 marks future:rows as unwrapped (rather than ignored)
+        // because its expanded name appears in the inherited ProcessContent
+        // set. CT_SheetData consequently validates and consumes its row child.
+        let xml = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:future="urn:example:future"
+            mc:Ignorable="future"
+            mc:ProcessContent="future:*">
+          <x:sheetData>
+            <future:empty/>
+            <future:rows>
+              <x:row r="9"><x:c r="B9"><x:v>9</x:v></x:c></x:row>
+            </future:rows>
+          </x:sheetData>
+        </x:worksheet>"#;
+        let streamed = stream_sheet_data(xml, &[], &[]).expect("ProcessContent exposes direct row");
+        assert_eq!(streamed.rows.len(), 1);
+        assert_eq!(streamed.rows[0].index, 9);
+        assert_eq!(streamed.rows[0].cells[0].col, 2);
+    }
+
+    #[test]
+    fn mce_inside_row_selects_direct_cell_before_row_parsing() {
+        let xml = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">
+          <x:sheetData>
+            <x:row r="4">
+              <mc:AlternateContent>
+                <mc:Choice Requires="x14">
+                  <x:c r="C4" t="str"><x:v>selected-cell</x:v></x:c>
+                </mc:Choice>
+                <mc:Fallback>
+                  <x:c r="D4" t="str"><x:v>fallback-cell</x:v></x:c>
+                </mc:Fallback>
+              </mc:AlternateContent>
+            </x:row>
+          </x:sheetData>
+        </x:worksheet>"#;
+        let streamed = stream_sheet_data(xml, &[], &[]).expect("row MCE is preprocessed");
+        assert_eq!(streamed.rows.len(), 1);
+        assert_eq!(streamed.rows[0].cells.len(), 1);
+        assert_eq!(streamed.rows[0].cells[0].col, 3);
+        assert!(matches!(
+            &streamed.rows[0].cells[0].value,
+            CellValue::Text { text, .. } if text == "selected-cell"
+        ));
+    }
+
+    #[test]
+    fn mce_process_content_inside_row_exposes_direct_cell() {
+        let xml = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:future="urn:example:future"
+            mc:Ignorable="future"
+            mc:ProcessContent="future:cells">
+          <x:sheetData>
+            <x:row r="6">
+              <future:cells>
+                <x:c r="B6"><x:v>6</x:v></x:c>
+              </future:cells>
+            </x:row>
+          </x:sheetData>
+        </x:worksheet>"#;
+        let streamed =
+            stream_sheet_data(xml, &[], &[]).expect("row ProcessContent is preprocessed");
+        assert_eq!(streamed.rows.len(), 1);
+        assert_eq!(streamed.rows[0].cells.len(), 1);
+        assert_eq!(streamed.rows[0].cells[0].col, 2);
+        assert!(matches!(
+            streamed.rows[0].cells[0].value,
+            CellValue::Number { number } if number == 6.0
+        ));
+    }
+
+    #[test]
+    fn mce_is_processed_inside_ordinary_worksheet_subtrees() {
+        let xml = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">
+          <x:sheetData/>
+          <x:mergeCells count="1">
+            <mc:AlternateContent>
+              <mc:Choice Requires="x14"><x:mergeCell ref="A1:B1"/></mc:Choice>
+              <mc:Fallback><x:mergeCell ref="C1:D1"/></mc:Fallback>
+            </mc:AlternateContent>
+          </x:mergeCells>
+        </x:worksheet>"#;
+        let (worksheet, _) =
+            parse_worksheet(xml, &[], &[], "MCE").expect("ordinary subtree is preprocessed");
+        assert_eq!(worksheet.merge_cells.len(), 1);
+        assert_eq!(worksheet.merge_cells[0].left, 1);
+        assert_eq!(worksheet.merge_cells[0].right, 2);
+    }
+
+    #[test]
+    fn spreadsheetml_ext_lst_is_the_configured_opaque_boundary() {
+        // Part 1 §10 designates extLst as the application-defined extension
+        // element. Its contents pass through unchanged even when they contain
+        // MCE markup that would be nonconformant in an ordinary worksheet
+        // subtree.
+        const PAYLOAD: &str = r#"<x:sheetData><x:row r="99"><mc:AlternateContent><mc:Fallback><x:c r="A99"/></mc:Fallback></mc:AlternateContent></x:row></x:sheetData><x:sheetData/><x:row r="100"/>"#;
+        let xml = format!(
+            r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:future="urn:example:future">
+          <x:sheetData/>
+          <x:extLst mc:MustUnderstand="future">
+            <x:ext uri="urn:example">
+              {PAYLOAD}
+            </x:ext>
+          </x:extLst>
+        </x:worksheet>"#
+        );
+        let streamed =
+            stream_sheet_data(&xml, &[], &[]).expect("extLst contents bypass MCE processing");
+        assert!(streamed.rows.is_empty());
+        assert!(streamed.shell_xml.contains(PAYLOAD));
+        assert!(streamed.shell_xml.contains("<mc:AlternateContent>"));
+        assert!(streamed.shell_xml.contains("<mc:Fallback>"));
+        assert!(streamed.shell_xml.contains(r#"mc:MustUnderstand="future""#));
+
+        let invalid_direct_child = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:future="urn:example:future">
+          <x:sheetData/>
+          <mc:AlternateContent>
+            <x:extLst mc:MustUnderstand="future"/>
+          </mc:AlternateContent>
+        </x:worksheet>"#;
+        let error = stream_sheet_data(invalid_direct_child, &[], &[])
+            .expect_err("extLst does not bypass AlternateContent child grammar");
+        assert!(error.contains("only Choice/Fallback children"));
+    }
+
+    #[test]
+    fn generated_row_projection_bytes_obey_the_batch_ceiling() {
+        const NAMESPACES: usize = 192;
+        const ROWS: usize = 300;
+        let mut xml = String::from(
+            r#"<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:future="urn:example:future" mc:Ignorable="future" mc:ProcessContent="future:cells""#,
+        );
+        for index in 0..NAMESPACES {
+            write!(xml, r#" xmlns:n{index}="urn:example:namespace:{index:04}""#)
+                .expect("namespace declaration");
+        }
+        xml.push_str("><x:sheetData>");
+        for row in 1..=ROWS {
+            write!(
+                xml,
+                r#"<x:row r="{row}"><future:cells><x:c r="A{row}"><x:v>{row}</x:v></x:c></future:cells></x:row>"#
+            )
+            .expect("projected row");
+        }
+        xml.push_str("</x:sheetData></x:worksheet>");
+
+        let mut row_count = 0usize;
+        let streamed = stream_worksheet_rows(&xml, &[], &[], |row| {
+            row_count += 1;
+            assert_eq!(row.cells.len(), 1);
+            Ok(())
+        })
+        .expect("namespace-heavy projected rows stream");
+        assert_eq!(row_count, ROWS);
+        assert!(
+            streamed.max_row_batch_bytes <= STREAMED_ROW_BATCH_BYTES,
+            "generated arena bytes exceeded ceiling: {} > {}",
+            streamed.max_row_batch_bytes,
+            STREAMED_ROW_BATCH_BYTES
+        );
+    }
+
+    #[test]
+    fn normal_worksheet_shell_remains_byte_exact_outside_sheet_data() {
+        let xml = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetPr/><sheetData>
+  <row r="1"><c r="A1"><v>1</v></c></row>
+</sheetData><mergeCells count="0"/></worksheet>"#;
+        let streamed = stream_sheet_data(xml, &[], &[]).expect("ordinary worksheet streams");
+        assert_eq!(
+            streamed.shell_xml,
+            r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetPr/><sheetData></sheetData><mergeCells count="0"/></worksheet>"#
+        );
+    }
+
+    #[test]
+    fn malformed_mce_processed_root_and_sheet_data_are_rejected() {
+        let no_root = r#"<mc:AlternateContent
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:future="urn:example:future">
+          <mc:Choice Requires="future"><x:worksheet><x:sheetData/></x:worksheet></mc:Choice>
+        </mc:AlternateContent>"#;
+        let error = stream_sheet_data(no_root, &[], &[])
+            .expect_err("no selected branch leaves no worksheet root");
+        assert!(error.contains("root must be exactly one"));
+
+        let duplicate_sheet_data = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:future="urn:example:future">
+          <x:sheetData/>
+          <mc:AlternateContent>
+            <mc:Choice Requires="future"><x:sheetData/></mc:Choice>
+            <mc:Fallback><x:sheetData/></mc:Fallback>
+          </mc:AlternateContent>
+        </x:worksheet>"#;
+        let error = stream_sheet_data(duplicate_sheet_data, &[], &[])
+            .expect_err("processed CT_Worksheet has duplicate sheetData");
+        assert!(error.contains("exactly one non-nested sheetData"));
+
+        let non_row = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:future="urn:example:future"
+            mc:Ignorable="future"
+            mc:ProcessContent="future:rows">
+          <x:sheetData><future:rows><x:c r="A1"/></future:rows></x:sheetData>
+        </x:worksheet>"#;
+        let error = stream_sheet_data(non_row, &[], &[])
+            .expect_err("processed CT_SheetData has a non-row child");
+        assert!(error.contains("only direct SpreadsheetML row children"));
+    }
+
+    #[test]
+    fn malformed_mce_declarations_and_alternate_content_are_rejected() {
+        let unbound_process_content = r#"<worksheet
+            xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            mc:ProcessContent="missing:rows"><sheetData/></worksheet>"#;
+        let error = stream_sheet_data(unbound_process_content, &[], &[])
+            .expect_err("ProcessContent QName must resolve");
+        assert!(error.contains("unbound namespace prefix"));
+
+        let non_ignorable_process_content = r#"<worksheet
+            xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:future="urn:example:future"
+            mc:ProcessContent="future:rows"><sheetData/></worksheet>"#;
+        let error = stream_sheet_data(non_ignorable_process_content, &[], &[])
+            .expect_err("ProcessContent namespace must be ignorable");
+        assert!(error.contains("must be declared Ignorable"));
+
+        let xml_space_on_unwrapped = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:future="urn:example:future"
+            mc:Ignorable="future"
+            mc:ProcessContent="future:rows">
+          <x:sheetData><future:rows xml:space="preserve"><x:row/></future:rows></x:sheetData>
+        </x:worksheet>"#;
+        let error = stream_sheet_data(xml_space_on_unwrapped, &[], &[])
+            .expect_err("unwrapped element cannot alter XML context");
+        assert!(error.contains("cannot carry xml:base, xml:lang, or xml:space"));
+
+        let unknown_must_understand = r#"<worksheet
+            xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:future="urn:example:future"
+            mc:MustUnderstand="future"><sheetData/></worksheet>"#;
+        let error = stream_sheet_data(unknown_must_understand, &[], &[])
+            .expect_err("unknown MustUnderstand signals mismatch");
+        assert!(error.contains("MustUnderstand namespace is not understood"));
+
+        let invalid_alternate_child = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
+          <mc:AlternateContent><x:sheetData/></mc:AlternateContent>
+        </x:worksheet>"#;
+        let error = stream_sheet_data(invalid_alternate_child, &[], &[])
+            .expect_err("AlternateContent child grammar is enforced");
+        assert!(error.contains("only Choice/Fallback children"));
+
+        let fallback_without_choice = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
+          <mc:AlternateContent><mc:Fallback><x:sheetData/></mc:Fallback></mc:AlternateContent>
+        </x:worksheet>"#;
+        let error = stream_sheet_data(fallback_without_choice, &[], &[])
+            .expect_err("Part 3 §7.5 requires one or more Choice children");
+        assert!(error.contains("at least one Choice before Fallback"));
+
+        for invalid_choice in [
+            r#"<mc:Choice><x:sheetData/></mc:Choice>"#,
+            r#"<mc:Choice Requires="   "><x:sheetData/></mc:Choice>"#,
+        ] {
+            let xml = format!(
+                r#"<x:worksheet
+                    xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
+                  <mc:AlternateContent>{invalid_choice}</mc:AlternateContent>
+                </x:worksheet>"#
+            );
+            let error = stream_sheet_data(&xml, &[], &[])
+                .expect_err("Choice requires a non-empty Requires attribute");
+            assert!(error.contains("Choice must have a non-empty Requires attribute"));
+        }
+    }
+
+    #[test]
+    fn empty_sheet_data_keeps_a_valid_empty_shell() {
+        let xml = r#"<x:worksheet xmlns:x="http://purl.oclc.org/ooxml/spreadsheetml/main"><x:sheetData/><x:mergeCells><x:mergeCell ref="A1:B1"/></x:mergeCells></x:worksheet>"#;
+        let streamed = stream_sheet_data(xml, &[], &[]).expect("empty sheetData streams");
+        assert!(streamed.rows.is_empty());
+        assert_eq!(streamed.shell_xml, xml);
+        let (worksheet, _) =
+            parse_worksheet(xml, &[], &[], "Empty").expect("empty worksheet parses");
+        assert!(worksheet.rows.is_empty());
+        assert_eq!(worksheet.merge_cells.len(), 1);
+    }
+
+    #[test]
+    fn malformed_unclosed_row_is_rejected_before_shell_parse() {
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></sheetData></worksheet>"#;
+        let error = stream_sheet_data(xml, &[], &[]).expect_err("unclosed row must fail");
+        assert!(
+            error.contains("worksheet XML stream"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn missing_or_duplicate_sheet_data_is_rejected_by_ct_worksheet_contract() {
+        let missing = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><mergeCells/></worksheet>"#;
+        let missing_error =
+            stream_sheet_data(missing, &[], &[]).expect_err("sheetData is required");
+        assert!(missing_error.contains("exactly one sheetData"));
+
+        let duplicate = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/><sheetData/></worksheet>"#;
+        let duplicate_error =
+            stream_sheet_data(duplicate, &[], &[]).expect_err("sheetData is singular");
+        assert!(duplicate_error.contains("exactly one non-nested sheetData"));
+
+        let nested = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><sheetData/></sheetData></worksheet>"#;
+        let nested_error = stream_sheet_data(nested, &[], &[]).expect_err("sheetData cannot nest");
+        assert!(nested_error.contains("direct child of worksheet"));
+    }
+
+    #[test]
+    fn sheet_data_rejects_rows_below_non_mce_wrappers() {
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><wrapper><row r="1"/></wrapper></sheetData></worksheet>"#;
+        let error =
+            stream_sheet_data(xml, &[], &[]).expect_err("CT_SheetData has direct rows only");
+        assert!(error.contains("direct SpreadsheetML row children"));
+    }
+
+    #[test]
+    fn high_density_sheet_keeps_dom_shell_small_and_preserves_all_cells() {
+        const ROWS: u32 = 4_000;
+        const COLS: u32 = 39;
+        let mut xml = String::with_capacity(ROWS as usize * COLS as usize * 36);
+        xml.push_str(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>"#,
+        );
+        for row in 1..=ROWS {
+            write!(xml, r#"<row r="{row}">"#).expect("write row");
+            for col in 1..=COLS {
+                write!(
+                    xml,
+                    r#"<c r="{}{}" t="inlineStr"><is><t>v{}-{}</t></is></c>"#,
+                    column_name(col),
+                    row,
+                    row,
+                    col
+                )
+                .expect("write cell");
+            }
+            xml.push_str("</row>");
+        }
+        xml.push_str(
+            r#"</sheetData><mergeCells><mergeCell ref="A1:B1"/></mergeCells></worksheet>"#,
+        );
+
+        let streamed = stream_sheet_data(&xml, &[], &[]).expect("large sheet streams");
+        assert_eq!(streamed.rows.len(), ROWS as usize);
+        assert_eq!(
+            streamed
+                .rows
+                .iter()
+                .map(|row| row.cells.len())
+                .sum::<usize>(),
+            (ROWS * COLS) as usize
+        );
+        assert!(
+            streamed.shell_xml.len() < 256,
+            "sheetData cell XML must not survive in the roxmltree shell"
+        );
+        let (worksheet, _) =
+            parse_worksheet(&xml, &[], &[], "Dense").expect("public worksheet parse succeeds");
+        assert_eq!(worksheet.rows.len(), ROWS as usize);
+        assert_eq!(worksheet.merge_cells.len(), 1);
+    }
+
+    fn column_name(mut col: u32) -> String {
+        let mut chars = Vec::new();
+        while col > 0 {
+            col -= 1;
+            chars.push((b'A' + (col % 26) as u8) as char);
+            col /= 26;
+        }
+        chars.into_iter().rev().collect()
+    }
+}
+
 /// Parse an `ST_Boolean` (ECMA-376 §22.9.2.7, xsd:boolean) attribute value.
 /// Accepts `1`/`true`/`on` as true and `0`/`false`/`off` as false (case-insensitive).
 /// Returns `None` when the attribute is absent so callers can apply their own default.
@@ -2469,10 +4393,20 @@ pub fn parse_workbook_native(data: &[u8]) -> Result<String, String> {
 /// continuation cells are rendered as empty; the display value comes from the
 /// WASM-callable markdown projection (mirrors `to_markdown_native`).
 #[wasm_bindgen]
-pub fn xlsx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
+pub fn xlsx_to_markdown(
+    data: &[u8],
+    max_zip_entry_bytes: Option<u64>,
+    max_parsed_part_inflated_bytes: Option<u64>,
+    max_operation_inflated_bytes: Option<u64>,
+) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
-    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    to_markdown_impl(data).map_err(|e| JsValue::from_str(&e))
+    let guard = ooxml_common::zip::scoped_limits(
+        max_zip_entry_bytes,
+        max_parsed_part_inflated_bytes,
+        max_operation_inflated_bytes,
+    );
+    let result = to_markdown_impl(data).map_err(|e| JsValue::from_str(&e));
+    prefer_resource_limit(&guard, result)
 }
 
 /// Extract raw bytes for a single embedded image entry (e.g.
@@ -2505,8 +4439,8 @@ pub fn extract_image(
 ///
 /// `ZipArchive<Cursor<Vec<u8>>>` and every cached part are fully owned (no borrow
 /// into the input), which is what lets them live in a `#[wasm_bindgen]` struct.
-/// The retained `max` mirrors the per-call `scoped_max` guard the free functions
-/// install.
+/// The retained limits mirror the per-call `scoped_limits` guard the free
+/// functions install.
 #[wasm_bindgen]
 pub struct XlsxArchive {
     /// The opened archive, or the container-open error string when the ZIP itself
@@ -2516,7 +4450,9 @@ pub struct XlsxArchive {
     /// constructor throwing an opaque error the viewer can't turn into a
     /// placeholder tab.
     archive: Result<XlsxZip, String>,
-    max: Option<u64>,
+    max_zip_entry_bytes: Option<u64>,
+    max_parsed_part_inflated_bytes: Option<u64>,
+    max_operation_inflated_bytes: Option<u64>,
     /// Workbook-level parts parsed once and reused across sheet switches. Loaded
     /// lazily on the first `parse` / `parse_sheet` (see [`XlsxArchive::shared`]).
     shared: Option<WorkbookShared>,
@@ -2525,9 +4461,9 @@ pub struct XlsxArchive {
 #[wasm_bindgen]
 impl XlsxArchive {
     /// Copy `data` into WASM once and open the ZIP central directory once.
-    /// `max_zip_entry_bytes` is retained and applied on every subsequent method
-    /// call (identical semantics to the free functions' `scoped_max` guard). The
-    /// shared workbook parts are parsed lazily on the first `parse`/`parse_sheet`.
+    /// Resource limits are retained and applied on every subsequent parse
+    /// method. Shared workbook parts are parsed lazily on the first
+    /// `parse`/`parse_sheet`.
     ///
     /// `data` is taken by value (`Vec<u8>`): wasm-bindgen copies the JS `Uint8Array`
     /// once into a WASM-owned buffer and hands that allocation to Rust as this
@@ -2536,14 +4472,21 @@ impl XlsxArchive {
     /// the `Cursor` could own its backing store, transiently doubling WASM
     /// linear memory to ~2x the file size during construction.
     #[wasm_bindgen(constructor)]
-    pub fn new(data: Vec<u8>, max_zip_entry_bytes: Option<u64>) -> Result<XlsxArchive, JsValue> {
+    pub fn new(
+        data: Vec<u8>,
+        max_zip_entry_bytes: Option<u64>,
+        max_parsed_part_inflated_bytes: Option<u64>,
+        max_operation_inflated_bytes: Option<u64>,
+    ) -> Result<XlsxArchive, JsValue> {
         console_error_panic_hook::set_once();
         // #774 (RB7 MAJOR): a truncated / corrupt CONTAINER is deferred, not
         // thrown, so `parse()` / `parse_sheet()` can degrade it to a placeholder
         // instead of the constructor failing with an opaque error.
         Ok(XlsxArchive {
             archive: open_zip(data),
-            max: max_zip_entry_bytes,
+            max_zip_entry_bytes,
+            max_parsed_part_inflated_bytes,
+            max_operation_inflated_bytes,
             shared: None,
         })
     }
@@ -2569,17 +4512,29 @@ impl XlsxArchive {
     /// CONTAINER failed to open (#774) the model is a degraded placeholder
     /// workbook tagged with the container.
     pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
-        if let Err(e) = &self.archive {
-            let wb = degraded_container_workbook(e.clone());
-            return serde_json::to_vec(&wb)
-                .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")));
+        let guard = ooxml_common::zip::scoped_limits(
+            self.max_zip_entry_bytes,
+            self.max_parsed_part_inflated_bytes,
+            self.max_operation_inflated_bytes,
+        );
+        let result = (|| {
+            if let Err(e) = &self.archive {
+                let wb = degraded_container_workbook(e.clone());
+                return serde_json::to_vec(&wb)
+                    .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")));
+            }
+            self.ensure_shared()?;
+            let shared = self.shared.as_ref().expect("shared loaded above");
+            let zip = self.archive.as_mut().expect("container open checked above");
+            let wb = parse_xlsx_inner_with(zip, shared).map_err(|e| JsValue::from_str(&e))?;
+            serde_json::to_vec(&wb).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
+        })();
+        if guard.resource_limit_error().is_some() {
+            // A tolerated optional-part read may have produced a partial shared
+            // cache. Never reuse it after the operation itself is rejected.
+            self.shared = None;
         }
-        self.ensure_shared()?;
-        let shared = self.shared.as_ref().expect("shared loaded above");
-        let zip = self.archive.as_mut().expect("container open checked above");
-        let wb = parse_xlsx_inner_with(zip, shared).map_err(|e| JsValue::from_str(&e))?;
-        serde_json::to_vec(&wb).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
+        prefer_resource_limit(&guard, result)
     }
 
     /// Parse one worksheet by 0-based index and return it as UTF-8 JSON bytes.
@@ -2588,15 +4543,25 @@ impl XlsxArchive {
     /// When the CONTAINER failed to open (#774) the sheet is the container-tagged
     /// placeholder.
     pub fn parse_sheet(&mut self, sheet_index: u32, name: &str) -> Result<Vec<u8>, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
-        if let Err(e) = &self.archive {
-            let ws = degraded_container_sheet(e.clone());
-            return serde_json::to_vec(&ws).map_err(|e| JsValue::from_str(&e.to_string()));
+        let guard = ooxml_common::zip::scoped_limits(
+            self.max_zip_entry_bytes,
+            self.max_parsed_part_inflated_bytes,
+            self.max_operation_inflated_bytes,
+        );
+        let result = (|| {
+            if let Err(e) = &self.archive {
+                let ws = degraded_container_sheet(e.clone());
+                return serde_json::to_vec(&ws).map_err(|e| JsValue::from_str(&e.to_string()));
+            }
+            self.ensure_shared()?;
+            let shared = self.shared.as_ref().expect("shared loaded above");
+            let zip = self.archive.as_mut().expect("container open checked above");
+            parse_sheet_with(zip, shared, sheet_index, name)
+        })();
+        if guard.resource_limit_error().is_some() {
+            self.shared = None;
         }
-        self.ensure_shared()?;
-        let shared = self.shared.as_ref().expect("shared loaded above");
-        let zip = self.archive.as_mut().expect("container open checked above");
-        parse_sheet_with(zip, shared, sheet_index, name)
+        prefer_resource_limit(&guard, result)
     }
 
     /// Extract raw bytes for one embedded image entry (e.g.
@@ -2604,7 +4569,7 @@ impl XlsxArchive {
     /// `extract_image`, but reads through the already-open archive. A corrupt
     /// container has no entries, so this surfaces the container-open error.
     pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let _guard = ooxml_common::zip::scoped_max(self.max_zip_entry_bytes);
         let zip = self
             .archive
             .as_mut()
@@ -2615,12 +4580,17 @@ impl XlsxArchive {
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
     /// free `xlsx_to_markdown`. A corrupt container degrades to an empty document.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
-        let zip = self
+        let guard = ooxml_common::zip::scoped_limits(
+            self.max_zip_entry_bytes,
+            self.max_parsed_part_inflated_bytes,
+            self.max_operation_inflated_bytes,
+        );
+        let result = self
             .archive
             .as_mut()
-            .map_err(|e| JsValue::from_str(&format!("xlsx-parser error: {e}")))?;
-        to_markdown_from_archive(zip).map_err(|e| JsValue::from_str(&e))
+            .map_err(|e| JsValue::from_str(&format!("xlsx-parser error: {e}")))
+            .and_then(|zip| to_markdown_from_archive(zip).map_err(|e| JsValue::from_str(&e)));
+        prefer_resource_limit(&guard, result)
     }
 }
 

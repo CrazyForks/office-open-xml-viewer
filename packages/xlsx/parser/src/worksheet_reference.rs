@@ -1,7 +1,5 @@
-use crate::{parse_cell_ref, resolve_implicit_ordinal, resolve_sheet_path};
-use crate::{CellRange, SharedString, SheetMeta, XlsxZip};
-use ooxml_common::depth::parse_guarded;
-use ooxml_common::ns::is_x_ns;
+use crate::{resolve_sheet_path, Row};
+use crate::{CellRange, CellValue, SharedString, SheetMeta, Worksheet, XlsxZip};
 use ooxml_common::zip::read_zip_string;
 use std::collections::HashMap;
 
@@ -29,9 +27,89 @@ impl ReferencedCellValue {
     }
 }
 
+fn referenced_cell_value(
+    value: &CellValue,
+    shared_strings: &[SharedString],
+) -> ReferencedCellValue {
+    match value {
+        CellValue::Text { text, .. } => ReferencedCellValue::Text(text.clone()),
+        CellValue::Shared { si } => shared_strings
+            .get(*si)
+            .map(|string| ReferencedCellValue::Text(string.text.clone()))
+            .unwrap_or(ReferencedCellValue::Empty),
+        CellValue::Number { number } if number.is_finite() => ReferencedCellValue::Number(*number),
+        _ => ReferencedCellValue::Empty,
+    }
+}
+
 struct IndexedWorksheet {
     cells: HashMap<(u32, u32), ReferencedCellValue>,
     string_bytes: usize,
+}
+
+struct IndexedWorksheetBuilder<'a> {
+    worksheet: IndexedWorksheet,
+    shared_strings: &'a [SharedString],
+    max_cells: usize,
+    max_string_bytes: usize,
+}
+
+impl<'a> IndexedWorksheetBuilder<'a> {
+    fn new(shared_strings: &'a [SharedString], max_cells: usize, max_string_bytes: usize) -> Self {
+        Self {
+            worksheet: IndexedWorksheet {
+                cells: HashMap::new(),
+                string_bytes: 0,
+            },
+            shared_strings,
+            max_cells,
+            max_string_bytes,
+        }
+    }
+
+    fn push_cell(&mut self, row: u32, col: u32, value: ReferencedCellValue) -> Option<()> {
+        if !(1..=MAX_COL).contains(&col) || !(1..=MAX_ROW).contains(&row) {
+            return Some(());
+        }
+        if value == ReferencedCellValue::Empty {
+            return Some(());
+        }
+        let key = (row, col);
+        let old_string_bytes = self
+            .worksheet
+            .cells
+            .get(&key)
+            .map(ReferencedCellValue::string_bytes)
+            .unwrap_or(0);
+        let next_cell_count =
+            self.worksheet.cells.len() + usize::from(!self.worksheet.cells.contains_key(&key));
+        let next_string_bytes = self
+            .worksheet
+            .string_bytes
+            .checked_sub(old_string_bytes)?
+            .checked_add(value.string_bytes())?;
+        if next_cell_count > self.max_cells || next_string_bytes > self.max_string_bytes {
+            return None;
+        }
+        self.worksheet.cells.insert(key, value);
+        self.worksheet.string_bytes = next_string_bytes;
+        Some(())
+    }
+
+    fn push_row(&mut self, row: Row) -> Option<()> {
+        for cell in row.cells {
+            if !(1..=MAX_COL).contains(&cell.col) || !(1..=MAX_ROW).contains(&cell.row) {
+                continue;
+            }
+            let value = referenced_cell_value(&cell.value, self.shared_strings);
+            self.push_cell(cell.row, cell.col, value)?;
+        }
+        Some(())
+    }
+
+    fn finish(self) -> IndexedWorksheet {
+        self.worksheet
+    }
 }
 
 /// Per-worksheet-parse state shared by charts and sparklines. Source sheets
@@ -75,6 +153,25 @@ impl WorksheetReferenceSession {
     fn consume_index(&mut self, worksheet: &IndexedWorksheet) {
         self.remaining_indexed_cells -= worksheet.cells.len();
         self.remaining_indexed_string_bytes -= worksheet.string_bytes;
+    }
+
+    fn index_parsed_worksheet(
+        &self,
+        worksheet: &Worksheet,
+        shared_strings: &[SharedString],
+    ) -> Option<IndexedWorksheet> {
+        let mut builder = IndexedWorksheetBuilder::new(
+            shared_strings,
+            self.remaining_indexed_cells,
+            self.remaining_indexed_string_bytes,
+        );
+        for row in &worksheet.rows {
+            for cell in &row.cells {
+                let value = referenced_cell_value(&cell.value, shared_strings);
+                builder.push_cell(cell.row, cell.col, value)?;
+            }
+        }
+        Some(builder.finish())
     }
 }
 
@@ -151,131 +248,20 @@ pub(crate) fn parse_a1_range(reference: &str) -> Option<CellRange> {
     })
 }
 
-fn inline_string_text(cell: roxmltree::Node<'_, '_>) -> String {
-    let Some(inline) = cell.children().find(|node| {
-        node.is_element() && node.tag_name().name() == "is" && is_x_ns(node.tag_name().namespace())
-    }) else {
-        return String::new();
-    };
-    let mut text = String::new();
-    for child in inline.children().filter(|node| node.is_element()) {
-        match child.tag_name().name() {
-            "t" if is_x_ns(child.tag_name().namespace()) => {
-                text.push_str(child.text().unwrap_or(""));
-            }
-            "r" if is_x_ns(child.tag_name().namespace()) => {
-                for run_text in child.children().filter(|node| {
-                    node.is_element()
-                        && node.tag_name().name() == "t"
-                        && is_x_ns(node.tag_name().namespace())
-                }) {
-                    text.push_str(run_text.text().unwrap_or(""));
-                }
-            }
-            // `<rPh>` is phonetic guidance for the base text, not part of the
-            // cell's displayed value (ECMA-376 §18.4.6).
-            _ => {}
-        }
-    }
-    text
-}
-
-fn cell_value(
-    cell: roxmltree::Node<'_, '_>,
-    shared_strings: &[SharedString],
-) -> ReferencedCellValue {
-    let cell_type = cell.attribute("t").unwrap_or("");
-    if cell_type == "inlineStr" {
-        return ReferencedCellValue::Text(inline_string_text(cell));
-    }
-    let value = cell
-        .children()
-        .find(|node| {
-            node.is_element()
-                && node.tag_name().name() == "v"
-                && is_x_ns(node.tag_name().namespace())
-        })
-        .and_then(|node| node.text())
-        .unwrap_or("");
-
-    match cell_type {
-        "s" => value
-            .parse::<usize>()
-            .ok()
-            .and_then(|index| shared_strings.get(index))
-            .map(|string| ReferencedCellValue::Text(string.text.clone()))
-            .unwrap_or(ReferencedCellValue::Empty),
-        "str" => ReferencedCellValue::Text(value.to_string()),
-        "" | "n" => value
-            .parse::<f64>()
-            .ok()
-            .filter(|number| number.is_finite())
-            .map(ReferencedCellValue::Number)
-            .unwrap_or(ReferencedCellValue::Empty),
-        _ => ReferencedCellValue::Empty,
-    }
-}
-
 fn parse_worksheet_cells(
     sheet_xml: &str,
     shared_strings: &[SharedString],
     max_cells: usize,
     max_string_bytes: usize,
 ) -> Option<IndexedWorksheet> {
-    let document = parse_guarded(sheet_xml).ok()?;
-    let mut values = HashMap::new();
-    let mut string_bytes = 0usize;
-    let mut previous_row = 0;
-    for row_node in document.descendants().filter(|node| {
-        node.is_element() && node.tag_name().name() == "row" && is_x_ns(node.tag_name().namespace())
-    }) {
-        let row = resolve_implicit_ordinal(
-            row_node
-                .attribute("r")
-                .and_then(|value| value.parse::<u32>().ok()),
-            &mut previous_row,
-        );
-        let mut previous_col = 0;
-        for cell in row_node.children().filter(|node| {
-            node.is_element()
-                && node.tag_name().name() == "c"
-                && is_x_ns(node.tag_name().namespace())
-        }) {
-            let (col, cell_row) = match cell.attribute("r") {
-                Some(reference) => {
-                    let (col, row) = parse_cell_ref(reference);
-                    previous_col = col;
-                    (col, row)
-                }
-                None => (resolve_implicit_ordinal(None, &mut previous_col), row),
-            };
-            if !(1..=MAX_COL).contains(&col) || !(1..=MAX_ROW).contains(&cell_row) {
-                continue;
-            }
-            let value = cell_value(cell, shared_strings);
-            if value == ReferencedCellValue::Empty {
-                continue;
-            }
-            let key = (cell_row, col);
-            let old_string_bytes = values
-                .get(&key)
-                .map(ReferencedCellValue::string_bytes)
-                .unwrap_or(0);
-            let next_cell_count = values.len() + usize::from(!values.contains_key(&key));
-            let next_string_bytes = string_bytes
-                .checked_sub(old_string_bytes)?
-                .checked_add(value.string_bytes())?;
-            if next_cell_count > max_cells || next_string_bytes > max_string_bytes {
-                return None;
-            }
-            values.insert(key, value);
-            string_bytes = next_string_bytes;
-        }
-    }
-    Some(IndexedWorksheet {
-        cells: values,
-        string_bytes,
+    let mut builder = IndexedWorksheetBuilder::new(shared_strings, max_cells, max_string_bytes);
+    crate::stream_worksheet_rows(sheet_xml, shared_strings, &[], |row| {
+        builder
+            .push_row(row)
+            .ok_or_else(|| "worksheet reference index resource limit".to_string())
     })
+    .ok()?;
+    Some(builder.finish())
 }
 
 fn reference_cell_count(range: &CellRange) -> Option<usize> {
@@ -340,7 +326,7 @@ pub(crate) fn extract_reference_cells(
 pub(crate) fn resolve_worksheet_reference(
     archive: &mut XlsxZip,
     formula: &str,
-    current_sheet_xml: &str,
+    current_worksheet: &Worksheet,
     current_sheet_name: &str,
     sheets: &[SheetMeta],
     workbook_rels: &roxmltree::Document<'_>,
@@ -353,12 +339,11 @@ pub(crate) fn resolve_worksheet_reference(
     let sheet_name = source_sheet.as_deref().unwrap_or(current_sheet_name);
     if !session.sheets.contains_key(sheet_name) {
         let worksheet = if sheet_name == current_sheet_name {
-            parse_worksheet_cells(
-                current_sheet_xml,
-                shared_strings,
-                session.remaining_indexed_cells,
-                session.remaining_indexed_string_bytes,
-            )
+            // Build the current-sheet index only when a chart or sparkline
+            // formula actually asks for cells. Most worksheets contain neither,
+            // so they retain no duplicate cell HashMap. Reusing the parsed model
+            // also avoids rebuilding a full worksheet DOM.
+            session.index_parsed_worksheet(current_worksheet, shared_strings)
         } else {
             sheets
                 .iter()
@@ -398,7 +383,9 @@ pub(crate) fn resolve_worksheet_reference(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CellRange, SharedString};
+    use crate::{parse_worksheet, CellRange, SharedString, SheetVisibility};
+    use std::{fmt::Write as _, io::Write as _};
+    use zip::write::SimpleFileOptions;
 
     #[test]
     fn quoted_unicode_sheet_reference_is_split_and_unescaped() {
@@ -445,6 +432,77 @@ mod tests {
                 ReferencedCellValue::Text("X".into()),
                 ReferencedCellValue::Number(42.0),
             ],
+        );
+    }
+
+    #[test]
+    fn parsed_worksheet_lazy_index_matches_streamed_projection_without_reparsing() {
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+          <row r="2"><c r="A2" t="inlineStr"><is><t>Inline</t><rPh sb="0" eb="1"><t>reading</t></rPh></is></c><c r="B2" t="s"><v>0</v></c><c r="C2"><v>42</v></c><c r="D2" t="b"><v>1</v></c></row>
+          <row><c t="str"><v>cached</v></c><c t="e"><v>#N/A</v></c></row>
+        </sheetData></worksheet>"#;
+        let shared = vec![SharedString {
+            text: "Shared".into(),
+            runs: None,
+            phonetic_runs: Vec::new(),
+            phonetic_pr: None,
+        }];
+        let (worksheet, _) =
+            parse_worksheet(xml, &shared, &[], "Sheet1").expect("worksheet parses");
+        let expected = parse_worksheet_cells(
+            xml,
+            &shared,
+            MAX_TOTAL_INDEXED_CELLS,
+            MAX_TOTAL_INDEXED_STRING_BYTES,
+        )
+        .expect("streamed index parses");
+
+        let session = WorksheetReferenceSession::default();
+        assert!(session.sheets.is_empty(), "no eager index is retained");
+        let actual = session
+            .index_parsed_worksheet(&worksheet, &shared)
+            .expect("parsed worksheet index fits");
+        assert!(
+            session.sheets.is_empty(),
+            "building an index does not cache it before a formula needs it"
+        );
+
+        assert_eq!(actual.cells, expected.cells);
+        assert_eq!(actual.string_bytes, expected.string_bytes);
+
+        let zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()))
+            .finish()
+            .expect("empty zip finishes");
+        let mut archive = XlsxZip::new(zip).expect("empty zip opens");
+        let rels = ooxml_common::depth::parse_guarded(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#,
+        )
+        .expect("empty workbook relationships parse");
+        let mut lazy_session = WorksheetReferenceSession::default();
+        assert!(lazy_session.sheets.is_empty());
+        let values = resolve_worksheet_reference(
+            &mut archive,
+            "A2:C2",
+            &worksheet,
+            "Sheet1",
+            &[],
+            &rels,
+            &shared,
+            &mut lazy_session,
+        )
+        .expect("current-sheet reference resolves from parsed worksheet");
+        assert_eq!(
+            values,
+            vec![
+                ReferencedCellValue::Text("Inline".into()),
+                ReferencedCellValue::Text("Shared".into()),
+                ReferencedCellValue::Number(42.0),
+            ]
+        );
+        assert_eq!(
+            lazy_session.sheets.len(),
+            1,
+            "the index appears only after a formula is resolved"
         );
     }
 
@@ -510,5 +568,119 @@ mod tests {
             extract_reference_cells(xml, &range, &[]),
             vec![ReferencedCellValue::Text("漢字".into())]
         );
+    }
+
+    #[test]
+    fn streamed_projection_matches_primary_mce_row_selection() {
+        let xml = r#"
+          <x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:future="urn:not-understood">
+            <x:sheetData>
+              <mc:AlternateContent>
+                <mc:Choice Requires="future">
+                  <x:row r="1"><x:c r="A1"><x:v>999</x:v></x:c></x:row>
+                </mc:Choice>
+                <mc:Fallback>
+                  <x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t>fallback</x:t></x:is></x:c></x:row>
+                </mc:Fallback>
+              </mc:AlternateContent>
+              <x:row><x:c t="str"><x:v>implicit</x:v></x:c></x:row>
+            </x:sheetData>
+          </x:worksheet>
+        "#;
+        let (worksheet, _) =
+            parse_worksheet(xml, &[], &[], "Sheet1").expect("primary worksheet parses MCE");
+        let session = WorksheetReferenceSession::default();
+        let expected = session
+            .index_parsed_worksheet(&worksheet, &[])
+            .expect("primary model index fits");
+        let actual = parse_worksheet_cells(
+            xml,
+            &[],
+            MAX_TOTAL_INDEXED_CELLS,
+            MAX_TOTAL_INDEXED_STRING_BYTES,
+        )
+        .expect("streamed reference projection parses MCE");
+
+        assert_eq!(actual.cells, expected.cells);
+        assert_eq!(actual.string_bytes, expected.string_bytes);
+        assert_eq!(
+            actual.cells.get(&(1, 1)),
+            Some(&ReferencedCellValue::Text("fallback".into()))
+        );
+        assert_eq!(
+            actual.cells.get(&(2, 1)),
+            Some(&ReferencedCellValue::Text("implicit".into()))
+        );
+    }
+
+    #[test]
+    fn cross_sheet_dense_reference_uses_bounded_streamed_projection() {
+        const ROWS: usize = 4_000;
+        const COLS: usize = 39;
+        let mut source = String::with_capacity(ROWS * COLS * 18);
+        source.push_str(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>"#,
+        );
+        for row in 0..ROWS {
+            write!(source, r#"<row r="{}">"#, row + 1).unwrap();
+            for col in 0..COLS {
+                write!(source, "<c><v>{}</v></c>", row * COLS + col).unwrap();
+            }
+            source.push_str("</row>");
+        }
+        source.push_str("</sheetData></worksheet>");
+
+        let cursor = {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            writer
+                .start_file("xl/worksheets/source.xml", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(source.as_bytes()).unwrap();
+            writer.finish().unwrap()
+        };
+        let mut archive = XlsxZip::new(cursor).expect("synthetic archive opens");
+        let rels = ooxml_common::depth::parse_guarded(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSource" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/source.xml"/></Relationships>"#,
+        )
+        .expect("workbook relationships parse");
+        let sheets = vec![SheetMeta {
+            name: "Source".into(),
+            sheet_id: 2,
+            r_id: "rSource".into(),
+            tab_color: None,
+            visibility: SheetVisibility::Visible,
+        }];
+        let current_xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#;
+        let (current, _) =
+            parse_worksheet(current_xml, &[], &[], "Dashboard").expect("current sheet parses");
+        let mut session = WorksheetReferenceSession::default();
+
+        let values = resolve_worksheet_reference(
+            &mut archive,
+            "'Source'!A1:AM4000",
+            &current,
+            "Dashboard",
+            &sheets,
+            &rels,
+            &[],
+            &mut session,
+        )
+        .expect("dense cross-sheet range resolves");
+
+        assert_eq!(values.len(), ROWS * COLS);
+        assert_eq!(values.first(), Some(&ReferencedCellValue::Number(0.0)));
+        assert_eq!(
+            values.last(),
+            Some(&ReferencedCellValue::Number((ROWS * COLS - 1) as f64))
+        );
+        let indexed = session
+            .sheets
+            .get("Source")
+            .and_then(Option::as_ref)
+            .expect("source index is cached");
+        assert_eq!(indexed.cells.len(), ROWS * COLS);
     }
 }

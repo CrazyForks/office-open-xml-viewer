@@ -1,6 +1,20 @@
 import type { MathRenderer } from '../math/mathjax';
 
 /**
+ * Opt-in limits for inflated ZIP-part I/O performed by one parser operation.
+ * The per-part limit applies to parsed XML/text parts; the aggregate operation
+ * limit counts every ZIP part read by the parser, including binary media.
+ * Every supplied value must be a positive safe integer number of bytes;
+ * omitted values are unlimited.
+ */
+export interface ParserResourceLimits {
+  /** Maximum bytes actually inflated for one parsed XML/text part. */
+  maxParsedPartInflatedBytes?: number;
+  /** Maximum bytes inflated across all parsed text and binary/media parts in one operation. */
+  maxOperationInflatedBytes?: number;
+}
+
+/**
  * Common load-time options shared by the docx / pptx / xlsx
  * `Document.load` / `Presentation.load` / `Workbook.load` factories and their
  * viewer wrappers.
@@ -72,6 +86,15 @@ export interface LoadOptions {
    * untrusted input. Zero / negative values fall back to the default.
    */
   maxZipEntryBytes?: number;
+  /**
+   * Optional inflated-I/O limits. The per-part limit applies to parsed
+   * XML/text; the aggregate operation limit also counts binary/media parts
+   * read by the parser. Unlike `maxZipEntryBytes`, these are unlimited by
+   * default, preserving historical compatibility. Supplied values must be
+   * positive safe integers. A violation rejects with
+   * {@link import('../errors/ooxml-error').ParserResourceLimitError}.
+   */
+  parserResourceLimits?: ParserResourceLimits;
   /**
    * Reject the parse request if the parser worker does not answer within this
    * many milliseconds. Opt-in safety net for a wedged or crashed worker that

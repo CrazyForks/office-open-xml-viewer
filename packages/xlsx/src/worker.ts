@@ -1,5 +1,12 @@
 import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
-import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
+import {
+  decodeDataUrl,
+  WasmParserHost,
+} from '@silurus/ooxml-core';
+import {
+  parserResourceLimitsForWasm,
+  serializeWorkerError,
+} from '@silurus/ooxml-core/worker';
 import type { WorkerRequest, WorkerResponse } from './types.js';
 
 // RB6: a `panic = "abort"` build traps (not unwinds) on a Rust panic / OOM /
@@ -43,6 +50,9 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
+      const [maxParsedPart, maxOperation] = parserResourceLimitsForWasm(
+        req.parserResourceLimits,
+      );
       const bytes = new Uint8Array(req.data);
       // Both the construction and `parse()` run under `host.run` so a trap in
       // EITHER poisons + recycles the instance (and frees the archive). Adopting
@@ -52,7 +62,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       // buffer, so forward it to main as a transferable — no clone, no decode
       // here. The single decode + JSON.parse happens on main.
       const json = host.run(() => {
-        const archive = new XlsxArchive(bytes, max);
+        const archive = new XlsxArchive(bytes, max, maxParsedPart, maxOperation);
         host.setArchive(archive);
         return archive.parse();
       });
@@ -111,7 +121,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       return;
     }
   } catch (err) {
-    const res: WorkerResponse = { type: 'error', id, message: String(err) };
+    const res: WorkerResponse = { type: 'error', id, ...serializeWorkerError(err) };
     self.postMessage(res);
   }
 };

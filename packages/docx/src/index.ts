@@ -20,7 +20,15 @@ export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core
 // Typed load-time error surfaced by DocxDocument.load (e.g. a password-protected
 // or legacy-binary .doc file). Re-exported so `@silurus/ooxml/docx` consumers can
 // narrow on `err.code`.
-export { OoxmlError, type OoxmlErrorCode } from '@silurus/ooxml-core';
+export {
+  OoxmlError,
+  ParserResourceLimitError,
+  type OoxmlErrorCode,
+  type OoxmlErrorSource,
+  type OoxmlErrorStage,
+  type ParserResourceLimitErrorDetails,
+  type ParserResourceLimits,
+} from '@silurus/ooxml-core';
 export { noteText } from './types';
 export type {
   DocxDocumentModel,

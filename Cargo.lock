@@ -572,6 +572,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.38.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1097,6 +1106,7 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "ooxml-common",
+ "quick-xml",
  "roxmltree",
  "serde",
  "serde_json",

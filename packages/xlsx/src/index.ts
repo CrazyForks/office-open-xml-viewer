@@ -19,7 +19,15 @@ export { resolveSharedStrings } from './shared-strings.js';
 // Typed load-time error surfaced by XlsxWorkbook.load (e.g. a password-protected
 // or legacy-binary .xls file). Re-exported so `@silurus/ooxml/xlsx` consumers can
 // narrow on `err.code`.
-export { OoxmlError, type OoxmlErrorCode } from '@silurus/ooxml-core';
+export {
+  OoxmlError,
+  ParserResourceLimitError,
+  type OoxmlErrorCode,
+  type OoxmlErrorSource,
+  type OoxmlErrorStage,
+  type ParserResourceLimitErrorDetails,
+  type ParserResourceLimits,
+} from '@silurus/ooxml-core';
 export type {
   Workbook,
   SheetMeta,

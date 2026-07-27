@@ -13,7 +13,8 @@
 //! its scope and the cap is restored on drop, so concurrent JS callers never
 //! interfere (WASM is single-threaded; each invocation runs to completion).
 
-use std::cell::Cell;
+use serde::Serialize;
+use std::cell::{Cell, RefCell};
 
 /// 512 MiB. OOXML legitimately reaches tens of MB (embedded video, 4K
 /// images) but not hundreds, so this cap blocks zip-bomb DoS without
@@ -47,6 +48,10 @@ fn initial_reserve(declared_size: u64) -> usize {
 
 thread_local! {
     static MAX_ZIP_ENTRY_BYTES: Cell<u64> = const { Cell::new(DEFAULT_MAX_ZIP_ENTRY_BYTES) };
+    static MAX_PARSED_PART_INFLATED_BYTES: Cell<Option<u64>> = const { Cell::new(None) };
+    static MAX_OPERATION_INFLATED_BYTES: Cell<Option<u64>> = const { Cell::new(None) };
+    static OPERATION_INFLATED_BYTES: Cell<u64> = const { Cell::new(0) };
+    static RESOURCE_LIMIT_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// RAII guard that restores the previous cap when dropped. Created by
@@ -54,12 +59,31 @@ thread_local! {
 /// full duration of the parse call.
 #[must_use = "binding the guard keeps the cap installed for this scope"]
 pub struct Guard {
-    previous: u64,
+    previous_zip_entry: u64,
+    previous_parsed_part: Option<u64>,
+    previous_operation: Option<u64>,
+    previous_observed: u64,
+    previous_resource_limit_error: Option<String>,
 }
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        MAX_ZIP_ENTRY_BYTES.with(|c| c.set(self.previous));
+        MAX_ZIP_ENTRY_BYTES.with(|c| c.set(self.previous_zip_entry));
+        MAX_PARSED_PART_INFLATED_BYTES.with(|c| c.set(self.previous_parsed_part));
+        MAX_OPERATION_INFLATED_BYTES.with(|c| c.set(self.previous_operation));
+        OPERATION_INFLATED_BYTES.with(|c| c.set(self.previous_observed));
+        RESOURCE_LIMIT_ERROR.with(|c| c.replace(self.previous_resource_limit_error.take()));
+    }
+}
+
+impl Guard {
+    /// Return the first resource-limit violation observed in this scope.
+    ///
+    /// OOXML parsers intentionally tolerate missing/corrupt optional parts and
+    /// may call `.ok()` on a ZIP read. The latch prevents that compatibility
+    /// behaviour from swallowing a deterministic resource-limit failure.
+    pub fn resource_limit_error(&self) -> Option<String> {
+        RESOURCE_LIMIT_ERROR.with(|c| c.borrow().clone())
     }
 }
 
@@ -67,17 +91,156 @@ impl Drop for Guard {
 /// guard. `None`, zero, or any non-positive value falls back to
 /// [`DEFAULT_MAX_ZIP_ENTRY_BYTES`].
 pub fn scoped_max(value: Option<u64>) -> Guard {
-    let resolved = value
+    scoped_limits(value, None, None)
+}
+
+/// Install the ZIP security cap and the opt-in parse-resource budgets for one
+/// operation. Unlike [`DEFAULT_MAX_ZIP_ENTRY_BYTES`], the parse budgets default
+/// to unlimited so adding them does not reject documents accepted by existing
+/// callers.
+///
+/// `max_parsed_part_inflated_bytes` applies only to XML/text parts read through
+/// [`read_zip_string`]. `max_operation_inflated_bytes` applies to the sum of all
+/// bytes actually inflated through the shared readers during this scope.
+pub fn scoped_limits(
+    max_zip_entry_bytes: Option<u64>,
+    max_parsed_part_inflated_bytes: Option<u64>,
+    max_operation_inflated_bytes: Option<u64>,
+) -> Guard {
+    let resolved = max_zip_entry_bytes
         .filter(|&n| n > 0)
         .unwrap_or(DEFAULT_MAX_ZIP_ENTRY_BYTES);
-    let previous = MAX_ZIP_ENTRY_BYTES.with(|c| c.replace(resolved));
-    Guard { previous }
+    let parsed_part = max_parsed_part_inflated_bytes.filter(|&n| n > 0);
+    let operation = max_operation_inflated_bytes.filter(|&n| n > 0);
+    let previous_zip_entry = MAX_ZIP_ENTRY_BYTES.with(|c| c.replace(resolved));
+    let previous_parsed_part = MAX_PARSED_PART_INFLATED_BYTES.with(|c| c.replace(parsed_part));
+    let previous_operation = MAX_OPERATION_INFLATED_BYTES.with(|c| c.replace(operation));
+    let previous_observed = OPERATION_INFLATED_BYTES.with(|c| c.replace(0));
+    let previous_resource_limit_error = RESOURCE_LIMIT_ERROR.with(|c| c.replace(None));
+    Guard {
+        previous_zip_entry,
+        previous_parsed_part,
+        previous_operation,
+        previous_observed,
+        previous_resource_limit_error,
+    }
 }
 
 /// Current cap in effect on this thread. Parsers consult this from their
 /// `read_zip_*` helpers when validating entry sizes.
 pub fn current_max() -> u64 {
     MAX_ZIP_ENTRY_BYTES.with(Cell::get)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceLimitDetails<'a> {
+    code: &'static str,
+    stage: &'static str,
+    source: &'static str,
+    part: &'a str,
+    metric: &'static str,
+    limit: u64,
+    observed: u64,
+}
+
+fn resource_limit_error(part: &str, metric: &'static str, limit: u64, observed: u64) -> String {
+    let details = ResourceLimitDetails {
+        code: "parser-resource-limit",
+        stage: "decompression",
+        source: "zip-part",
+        part,
+        metric,
+        limit,
+        observed,
+    };
+    // Serialization is infallible for this fixed scalar/string structure.
+    let error = format!(
+        "OOXML_RESOURCE_LIMIT:{}",
+        serde_json::to_string(&details).expect("resource-limit details serialize")
+    );
+    RESOURCE_LIMIT_ERROR.with(|c| {
+        let mut current = c.borrow_mut();
+        if current.is_none() {
+            *current = Some(error.clone());
+        }
+    });
+    error
+}
+
+fn operation_observed() -> u64 {
+    OPERATION_INFLATED_BYTES.with(Cell::get)
+}
+
+fn checked_read_limit(parsed_part: bool) -> u64 {
+    let mut limit = current_max();
+    if parsed_part {
+        if let Some(part_limit) = MAX_PARSED_PART_INFLATED_BYTES.with(Cell::get) {
+            limit = limit.min(part_limit);
+        }
+    }
+    if let Some(operation_limit) = MAX_OPERATION_INFLATED_BYTES.with(Cell::get) {
+        limit = limit.min(operation_limit.saturating_sub(operation_observed()));
+    }
+    limit
+}
+
+fn record_inflated(path: &str, amount: u64, parsed_part: bool) -> Result<(), String> {
+    if parsed_part {
+        if let Some(limit) = MAX_PARSED_PART_INFLATED_BYTES.with(Cell::get) {
+            if amount > limit {
+                return Err(resource_limit_error(
+                    path,
+                    "parsed-part-inflated-bytes",
+                    limit,
+                    amount,
+                ));
+            }
+        }
+    }
+    if let Some(limit) = MAX_OPERATION_INFLATED_BYTES.with(Cell::get) {
+        let observed = operation_observed().saturating_add(amount);
+        if observed > limit {
+            return Err(resource_limit_error(
+                path,
+                "operation-inflated-bytes",
+                limit,
+                observed,
+            ));
+        }
+    }
+    OPERATION_INFLATED_BYTES.with(|c| c.set(c.get().saturating_add(amount)));
+    Ok(())
+}
+
+fn read_entry<R: std::io::Read>(
+    entry: &mut R,
+    path: &str,
+    declared_size: u64,
+    parsed_part: bool,
+) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    if let Some(error) = RESOURCE_LIMIT_ERROR.with(|c| c.borrow().clone()) {
+        return Err(error);
+    }
+    let max = current_max();
+    if declared_size > max {
+        return Err(format!("ZIP entry exceeds size limit: {path}"));
+    }
+    let read_limit = checked_read_limit(parsed_part);
+    let mut buf = Vec::with_capacity(initial_reserve(declared_size.min(read_limit)));
+    // Read limit+1 so forged/incorrect ZIP metadata and streams larger than the
+    // configured cap are rejected instead of being silently truncated.
+    entry
+        .take(read_limit.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read error: {e}"))?;
+    let amount = buf.len() as u64;
+    if amount > max {
+        return Err(format!("ZIP entry exceeds size limit: {path}"));
+    }
+    record_inflated(path, amount, parsed_part)?;
+    Ok(buf)
 }
 
 /// Read one zip entry's bytes by path. Honors the scoped max-entry guard:
@@ -89,26 +252,15 @@ pub fn extract_zip_entry(
     path: &str,
     max_zip_entry_bytes: Option<u64>,
 ) -> Result<Vec<u8>, String> {
-    use std::io::{Cursor, Read};
+    use std::io::Cursor;
     let _guard = scoped_max(max_zip_entry_bytes);
-    let max = current_max();
     let cursor = Cursor::new(data);
     let mut zip = zip::ZipArchive::new(cursor).map_err(|e| format!("zip open error: {e}"))?;
     let mut entry = zip
         .by_name(path)
         .map_err(|e| format!("entry not found: {path}: {e}"))?;
-    if entry.size() > max {
-        return Err(format!("ZIP entry exceeds size limit: {path}"));
-    }
-    // Pre-reserve a capped amount, not the (attacker-controlled) declared size —
-    // `read_to_end` grows the buffer for genuinely large parts. See INITIAL_RESERVE_CAP.
-    let mut buf = Vec::with_capacity(initial_reserve(entry.size()));
-    entry
-        .by_ref()
-        .take(max)
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("read error: {e}"))?;
-    Ok(buf)
+    let declared_size = entry.size();
+    read_entry(&mut entry, path, declared_size, false)
 }
 
 /// Read one entry's bytes from an **already-opened** [`ZipArchive`]. Twin of
@@ -122,23 +274,11 @@ pub fn read_zip_bytes<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     path: &str,
 ) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    let max = current_max();
     let mut entry = archive
         .by_name(path)
         .map_err(|e| format!("entry not found: {path}: {e}"))?;
-    if entry.size() > max {
-        return Err(format!("ZIP entry exceeds size limit: {path}"));
-    }
-    // Pre-reserve a capped amount, not the (attacker-controlled) declared size —
-    // `read_to_end` grows the buffer for genuinely large parts. See INITIAL_RESERVE_CAP.
-    let mut buf = Vec::with_capacity(initial_reserve(entry.size()));
-    entry
-        .by_ref()
-        .take(max)
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("read error: {e}"))?;
-    Ok(buf)
+    let declared_size = entry.size();
+    read_entry(&mut entry, path, declared_size, false)
 }
 
 /// UTF-8 string counterpart of [`read_zip_bytes`] for XML parts. Same cap
@@ -149,21 +289,72 @@ pub fn read_zip_string<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     path: &str,
 ) -> Result<String, String> {
-    use std::io::Read;
-    let max = current_max();
     let mut entry = archive
         .by_name(path)
         .map_err(|e| format!("entry not found: {path}: {e}"))?;
-    if entry.size() > max {
+    let declared_size = entry.size();
+    let bytes = read_entry(&mut entry, path, declared_size, true)?;
+    String::from_utf8(bytes).map_err(|e| format!("read error: {e}"))
+}
+
+/// Read at most `max_bytes` from the beginning of one XML/text ZIP part.
+///
+/// This is intentionally a bounded prefix read rather than a truncated version
+/// of [`read_zip_string`]. It is suitable for lightweight metadata probes that
+/// do not need the complete part. The bytes actually inflated are charged to
+/// both parsed-part and operation budgets, while the ZIP entry security cap is
+/// still checked before decompression.
+///
+/// When the byte boundary splits a valid UTF-8 scalar, the incomplete trailing
+/// bytes are omitted from the returned string. They remain charged because they
+/// were inflated. Any other UTF-8 error is reported as corrupt input.
+pub fn read_zip_string_head<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    path: &str,
+    max_bytes: usize,
+) -> Result<String, String> {
+    use std::io::Read;
+
+    if let Some(error) = RESOURCE_LIMIT_ERROR.with(|c| c.borrow().clone()) {
+        return Err(error);
+    }
+    let entry = archive
+        .by_name(path)
+        .map_err(|e| format!("entry not found: {path}: {e}"))?;
+    let declared_size = entry.size();
+    let zip_limit = current_max();
+    if declared_size > zip_limit {
         return Err(format!("ZIP entry exceeds size limit: {path}"));
     }
-    let mut buf = String::new();
+
+    let requested = max_bytes as u64;
+    let budget_limit = checked_read_limit(true);
+    let allowed = requested.min(budget_limit);
+    // When a parser budget, rather than the caller's requested prefix length,
+    // is the active bound, read one extra byte to distinguish EOF-at-limit from
+    // an actual violation. A caller-requested prefix is deliberately bounded
+    // and must not inspect or reject the next byte.
+    let read_limit = if budget_limit < requested {
+        allowed.saturating_add(1)
+    } else {
+        allowed
+    };
+    let mut bytes = Vec::with_capacity(initial_reserve(declared_size.min(read_limit)));
     entry
-        .by_ref()
-        .take(max)
-        .read_to_string(&mut buf)
+        .take(read_limit)
+        .read_to_end(&mut bytes)
         .map_err(|e| format!("read error: {e}"))?;
-    Ok(buf)
+    record_inflated(path, bytes.len() as u64, true)?;
+
+    match std::str::from_utf8(&bytes) {
+        Ok(text) => Ok(text.to_owned()),
+        Err(error) if error.error_len().is_none() => {
+            bytes.truncate(error.valid_up_to());
+            // `valid_up_to` is guaranteed to end on a UTF-8 boundary.
+            Ok(String::from_utf8(bytes).expect("validated UTF-8 prefix"))
+        }
+        Err(error) => Err(format!("read error: {error}")),
+    }
 }
 
 #[cfg(test)]
@@ -210,6 +401,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_does_not_silently_truncate_when_declared_size_is_too_small() {
+        use std::io::{Cursor, Write};
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            writer.start_file("xl/worksheets/sheet1.xml", opts).unwrap();
+            writer.write_all(b"12345678").unwrap();
+            writer.finish().unwrap();
+        }
+        // Keep the compressed-size fields and payload intact but under-report
+        // the uncompressed size in both headers. A reader that trusts metadata
+        // and uses `take(max)` would otherwise return a plausible prefix.
+        let local = bytes
+            .windows(4)
+            .position(|w| w == 0x0403_4b50u32.to_le_bytes())
+            .unwrap();
+        bytes[local + 22..local + 26].copy_from_slice(&4u32.to_le_bytes());
+        let central = bytes
+            .windows(4)
+            .position(|w| w == 0x0201_4b50u32.to_le_bytes())
+            .unwrap();
+        bytes[central + 24..central + 28].copy_from_slice(&4u32.to_le_bytes());
+
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let _guard = scoped_max(Some(6));
+        assert!(read_zip_bytes(&mut archive, "xl/worksheets/sheet1.xml").is_err());
+    }
+
     /// Build a one-entry in-memory zip for the open-archive helper tests.
     fn archive_with(name: &str, body: &[u8]) -> zip::ZipArchive<std::io::Cursor<Vec<u8>>> {
         use std::io::{Cursor, Write};
@@ -244,6 +466,115 @@ mod tests {
         );
         let err = read_zip_string(&mut ar, "xl/nope.xml").unwrap_err();
         assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn parsed_part_budget_uses_actual_inflated_bytes_and_reports_details() {
+        let mut ar = archive_with("word/document.xml", b"<document/>");
+        let _guard = scoped_limits(None, Some(5), None);
+        let err = read_zip_string(&mut ar, "word/document.xml").unwrap_err();
+        let json = err.strip_prefix("OOXML_RESOURCE_LIMIT:").unwrap();
+        let details: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(details["code"], "parser-resource-limit");
+        assert_eq!(details["stage"], "decompression");
+        assert_eq!(details["source"], "zip-part");
+        assert_eq!(details["part"], "word/document.xml");
+        assert_eq!(details["metric"], "parsed-part-inflated-bytes");
+        assert_eq!(details["limit"], 5);
+        assert_eq!(details["observed"], 6);
+        assert!(details.get("recoverable").is_none());
+        assert!(details.get("fatal").is_none());
+    }
+
+    #[test]
+    fn operation_budget_counts_actual_bytes_across_parts() {
+        use std::io::{Cursor, Write};
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("word/a.xml", opts).unwrap();
+            w.write_all(b"1234").unwrap();
+            w.start_file("word/b.xml", opts).unwrap();
+            w.write_all(b"5678").unwrap();
+            w.finish().unwrap();
+        }
+        let mut ar = zip::ZipArchive::new(Cursor::new(buf)).unwrap();
+        let _guard = scoped_limits(None, None, Some(6));
+        assert_eq!(read_zip_string(&mut ar, "word/a.xml").unwrap(), "1234");
+        let err = read_zip_string(&mut ar, "word/b.xml").unwrap_err();
+        let json = err.strip_prefix("OOXML_RESOURCE_LIMIT:").unwrap();
+        let details: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(details["metric"], "operation-inflated-bytes");
+        assert_eq!(details["limit"], 6);
+        assert_eq!(details["observed"], 7);
+        assert_eq!(details["part"], "word/b.xml");
+    }
+
+    #[test]
+    fn string_head_reads_only_the_requested_prefix_and_charges_it() {
+        let mut ar = archive_with("xl/worksheets/sheet1.xml", b"abcdefghijklmnop");
+        let _guard = scoped_limits(None, Some(8), Some(8));
+        assert_eq!(
+            read_zip_string_head(&mut ar, "xl/worksheets/sheet1.xml", 8).unwrap(),
+            "abcdefgh"
+        );
+        let err = read_zip_string_head(&mut ar, "xl/worksheets/sheet1.xml", 1).unwrap_err();
+        let details: serde_json::Value =
+            serde_json::from_str(err.strip_prefix("OOXML_RESOURCE_LIMIT:").unwrap()).unwrap();
+        assert_eq!(details["metric"], "operation-inflated-bytes");
+        assert_eq!(details["limit"], 8);
+        assert_eq!(details["observed"], 9);
+    }
+
+    #[test]
+    fn string_head_detects_a_budget_violation_without_silent_truncation() {
+        let mut ar = archive_with("xl/worksheets/sheet1.xml", b"12345678");
+        let _guard = scoped_limits(None, Some(4), None);
+        let err = read_zip_string_head(&mut ar, "xl/worksheets/sheet1.xml", 16).unwrap_err();
+        let details: serde_json::Value =
+            serde_json::from_str(err.strip_prefix("OOXML_RESOURCE_LIMIT:").unwrap()).unwrap();
+        assert_eq!(details["metric"], "parsed-part-inflated-bytes");
+        assert_eq!(details["limit"], 4);
+        assert_eq!(details["observed"], 5);
+    }
+
+    #[test]
+    fn string_head_handles_a_utf8_boundary_and_still_charges_read_bytes() {
+        let mut ar = archive_with("xl/worksheets/sheet1.xml", "ab€cd".as_bytes());
+        let _guard = scoped_limits(None, None, Some(3));
+        assert_eq!(
+            read_zip_string_head(&mut ar, "xl/worksheets/sheet1.xml", 3).unwrap(),
+            "ab"
+        );
+        let err = read_zip_string_head(&mut ar, "xl/worksheets/sheet1.xml", 1).unwrap_err();
+        let details: serde_json::Value =
+            serde_json::from_str(err.strip_prefix("OOXML_RESOURCE_LIMIT:").unwrap()).unwrap();
+        assert_eq!(details["observed"], 4);
+    }
+
+    #[test]
+    fn parse_budgets_are_opt_in_and_restored_with_the_guard() {
+        let mut ar = archive_with("xl/workbook.xml", b"12345678");
+        {
+            let guard = scoped_limits(None, Some(2), Some(2));
+            let first = read_zip_string(&mut ar, "xl/workbook.xml").unwrap_err();
+            // Simulate a tolerant optional-part parser swallowing the Result:
+            // the operation still exposes the first limit violation and all
+            // later reads stop immediately with the same deterministic error.
+            assert_eq!(
+                guard.resource_limit_error().as_deref(),
+                Some(first.as_str())
+            );
+            assert_eq!(
+                read_zip_string(&mut ar, "xl/workbook.xml").unwrap_err(),
+                first
+            );
+        }
+        assert_eq!(
+            read_zip_string(&mut ar, "xl/workbook.xml").unwrap(),
+            "12345678"
+        );
     }
 
     /// Forge a STORED (compression=0) single-entry zip whose declared

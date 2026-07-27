@@ -23,6 +23,10 @@ import {
   dropDuotoneBitmapCache,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
+import {
+  parserResourceLimitsForWasm,
+  serializeWorkerError,
+} from '@silurus/ooxml-core/worker';
 import type { RenderWorkerRequest, RenderWorkerResponse, PresentationMeta } from './worker-protocol';
 
 // RB6: same self-poison + auto-respawn as the parse-only worker. A trap during
@@ -114,6 +118,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
+      const [maxParsedPart, maxOperation] = parserResourceLimitsForWasm(
+        req.parserResourceLimits,
+      );
       const bytes = new Uint8Array(req.buffer);
       // Construction + `parse()` run under `host.run` so a trap in EITHER poisons
       // + recycles the instance (and frees the archive). `setArchive` frees any
@@ -121,7 +128,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // bytes (Result<Vec<u8>, JsValue>). Render mode consumes the model
       // in-worker, so decode + parse here (one decode, no passthrough).
       pres = host.run(() => {
-        const archive = new PptxArchive(bytes, max);
+        const archive = new PptxArchive(bytes, max, maxParsedPart, maxOperation);
         host.setArchive(archive);
         return JSON.parse(new TextDecoder().decode(archive.parse())) as Presentation;
       });
@@ -234,7 +241,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
     }
   } catch (err) {
     if ('id' in req) {
-      post({ kind: 'error', id: req.id, message: err instanceof Error ? err.message : String(err) });
+      post({ kind: 'error', id: req.id, ...serializeWorkerError(err) });
     }
   }
 };

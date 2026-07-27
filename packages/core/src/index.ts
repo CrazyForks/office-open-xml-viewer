@@ -40,10 +40,17 @@ export type {
   LegendManualLayout,
   SecondaryValueAxis,
 } from './types/chart';
-export type { LoadOptions } from './types/load-options';
+export type { LoadOptions, ParserResourceLimits } from './types/load-options';
 // Typed load-time error (PD4 seed): the `load()` factories throw this with a
 // stable `code` for container-level failures detected on the main thread.
-export { OoxmlError, type OoxmlErrorCode } from './errors/ooxml-error';
+export {
+  OoxmlError,
+  ParserResourceLimitError,
+  type OoxmlErrorCode,
+  type OoxmlErrorSource,
+  type OoxmlErrorStage,
+  type ParserResourceLimitErrorDetails,
+} from './errors/ooxml-error';
 // CFB (OLE2) container sniffer: the `load()` factories call this on the raw
 // bytes before touching the parser worker, so a password-protected or legacy
 // .doc/.xls/.ppt file becomes a typed OoxmlError instead of an opaque zip error.

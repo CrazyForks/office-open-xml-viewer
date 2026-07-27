@@ -874,6 +874,7 @@ declare interface LoadOptions_2 {
     password?: string;
     wasmUrl?: string | URL;
     maxZipEntryBytes?: number;
+    parserResourceLimits?: ParserResourceLimits;
     workerTimeoutMs?: number;
     math?: MathRenderer;
 }
@@ -1024,6 +1025,8 @@ export declare class OoxmlError extends Error {
     constructor(code: OoxmlErrorCode, message: string);
 }
 export declare type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml';
+export declare type OoxmlErrorSource = 'container' | 'zip-part' | 'parser' | 'serializer' | 'layout' | 'renderer' | 'worker';
+export declare type OoxmlErrorStage = 'container' | 'decompression' | 'parsing' | 'serialization' | 'layout' | 'rendering' | 'worker';
 export declare function openExternalHyperlink(url: string, allowed?: readonly string[], win?: Pick<Window, 'open'> | undefined): boolean;
 export declare interface PageBorderEdge {
     style: string;
@@ -1056,6 +1059,28 @@ export declare interface ParagraphBorders {
     left: ParaBorderEdge | null;
     right: ParaBorderEdge | null;
     between: ParaBorderEdge | null;
+}
+export declare class ParserResourceLimitError extends Error {
+    readonly code: 'parser-resource-limit';
+    readonly stage: OoxmlErrorStage;
+    readonly source: OoxmlErrorSource;
+    readonly part: string;
+    readonly metric: string;
+    readonly limit: number;
+    readonly observed: number;
+    constructor(message: string, details: ParserResourceLimitErrorDetails);
+}
+export declare interface ParserResourceLimitErrorDetails {
+    stage: OoxmlErrorStage;
+    source: OoxmlErrorSource;
+    part: string;
+    metric: string;
+    limit: number;
+    observed: number;
+}
+export declare interface ParserResourceLimits {
+    maxParsedPartInflatedBytes?: number;
+    maxOperationInflatedBytes?: number;
 }
 export declare type PathCmd = {
     cmd: 'moveTo';

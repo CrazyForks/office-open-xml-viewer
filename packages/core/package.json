@@ -20,6 +20,7 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./worker": "./src/worker/index.ts",
     "./types": "./src/types/common.ts",
     "./testing": "./src/testing/index.ts",
     "./mathjax-stix2": "./assets/mathjax-stix2.js"

@@ -18,6 +18,10 @@ import {
   dropDuotoneBitmapCache,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
+import {
+  parserResourceLimitsForWasm,
+  serializeWorkerError,
+} from '@silurus/ooxml-core/worker';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { resolveSharedStrings } from './shared-strings.js';
@@ -129,13 +133,21 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
+      const [maxParsedPart, maxOperation] = parserResourceLimitsForWasm(
+        req.parserResourceLimits,
+      );
       // Construction + `parse()` run under `host.run` so a trap in EITHER poisons
       // + recycles the instance (and frees the archive). `setArchive` frees any
       // prior handle first — the re-parse dispose. `parse()` returns UTF-8 JSON
       // bytes (Result<Vec<u8>, JsValue>); decode + parse the workbook index here
       // (consumed in-worker, then a light copy is sent to the proxy as an object).
       workbook = host.run(() => {
-        const archive = new XlsxArchive(new Uint8Array(req.data), max);
+        const archive = new XlsxArchive(
+          new Uint8Array(req.data),
+          max,
+          maxParsedPart,
+          maxOperation,
+        );
         host.setArchive(archive);
         return JSON.parse(new TextDecoder().decode(archive.parse())) as ParsedWorkbook;
       });
@@ -208,6 +220,6 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       return;
     }
   } catch (err) {
-    post({ type: 'error', id, message: err instanceof Error ? err.message : String(err) });
+    post({ type: 'error', id, ...serializeWorkerError(err) });
   }
 };

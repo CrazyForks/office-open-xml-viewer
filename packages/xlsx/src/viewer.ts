@@ -833,6 +833,7 @@ export class XlsxViewer implements ZoomableViewer {
       const wb = await XlsxWorkbook.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
+        parserResourceLimits: this.opts.parserResourceLimits,
         workerTimeoutMs: this.opts.workerTimeoutMs,
         wasmUrl: this.opts.wasmUrl,
         math: this.opts.math,

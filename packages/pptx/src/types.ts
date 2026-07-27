@@ -1,3 +1,6 @@
+import type { ParserResourceLimits } from '@silurus/ooxml-core';
+import type { WorkerErrorPayload } from '@silurus/ooxml-core/worker';
+
 // ===== Shared types re-exported from @silurus/ooxml-core =====
 export type {
   PathCmd,
@@ -607,7 +610,7 @@ export interface PictureElement {
 
 export type WorkerRequest =
   | { kind: 'init'; wasmUrl: string }
-  | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number }
+  | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number; parserResourceLimits?: ParserResourceLimits }
   | { kind: 'extractMedia'; id: number; path: string }
   | { kind: 'extractImage'; id: number; path: string }
   // Project the retained archive to GitHub-flavoured markdown (`PptxArchive.to_markdown`,
@@ -623,4 +626,4 @@ export type WorkerResponse =
   | { kind: 'mediaExtracted'; id: number; bytes: ArrayBuffer }
   | { kind: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { kind: 'markdownRendered'; id: number; markdown: string }
-  | { kind: 'error'; id: number; message: string };
+  | ({ kind: 'error'; id: number } & WorkerErrorPayload);

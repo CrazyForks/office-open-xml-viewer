@@ -16,6 +16,10 @@ import {
   dropBitmapCacheByPath,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
+import {
+  parserResourceLimitsForWasm,
+  serializeWorkerError,
+} from '@silurus/ooxml-core/worker';
 import type { DocxDocumentModel } from './types';
 import { renderDocumentToCanvas, dropColorReplacedCache } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
@@ -97,6 +101,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
+      const [maxParsedPart, maxOperation] = parserResourceLimitsForWasm(
+        req.parserResourceLimits,
+      );
       const bytes = new Uint8Array(req.data);
       // Construction + `parse()` run under `host.run` so a trap in EITHER poisons
       // + recycles the instance (and frees the archive). `setArchive` frees any
@@ -106,7 +113,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // the model in-worker, so decode + parse it here (one decode, no
       // passthrough).
       const parsedModel = host.run(() => {
-        const archive = new DocxArchive(bytes, max);
+        const archive = new DocxArchive(bytes, max, maxParsedPart, maxOperation);
         host.setArchive(archive);
         return JSON.parse(new TextDecoder().decode(archive.parse())) as DocxDocumentModel;
       });
@@ -233,8 +240,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
     post({
       type: 'error',
       id,
-      message: error.message,
-      errorName: error.name,
+      ...serializeWorkerError(error),
       ...(details.code !== undefined ? { code: details.code } : {}),
       ...(details.reason !== undefined ? { reason: details.reason } : {}),
       ...(details.outgoingColumnIndex !== undefined

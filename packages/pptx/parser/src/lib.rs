@@ -1,7 +1,7 @@
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::is_r_ns;
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use wasm_bindgen::prelude::*;
 
 mod table_style_presets;
@@ -63,11 +63,24 @@ fn note_layout_master_parse() {
 /// thread does a single `TextDecoder.decode` + `JSON.parse`, collapsing three
 /// serializations (Rust String → JsString → structured clone) into one decode.
 #[wasm_bindgen]
-pub fn parse_pptx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<Vec<u8>, JsValue> {
+pub fn parse_pptx(
+    data: &[u8],
+    max_zip_entry_bytes: Option<u64>,
+    max_parsed_part_inflated_bytes: Option<u64>,
+    max_operation_inflated_bytes: Option<u64>,
+) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
-    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    let presentation = parse_presentation_from_bytes(data)
-        .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
+    let guard = ooxml_common::zip::scoped_limits(
+        max_zip_entry_bytes,
+        max_parsed_part_inflated_bytes,
+        max_operation_inflated_bytes,
+    );
+    let presentation = parse_presentation_from_bytes(data);
+    if let Some(error) = guard.resource_limit_error() {
+        return Err(JsValue::from_str(&error));
+    }
+    let presentation =
+        presentation.map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
     serde_json::to_vec(&presentation)
         .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
@@ -76,11 +89,23 @@ pub fn parse_pptx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<Vec<u
 /// so the browser / Node WASM path and the native mcp-server path stay in
 /// lock-step. See `to_markdown_native` for the design rationale.
 #[wasm_bindgen]
-pub fn pptx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
+pub fn pptx_to_markdown(
+    data: &[u8],
+    max_zip_entry_bytes: Option<u64>,
+    max_parsed_part_inflated_bytes: Option<u64>,
+    max_operation_inflated_bytes: Option<u64>,
+) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
-    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    let pres = parse_presentation_from_bytes(data)
-        .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
+    let guard = ooxml_common::zip::scoped_limits(
+        max_zip_entry_bytes,
+        max_parsed_part_inflated_bytes,
+        max_operation_inflated_bytes,
+    );
+    let pres = parse_presentation_from_bytes(data);
+    if let Some(error) = guard.resource_limit_error() {
+        return Err(JsValue::from_str(&error));
+    }
+    let pres = pres.map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
     Ok(render_presentation_md(&pres))
 }
 
@@ -154,6 +179,8 @@ pub struct PptxArchive {
     /// placeholder slide.
     archive: Result<PptxZip, String>,
     max: Option<u64>,
+    max_parsed_part_inflated_bytes: Option<u64>,
+    max_operation_inflated_bytes: Option<u64>,
 }
 
 #[wasm_bindgen]
@@ -169,7 +196,12 @@ impl PptxArchive {
     /// the `Cursor` could own its backing store, transiently doubling WASM
     /// linear memory to ~2x the file size during construction.
     #[wasm_bindgen(constructor)]
-    pub fn new(data: Vec<u8>, max_zip_entry_bytes: Option<u64>) -> Result<PptxArchive, JsValue> {
+    pub fn new(
+        data: Vec<u8>,
+        max_zip_entry_bytes: Option<u64>,
+        max_parsed_part_inflated_bytes: Option<u64>,
+        max_operation_inflated_bytes: Option<u64>,
+    ) -> Result<PptxArchive, JsValue> {
         console_error_panic_hook::set_once();
         // #774 (RB7 MAJOR): a truncated / corrupt CONTAINER is deferred, not
         // thrown, so `parse()` can degrade it to a placeholder presentation
@@ -177,6 +209,8 @@ impl PptxArchive {
         Ok(PptxArchive {
             archive: open_zip(data),
             max: max_zip_entry_bytes,
+            max_parsed_part_inflated_bytes,
+            max_operation_inflated_bytes,
         })
     }
 
@@ -185,12 +219,20 @@ impl PptxArchive {
     /// CONTAINER failed to open (#774) the model is a degraded placeholder
     /// presentation tagged with the container.
     pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let guard = ooxml_common::zip::scoped_limits(
+            self.max,
+            self.max_parsed_part_inflated_bytes,
+            self.max_operation_inflated_bytes,
+        );
         let presentation = match self.archive.as_mut() {
-            Ok(zip) => parse_presentation(zip)
-                .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?,
-            Err(e) => degraded_container_presentation(e.clone()),
+            Ok(zip) => parse_presentation(zip),
+            Err(e) => Ok(degraded_container_presentation(e.clone())),
         };
+        if let Some(error) = guard.resource_limit_error() {
+            return Err(JsValue::from_str(&error));
+        }
+        let presentation =
+            presentation.map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
         serde_json::to_vec(&presentation)
             .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
     }
@@ -224,12 +266,19 @@ impl PptxArchive {
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
     /// free `pptx_to_markdown`. A corrupt container degrades to an empty deck.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let guard = ooxml_common::zip::scoped_limits(
+            self.max,
+            self.max_parsed_part_inflated_bytes,
+            self.max_operation_inflated_bytes,
+        );
         let pres = match self.archive.as_mut() {
-            Ok(zip) => parse_presentation(zip)
-                .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?,
-            Err(e) => degraded_container_presentation(e.clone()),
+            Ok(zip) => parse_presentation(zip),
+            Err(e) => Ok(degraded_container_presentation(e.clone())),
         };
+        if let Some(error) = guard.resource_limit_error() {
+            return Err(JsValue::from_str(&error));
+        }
+        let pres = pres.map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
         Ok(render_presentation_md(&pres))
     }
 }
@@ -251,16 +300,7 @@ pub(crate) fn read_zip_str(
     zip: &mut PptxZip,
     path: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let max = ooxml_common::zip::current_max();
-    let mut file = zip
-        .by_name(path)
-        .map_err(|_| format!("missing ZIP entry: {path}"))?;
-    if file.size() > max {
-        return Err(format!("ZIP entry exceeds size limit: {path}").into());
-    }
-    let mut buf = String::new();
-    file.by_ref().take(max).read_to_string(&mut buf)?;
-    Ok(buf)
+    ooxml_common::zip::read_zip_string(zip, path).map_err(Into::into)
 }
 
 // ===========================
@@ -1357,6 +1397,7 @@ mod tests {
     use super::*;
     use crate::chart::{parse_chartex, parse_legacy_chart};
     use ooxml_common::math::nodes_to_text;
+    use std::io::Read;
 
     // Local-only sample (redistribution-prohibited, gitignored). Tests that
     // depend on it must skip gracefully on a clean checkout / in CI where the
@@ -7262,5 +7303,45 @@ mod tests {
                 "healthy slide must carry no parseError; got {slide}"
             );
         }
+    }
+
+    #[test]
+    fn parse_entry_path_enforces_the_parsed_part_budget() {
+        let data = build_three_slide_deck(9, "<unused/>");
+        let guard = ooxml_common::zip::scoped_limits(None, Some(32), None);
+        let _ = parse_presentation_from_bytes(&data);
+        let error = guard
+            .resource_limit_error()
+            .expect("the presentation XML read must use the shared counted reader");
+        let details: serde_json::Value = serde_json::from_str(
+            error
+                .strip_prefix("OOXML_RESOURCE_LIMIT:")
+                .expect("typed resource-limit envelope"),
+        )
+        .unwrap();
+        assert_eq!(details["part"], "ppt/presentation.xml");
+        assert_eq!(details["metric"], "parsed-part-inflated-bytes");
+        assert_eq!(details["limit"], 32);
+        assert_eq!(details["observed"], 33);
+    }
+
+    #[test]
+    fn parse_entry_path_enforces_the_operation_budget_across_parts() {
+        let data = build_three_slide_deck(9, "<unused/>");
+        let guard = ooxml_common::zip::scoped_limits(None, None, Some(500));
+        let _ = parse_presentation_from_bytes(&data);
+        let error = guard
+            .resource_limit_error()
+            .expect("production XML reads must share the operation counter");
+        let details: serde_json::Value = serde_json::from_str(
+            error
+                .strip_prefix("OOXML_RESOURCE_LIMIT:")
+                .expect("typed resource-limit envelope"),
+        )
+        .unwrap();
+        assert_eq!(details["metric"], "operation-inflated-bytes");
+        assert_eq!(details["limit"], 500);
+        assert_eq!(details["observed"], 501);
+        assert!(details["part"].as_str().unwrap().starts_with("ppt/"));
     }
 }

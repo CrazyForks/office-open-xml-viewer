@@ -8,7 +8,7 @@ use ooxml_common::ns::{is_c_ns, is_r_ns, is_xdr_ns};
 use ooxml_common::zip::read_zip_string;
 
 pub(crate) struct ChartReferenceContext<'a, 'input, 'session> {
-    pub(crate) sheet_xml: &'a str,
+    pub(crate) worksheet: &'a Worksheet,
     pub(crate) sheet_name: &'a str,
     pub(crate) sheets: &'a [SheetMeta],
     pub(crate) workbook_rels: &'a roxmltree::Document<'input>,
@@ -18,7 +18,7 @@ pub(crate) struct ChartReferenceContext<'a, 'input, 'session> {
 
 struct XlsxChartReferenceResolver<'archive, 'data, 'input, 'session> {
     archive: &'archive mut crate::XlsxZip,
-    sheet_xml: &'data str,
+    worksheet: &'data Worksheet,
     sheet_name: &'data str,
     sheets: &'data [SheetMeta],
     workbook_rels: &'data roxmltree::Document<'input>,
@@ -31,7 +31,7 @@ impl ooxml_common::chart::ChartReferenceResolver for XlsxChartReferenceResolver<
         resolve_worksheet_reference(
             self.archive,
             formula,
-            self.sheet_xml,
+            self.worksheet,
             self.sheet_name,
             self.sheets,
             self.workbook_rels,
@@ -54,7 +54,7 @@ impl ooxml_common::chart::ChartReferenceResolver for XlsxChartReferenceResolver<
         resolve_worksheet_reference(
             self.archive,
             formula,
-            self.sheet_xml,
+            self.worksheet,
             self.sheet_name,
             self.sheets,
             self.workbook_rels,
@@ -322,7 +322,7 @@ pub(crate) fn load_sheet_charts(
             } else if let Some(context) = reference_context.as_mut() {
                 let mut references = XlsxChartReferenceResolver {
                     archive,
-                    sheet_xml: context.sheet_xml,
+                    worksheet: context.worksheet,
                     sheet_name: context.sheet_name,
                     sheets: context.sheets,
                     workbook_rels: context.workbook_rels,
@@ -772,11 +772,13 @@ mod worksheet_reference_tests {
         let sheet_metas = sheets();
         let theme = vec!["#4472C4".into(); 12];
         let mut session = WorksheetReferenceSession::default();
+        let (worksheet, _) =
+            crate::parse_worksheet(DASHBOARD_XML, &[], &theme, "Dashboard").unwrap();
         let charts = load_sheet_charts(
             &mut archive,
             "worksheets/sheet1.xml",
             Some(ChartReferenceContext {
-                sheet_xml: DASHBOARD_XML,
+                worksheet: &worksheet,
                 sheet_name: "Dashboard",
                 sheets: &sheet_metas,
                 workbook_rels: &rels,

@@ -1,5 +1,6 @@
 import type { DimOptions, MediaElement, WorkerResponse } from './types';
 import type { PptxTextRunInfo } from './renderer';
+import type { ParserResourceLimits } from '@silurus/ooxml-core';
 
 /** Lightweight summary returned by the render worker's `parse` — everything
  *  the main-thread proxy needs for its synchronous getters. The full model
@@ -33,7 +34,7 @@ export type RenderWorkerRequest =
   | { kind: 'extractMedia'; id: number; path: string }
   | { kind: 'extractImage'; id: number; path: string }
   | { kind: 'toMarkdown'; id: number }
-  | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number; useGoogleFonts?: boolean }
+  | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number; parserResourceLimits?: ParserResourceLimits; useGoogleFonts?: boolean }
   | { kind: 'renderSlide'; id: number; slideIndex: number; width: number; dpr: number; skipMediaControls?: boolean; dim?: DimOptions }
   // IX6 — collect a slide's text-run geometry WITHOUT transferring a bitmap. The
   // find controller scans every slide for its runs; a bitmap per slide would be

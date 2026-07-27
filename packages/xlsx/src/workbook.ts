@@ -12,7 +12,9 @@ import {
   toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
+  type ParserResourceLimits,
 } from '@silurus/ooxml-core';
+import { deserializeWorkerError } from '@silurus/ooxml-core/worker';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
@@ -65,6 +67,7 @@ export class XlsxWorkbook {
     this.getImage(path, mime);
   private rawData: ArrayBuffer | null = null;
   private maxZipEntryBytes: number | undefined;
+  private parserResourceLimits: ParserResourceLimits | undefined;
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
    *  `renderViewport` call reuses it — equations in shapes render when present,
    *  and are skipped (engine tree-shaken) when omitted. */
@@ -82,7 +85,7 @@ export class XlsxWorkbook {
     this._mode = mode;
     this.bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this.worker, {
       correlate: (res) => res.id,
-      toError: (res) => (res.type === 'error' ? res.message : undefined),
+      toError: (res) => (res.type === 'error' ? deserializeWorkerError(res) : undefined),
     });
     // Default: the parser WASM emitted next to this bundle, resolved relative to
     // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
@@ -131,6 +134,7 @@ export class XlsxWorkbook {
   private async _load(data: ArrayBuffer, opts: LoadOptions = {}): Promise<void> {
     this.rawData = data;
     this.maxZipEntryBytes = opts.maxZipEntryBytes;
+    this.parserResourceLimits = opts.parserResourceLimits;
     this.math = opts.math;
     if (opts.math && this._mode === 'worker') {
       console.warn(
@@ -148,6 +152,7 @@ export class XlsxWorkbook {
               id,
               data: data.slice(0),
               maxZipEntryBytes: this.maxZipEntryBytes,
+              parserResourceLimits: this.parserResourceLimits,
               useGoogleFonts: !!opts.useGoogleFonts,
             } satisfies RenderWorkerRequest)
           : ({
@@ -155,6 +160,7 @@ export class XlsxWorkbook {
               id,
               data: data.slice(0),
               maxZipEntryBytes: this.maxZipEntryBytes,
+              parserResourceLimits: this.parserResourceLimits,
             } satisfies WorkerRequest),
       undefined,
       { timeoutMs: opts.workerTimeoutMs },
@@ -243,6 +249,7 @@ export class XlsxWorkbook {
       sheetIndex,
       sheetName: sheetMeta.name,
       maxZipEntryBytes: this.maxZipEntryBytes,
+      parserResourceLimits: this.parserResourceLimits,
     }));
     // Parse mode: the worker forwards the sheet as transferred UTF-8 JSON bytes
     // — decode + parse once here. Worker (render) mode: the worker already

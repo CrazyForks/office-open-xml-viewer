@@ -1,6 +1,12 @@
 // ===== Output JSON model (mirrors Rust types) =====
 
-import type { MathNode, ChartModel, Duotone } from '@silurus/ooxml-core';
+import type {
+  MathNode,
+  ChartModel,
+  Duotone,
+  ParserResourceLimits,
+} from '@silurus/ooxml-core';
+import type { WorkerErrorPayload } from '@silurus/ooxml-core/worker';
 
 export interface DocxDocumentModel {
   section: SectionProps;
@@ -1499,7 +1505,7 @@ export interface CellBorders {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number }
+  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number; parserResourceLimits?: ParserResourceLimits }
   | { type: 'extractImage'; id: number; path: string }
   // Project the retained archive to GitHub-flavoured markdown (`DocxArchive.to_markdown`,
   // the handle already opened at `parse` — no re-copy of the file). Twin of
@@ -1513,17 +1519,16 @@ export type WorkerResponse =
   | { type: 'parsed'; id: number; documentJson: ArrayBuffer }
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'markdownRendered'; id: number; markdown: string }
-  | {
+  | ({
       type: 'error';
       id: number;
-      message: string;
+    } & WorkerErrorPayload & {
       errorName?: string;
-      code?: string;
       reason?: string;
       outgoingColumnIndex?: number;
       outgoingColumnCount?: number;
       incomingColumnCount?: number;
-    };
+    });
 
 // ===== Public API types =====
 
