@@ -4,6 +4,16 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.74.1 — 2026-07-27
+
+Patch. Restores authored rotation for descendants of reflected DrawingML groups.
+
+- **ooxml:** reverse child rotation direction when composing a parent group
+  with exactly one reflection, including nested groups and leaf shapes. This
+  restores mirrored decorations and other rotated descendants across PPTX,
+  DOCX, and XLSX while preserving the shared Annex L transform path.
+  (ECMA-376 Part 1 Annex L §L.4.7.4–§L.4.7.6; #1105)
+
 ## 0.74.0 — 2026-07-27
 
 Minor. Exposes saved XLSX pivot-table metadata for read-only inspection and
