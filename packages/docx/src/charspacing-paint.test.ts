@@ -42,7 +42,9 @@ interface FillCall {
   scaleY: number;
 }
 
-function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[] } {
+function makeRecordingCanvas(options: Readonly<{
+  followingGlyphLeftOverhangPx?: number;
+}> = {}): { canvas: HTMLCanvasElement; fills: FillCall[] } {
   let font = `${FONT_PX}px serif`;
   let letterSpacing = '0px';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? String(FONT_PX));
@@ -62,7 +64,8 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[] }
       const w = [...s].length * p;
       return {
         width: w,
-        actualBoundingBoxLeft: 0,
+        actualBoundingBoxLeft:
+          s === 'に' ? options.followingGlyphLeftOverhangPx ?? 0 : 0,
         // The punctuation fixture exposes a selected-glyph right ink edge at
         // half its full-width cell. Other text fills its complete advance.
         actualBoundingBoxRight:
@@ -210,6 +213,26 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
     expect(punctuation.letterSpacing).toBe('-10px');
     expect(punctuation.x - first.x).toBeCloseTo(20, 5);
     expect(following.x - first.x).toBeCloseTo(30, 5);
+  });
+
+  it('keeps a compressed closing parenthesis clear of the following CJK glyph ink', async () => {
+    const followingGlyphLeftOverhangPx = 4;
+    const { canvas, fills } = makeRecordingCanvas({ followingGlyphLeftOverhangPx });
+    const model = {
+      ...doc([para([textRun('ます。）に')])], section()),
+      settings: { characterSpacingControl: 'compressPunctuation' },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    const closingParenthesis = drawOf(fills, '）');
+    const following = drawOf(fills, 'に');
+    const closingInkRightPx = closingParenthesis.x + FONT_PX / 2;
+    const followingInkLeftPx = following.x - followingGlyphLeftOverhangPx;
+
+    expect(closingParenthesis.letterSpacing).toBe('-6px');
+    expect(following.x - closingParenthesis.x).toBeCloseTo(14, 5);
+    expect(followingInkLeftPx).toBeGreaterThanOrEqual(closingInkRightPx);
   });
 
   it('does not collapse middle-punctuation advance into the following glyph', async () => {
