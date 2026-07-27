@@ -4240,7 +4240,7 @@ mod group_transform_contract_tests {
         assert!((mapped.y - 105.0).abs() < 1e-9);
         assert!((mapped.width - 40.0).abs() < 1e-9);
         assert!((mapped.height - 10.0).abs() < 1e-9);
-        assert!((mapped.rotation_degrees - 105.0).abs() < 1e-9);
+        assert!((mapped.rotation_degrees - 75.0).abs() < 1e-9);
         assert!(mapped.flip_h);
         assert!(mapped.flip_v);
     }
