@@ -4,6 +4,17 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.74.3 — 2026-07-30
+
+Patch. Restores equations in VS Code previews and adds consistent continuous
+scrolling and zoom controls.
+
+- **vscode:** retain the bundled MathJax and STIX Two Math engine so equations
+  render in DOCX, XLSX, and PPTX previews instead of being removed as an
+  apparently side-effect-free import. DOCX and PPTX now use their virtualized
+  continuous-scroll viewers, while all three formats share zoom-out, current
+  percentage, and zoom-in controls. (#1109)
+
 ## 0.74.2 — 2026-07-27
 
 Patch. Prevents contextually kerned Japanese closing punctuation from collapsing
