@@ -2095,7 +2095,7 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // and is used only for equality linking.
     if let Some(fit_text) = child_w(rpr, "fitText") {
         fmt.fit_text = attr_w(fit_text, "val")
-            .and_then(|value| parse_measure_to_pt(&value, 1.0 / 20.0))
+            .and_then(|value| parse_measure_to_pt(&value, 20.0))
             .map(|points| points * 20.0)
             .filter(|value| *value >= 0.0)
             .map(|val| FitTextSpec {
