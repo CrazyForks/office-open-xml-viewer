@@ -3,9 +3,11 @@
  *
  * Runs inside the VSCode Webview iframe. Receives the file bytes via the
  * `ooxml-init` message and instantiates the appropriate viewer:
- *   - docx / pptx: scroll-stacked render of every page / slide with a transparent
- *     text layer for native selection (PDF.js-style).
- *   - xlsx: XlsxViewer (sheet-based, no scroll stack)
+ *   - docx / pptx: their virtualized continuous-scroll viewers.
+ *   - xlsx: its sheet-based scrolling viewer.
+ *
+ * All three satisfy the shared ZoomableViewer contract, which drives the
+ * extension toolbar's zoom-out / zoom-in controls.
  */
 
 declare const __OOXML_FILE_TYPE__: 'docx' | 'xlsx' | 'pptx';
@@ -17,9 +19,9 @@ declare function acquireVsCodeApi(): {
 };
 
 import { XlsxViewer, type CellRange } from '@silurus/ooxml-xlsx';
-import { DocxDocument, buildDocxTextLayer, type DocxTextRunInfo } from '@silurus/ooxml-docx';
-import { PptxPresentation, buildPptxTextLayer, type PptxTextRunInfo } from '@silurus/ooxml-pptx';
-import { svgExtents } from '@silurus/ooxml-core';
+import { DocxScrollViewer } from '@silurus/ooxml-docx';
+import { PptxScrollViewer } from '@silurus/ooxml-pptx';
+import { svgExtents, type ZoomableViewer } from '@silurus/ooxml-core';
 // Side-effect import: bundles the self-contained MathJax + STIX Two Math engine
 // into the webview and sets globalThis.__ooxmlStix2. The library renders OMML
 // equations only when handed a `math` engine; its built-in engine loads lazily
@@ -43,6 +45,10 @@ const fileType = __OOXML_FILE_TYPE__;
 
 const statusEl = document.getElementById('status')!;
 const viewerContainer = document.getElementById('viewer-container')!;
+const zoomOutButton = document.getElementById('zoom-out') as HTMLButtonElement;
+const zoomInButton = document.getElementById('zoom-in') as HTMLButtonElement;
+const zoomLabel = document.getElementById('zoom-label')!;
+let activeViewer: ZoomableViewer | null = null;
 
 function showError(msg: string): void {
   statusEl.dataset.state = 'error';
@@ -53,6 +59,34 @@ function showError(msg: string): void {
 function hideStatus(): void {
   statusEl.style.display = 'none';
 }
+
+function updateZoomLabel(scale: number): void {
+  zoomLabel.textContent = `${Math.round(scale * 100)}%`;
+}
+
+function bindZoomViewer(viewer: ZoomableViewer): void {
+  activeViewer = viewer;
+  zoomOutButton.disabled = false;
+  zoomInButton.disabled = false;
+  updateZoomLabel(viewer.getScale());
+}
+
+async function runZoom(action: 'zoomIn' | 'zoomOut'): Promise<void> {
+  if (!activeViewer) return;
+  try {
+    await activeViewer[action]();
+    updateZoomLabel(activeViewer.getScale());
+  } catch (err) {
+    showError(`Error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+zoomOutButton.addEventListener('click', () => {
+  void runZoom('zoomOut');
+});
+zoomInButton.addEventListener('click', () => {
+  void runZoom('zoomIn');
+});
 
 // Notify extension host that the webview script is ready to receive messages.
 vscodeApi.postMessage({ type: 'webview-ready' });
@@ -92,14 +126,14 @@ window.addEventListener('message', async (event: MessageEvent) => {
 // ── XLSX ─────────────────────────────────────────────────────────────────────
 
 async function initXlsx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
-  const container = document.createElement('div');
-  container.style.cssText = 'width:100%;height:100vh;';
-  viewerContainer.appendChild(container);
-
-  const viewer = new XlsxViewer(container, {
+  let loadFailed = false;
+  const viewer = new XlsxViewer(viewerContainer, {
     math,
     useGoogleFonts,
+    showZoomSlider: false,
+    onScaleChange: updateZoomLabel,
     onError(err) {
+      loadFailed = true;
       showError(`Error: ${err.message}`);
     },
     onSelectionChange(sel: CellRange | null) {
@@ -109,6 +143,8 @@ async function initXlsx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
   });
 
   await viewer.load(buffer);
+  if (loadFailed) return;
+  bindZoomViewer(viewer);
   hideStatus();
 
   document.addEventListener('keydown', (e) => {
@@ -120,90 +156,44 @@ async function initXlsx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
   });
 }
 
-// ── DOCX (scroll view) ───────────────────────────────────────────────────────
-//
-// The text-selection overlay is built by the shared, public buildDocxTextLayer
-// (imported above) rather than a local duplicate: this webview's `.page-canvas`
-// is `width:100%` of `.page-wrapper` (itself capped by an inline `max-width`),
-// so it IS responsively scaled by the editor pane's width, exactly the pattern
-// the shared builder now guards (an overlay pinned to literal px would overflow
-// `.page-wrapper` under a narrow pane, pushing scroll onto an ancestor — the same
-// bug fixed for PptxViewer/DocxViewer). buildDocxTextLayer takes the page's
-// intended CSS box (px, numbers) as the `%` denominators and leaves the
-// `.text-layer` container's own `width:100%;height:100%` (set by CSS class)
-// untouched.
+// ── DOCX (virtualized continuous scroll) ─────────────────────────────────────
 
 async function initDocx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
-  const doc = await DocxDocument.load(buffer, { math, useGoogleFonts });
-
-  const stack = document.createElement('div');
-  stack.className = 'page-stack';
-  viewerContainer.appendChild(stack);
-
-  const widthPx = Math.min(window.innerWidth - 64, 900);
-
-  for (let i = 0; i < doc.pageCount; i++) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'page-wrapper';
-    wrapper.style.maxWidth = `${widthPx}px`;
-
-    const canvas = document.createElement('canvas');
-    canvas.className = 'page-canvas';
-
-    const textLayer = document.createElement('div');
-    textLayer.className = 'text-layer';
-
-    wrapper.append(canvas, textLayer);
-    stack.appendChild(wrapper);
-
-    const runs: DocxTextRunInfo[] = [];
-    await doc.renderPage(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
-    const cssHeight = parseFloat(canvas.style.height) || canvas.height;
-    buildDocxTextLayer(textLayer, runs, widthPx, cssHeight);
-  }
-
+  let loadFailed = false;
+  const viewer = new DocxScrollViewer(viewerContainer, {
+    math,
+    useGoogleFonts,
+    enableTextSelection: true,
+    background: 'var(--vscode-editor-background)',
+    onScaleChange: updateZoomLabel,
+    onError(err) {
+      loadFailed = true;
+      showError(`Error: ${err.message}`);
+    },
+  });
+  await viewer.load(buffer);
+  if (loadFailed) return;
+  bindZoomViewer(viewer);
   hideStatus();
 }
 
-// ── PPTX (scroll view) ───────────────────────────────────────────────────────
-//
-// Same rationale as the docx section above: the shared, public
-// buildPptxTextLayer (imported above) replaces the former local duplicate,
-// which pinned `.text-layer`'s width/height and every shape frame / span to
-// literal px — the same responsive-overflow bug fixed for PptxViewer, and a
-// live one here too (`.page-canvas` is `width:100%` of `.page-wrapper`, capped
-// by an inline `max-width`, so it IS responsively scaled by the editor pane).
+// ── PPTX (virtualized continuous scroll) ─────────────────────────────────────
 
 async function initPptx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
-  const pres = await PptxPresentation.load(buffer, { math, useGoogleFonts });
-
-  const stack = document.createElement('div');
-  stack.className = 'page-stack';
-  viewerContainer.appendChild(stack);
-
-  const widthPx = Math.min(window.innerWidth - 64, 960);
-  const cssHeight = pres.slideWidth > 0
-    ? Math.round((pres.slideHeight * widthPx) / pres.slideWidth)
-    : Math.round((widthPx * 9) / 16);
-
-  for (let i = 0; i < pres.slideCount; i++) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'page-wrapper';
-    wrapper.style.maxWidth = `${widthPx}px`;
-
-    const canvas = document.createElement('canvas');
-    canvas.className = 'page-canvas';
-
-    const textLayer = document.createElement('div');
-    textLayer.className = 'text-layer';
-
-    wrapper.append(canvas, textLayer);
-    stack.appendChild(wrapper);
-
-    const runs: PptxTextRunInfo[] = [];
-    await pres.presentSlide(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
-    buildPptxTextLayer(textLayer, runs, widthPx, cssHeight);
-  }
-
+  let loadFailed = false;
+  const viewer = new PptxScrollViewer(viewerContainer, {
+    math,
+    useGoogleFonts,
+    enableTextSelection: true,
+    background: 'var(--vscode-editor-background)',
+    onScaleChange: updateZoomLabel,
+    onError(err) {
+      loadFailed = true;
+      showError(`Error: ${err.message}`);
+    },
+  });
+  await viewer.load(buffer);
+  if (loadFailed) return;
+  bindZoomViewer(viewer);
   hideStatus();
 }
