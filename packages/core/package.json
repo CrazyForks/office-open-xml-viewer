@@ -15,7 +15,9 @@
     "url": "https://github.com/yukiyokotani/office-open-xml-viewer/issues"
   },
   "type": "module",
-  "sideEffects": false,
+  "sideEffects": [
+    "./assets/mathjax-stix2.js"
+  ],
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {

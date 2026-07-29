@@ -79,30 +79,67 @@ export function getWebviewHtml(
     html, body {
       width: 100%;
       height: 100%;
+      overflow: hidden;
       background: var(--vscode-editor-background);
       color: var(--vscode-foreground);
       font-family: var(--vscode-font-family, sans-serif);
     }
-    /* xlsx fills the whole viewport; docx/pptx scroll inside #viewer-root. */
-    body.layout-xlsx { overflow: hidden; }
-    body.layout-stack { overflow: auto; }
     #viewer-root {
       width: 100%;
-      min-height: 100%;
-      display: flex;
-      justify-content: center;
-      align-items: flex-start;
-      padding: 16px;
-    }
-    body.layout-xlsx #viewer-root { padding: 0; height: 100%; }
-    #viewer-container { max-width: 100%; width: 100%; }
-    body.layout-stack #viewer-container {
+      height: 100%;
+      min-height: 0;
       display: flex;
       flex-direction: column;
+    }
+    #viewer-toolbar {
+      height: 35px;
+      flex: 0 0 35px;
+      display: flex;
       align-items: center;
+      justify-content: flex-end;
+      gap: 4px;
+      padding: 0 8px;
+      border-bottom: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.35));
+      background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
+      user-select: none;
+    }
+    #viewer-toolbar button {
+      width: 26px;
+      height: 24px;
+      border: 1px solid transparent;
+      border-radius: 3px;
+      color: var(--vscode-foreground);
+      background: transparent;
+      font: 16px/1 var(--vscode-font-family, sans-serif);
+      cursor: pointer;
+    }
+    #viewer-toolbar button:hover:not(:disabled) {
+      background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.2));
+    }
+    #viewer-toolbar button:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+    #viewer-toolbar button:disabled {
+      cursor: default;
+      opacity: 0.4;
+    }
+    #zoom-label {
+      min-width: 46px;
+      text-align: center;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    #viewer-container {
+      position: relative;
+      width: 100%;
+      min-width: 0;
+      min-height: 0;
+      flex: 1 1 auto;
+      overflow: hidden;
     }
     #status {
-      position: fixed;
+      position: absolute;
       inset: 0;
       display: flex;
       align-items: center;
@@ -126,40 +163,15 @@ export function getWebviewHtml(
       animation: spin 0.9s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    /* docx / pptx scroll-stack styling */
-    .page-stack {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 16px;
-      width: 100%;
-    }
-    .page-wrapper {
-      position: relative;
-      width: 100%;
-      margin: 0 auto;
-    }
-    .page-canvas {
-      display: block;
-      width: 100%;
-      background: #fff;
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
-    }
-    .text-layer {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      pointer-events: none;
-      user-select: text;
-      -webkit-user-select: text;
-    }
   </style>
 </head>
-<body class="${fileType === 'xlsx' ? 'layout-xlsx' : 'layout-stack'}">
+<body>
   <div id="viewer-root">
+    <div id="viewer-toolbar" role="toolbar" aria-label="Zoom controls">
+      <button id="zoom-out" type="button" aria-label="Zoom out" title="Zoom out" disabled>−</button>
+      <span id="zoom-label" aria-live="polite">100%</span>
+      <button id="zoom-in" type="button" aria-label="Zoom in" title="Zoom in" disabled>+</button>
+    </div>
     <div id="viewer-container">
       <div id="status"><div class="spinner"></div></div>
     </div>
