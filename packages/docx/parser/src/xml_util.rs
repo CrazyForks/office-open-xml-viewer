@@ -75,9 +75,10 @@ pub fn attr_w14(node: Node, name: &str) -> Option<String> {
 ///
 /// Suffixed values use the fixed physical-unit conversions from
 /// `ST_UniversalMeasure` (`pt`, `in`, `pc`/`pi`, `mm`, `cm`). The meaning of a
-/// bare number is context-dependent, so callers supply its points-per-unit
-/// scale: VML shape lengths use `1.0`, while `ST_TwipsMeasure` uses `1.0 / 20.0`.
-pub(crate) fn parse_measure_to_pt(value: &str, unitless_scale: f64) -> Option<f64> {
+/// bare number is context-dependent, so callers supply how many of that unit
+/// make one point: VML shape lengths use `1.0`, `ST_TwipsMeasure` uses `20.0`,
+/// and `ST_HpsMeasure` uses `2.0`.
+pub(crate) fn parse_measure_to_pt(value: &str, unitless_per_pt: f64) -> Option<f64> {
     let value = value.trim();
     let (number, scale) = if let Some(number) = value.strip_suffix("pt") {
         (number, 1.0)
@@ -93,25 +94,34 @@ pub(crate) fn parse_measure_to_pt(value: &str, unitless_scale: f64) -> Option<f6
     } else if let Some(number) = value.strip_suffix("cm") {
         (number, 72.0 / 2.54)
     } else {
-        (value, unitless_scale)
+        // Divide rather than multiply by a reciprocal: 1701 / 20.0 is 85.05,
+        // 1701 * (1.0 / 20.0) is 85.05000000000001, and section geometry
+        // asserts the exact value.
+        return parse_finite(value).map(|number| number / unitless_per_pt);
     };
 
-    number
+    parse_finite(number).map(|number| number * scale)
+}
+
+/// Parse a decimal, rejecting non-finite values so NaN/inf never reaches layout.
+fn parse_finite(value: &str) -> Option<f64> {
+    value
         .trim()
         .parse::<f64>()
         .ok()
         .filter(|number| number.is_finite())
-        .map(|number| number * scale)
 }
 
-/// Parse twips (1/20 pt) string to f64 pt.
+/// Parse `ST_TwipsMeasure` (§22.9.2.14) to points. A bare number is twips; a
+/// `ST_PositiveUniversalMeasure` suffix is an absolute size.
 pub fn twips_to_pt(s: &str) -> f64 {
-    s.parse::<f64>().unwrap_or(0.0) / 20.0
+    parse_measure_to_pt(s, 20.0).unwrap_or(0.0)
 }
 
-/// Parse half-points string to f64 pt.
+/// Parse `ST_HpsMeasure` (§17.18.42) to points. A bare number is half-points; a
+/// `ST_PositiveUniversalMeasure` suffix is an absolute size.
 pub fn half_pt_to_pt(s: &str) -> f64 {
-    s.parse::<f64>().unwrap_or(0.0) / 2.0
+    parse_measure_to_pt(s, 2.0).unwrap_or(0.0)
 }
 
 /// Parse a ST_OnOff-style toggle child element. ECMA-376 §17.3.2.22 allows
@@ -136,4 +146,38 @@ pub fn bool_prop(node: Node, tag: &str) -> Option<bool> {
 pub fn on_off_attr(node: Node, name: &str) -> Option<bool> {
     let val = attr_w(node, name)?;
     Some(!matches!(val.as_str(), "0" | "false" | "off"))
+}
+
+#[cfg(test)]
+mod measure_tests {
+    use super::{half_pt_to_pt, twips_to_pt};
+
+    #[test]
+    fn half_pt_to_pt_accepts_positive_universal_measures() {
+        // ST_HpsMeasure (§17.18.42) = ST_UnsignedDecimalNumber |
+        // ST_PositiveUniversalMeasure.
+        assert_eq!(half_pt_to_pt("20"), 10.0, "20 half-points = 10pt");
+        assert_eq!(half_pt_to_pt("12pt"), 12.0, "12pt is absolute, not 6pt");
+        assert_eq!(half_pt_to_pt("1in"), 72.0);
+        assert_eq!(half_pt_to_pt("1pc"), 12.0);
+        assert_eq!(half_pt_to_pt("1pi"), 12.0);
+        assert!((half_pt_to_pt("3.6mm") - 72.0 * 3.6 / 25.4).abs() < 1e-9);
+        assert!((half_pt_to_pt("2.54cm") - 72.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn twips_to_pt_accepts_positive_universal_measures() {
+        // ST_TwipsMeasure (§22.9.2.14) is the same union.
+        assert_eq!(twips_to_pt("240"), 12.0, "240 twips = 12pt");
+        assert_eq!(twips_to_pt("12pt"), 12.0);
+        assert_eq!(twips_to_pt("1in"), 72.0);
+    }
+
+    #[test]
+    fn measure_parsers_reject_unparseable_and_non_finite_values() {
+        assert_eq!(half_pt_to_pt(""), 0.0);
+        assert_eq!(half_pt_to_pt("auto"), 0.0);
+        assert_eq!(half_pt_to_pt("inf"), 0.0);
+        assert_eq!(twips_to_pt("NaN"), 0.0);
+    }
 }
