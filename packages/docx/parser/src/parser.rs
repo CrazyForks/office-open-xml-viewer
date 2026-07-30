@@ -395,7 +395,7 @@ mod private_typography_wire_tests {
             r#"<w:r><w:ruby>
               <w:rubyPr>
                 <w:rubyAlign w:val="distributeSpace"/><w:hps w:val="12"/>
-                <w:hpsBaseText w:val="24"/><w:hpsRaise w:val="10"/><w:lid w:val="ja-JP"/>
+                <w:hpsBaseText w:val="12pt"/><w:hpsRaise w:val="3.6mm"/><w:lid w:val="ja-JP"/>
               </w:rubyPr>
               <w:rt><w:r><w:rPr><w:rFonts w:ascii="Yu Gothic"/><w:sz w:val="12"/>
                 <w:b/><w:i/><w:color w:val="112233"/><w:lang w:val="ja-JP"/></w:rPr><w:t>かん</w:t></w:r></w:rt>
@@ -407,7 +407,10 @@ mod private_typography_wire_tests {
 
         assert_eq!(ruby["align"]["value"], "distributeSpace");
         assert_eq!(ruby["baseFontSizePt"]["value"], 12.0);
-        assert_eq!(ruby["raisePt"]["value"], 5.0);
+        assert!(
+            (ruby["raisePt"]["value"].as_f64().expect("raise value") - 72.0 * 3.6 / 25.4).abs()
+                < 1e-9
+        );
         assert_eq!(ruby["language"]["value"], "ja-jp");
         assert_eq!(ruby["guideRuns"][0]["text"], "かん");
         assert_eq!(ruby["guideRuns"][0]["fontFamily"], "Yu Gothic");
@@ -415,6 +418,76 @@ mod private_typography_wire_tests {
         assert_eq!(ruby["guideRuns"][0]["bold"], true);
         assert_eq!(ruby["guideRuns"][0]["italic"], true);
         assert_eq!(ruby["guideRuns"][0]["color"], "112233");
+    }
+
+    #[test]
+    fn invalid_hps_measure_lexemes_remain_invalid_in_private_ruby_wire() {
+        let styles = StyleMap::parse("");
+        for invalid in ["-0", "-0pt", "1.5", "1e2", "+12pt"] {
+            let paragraph = parse_p(
+                &format!(
+                    r#"<w:r><w:ruby>
+                      <w:rubyPr>
+                        <w:hps w:val="{invalid}"/>
+                        <w:hpsBaseText w:val="{invalid}"/>
+                        <w:hpsRaise w:val="{invalid}"/>
+                      </w:rubyPr>
+                      <w:rt><w:r><w:t>かん</w:t></w:r></w:rt>
+                      <w:rubyBase><w:r><w:t>漢</w:t></w:r></w:rubyBase>
+                    </w:ruby></w:r>"#
+                ),
+                &styles,
+            );
+            let run = first_run_json(&paragraph, "text");
+            let ruby = &run["__typographyAcquisition"]["ruby"];
+            for metric in ["baseFontSizePt", "raisePt"] {
+                assert_eq!(
+                    ruby[metric]["status"], "invalid",
+                    "{invalid:?} must remain invalid for {metric}"
+                );
+                assert!(ruby[metric]["value"].is_null());
+            }
+            assert_eq!(
+                run["ruby"]["fontSizePt"], 5.0,
+                "{invalid:?} hps must use the established half-font-size fallback"
+            );
+            assert!(
+                run["ruby"].get("hpsRaisePt").is_none(),
+                "{invalid:?} hpsRaise must remain absent from the public projection"
+            );
+        }
+    }
+
+    #[test]
+    fn position_public_fallback_and_private_status_survive_serialization() {
+        let styles = StyleMap::parse("");
+        let invalid = parse_p(
+            r#"<w:r><w:rPr><w:position w:val="1e2"/></w:rPr><w:t>x</w:t></w:r>"#,
+            &styles,
+        );
+        let invalid = first_run_json(&invalid, "text");
+        assert_eq!(invalid["position"], 0.0);
+        assert_eq!(
+            invalid["__typographyAcquisition"]["positionPt"]["status"],
+            "invalid"
+        );
+        assert!(invalid["__typographyAcquisition"]["positionPt"]["value"].is_null());
+
+        let valid = parse_p(
+            r#"<w:r><w:rPr><w:position w:val="-3.6mm"/></w:rPr><w:t>x</w:t></w:r>"#,
+            &styles,
+        );
+        let valid = first_run_json(&valid, "text");
+        let expected = -72.0 * 3.6 / 25.4;
+        assert!((valid["position"].as_f64().expect("public position") - expected).abs() < 1e-9);
+        assert!(
+            (valid["__typographyAcquisition"]["positionPt"]["value"]
+                .as_f64()
+                .expect("private position")
+                - expected)
+                .abs()
+                < 1e-9
+        );
     }
 
     #[test]
@@ -4524,11 +4597,7 @@ fn ruby_typography_wire(
     });
     let half_points = |name: &str| {
         let raw = element_value(name);
-        let value = raw
-            .as_deref()
-            .and_then(|value| value.parse::<f64>().ok())
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .map(|value| value / 2.0);
+        let value = raw.as_deref().and_then(half_pt_to_pt);
         parsed_typography_value(raw, value)
     };
     let language_raw = element_value("lid");
@@ -5386,14 +5455,12 @@ fn parse_run_inner(
                 let rt_size_pt: f64 = child_w(child, "rubyPr")
                     .and_then(|rp| child_w(rp, "hps"))
                     .and_then(|hps| attr_w(hps, "val"))
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .map(|hp| hp / 2.0) // half-points → points
+                    .and_then(|value| half_pt_to_pt(&value))
                     .unwrap_or_else(|| fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE) / 2.0);
                 let hps_raise_pt = child_w(child, "rubyPr")
                     .and_then(|rp| child_w(rp, "hpsRaise"))
                     .and_then(|hps_raise| attr_w(hps_raise, "val"))
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .map(|hp| hp / 2.0); // half-points → points (§17.3.3.12)
+                    .and_then(|value| half_pt_to_pt(&value));
                 let ruby_typography = ruby_typography_wire(child, &fmt, style_map, theme);
                 let ruby = if !rt_text.is_empty() {
                     Some(RubyAnnotation {
@@ -8474,14 +8541,12 @@ fn extract_simple_paragraph_text(
                     let font_size_pt = child_w(ruby_node, "rubyPr")
                         .and_then(|rp| child_w(rp, "hps"))
                         .and_then(|hps| attr_w(hps, "val"))
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .map(|hp| hp / 2.0)
+                        .and_then(|value| half_pt_to_pt(&value))
                         .unwrap_or_else(|| fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE) / 2.0);
                     let hps_raise_pt = child_w(ruby_node, "rubyPr")
                         .and_then(|rp| child_w(rp, "hpsRaise"))
                         .and_then(|hps_raise| attr_w(hps_raise, "val"))
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .map(|hp| hp / 2.0);
+                        .and_then(|value| half_pt_to_pt(&value));
                     Some(RubyAnnotation {
                         text: rt_text,
                         font_size_pt,
@@ -12521,6 +12586,54 @@ mod tests {
             serde_json::to_value(annotation).unwrap()["hpsRaisePt"],
             serde_json::json!(0.0),
         );
+
+        let universal = r#"<w:r><w:ruby>
+          <w:rubyPr><w:hps w:val="12pt"/><w:hpsRaise w:val="3.6mm"/></w:rubyPr>
+          <w:rt><w:r><w:t>かん</w:t></w:r></w:rt>
+          <w:rubyBase><w:r><w:t>漢</w:t></w:r></w:rubyBase>
+        </w:ruby></w:r>"#;
+        let universal_runs = parse_para(universal, &base, &styles);
+        let annotation = first_text(&universal_runs)
+            .ruby
+            .as_ref()
+            .expect("ruby annotation");
+        assert_eq!(annotation.font_size_pt, 12.0);
+        assert!(
+            (annotation.hps_raise_pt.expect("universal hpsRaise") - 72.0 * 3.6 / 25.4).abs() < 1e-9
+        );
+
+        for invalid in ["-0", "-0pt", "1.5", "1e2", "+12pt"] {
+            let invalid_runs = parse_para(
+                &ruby(&format!(r#"<w:hpsRaise w:val="{invalid}"/>"#)),
+                &base,
+                &styles,
+            );
+            let annotation = first_text(&invalid_runs)
+                .ruby
+                .as_ref()
+                .expect("ruby annotation");
+            assert_eq!(
+                annotation.hps_raise_pt, None,
+                "{invalid:?} must not become a body ruby raise"
+            );
+
+            let invalid_hps = format!(
+                r#"<w:r><w:ruby>
+                  <w:rubyPr><w:hps w:val="{invalid}"/></w:rubyPr>
+                  <w:rt><w:r><w:t>かん</w:t></w:r></w:rt>
+                  <w:rubyBase><w:r><w:t>漢</w:t></w:r></w:rubyBase>
+                </w:ruby></w:r>"#
+            );
+            let invalid_runs = parse_para(&invalid_hps, &base, &styles);
+            let annotation = first_text(&invalid_runs)
+                .ruby
+                .as_ref()
+                .expect("ruby annotation");
+            assert_eq!(
+                annotation.font_size_pt, 5.0,
+                "{invalid:?} must use the body ruby size fallback"
+            );
+        }
     }
 
     // §17.16.5.69 — Word generates each TOC entry as a navigation hyperlink
@@ -25011,6 +25124,45 @@ mod ruby_tab_tests {
                 .is_none(),
             "absent w:hpsRaise must remain distinguishable from zero",
         );
+
+        let universal = parse_shape_para(
+            r#"<w:r><w:ruby>
+              <w:rubyPr><w:hps w:val="12pt"/><w:hpsRaise w:val="3.6mm"/></w:rubyPr>
+              <w:rt><w:r><w:t>かん</w:t></w:r></w:rt>
+              <w:rubyBase><w:r><w:t>漢</w:t></w:r></w:rubyBase>
+            </w:ruby></w:r>"#,
+        )
+        .expect("text-box paragraph yields a ShapeText block");
+        let annotation = universal.runs[0].ruby.as_ref().expect("ruby annotation");
+        assert_eq!(annotation.font_size_pt, 12.0);
+        assert!(
+            (annotation.hps_raise_pt.expect("universal hpsRaise") - 72.0 * 3.6 / 25.4).abs() < 1e-9
+        );
+
+        for invalid in ["-0", "-0pt", "1.5", "1e2", "+12pt"] {
+            let invalid_shape = parse_shape_para(&format!(
+                r#"<w:r><w:ruby>
+                  <w:rubyPr>
+                    <w:hps w:val="{invalid}"/><w:hpsRaise w:val="{invalid}"/>
+                  </w:rubyPr>
+                  <w:rt><w:r><w:t>かん</w:t></w:r></w:rt>
+                  <w:rubyBase><w:r><w:t>漢</w:t></w:r></w:rubyBase>
+                </w:ruby></w:r>"#
+            ))
+            .expect("text-box paragraph yields a ShapeText block");
+            let annotation = invalid_shape.runs[0]
+                .ruby
+                .as_ref()
+                .expect("ruby annotation");
+            assert_eq!(
+                annotation.font_size_pt, 5.0,
+                "{invalid:?} must use the text-box ruby size fallback"
+            );
+            assert_eq!(
+                annotation.hps_raise_pt, None,
+                "{invalid:?} must not become a text-box ruby raise"
+            );
+        }
     }
 
     /// ECMA-376 §17.3.3.25 (`w:ruby`) + §17.3.3.32 (`w:tab`) — a `<w:tab/>` inside

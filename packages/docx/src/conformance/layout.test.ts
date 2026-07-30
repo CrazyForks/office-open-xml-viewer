@@ -219,6 +219,37 @@ function encodedXml(value: string): Uint8Array {
   return new TextEncoder().encode(value);
 }
 
+function fontSizeMeasureDocx(
+  body: string,
+  styles: string,
+): Uint8Array {
+  const seed = CONFORMANCE_CASES[0];
+  if (!seed) throw new Error('conformance corpus is empty');
+  const parts = new Map(generateConformanceParts(seed));
+  parts.set(
+    'word/document.xml',
+    encodedXml(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+      <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+          ${body}
+          <w:sectPr>
+            <w:pgSz w:w="12240" w:h="15840"/>
+            <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"
+              w:header="720" w:footer="720" w:gutter="0"/>
+          </w:sectPr>
+        </w:body>
+      </w:document>`),
+  );
+  parts.set(
+    'word/styles.xml',
+    encodedXml(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+      <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        ${styles}
+      </w:styles>`),
+  );
+  return storeZip(parts);
+}
+
 function inlineDrawingCase() {
   const testCase = CONFORMANCE_CASES.find(({ axes }) =>
     axes.story === 'body'
@@ -331,6 +362,186 @@ describe('synthetic DOCX conformance matrix', () => {
     for (const bytes of first) {
       expect([...bytes.subarray(0, 4)]).toEqual([0x50, 0x4b, 0x03, 0x04]);
     }
+  });
+});
+
+describe('ST_HpsMeasure font sizes through the WASM parser', () => {
+  const expectedMmSizePt = 72 * 3.6 / 25.4;
+
+  it('preserves unit-bearing w:sz and w:szCs inherited from docDefaults', () => {
+    const model = parse(fontSizeMeasureDocx(
+      '<w:p><w:r><w:t>DOC_DEFAULT_UNITS</w:t></w:r></w:p>',
+      `<w:docDefaults><w:rPrDefault><w:rPr>
+        <w:sz w:val="3.6mm"/><w:szCs w:val="12pt"/>
+      </w:rPr></w:rPrDefault></w:docDefaults>
+      <w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>`,
+    ));
+    const run = textRunOf(
+      targetParagraph(model, 'body', 'DOC_DEFAULT_UNITS'),
+      'DOC_DEFAULT_UNITS',
+    );
+
+    expect(run.fontSize).toBeCloseTo(expectedMmSizePt, 10);
+    expect(run.fontSizeCs).toBe(12);
+  });
+
+  it('preserves unit-bearing sizes through basedOn and ignores invalid direct values', () => {
+    const model = parse(fontSizeMeasureDocx(
+      `<w:p>
+        <w:pPr><w:pStyle w:val="Derived"/></w:pPr>
+        <w:r>
+          <w:rPr><w:sz w:val="invalid"/><w:szCs w:val="invalid"/></w:rPr>
+          <w:t>STYLE_CHAIN_UNITS</w:t>
+        </w:r>
+      </w:p>`,
+      `<w:docDefaults><w:rPrDefault><w:rPr>
+        <w:sz w:val="18"/><w:szCs w:val="20"/>
+      </w:rPr></w:rPrDefault></w:docDefaults>
+      <w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>
+      <w:style w:type="paragraph" w:styleId="Base">
+        <w:basedOn w:val="Normal"/>
+        <w:rPr><w:sz w:val="3.6mm"/><w:szCs w:val="12pt"/></w:rPr>
+      </w:style>
+      <w:style w:type="paragraph" w:styleId="Derived">
+        <w:basedOn w:val="Base"/>
+      </w:style>`,
+    ));
+    const run = textRunOf(
+      targetParagraph(model, 'body', 'STYLE_CHAIN_UNITS'),
+      'STYLE_CHAIN_UNITS',
+    );
+
+    expect(run.fontSize).toBeCloseTo(expectedMmSizePt, 10);
+    expect(run.fontSizeCs).toBe(12);
+  });
+
+  it('rejects non-schema HPS lexemes without blocking inherited sizes or enabling kerning', () => {
+    const invalidValues = [
+      '-0', '-0pt', '-2', '-2pt', '1.5', '1e2', '+12', '+12pt',
+    ];
+    const body = invalidValues.map((value, index) => `<w:p>
+      <w:pPr><w:pStyle w:val="Derived"/></w:pPr>
+      <w:r>
+        <w:rPr>
+          <w:sz w:val="${value}"/><w:szCs w:val="${value}"/>
+          <w:kern w:val="${value}"/>
+        </w:rPr>
+        <w:t>INVALID_HPS_${index}</w:t>
+      </w:r>
+    </w:p>`).join('');
+    const model = parse(fontSizeMeasureDocx(
+      body,
+      `<w:docDefaults><w:rPrDefault><w:rPr>
+        <w:sz w:val="18"/><w:szCs w:val="20"/>
+      </w:rPr></w:rPrDefault></w:docDefaults>
+      <w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>
+      <w:style w:type="paragraph" w:styleId="Base">
+        <w:basedOn w:val="Normal"/>
+        <w:rPr><w:sz w:val="3.6mm"/><w:szCs w:val="12pt"/></w:rPr>
+      </w:style>
+      <w:style w:type="paragraph" w:styleId="Derived">
+        <w:basedOn w:val="Base"/>
+      </w:style>`,
+    ));
+
+    invalidValues.forEach((value, index) => {
+      const target = `INVALID_HPS_${index}`;
+      const run = textRunOf(targetParagraph(model, 'body', target), target);
+      expect(run.fontSize, value).toBeCloseTo(expectedMmSizePt, 10);
+      expect(run.fontSizeCs, value).toBe(12);
+      expect(run.kerning, value).toBeUndefined();
+    });
+  });
+
+  it('keeps authored zero sizes and kerning thresholds', () => {
+    const model = parse(fontSizeMeasureDocx(
+      `<w:p><w:r><w:rPr>
+        <w:sz w:val="0pt"/><w:szCs w:val="0"/><w:kern w:val="0pt"/>
+      </w:rPr><w:t>VALID_ZERO_HPS</w:t></w:r></w:p>`,
+      '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>',
+    ));
+    const run = textRunOf(
+      targetParagraph(model, 'body', 'VALID_ZERO_HPS'),
+      'VALID_ZERO_HPS',
+    );
+
+    expect(run.fontSize).toBe(0);
+    expect(run.fontSizeCs).toBe(0);
+    expect(run.kerning).toBe(0);
+  });
+
+  it('keeps position compatibility projection separate from strict private acquisition', () => {
+    const model = parse(fontSizeMeasureDocx(
+      `<w:p>
+        <w:r><w:rPr><w:position w:val="1e2"/></w:rPr><w:t>BAD_POSITION</w:t></w:r>
+        <w:r><w:rPr><w:position w:val="-3.6mm"/></w:rPr><w:t>SIGNED_POSITION</w:t></w:r>
+      </w:p>`,
+      '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>',
+    ));
+    const invalid = textRunOf(
+      targetParagraph(model, 'body', 'BAD_POSITION'),
+      'BAD_POSITION',
+    ) as DocxTextRun & {
+      __typographyAcquisition: {
+        positionPt: { status: string; value: number | null };
+      };
+    };
+    expect(invalid.position).toBe(0);
+    expect(invalid.__typographyAcquisition.positionPt).toMatchObject({
+      status: 'invalid',
+      value: null,
+    });
+
+    const valid = textRunOf(
+      targetParagraph(model, 'body', 'SIGNED_POSITION'),
+      'SIGNED_POSITION',
+    ) as DocxTextRun & {
+      __typographyAcquisition: {
+        positionPt: { status: string; value: number | null };
+      };
+    };
+    expect(valid.position).toBeCloseTo(-expectedMmSizePt, 10);
+    expect(valid.__typographyAcquisition.positionPt).toMatchObject({
+      status: 'valid',
+    });
+    expect(valid.__typographyAcquisition.positionPt.value)
+      .toBeCloseTo(-expectedMmSizePt, 10);
+  });
+
+  it('rejects invalid ruby HPS lexemes in the public and private WASM projections', () => {
+    const model = parse(fontSizeMeasureDocx(
+      `<w:p><w:r><w:ruby>
+        <w:rubyPr>
+          <w:hps w:val="1.5"/><w:hpsBaseText w:val="-0pt"/>
+          <w:hpsRaise w:val="1e2"/>
+        </w:rubyPr>
+        <w:rt><w:r><w:t>guide</w:t></w:r></w:rt>
+        <w:rubyBase><w:r><w:t>INVALID_RUBY_HPS</w:t></w:r></w:rubyBase>
+      </w:ruby></w:r></w:p>`,
+      '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>',
+    ));
+    const run = textRunOf(
+      targetParagraph(model, 'body', 'INVALID_RUBY_HPS'),
+      'INVALID_RUBY_HPS',
+    ) as DocxTextRun & {
+      __typographyAcquisition: {
+        ruby: {
+          baseFontSizePt: { status: string; value: number | null };
+          raisePt: { status: string; value: number | null };
+        };
+      };
+    };
+
+    expect(run.ruby?.fontSizePt).toBe(5);
+    expect(run.ruby?.hpsRaisePt).toBeUndefined();
+    expect(run.__typographyAcquisition.ruby.baseFontSizePt).toMatchObject({
+      status: 'invalid',
+      value: null,
+    });
+    expect(run.__typographyAcquisition.ruby.raisePt).toMatchObject({
+      status: 'invalid',
+      value: null,
+    });
   });
 });
 
