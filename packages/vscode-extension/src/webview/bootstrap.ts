@@ -23,6 +23,7 @@ import { DocxScrollViewer } from '@silurus/ooxml-docx';
 import { PptxScrollViewer } from '@silurus/ooxml-pptx';
 import { svgExtents, type ZoomableViewer } from '@silurus/ooxml-core';
 import { loadAtNaturalScale } from './naturalScale';
+import { captureUnhandledWheelZoom } from './wheelZoomFallback';
 // Side-effect import: bundles the self-contained MathJax + STIX Two Math engine
 // into the webview and sets globalThis.__ooxmlStix2. The library renders OMML
 // equations only when handed a `math` engine; its built-in engine loads lazily
@@ -88,6 +89,19 @@ zoomOutButton.addEventListener('click', () => {
 zoomInButton.addEventListener('click', () => {
   void runZoom('zoomIn');
 });
+
+// Chromium normally sends a trackpad pinch as Ctrl+wheel to the viewer-owned
+// scroll host. VS Code's webview can target the frame instead, so capture it at
+// the window and fall back only when the viewer's own handler did not run.
+window.addEventListener(
+  'wheel',
+  (event) => {
+    captureUnhandledWheelZoom(event, activeViewer, undefined, (err) => {
+      showError(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  },
+  { capture: true, passive: false },
+);
 
 // Notify extension host that the webview script is ready to receive messages.
 vscodeApi.postMessage({ type: 'webview-ready' });
