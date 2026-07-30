@@ -79,6 +79,13 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
   /** Enable `Ctrl`/`Cmd`+wheel zoom. Default true. */
   enableZoom?: boolean;
   /**
+   * Re-fit the document to the container width when the container is resized.
+   * Default true. Set false to preserve the current absolute scale, including
+   * an explicit pre-load `setScale(1)`, independently of the viewport width.
+   * Explicit `fitWidth()` and `fitPage()` calls remain available.
+   */
+  refitOnResize?: boolean;
+  /**
    * CSS `background` shorthand for the scroll surface (the "desk") visible
    * behind and between pages — the gray a PDF reader paints around the sheet.
    * Applied to the viewer-owned scroll host. The pages themselves are always
@@ -116,8 +123,9 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
   /** IX9 — fires whenever the zoom factor actually changes (`1` = 100% = a page
    *  at its natural pt→px size): from {@link DocxScrollViewer.setScale},
    *  `zoomIn`/`zoomOut`, `fitWidth`/`fitPage`, a Ctrl/⌘+wheel gesture, or a
-   *  container-resize re-fit. Named `onScaleChange` to match the single-canvas
-   *  viewers so all five share one notification shape. */
+   *  container-resize re-fit (when `refitOnResize` is enabled). Named
+   *  `onScaleChange` to match the single-canvas viewers so all five share one
+   *  notification shape. */
   onScaleChange?: (scale: number) => void;
   /** IX1 (design decision — NOT user-confirmed, integrator may veto). Called when
    *  a hyperlink run is clicked. When omitted, the default is: external → open in a
@@ -1513,6 +1521,14 @@ export class DocxScrollViewer implements ZoomableViewer {
     // Zero-width recovery: first non-zero layout establishes the base scale.
     if (!this._scaleEstablished) {
       this.relayout();
+      return;
+    }
+    if (this._opts.refitOnResize === false) {
+      // Fixed-scale hosts (for example VS Code previews) must not turn a pane
+      // resize into an implicit zoom. Recompute the visible window and horizontal
+      // centering only; page geometry and rendered bitmaps remain valid.
+      this._lastFitWidth = this._fitWidthPx();
+      this._mountVisible();
       return;
     }
     const newBase = this._baseScale();

@@ -83,6 +83,13 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
   /** Enable `Ctrl`/`Cmd`+wheel zoom. Default true. */
   enableZoom?: boolean;
   /**
+   * Re-fit the presentation to the container width when the container is
+   * resized. Default true. Set false to preserve the current absolute scale,
+   * including an explicit pre-load `setScale(1)`, independently of the viewport
+   * width. Explicit `fitWidth()` and `fitPage()` calls remain available.
+   */
+  refitOnResize?: boolean;
+  /**
    * CSS `background` shorthand for the scroll surface (the "desk") visible
    * behind and between slides — the gray a presentation viewer paints around the
    * slide. Applied to the viewer-owned scroll host. The slides themselves are
@@ -120,8 +127,9 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
   /** IX9 — fires whenever the zoom factor actually changes (`1` = 100% = a slide
    *  at its natural EMU→px size): from {@link PptxScrollViewer.setScale},
    *  `zoomIn`/`zoomOut`, `fitWidth`/`fitPage`, a Ctrl/⌘+wheel gesture, or a
-   *  container-resize re-fit. Named `onScaleChange` to match the single-canvas
-   *  viewers so all five share one notification shape. */
+   *  container-resize re-fit (when `refitOnResize` is enabled). Named
+   *  `onScaleChange` to match the single-canvas viewers so all five share one
+   *  notification shape. */
   onScaleChange?: (scale: number) => void;
   /** Error callback. When set, `load()` invokes it and resolves (otherwise the
    *  error is rethrown — shared viewer error contract). It ALSO fires for async
@@ -1497,6 +1505,14 @@ export class PptxScrollViewer implements ZoomableViewer {
     // Zero-width recovery: first non-zero layout establishes the base scale.
     if (!this._scaleEstablished) {
       this.relayout();
+      return;
+    }
+    if (this._opts.refitOnResize === false) {
+      // Fixed-scale hosts (for example VS Code previews) must not turn a pane
+      // resize into an implicit zoom. Recompute the visible window and horizontal
+      // centering only; slide geometry and rendered bitmaps remain valid.
+      this._lastFitWidth = this._fitWidthPx();
+      this._mountVisible();
       return;
     }
     const newBase = this._baseScale();
