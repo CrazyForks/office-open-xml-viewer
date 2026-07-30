@@ -1201,6 +1201,23 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
     v.destroy();
   });
 
+  it('refitOnResize false preserves the absolute scale when the container width changes', () => {
+    const onScaleChange = vi.fn();
+    const { v, container } = setup(20, { refitOnResize: false, onScaleChange });
+    v.setScale(1);
+    onScaleChange.mockClear();
+    const epochBefore = v.renderEpochForTest();
+
+    container.clientWidth = 400;
+    (container.children[0] as FakeEl).children[0].clientWidth = 400;
+    v.resizeForTest();
+
+    expect(v.scaleForTest()).toBe(1);
+    expect(v.renderEpochForTest()).toBe(epochBefore);
+    expect(onScaleChange).not.toHaveBeenCalled();
+    v.destroy();
+  });
+
   it('ResizeObserver re-fit bumps the render epoch (resize is an epoch event)', () => {
     const { v, container } = setup();
     const before = v.renderEpochForTest();

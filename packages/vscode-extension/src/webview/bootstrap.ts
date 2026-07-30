@@ -22,6 +22,7 @@ import { XlsxViewer, type CellRange } from '@silurus/ooxml-xlsx';
 import { DocxScrollViewer } from '@silurus/ooxml-docx';
 import { PptxScrollViewer } from '@silurus/ooxml-pptx';
 import { svgExtents, type ZoomableViewer } from '@silurus/ooxml-core';
+import { loadAtNaturalScale } from './naturalScale';
 // Side-effect import: bundles the self-contained MathJax + STIX Two Math engine
 // into the webview and sets globalThis.__ooxmlStix2. The library renders OMML
 // equations only when handed a `math` engine; its built-in engine loads lazily
@@ -164,6 +165,7 @@ async function initDocx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
     math,
     useGoogleFonts,
     enableTextSelection: true,
+    refitOnResize: false,
     background: 'var(--vscode-editor-background)',
     onScaleChange: updateZoomLabel,
     onError(err) {
@@ -171,7 +173,7 @@ async function initDocx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
       showError(`Error: ${err.message}`);
     },
   });
-  await viewer.load(buffer);
+  await loadAtNaturalScale(viewer, buffer);
   if (loadFailed) return;
   bindZoomViewer(viewer);
   hideStatus();
@@ -185,6 +187,7 @@ async function initPptx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
     math,
     useGoogleFonts,
     enableTextSelection: true,
+    refitOnResize: false,
     background: 'var(--vscode-editor-background)',
     onScaleChange: updateZoomLabel,
     onError(err) {
@@ -192,7 +195,7 @@ async function initPptx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
       showError(`Error: ${err.message}`);
     },
   });
-  await viewer.load(buffer);
+  await loadAtNaturalScale(viewer, buffer);
   if (loadFailed) return;
   bindZoomViewer(viewer);
   hideStatus();
