@@ -76,8 +76,8 @@ pub fn attr_w14(node: Node, name: &str) -> Option<String> {
 /// Suffixed values use the fixed physical-unit conversions from
 /// `ST_UniversalMeasure` (`pt`, `in`, `pc`/`pi`, `mm`, `cm`). The meaning of a
 /// bare number is context-dependent, so callers supply how many of that unit
-/// make one point: VML shape lengths use `1.0`, `ST_TwipsMeasure` uses `20.0`,
-/// and `ST_HpsMeasure` uses `2.0`.
+/// make one point: VML shape lengths use `1.0`, while `ST_TwipsMeasure` uses
+/// `20.0`. HPS measures use their stricter dedicated parsers below.
 pub(crate) fn parse_measure_to_pt(value: &str, unitless_per_pt: f64) -> Option<f64> {
     let value = value.trim();
     let (number, scale) = if let Some(number) = value.strip_suffix("pt") {
@@ -118,10 +118,85 @@ pub fn twips_to_pt(s: &str) -> f64 {
     parse_measure_to_pt(s, 20.0).unwrap_or(0.0)
 }
 
-/// Parse `ST_HpsMeasure` (§17.18.42) to points. A bare number is half-points; a
-/// `ST_PositiveUniversalMeasure` suffix is an absolute size.
-pub fn half_pt_to_pt(s: &str) -> f64 {
-    parse_measure_to_pt(s, 2.0).unwrap_or(0.0)
+/// Parse `ST_HpsMeasure` (§17.18.42) to points.
+///
+/// Its lexical union is deliberately narrower than an `f64`: a bare value is
+/// `ST_UnsignedDecimalNumber` (digits only, in half-points), while a suffixed
+/// value is `ST_PositiveUniversalMeasure` (an unsigned decimal plus a supported
+/// absolute unit). Rejecting signs, fractional/exponent bare numbers, and
+/// negative universal measures keeps malformed direct formatting from blocking
+/// a valid inherited value.
+pub fn half_pt_to_pt(s: &str) -> Option<f64> {
+    let value = s.trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return value.parse::<u64>().ok().map(|number| number as f64 / 2.0);
+    }
+    universal_measure_to_pt(value, false)
+}
+
+/// Parse `ST_SignedHpsMeasure` (§17.18.81) to points.
+///
+/// The bare member is the XSD `integer` lexical form (optional `+`/`-`, then
+/// digits) in half-points. The unit-bearing member is `ST_UniversalMeasure`,
+/// whose schema pattern allows an optional minus sign, but not a plus sign.
+pub fn signed_half_pt_to_pt(s: &str) -> Option<f64> {
+    let value = s.trim();
+    if is_xsd_integer_lexeme(value) {
+        return parse_finite(value).map(|number| number / 2.0);
+    }
+    universal_measure_to_pt(value, true)
+}
+
+fn is_xsd_integer_lexeme(value: &str) -> bool {
+    let digits = value
+        .strip_prefix('+')
+        .or_else(|| value.strip_prefix('-'))
+        .unwrap_or(value);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn universal_measure_to_pt(value: &str, signed: bool) -> Option<f64> {
+    let (number, scale) = if let Some(number) = value.strip_suffix("pt") {
+        (number, 1.0)
+    } else if let Some(number) = value.strip_suffix("in") {
+        (number, 72.0)
+    } else if let Some(number) = value
+        .strip_suffix("pc")
+        .or_else(|| value.strip_suffix("pi"))
+    {
+        (number, 12.0)
+    } else if let Some(number) = value.strip_suffix("mm") {
+        (number, 72.0 / 25.4)
+    } else {
+        (value.strip_suffix("cm")?, 72.0 / 2.54)
+    };
+
+    let unsigned_number = if signed {
+        number.strip_prefix('-').unwrap_or(number)
+    } else {
+        number
+    };
+    if unsigned_number.is_empty()
+        || unsigned_number.starts_with('+')
+        || (!signed && number.starts_with('-'))
+    {
+        return None;
+    }
+
+    let mut parts = unsigned_number.split('.');
+    let integer = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    if integer.is_empty()
+        || !integer.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.is_some_and(|digits| {
+            digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        || parts.next().is_some()
+    {
+        return None;
+    }
+
+    parse_finite(number).map(|number| number * scale)
 }
 
 /// Parse a ST_OnOff-style toggle child element. ECMA-376 §17.3.2.22 allows
@@ -150,19 +225,55 @@ pub fn on_off_attr(node: Node, name: &str) -> Option<bool> {
 
 #[cfg(test)]
 mod measure_tests {
-    use super::{half_pt_to_pt, twips_to_pt};
+    use super::{half_pt_to_pt, signed_half_pt_to_pt, twips_to_pt};
 
     #[test]
     fn half_pt_to_pt_accepts_positive_universal_measures() {
         // ST_HpsMeasure (§17.18.42) = ST_UnsignedDecimalNumber |
         // ST_PositiveUniversalMeasure.
-        assert_eq!(half_pt_to_pt("20"), 10.0, "20 half-points = 10pt");
-        assert_eq!(half_pt_to_pt("12pt"), 12.0, "12pt is absolute, not 6pt");
-        assert_eq!(half_pt_to_pt("1in"), 72.0);
-        assert_eq!(half_pt_to_pt("1pc"), 12.0);
-        assert_eq!(half_pt_to_pt("1pi"), 12.0);
-        assert!((half_pt_to_pt("3.6mm") - 72.0 * 3.6 / 25.4).abs() < 1e-9);
-        assert!((half_pt_to_pt("2.54cm") - 72.0).abs() < 1e-9);
+        assert_eq!(half_pt_to_pt("20"), Some(10.0), "20 half-points = 10pt");
+        assert_eq!(
+            half_pt_to_pt("12pt"),
+            Some(12.0),
+            "12pt is absolute, not 6pt"
+        );
+        assert_eq!(half_pt_to_pt("1in"), Some(72.0));
+        assert_eq!(half_pt_to_pt("1pc"), Some(12.0));
+        assert_eq!(half_pt_to_pt("1pi"), Some(12.0));
+        assert_eq!(half_pt_to_pt("0"), Some(0.0));
+        assert_eq!(half_pt_to_pt("0pt"), Some(0.0));
+        assert!((half_pt_to_pt("3.6mm").unwrap() - 72.0 * 3.6 / 25.4).abs() < 1e-9);
+        assert!((half_pt_to_pt("2.54cm").unwrap() - 72.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn half_pt_to_pt_rejects_values_outside_st_hps_measure_lexical_space() {
+        for invalid in ["-0", "-0pt", "-10", "-10pt", "1.5", "1e2", "+10", "+10pt"] {
+            assert_eq!(
+                half_pt_to_pt(invalid),
+                None,
+                "{invalid:?} is neither ST_UnsignedDecimalNumber nor ST_PositiveUniversalMeasure"
+            );
+        }
+    }
+
+    #[test]
+    fn signed_half_pt_to_pt_matches_st_signed_hps_measure_lexical_space() {
+        assert_eq!(signed_half_pt_to_pt("10"), Some(5.0));
+        assert_eq!(signed_half_pt_to_pt("-10"), Some(-5.0));
+        assert_eq!(signed_half_pt_to_pt("+10"), Some(5.0));
+        assert_eq!(signed_half_pt_to_pt("-0"), Some(-0.0));
+        assert_eq!(signed_half_pt_to_pt("-0pt"), Some(-0.0));
+        assert_eq!(signed_half_pt_to_pt("-12pt"), Some(-12.0));
+        assert!((signed_half_pt_to_pt("-3.6mm").unwrap() + 72.0 * 3.6 / 25.4).abs() < 1e-9);
+
+        for invalid in ["1.5", "1e2", "+12pt", "12PT"] {
+            assert_eq!(
+                signed_half_pt_to_pt(invalid),
+                None,
+                "{invalid:?} is outside ST_SignedHpsMeasure's lexical union"
+            );
+        }
     }
 
     #[test]
@@ -175,9 +286,9 @@ mod measure_tests {
 
     #[test]
     fn measure_parsers_reject_unparseable_and_non_finite_values() {
-        assert_eq!(half_pt_to_pt(""), 0.0);
-        assert_eq!(half_pt_to_pt("auto"), 0.0);
-        assert_eq!(half_pt_to_pt("inf"), 0.0);
+        assert_eq!(half_pt_to_pt(""), None);
+        assert_eq!(half_pt_to_pt("auto"), None);
+        assert_eq!(half_pt_to_pt("inf"), None);
         assert_eq!(twips_to_pt("NaN"), 0.0);
     }
 }

@@ -1900,28 +1900,25 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // carries only szCs (common Word editing residue) must inherit its sz from
     // the style/docDefaults chain, not adopt the complex-script metric —
     // otherwise body text with a leftover szCs renders a size too large.
-    if let Some(sz) = child_w(rpr, "sz") {
-        if let Some(v) = attr_w(sz, "val") {
-            fmt.font_size = Some(half_pt_to_pt(&v));
-        }
-    }
+    fmt.font_size = child_w(rpr, "sz")
+        .and_then(|sz| attr_w(sz, "val"))
+        .and_then(|value| half_pt_to_pt(&value));
 
     // Complex-script font size (ECMA-376 §17.3.2.39 w:szCs, half-points).
     // Recorded independently of the sz/szCs fallback above so RTL runs can use
     // the complex-script metric without disturbing the existing Latin/CJK size.
-    if let Some(sz_cs) = child_w(rpr, "szCs") {
-        if let Some(v) = attr_w(sz_cs, "val") {
-            fmt.font_size_cs = Some(half_pt_to_pt(&v));
-        }
-    }
+    fmt.font_size_cs = child_w(rpr, "szCs")
+        .and_then(|sz_cs| attr_w(sz_cs, "val"))
+        .and_then(|value| half_pt_to_pt(&value));
 
     // Record which of w:sz / w:szCs were set AT THIS LEVEL so the style-chain
     // merge can mirror a directly-applied Latin size into the complex-script
-    // size when no szCs accompanies it (Word's behaviour — §17.3.2.18). Use the
-    // literal child presence (not the sz/szCs fallback above, which conflates
-    // them).
-    fmt.font_size_set_here = child_w(rpr, "sz").is_some();
-    fmt.font_size_cs_set_here = child_w(rpr, "szCs").is_some();
+    // size when no szCs accompanies it (Word's behaviour — §17.3.2.18). Only a
+    // successfully normalized finite, non-negative value is an authored
+    // formatting fact; malformed children remain absent so they cannot
+    // manufacture a 0pt override of inheritance.
+    fmt.font_size_set_here = fmt.font_size.is_some();
+    fmt.font_size_cs_set_here = fmt.font_size_cs.is_some();
 
     // Complex-script bold / italic toggles (ECMA-376 §17.3.2.3 / §17.3.2.17).
     fmt.bold_cs = bool_prop(rpr, "bCs");
@@ -2130,13 +2127,10 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // it as a baseline y-offset without changing the font size or line box.
     if let Some(pos) = child_w(rpr, "position") {
         let raw = attr_w(pos, "val");
-        let value = raw
-            .as_deref()
-            .and_then(|value| value.parse::<f64>().ok())
-            .map(|value| value / 2.0);
+        let value = raw.as_deref().and_then(signed_half_pt_to_pt);
         // Keep the stable public projection byte-for-byte compatible while the
         // private value carries invalid status for the replacement layout path.
-        fmt.position = raw.as_deref().map(half_pt_to_pt);
+        fmt.position = raw.as_ref().map(|_| value.unwrap_or(0.0));
         fmt.position_typography = Some(typography_value(raw, value));
     }
 
@@ -2146,7 +2140,7 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // hierarchy default is OFF. `w:val="0"` = kern at all sizes. Stored in points.
     if let Some(kern) = child_w(rpr, "kern") {
         if let Some(v) = attr_w(kern, "val") {
-            fmt.kerning = Some(half_pt_to_pt(&v));
+            fmt.kerning = half_pt_to_pt(&v);
         }
     }
 
@@ -2831,6 +2825,96 @@ mod tests {
     }
 
     #[test]
+    fn sz_and_szcs_accept_positive_universal_measures() {
+        // ECMA-376 §17.18.42: ST_HpsMeasure is the union of an unsigned
+        // half-point count and ST_PositiveUniversalMeasure. Unit-bearing values
+        // are absolute, so they must not be divided by two.
+        let fmt = run_fmt_from(r#"<w:sz w:val="3.6mm"/><w:szCs w:val="12pt"/>"#);
+        assert!((fmt.font_size.expect("w:sz parses") - 72.0 * 3.6 / 25.4).abs() < 1e-9);
+        assert_eq!(fmt.font_size_cs, Some(12.0));
+    }
+
+    #[test]
+    fn universal_measure_font_sizes_survive_docdefaults_and_basedon_cascades() {
+        // §17.7.2 applies docDefaults below the paragraph style chain. Exercise
+        // the lexical union through both inheritance sources rather than only
+        // testing the conversion helper.
+        let defaults = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:docDefaults><w:rPrDefault><w:rPr>
+                <w:sz w:val="3.6mm"/><w:szCs w:val="12pt"/>
+              </w:rPr></w:rPrDefault></w:docDefaults>
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>
+            </w:styles>"#,
+            ns = W_NS,
+        );
+        let (_, inherited_defaults) = StyleMap::parse(&defaults).resolve_para(None, None);
+        assert!(
+            (inherited_defaults.font_size.expect("docDefaults w:sz") - 72.0 * 3.6 / 25.4).abs()
+                < 1e-9
+        );
+        assert_eq!(inherited_defaults.font_size_cs, Some(12.0));
+
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:docDefaults><w:rPrDefault><w:rPr>
+                <w:sz w:val="18"/><w:szCs w:val="20"/>
+              </w:rPr></w:rPrDefault></w:docDefaults>
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>
+              <w:style w:type="paragraph" w:styleId="Base">
+                <w:basedOn w:val="Normal"/>
+                <w:rPr><w:sz w:val="3.6mm"/><w:szCs w:val="12pt"/></w:rPr>
+              </w:style>
+              <w:style w:type="paragraph" w:styleId="Derived">
+                <w:basedOn w:val="Base"/>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS,
+        );
+        let (_, inherited_style) = StyleMap::parse(&styles).resolve_para(Some("Derived"), None);
+        assert!(
+            (inherited_style.font_size.expect("basedOn w:sz") - 72.0 * 3.6 / 25.4).abs() < 1e-9
+        );
+        assert_eq!(inherited_style.font_size_cs, Some(12.0));
+
+        // A malformed value is not a valid formatting value and must not become
+        // an authored 0pt override that blocks the inherited style.
+        for invalid in [
+            "invalid", "-0", "-0pt", "-2", "-2pt", "1.5", "1e2", "+12", "+12pt",
+        ] {
+            let mut inherited = inherited_style.clone();
+            let direct = run_fmt_from(&format!(
+                r#"<w:sz w:val="{invalid}"/><w:szCs w:val="{invalid}"/>"#
+            ));
+            apply_run(&mut inherited, &direct);
+            assert!(
+                (inherited
+                    .font_size
+                    .expect("style survives invalid direct w:sz")
+                    - 72.0 * 3.6 / 25.4)
+                    .abs()
+                    < 1e-9,
+                "{invalid:?} must not block w:sz inheritance"
+            );
+            assert_eq!(
+                inherited.font_size_cs,
+                Some(12.0),
+                "{invalid:?} must not block w:szCs inheritance"
+            );
+        }
+
+        for valid_zero in ["0", "0pt"] {
+            let mut inherited = inherited_style.clone();
+            let direct = run_fmt_from(&format!(
+                r#"<w:sz w:val="{valid_zero}"/><w:szCs w:val="{valid_zero}"/>"#
+            ));
+            apply_run(&mut inherited, &direct);
+            assert_eq!(inherited.font_size, Some(0.0));
+            assert_eq!(inherited.font_size_cs, Some(0.0));
+        }
+    }
+
+    #[test]
     fn szcs_alone_does_not_set_latin_cjk_font_size() {
         // §17.3.2.39: w:szCs is the complex-script size only. A non-complex run
         // carrying ONLY szCs (Word editing residue) must leave font_size None so
@@ -3252,6 +3336,38 @@ mod tests {
         // Negative = lowered (sample-11 uses -10 half-pt = -5 pt).
         let f = run_fmt_from(r#"<w:position w:val="-10"/>"#);
         assert_eq!(f.position, Some(-5.0));
+        let f = run_fmt_from(r#"<w:position w:val="12pt"/>"#);
+        assert_eq!(f.position, Some(12.0));
+        assert_eq!(
+            f.position_typography.and_then(|value| value.value),
+            Some(12.0),
+            "the private layout input uses the same universal-measure conversion"
+        );
+        let f = run_fmt_from(r#"<w:position w:val="-3.6mm"/>"#);
+        let expected = -72.0 * 3.6 / 25.4;
+        assert!((f.position.expect("signed universal projection") - expected).abs() < 1e-9);
+        assert!(
+            (f.position_typography
+                .and_then(|value| value.value)
+                .expect("signed universal private value")
+                - expected)
+                .abs()
+                < 1e-9
+        );
+        for invalid in ["invalid", "1.5", "1e2", "+12pt"] {
+            let f = run_fmt_from(&format!(r#"<w:position w:val="{invalid}"/>"#));
+            assert_eq!(
+                f.position,
+                Some(0.0),
+                "the stable public projection keeps its legacy invalid-value fallback"
+            );
+            let private = f.position_typography.expect("authored position fact");
+            assert_eq!(
+                private.status,
+                crate::types::TypographyValueStatusWire::Invalid
+            );
+            assert_eq!(private.value, None);
+        }
         let f = run_fmt_from(r#"<w:b/>"#);
         assert_eq!(f.position, None);
     }
@@ -3266,6 +3382,27 @@ mod tests {
         // not absence, so it must be Some(0.0) to keep kerning enabled.
         let f = run_fmt_from(r#"<w:kern w:val="0"/>"#);
         assert_eq!(f.kerning, Some(0.0));
+        let f = run_fmt_from(r#"<w:kern w:val="12pt"/>"#);
+        assert_eq!(f.kerning, Some(12.0));
+        let f = run_fmt_from(r#"<w:kern w:val="0pt"/>"#);
+        assert_eq!(f.kerning, Some(0.0));
+        for invalid in [
+            "invalid", "-0", "-0pt", "-2", "-2pt", "1.5", "1e2", "+12", "+12pt",
+        ] {
+            let f = run_fmt_from(&format!(r#"<w:kern w:val="{invalid}"/>"#));
+            assert_eq!(
+                f.kerning, None,
+                "{invalid:?} must not become an authored kerning threshold"
+            );
+
+            let mut inherited = run_fmt_from(r#"<w:kern w:val="24"/>"#);
+            apply_run(&mut inherited, &f);
+            assert_eq!(
+                inherited.kerning,
+                Some(12.0),
+                "{invalid:?} must not block an inherited kerning threshold"
+            );
+        }
         // Absent ⇒ None (inherit; the hierarchy default is kerning OFF).
         let f = run_fmt_from(r#"<w:b/>"#);
         assert_eq!(f.kerning, None);
