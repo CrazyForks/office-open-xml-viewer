@@ -981,6 +981,433 @@ describe('PptxScrollViewer — self-load path (T7 story)', () => {
   });
 });
 
+describe('PptxScrollViewer — interactive media lifecycle', () => {
+  function setup(mode: 'main' | 'worker' = 'main', deferred = true) {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU, mode, deferred);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableMediaPlayback: true,
+      gap: 10,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+      overscan: 1,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientWidth = 200;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    return { v, engine, scrollHost };
+  }
+
+  it.each(['main', 'worker'] as const)(
+    'routes %s-mode slots through presentSlide without touching the static render paths',
+    (mode) => {
+      const { v, engine } = setup(mode);
+      expect(engine.presentationCalls.length).toBeGreaterThan(0);
+      expect(engine.renderCalls).toHaveLength(0);
+      expect(engine.bitmapCalls).toHaveLength(0);
+      v.destroy();
+    },
+  );
+
+  it('keeps interactive media bounded when text-selection overscan mounts a large deck', () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(1_000, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableMediaPlayback: true,
+      enableTextSelection: true,
+      overscan: 1_000,
+      mediaOverscan: 1,
+      gap: 10,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientWidth = 200;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+
+    expect(v.mountedSlideIndicesForTest()).toHaveLength(1_000);
+    expect(v.interactiveSlideIndicesForTest().length).toBeLessThanOrEqual(5);
+    expect(engine.presentationCalls.length).toBeLessThanOrEqual(5);
+    // The remaining mounted slides use the static renderer, retaining their
+    // text overlays for browser-native Find without allocating media blobs/RAF.
+    expect(engine.renderCalls.length).toBeGreaterThan(900);
+    v.destroy();
+  });
+
+  it.each(['main', 'worker'] as const)(
+    'keeps every mounted %s-mode text overlay populated while media stays bounded',
+    async (mode) => {
+      installDom();
+      const container = makeContainer(200, 400);
+      const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU, mode);
+      engine.feedTextRuns = [{
+        text: 'Native find text',
+        inShapeX: 4,
+        inShapeY: 6,
+        w: 100,
+        h: 18,
+        fontSize: 12,
+        font: '12px sans-serif',
+        shapeX: 0,
+        shapeY: 0,
+        shapeW: 180,
+        shapeH: 30,
+        rotation: 0,
+      }];
+      const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+        presentation: engine.asPres(),
+        enableMediaPlayback: true,
+        enableTextSelection: true,
+        overscan: 50,
+        mediaOverscan: 1,
+        gap: 10,
+        paddingTop: 0,
+        paddingBottom: 0,
+        paddingLeft: 0,
+        paddingRight: 0,
+      });
+      const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+      scrollHost.clientWidth = 200;
+      scrollHost.clientHeight = 400;
+      v.relayout();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const slots = scrollHost.children.filter((child) =>
+        child.children.some((grandchild) => grandchild.tag === 'canvas'));
+      expect(slots).toHaveLength(50);
+      for (const slot of slots) {
+        const textLayer = slot.children.find((child) => child.tag === 'div') as FakeEl;
+        expect(textLayer.children).toHaveLength(1);
+      }
+      expect(engine.presentationCalls.length).toBeLessThanOrEqual(5);
+      v.destroy();
+    },
+  );
+
+  it('destroys media leaving the bounded range and upgrades newly visible slides on scroll', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(200, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableMediaPlayback: true,
+      enableTextSelection: true,
+      overscan: 200,
+      mediaOverscan: 1,
+      gap: 10,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientWidth = 200;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    const initialCalls = [...engine.presentationCalls];
+    for (const call of initialCalls) call.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    scrollHost.scrollTop = 5_000;
+    scrollHost.dispatch('scroll');
+
+    expect(initialCalls.every((call) => call.handle.destroy.mock.calls.length === 1)).toBe(true);
+    const newCalls = engine.presentationCalls.slice(initialCalls.length);
+    expect(newCalls.length).toBeGreaterThan(0);
+    expect(newCalls.length).toBeLessThanOrEqual(6);
+    expect(newCalls.some((call) => call.slide >= 35)).toBe(true);
+    expect(v.interactiveSlideIndicesForTest().length).toBeLessThanOrEqual(6);
+    v.destroy();
+  });
+
+  it('does not let a pending worker static bitmap blank a promoted interactive canvas', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableMediaPlayback: true,
+      enableTextSelection: true,
+      overscan: 50,
+      mediaOverscan: 1,
+      gap: 10,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientWidth = 200;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    const staticCall = engine.bitmapCalls.find((call) => call.slide === 20)!;
+    const staticBitmap = engine.createdBitmaps[engine.bitmapCalls.indexOf(staticCall)];
+    const slot = scrollHost.children.find((child) => child.style.top === '2600px') as FakeEl;
+
+    const presentationCount = engine.presentationCalls.length;
+    scrollHost.scrollTop = 2_600;
+    scrollHost.dispatch('scroll');
+    const promotion = engine.presentationCalls
+      .slice(presentationCount)
+      .find((call) => call.slide === 20)!;
+    promotion.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const interactiveCanvas = slot.children.find((child) => child.tag === 'canvas') as FakeEl;
+    const widthAfterPromotion = interactiveCanvas.width;
+    const resizeCountAfterPromotion = interactiveCanvas._deviceResizes.length;
+
+    staticCall.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(slot.children.find((child) => child.tag === 'canvas')).toBe(interactiveCanvas);
+    expect(interactiveCanvas.width).toBe(widthAfterPromotion);
+    expect(interactiveCanvas._deviceResizes).toHaveLength(resizeCountAfterPromotion);
+    expect(staticBitmap.close).toHaveBeenCalledTimes(1);
+    expect(promotion.handle.destroy).not.toHaveBeenCalled();
+    v.destroy();
+  });
+
+  it('retains a pending worker static paint when promotion is cancelled before canvas swap', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
+    engine.feedTextRuns = [{
+      text: 'Still searchable',
+      inShapeX: 4,
+      inShapeY: 6,
+      w: 100,
+      h: 18,
+      fontSize: 12,
+      font: '12px sans-serif',
+      shapeX: 0,
+      shapeY: 0,
+      shapeW: 180,
+      shapeH: 30,
+      rotation: 0,
+    }];
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableMediaPlayback: true,
+      enableTextSelection: true,
+      overscan: 50,
+      mediaOverscan: 1,
+      gap: 10,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientWidth = 200;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    const staticCall = engine.bitmapCalls.find((call) => call.slide === 20)!;
+    const slot = scrollHost.children.find((child) => child.style.top === '2600px') as FakeEl;
+
+    const presentationCount = engine.presentationCalls.length;
+    scrollHost.scrollTop = 2_600;
+    scrollHost.dispatch('scroll');
+    const cancelledPromotion = engine.presentationCalls
+      .slice(presentationCount)
+      .find((call) => call.slide === 20)!;
+    scrollHost.scrollTop = 0;
+    scrollHost.dispatch('scroll');
+
+    staticCall.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const canvas = slot.children.find((child) => child.tag === 'canvas') as FakeEl;
+    const textLayer = slot.children.find((child) => child.tag === 'div') as FakeEl;
+    expect(canvas.width).toBeGreaterThan(0);
+    expect(textLayer.children).toHaveLength(1);
+
+    cancelledPromotion.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cancelledPromotion.handle.destroy).toHaveBeenCalledTimes(1);
+    expect(slot.children.find((child) => child.tag === 'canvas')).toBe(canvas);
+    v.destroy();
+  });
+
+  it('zoom-settles interactive media only inside its bounded viewport range', async () => {
+    vi.useFakeTimers();
+    try {
+      installDom();
+      const container = makeContainer(200, 400);
+      const engine = new FakePptxEngine(500, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
+      const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+        presentation: engine.asPres(),
+        enableMediaPlayback: true,
+        enableTextSelection: true,
+        overscan: 500,
+        mediaOverscan: 1,
+        gap: 10,
+        paddingTop: 0,
+        paddingBottom: 0,
+        paddingLeft: 0,
+        paddingRight: 0,
+      });
+      const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+      scrollHost.clientWidth = 200;
+      scrollHost.clientHeight = 400;
+      v.relayout();
+      for (const call of engine.presentationCalls) call.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      const before = engine.presentationCalls.length;
+
+      v.setScale(v.getScale() * 2);
+      vi.advanceTimersByTime(200);
+
+      const settleCalls = engine.presentationCalls.slice(before);
+      expect(settleCalls.length).toBeGreaterThan(0);
+      expect(settleCalls.length).toBeLessThanOrEqual(6);
+      const active = new Set(v.interactiveSlideIndicesForTest());
+      expect(settleCalls.every((call) => active.has(call.slide))).toBe(true);
+      v.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the selectable text overlay populated on worker-backed media slides', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
+    engine.feedTextRuns = [{
+      text: 'Selectable media caption',
+      inShapeX: 4,
+      inShapeY: 6,
+      w: 100,
+      h: 18,
+      fontSize: 12,
+      font: '12px sans-serif',
+      shapeX: 0,
+      shapeY: 0,
+      shapeW: 180,
+      shapeH: 30,
+      rotation: 0,
+    }];
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableMediaPlayback: true,
+      enableTextSelection: true,
+      paddingLeft: 0,
+      paddingRight: 0,
+    });
+    const call = engine.presentationCalls[0];
+    call.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    const slot = scrollHost.children.find((child) =>
+      child.children.some((grandchild) => grandchild.tag === 'canvas')) as FakeEl;
+    const textLayer = slot.children.find((child) => child.tag === 'div') as FakeEl;
+    expect(textLayer.children).toHaveLength(1);
+    expect(textLayer.children[0].children[0].textContent).toBe('Selectable media caption');
+    v.destroy();
+  });
+
+  it('destroys a pending handle that resolves after its virtual slot was recycled', async () => {
+    const { v, engine, scrollHost } = setup();
+    const pending = engine.presentationCalls.find((call) => call.slide === 0)!;
+
+    scrollHost.scrollTop = 2000;
+    scrollHost.dispatch('scroll');
+    pending.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(pending.handle.destroy).toHaveBeenCalledTimes(1);
+    v.destroy();
+  });
+
+  it('destroys every live handle when the viewer is destroyed', async () => {
+    const { v, engine } = setup();
+    for (const call of engine.presentationCalls) call.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const handles = engine.presentationCalls.map((call) => call.handle);
+
+    v.destroy();
+    for (const handle of handles) expect(handle.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('atomically replaces and destroys the previous handle after zoom settle', async () => {
+    vi.useFakeTimers();
+    try {
+      const { v, engine } = setup();
+      for (const call of engine.presentationCalls) call.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      const initial = engine.presentationCalls.find((call) => call.slide === 0)!;
+      const callsBeforeZoom = engine.presentationCalls.length;
+
+      v.setScale(v.getScale() * 2);
+      vi.advanceTimersByTime(200);
+      const settle = engine.presentationCalls
+        .slice(callsBeforeZoom)
+        .find((call) => call.slide === 0)!;
+      expect(settle).toBeDefined();
+      expect(initial.handle.destroy).not.toHaveBeenCalled();
+
+      settle.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(initial.handle.destroy).toHaveBeenCalledTimes(1);
+      expect(settle.handle.destroy).not.toHaveBeenCalled();
+      v.destroy();
+      expect(settle.handle.destroy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('invalidates same-index pending handles when a new deck is loaded', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const oldEngine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
+    const newEngine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU, 'main', false);
+    vi.spyOn(PptxPresentation, 'load')
+      .mockResolvedValueOnce(oldEngine.asPres())
+      .mockResolvedValueOnce(newEngine.asPres());
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      enableMediaPlayback: true,
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientWidth = 200;
+    scrollHost.clientHeight = 400;
+
+    await v.load('old.pptx');
+    const stale = oldEngine.presentationCalls.find((call) => call.slide === 0)!;
+    await v.load('new.pptx');
+    stale.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(oldEngine.destroyed).toBe(true);
+    expect(stale.handle.destroy).toHaveBeenCalledTimes(1);
+    expect(newEngine.presentationCalls.length).toBeGreaterThan(0);
+    v.destroy();
+  });
+});
+
 describe('PptxScrollViewer — text selection (T5)', () => {
   // A minimal PptxTextRunInfo: richer than docx's flat run — it carries per-shape
   // frame geometry (shapeX/Y/W/H, rotation) so buildPptxTextLayer can group runs

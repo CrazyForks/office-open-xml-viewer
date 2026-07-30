@@ -1,5 +1,6 @@
 import { vi } from 'vitest';
 import type { PptxPresentation, RenderSlideOptions, RenderSlideToBitmapOptions } from './presentation';
+import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
 
 /** A recording fake DOM element. Extends the `FakeEl` pattern from
@@ -278,6 +279,10 @@ export interface RenderCall {
   reject: (e: Error) => void;
 }
 
+export interface PresentationCall extends RenderCall {
+  handle: PresentationHandle & { destroy: ReturnType<typeof vi.fn> };
+}
+
 /** A fake PptxPresentation covering exactly the surface PptxScrollViewer consumes.
  *  Slide size is UNIFORM (slideWidth/slideHeight in EMU), unlike docx's per-index
  *  pageSize. Deferred mode: renderSlide / renderSlideToBitmap return promises the
@@ -287,6 +292,7 @@ export class FakePptxEngine {
   destroyed = false;
   renderCalls: RenderCall[] = [];
   bitmapCalls: RenderCall[] = [];
+  presentationCalls: PresentationCall[] = [];
   createdBitmaps: Array<{ width: number; height: number; close: ReturnType<typeof vi.fn> }> = [];
   /** Runs fed to the `onTextRun` callback of `renderSlide` (main) /
    *  `renderSlideToBitmap` (worker) and returned by `collectSlideRuns`, so a test
@@ -366,6 +372,34 @@ export class FakePptxEngine {
       };
       this.bitmapCalls.push(call);
       if (!this.deferred) resolve(bmp as unknown as ImageBitmap);
+    });
+  }
+  presentSlide(_canvas: unknown, slide: number, opts?: RenderSlideOptions): Promise<PresentationHandle> {
+    const canvas = _canvas as FakeEl | undefined;
+    if (canvas && opts?.width && opts.width > 0) {
+      const dpr = opts.dpr ?? 1;
+      canvas.width = Math.round(opts.width * dpr);
+      canvas.height = this.slideWidth > 0
+        ? Math.round((canvas.width * this.slideHeight) / this.slideWidth)
+        : 0;
+    }
+    for (const r of this.feedTextRuns ?? []) opts?.onTextRun?.(r);
+    const handle = {
+      play: vi.fn(),
+      pause: vi.fn(),
+      destroy: vi.fn(),
+    };
+    return new Promise<PresentationHandle>((resolve, reject) => {
+      const call: PresentationCall = {
+        slide,
+        width: opts?.width,
+        canvas,
+        handle,
+        resolve: () => resolve(handle),
+        reject,
+      };
+      this.presentationCalls.push(call);
+      if (!this.deferred) resolve(handle);
     });
   }
   /** IX6 — mode-agnostic run collection for the find scan (mirrors the real

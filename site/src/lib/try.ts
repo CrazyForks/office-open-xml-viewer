@@ -1,8 +1,8 @@
 // "Try yours" — render a user-supplied file entirely in the browser. The file
 // is read with FileReader/arrayBuffer and parsed by the WASM engines; it never
 // leaves the page (no upload, no server).
-import { PptxPresentation } from '@silurus/ooxml-pptx';
-import { DocxDocument } from '@silurus/ooxml-docx';
+import { PptxPresentation, PptxScrollViewer } from '@silurus/ooxml-pptx';
+import { DocxDocument, DocxScrollViewer } from '@silurus/ooxml-docx';
 import { XlsxViewer } from '@silurus/ooxml-xlsx';
 import { loadMathJax, mathMLToSvg } from '../../../packages/core/src/math/engine';
 
@@ -10,21 +10,17 @@ import { loadMathJax, mathMLToSvg } from '../../../packages/core/src/math/engine
 // equations render. (In the published library this is `@silurus/ooxml/math`.)
 const math = { loadMathJax, mathMLToSvg };
 
-const DPR = () => Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2);
+const VIEWER_GAP = 26;
+// Absolute ScrollViewer scale (96-dpi natural size = 1). A fixed factor keeps
+// the same authored font size visually consistent across portrait/landscape
+// pages and slide aspect ratios; unlike fit-width it does not grow with the host.
+const DEFAULT_SCALE = 0.9;
+const MIN_SCALE = 0.5;
 
-// Render slides at the width they actually display at (`.lv-page` max-width),
-// not larger. Rendering bigger than the display only shrinks the interactive
-// media controls (drawn at fixed px in canvas space) when the canvas is
-// CSS-downscaled to fit — making them look tiny next to the slide. dpr keeps
-// the backing store crisp on HiDPI.
-const SLIDE_W = 880;
-
-type SlideHandle = Awaited<ReturnType<PptxPresentation['presentSlide']>>;
-
-// Disposes the previous render's live resources (interactive slide handles +
-// their IntersectionObserver) so audio/video stops and RAF loops are released
-// when a new file is loaded.
+// Disposes the previous viewer and its parser/worker resources when a new file
+// is loaded.
 let activeCleanup: (() => void) | null = null;
+let renderGeneration = 0;
 
 export interface RenderResult {
   format: 'docx' | 'xlsx' | 'pptx';
@@ -32,16 +28,46 @@ export interface RenderResult {
   unitLabel: string;
 }
 
+function scrollViewerHost(stage: HTMLElement): HTMLDivElement {
+  const host = document.createElement('div');
+  host.className = 'lv-scroll-viewer';
+  stage.appendChild(host);
+  return host;
+}
+
+class SupersededRenderError extends Error {
+  override name = 'AbortError';
+  constructor() {
+    super('This file render was superseded by a newer selection.');
+  }
+}
+
+function assertCurrentRender(generation: number): void {
+  if (generation !== renderGeneration) throw new SupersededRenderError();
+}
+
+/** Tear down the current viewer when Try Yours leaves the page. */
+export function disposeRenderedFile(): void {
+  renderGeneration++;
+  activeCleanup?.();
+  activeCleanup = null;
+}
+
 export async function renderFile(stage: HTMLElement, file: File): Promise<RenderResult> {
+  const generation = ++renderGeneration;
+  // Any new selection — supported or not — supersedes and releases the current
+  // viewer before validation. The page hides the panel on validation failure, so
+  // retaining its media/worker resources would be both invisible and leaked.
+  activeCleanup?.();
+  activeCleanup = null;
+
   const ext = file.name.split('.').pop()?.toLowerCase();
   if (ext !== 'docx' && ext !== 'xlsx' && ext !== 'pptx') {
     throw new Error('Unsupported file — choose a .docx, .xlsx or .pptx file.');
   }
-  // Tear down any live handles from a previous file before replacing the stage.
-  activeCleanup?.();
-  activeCleanup = null;
 
   const buffer = await file.arrayBuffer();
+  assertCurrentRender(generation);
   stage.innerHTML = '';
 
   if (ext === 'xlsx') {
@@ -49,82 +75,84 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
     host.className = 'lv-xlsx';
     stage.appendChild(host);
     const viewer = new XlsxViewer(host, { useGoogleFonts: true, showZoomSlider: true, math });
-    await viewer.load(buffer);
+    try {
+      await viewer.load(buffer);
+    } catch (error) {
+      viewer.destroy();
+      throw error;
+    }
+    if (generation !== renderGeneration) {
+      viewer.destroy();
+      throw new SupersededRenderError();
+    }
+    activeCleanup = () => viewer.destroy();
     return { format: 'xlsx', units: 0, unitLabel: 'sheet' };
   }
 
-  const sc = document.createElement('div');
-  sc.className = 'lv-scroll';
-  stage.appendChild(sc);
-
   if (ext === 'pptx') {
-    const deck = await PptxPresentation.load(buffer, { useGoogleFonts: true, math });
-    const canvases: HTMLCanvasElement[] = [];
-    for (let i = 0; i < deck.slideCount; i++) {
-      const c = document.createElement('canvas');
-      c.className = 'lv-page';
-      c.dataset.slide = String(i);
-      sc.appendChild(c);
-      await deck.renderSlide(c, i, { width: SLIDE_W, dpr: DPR() });
-      canvases.push(c);
-    }
-
-    // Audio/video playback: upgrade slides to an interactive PresentationHandle
-    // (click-to-play media + scrubber) — but only while they are on-screen, so
-    // the per-handle RAF loop and decoded media stay bounded no matter how many
-    // slides the deck has. Off-screen slides keep their static base render.
-    const handles = new Map<number, SlideHandle>();
-    const pending = new Set<number>();
-    const visible = new Set<number>();
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const e of entries) {
-          const c = e.target as HTMLCanvasElement;
-          const idx = Number(c.dataset.slide);
-          if (e.isIntersecting) {
-            visible.add(idx);
-            if (handles.has(idx) || pending.has(idx)) continue;
-            pending.add(idx);
-            deck
-              .presentSlide(c, idx, { width: SLIDE_W, dpr: DPR() })
-              .then((h) => {
-                pending.delete(idx);
-                if (visible.has(idx)) handles.set(idx, h);
-                else h.destroy(); // scrolled away before it resolved
-              })
-              .catch(() => pending.delete(idx));
-          } else {
-            visible.delete(idx);
-            const h = handles.get(idx);
-            if (h) {
-              h.destroy(); // stops media + RAF; the static base frame remains
-              handles.delete(idx);
-            }
-          }
-        }
-      },
-      { root: sc, rootMargin: '150px 0px' },
-    );
-    canvases.forEach((c) => io.observe(c));
-    activeCleanup = () => {
-      io.disconnect();
-      handles.forEach((h) => h.destroy());
-      handles.clear();
-      pending.clear();
-      visible.clear();
+    const host = scrollViewerHost(stage);
+    const viewerOptions = {
+      gap: VIEWER_GAP,
+      overscan: 0,
+      enableTextSelection: true,
+      enableMediaPlayback: true,
+      mediaOverscan: 1,
+      enableZoom: true,
+      zoomMin: MIN_SCALE,
+      useGoogleFonts: true,
+      math,
     };
-
-    return { format: 'pptx', units: deck.slideCount, unitLabel: 'slide' };
+    const viewer = new PptxScrollViewer(host, viewerOptions);
+    // Latch before load so the first painted frame is already at the fixed
+    // physical scale (no width-fit frame followed by a visible resize).
+    viewer.setScale(DEFAULT_SCALE);
+    try {
+      await viewer.load(buffer);
+    } catch (error) {
+      viewer.destroy();
+      throw error;
+    }
+    if (generation !== renderGeneration) {
+      viewer.destroy();
+      throw new SupersededRenderError();
+    }
+    // Browser-native Find only sees mounted DOM. Keep every selectable overlay
+    // mounted in Try Yours by setting the finite parsed slide count as overscan;
+    // the package default remains virtualized for normal integrations.
+    viewerOptions.overscan = viewer.slideCount;
+    viewer.relayout();
+    activeCleanup = () => viewer.destroy();
+    return { format: 'pptx', units: viewer.slideCount, unitLabel: 'slide' };
   }
 
-  const doc = await DocxDocument.load(buffer, { useGoogleFonts: true, math });
-  for (let i = 0; i < doc.pageCount; i++) {
-    const c = document.createElement('canvas');
-    c.className = 'lv-page';
-    sc.appendChild(c);
-    await doc.renderPage(c, i, { width: 1000, dpr: DPR() });
+  const host = scrollViewerHost(stage);
+  const viewerOptions = {
+    gap: VIEWER_GAP,
+    overscan: 0,
+    enableTextSelection: true,
+    enableZoom: true,
+    zoomMin: MIN_SCALE,
+    useGoogleFonts: true,
+    math,
+  };
+  const viewer = new DocxScrollViewer(host, viewerOptions);
+  viewer.setScale(DEFAULT_SCALE);
+  try {
+    await viewer.load(buffer);
+  } catch (error) {
+    viewer.destroy();
+    throw error;
   }
-  return { format: 'docx', units: doc.pageCount, unitLabel: 'page' };
+  if (generation !== renderGeneration) {
+    viewer.destroy();
+    throw new SupersededRenderError();
+  }
+  // As above, native Find needs every page's text layer in the DOM. pageCount is
+  // a finite, parser-validated bound and avoids an unbounded overscan sentinel.
+  viewerOptions.overscan = viewer.pageCount;
+  viewer.relayout();
+  activeCleanup = () => viewer.destroy();
+  return { format: 'docx', units: viewer.pageCount, unitLabel: 'page' };
 }
 
 // Hot standby: warm each WASM engine (and the Google Fonts CSS) on an idle tick
