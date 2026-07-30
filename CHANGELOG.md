@@ -4,6 +4,32 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.74.4 — 2026-07-31
+
+Patch. Corrects Word measure and table-border semantics, and completes the
+continuous-scroll, zoom, selection, and find experience in the website and
+VS Code previews.
+
+- **docx parser:** accept absolute-unit members such as `12pt` and `3.6mm` in
+  half-point and twips measures, while keeping unsigned font-size and kerning
+  values distinct from signed text-position values. Invalid direct values now
+  preserve style inheritance instead of collapsing the effective size to zero.
+  (§17.18.42, §17.18.81, §22.9.2.14; #1110, #1116)
+- **docx:** resolve `nil` and `none` shared-cell borders according to the
+  ECMA-376 conflict algorithm, evaluate each segment beside a horizontally or
+  vertically merged cell independently, and use the terminal continuation
+  cell for a vertical merge's bottom edge. (§17.4.66; #1114)
+- **website:** use `DocxScrollViewer` and `PptxScrollViewer` directly in Try
+  Yours, retaining selectable text and browser-native find while adding
+  trackpad pinch / Ctrl-or-Cmd-wheel zoom. The preview starts at a fixed 90%
+  natural scale with a 50% minimum, and PPTX media remains interactive only
+  near the real viewport. (#1115)
+- **vscode:** preserve a readable natural DOCX scale, fit PPTX slides inside
+  the preview width with side gutters, and capture webview trackpad pinch
+  gestures. Add a case-insensitive Ctrl+F / Cmd+F popup for DOCX, XLSX, and
+  PPTX with next/previous navigation and Escape / close-button dismissal.
+  (#1112, #1113, #1117)
+
 ## 0.74.3 — 2026-07-30
 
 Patch. Restores equations in VS Code previews and adds consistent continuous
