@@ -597,6 +597,7 @@ export declare interface DocxScrollViewerOptions extends Omit<RenderPageOptions,
     zoomMin?: number;
     zoomMax?: number;
     enableZoom?: boolean;
+    refitOnResize?: boolean;
     background?: string;
     pageShadow?: string | false;
     document?: DocxDocument;
