@@ -371,7 +371,7 @@ describe('adjacent-table logical layout input (transient union grid)', () => {
     });
   });
 
-  it('cascades a row-exception none border through to its source table border, and nil suppresses it', () => {
+  it('cascades a row-exception none border through while nil blocks source-table fallback', () => {
     const base = tableInput(0, [80], edges({ right: border(2, '#ff0000') }));
     const withNone: TableLayoutInput = {
       ...base,
@@ -393,8 +393,8 @@ describe('adjacent-table logical layout input (transient union grid)', () => {
     expect(noneCombined.rows[0]?.sourceTableEdges.right).toMatchObject({ color: '#ff0000', widthPt: 2 });
 
     const nilCombined = combineAdjacentTableLayoutInputs('group:nil', [withNil, tableInput(1, [80])]);
-    // nil is an authored suppression: it is retained (not replaced by the
-    // source table border) so downstream border resolution suppresses the edge.
+    // nil is retained instead of being replaced by the source table border;
+    // downstream conflict resolution can still display an opposing visible edge.
     expect(nilCombined.rows[0]?.sourceTableEdges.right).toMatchObject({
       authoredStyle: 'nil', widthPt: 0,
     });

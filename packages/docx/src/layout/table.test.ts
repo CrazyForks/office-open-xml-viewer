@@ -656,7 +656,7 @@ describe('retained table layout', () => {
     expect(cell.clipBounds).toEqual({ xPt: 10, yPt: 20, widthPt: 100, heightPt: 20 });
   });
 
-  it('retains no shared segment when a Word nil border suppresses its opponent', async () => {
+  it('retains the opposing shared segment when the other candidate is nil', async () => {
     const nil = { widthPt: 1, color: '#000000', authoredStyle: 'nil' };
     const single = { widthPt: 1, color: '#000000', authoredStyle: 'single' };
     const input = tableInput([{
@@ -672,7 +672,12 @@ describe('retained table layout', () => {
 
     const { layout } = layoutTable(input, placement(), services);
 
-    expect(layout.borders.filter((border) => border.edge === 'between')).toEqual([]);
+    expect(layout.borders.filter((border) => border.edge === 'between')).toEqual([
+      expect.objectContaining({
+        color: '#000000',
+        widthPt: 1,
+      }),
+    ]);
   });
 
   it('treats a cell-level inside border as a cell conflict candidate', async () => {

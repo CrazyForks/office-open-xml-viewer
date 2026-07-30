@@ -1,7 +1,7 @@
 import type { BorderSpec, CellBorders, TableBorders } from './types';
 import {
-  wordNilBorderSuppressesSharedEdge,
   WORD_TABLE_BORDER_STYLE_PRECEDENCE,
+  wordAuthoredBorderParticipates,
   wordTableBorderWeight,
 } from './layout/table-compatibility.js';
 
@@ -15,10 +15,9 @@ import {
  * candidates for each shared edge and retains only the returned winner, so a
  * gridline is painted once with the correct spec (no more "last cell wins").
  *
- * Rules (ECMA-376 §17.4.66 plus the registered table-border compatibility
- * rules):
- *   0. `none` loses to the opposing border;
- *      `word-nil-table-border-suppression` suppresses the shared edge.
+ * Rules (ECMA-376 §17.4.66 plus the registered table-border weight
+ * compatibility rule):
+ *   0. `nil` and `none` lose to the opposing border.
  *   1. A CELL border always beats a TABLE(-level or table-style) border.
  *   2. `word-table-border-weight-precedence` supplies the border-number weight;
  *      dotted and dashed have weight 1 regardless of width.
@@ -67,18 +66,32 @@ export function resolveCellEdges(
     outer: boolean,
     tableOuter: BorderSpec | null,
   ): BorderCandidate | null => {
-    if (own) return { spec: own, source: 'cell' };
-    const inherited = outer ? tableOuter : (cell.insideH ?? table.insideH);
-    return inherited ? { spec: inherited, source: 'table' } : null;
+    if (own && wordAuthoredBorderParticipates(own.style)) {
+      return { spec: own, source: 'cell' };
+    }
+    if (!outer && cell.insideH && wordAuthoredBorderParticipates(cell.insideH.style)) {
+      return { spec: cell.insideH, source: 'cell' };
+    }
+    const inherited = outer ? tableOuter : table.insideH;
+    return inherited && wordAuthoredBorderParticipates(inherited.style)
+      ? { spec: inherited, source: 'table' }
+      : null;
   };
   const vertical = (
     own: BorderSpec | null,
     outer: boolean,
     tableOuter: BorderSpec | null,
   ): BorderCandidate | null => {
-    if (own) return { spec: own, source: 'cell' };
-    const inherited = outer ? tableOuter : (cell.insideV ?? table.insideV);
-    return inherited ? { spec: inherited, source: 'table' } : null;
+    if (own && wordAuthoredBorderParticipates(own.style)) {
+      return { spec: own, source: 'cell' };
+    }
+    if (!outer && cell.insideV && wordAuthoredBorderParticipates(cell.insideV.style)) {
+      return { spec: cell.insideV, source: 'cell' };
+    }
+    const inherited = outer ? tableOuter : table.insideV;
+    return inherited && wordAuthoredBorderParticipates(inherited.style)
+      ? { spec: inherited, source: 'table' }
+      : null;
   };
 
   const top = horizontal(cell.top, edges.topRow, table.top);
@@ -142,11 +155,19 @@ export function resolveBorderConflict(
   a: BorderCandidate | null,
   b: BorderCandidate | null,
 ): BorderCandidate | null {
-  // `word-nil-table-border-suppression`: nil suppresses the shared edge, while
-  // none merely contributes no competing border.
-  if (wordNilBorderSuppressesSharedEdge(a?.spec.style, b?.spec.style)) return null;
-  const av = a && a.spec.style !== 'none' ? a : null;
-  const bv = b && b.spec.style !== 'none' ? b : null;
+  // §17.4.66: nil and none are both non-painting candidates and lose to the
+  // opposing border. They remain distinct during the per-cell cascade: none
+  // admits style/table fallback, whereas authored nil blocks fallback on that
+  // side before the two resolved candidates reach this kernel.
+  const visible = (candidate: BorderCandidate | null): BorderCandidate | null => (
+    candidate
+      && candidate.spec.style !== 'nil'
+      && candidate.spec.style !== 'none'
+      ? candidate
+      : null
+  );
+  const av = visible(a);
+  const bv = visible(b);
   if (!av && !bv) return null;
   if (!av) return bv;
   if (!bv) return av;
