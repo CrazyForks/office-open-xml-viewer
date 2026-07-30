@@ -1,9 +1,11 @@
 import { computeVisibleRange, openExternalHyperlink, PT_TO_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type VisibleRange } from '@silurus/ooxml-core';
-import type { HyperlinkTarget, ZoomableViewer } from '@silurus/ooxml-core';
+import type { FindMatch, FindMatchesOptions, HyperlinkTarget, ZoomableViewer } from '@silurus/ooxml-core';
 import { DocxDocument } from './document';
 import type { LoadOptions } from './document';
 import type { DocxTextRunInfo } from './renderer';
 import { buildDocxTextLayer } from './text-layer';
+import { DocxFindController, type DocxMatchLocation } from './find';
+import { buildDocxHighlightLayer } from './find-highlight-layer';
 import type { RenderPageOptions } from './types';
 
 /**
@@ -156,6 +158,7 @@ interface PageSlot {
   wrapper: HTMLDivElement;
   canvas: HTMLCanvasElement;
   textLayer: HTMLDivElement | null;
+  highlightLayer: HTMLDivElement;
   /** page index this slot is currently rendering / has rendered, or -1 when free. */
   renderedPage: number;
   /** The `_scale` at which this slot's on-screen canvas bitmap (and text overlay)
@@ -299,6 +302,11 @@ export class DocxScrollViewer implements ZoomableViewer {
    *  `_settleSlot`) so a recycled/re-mounted slot and a settle-swapped spare all
    *  carry it. */
   private readonly _pageShadow: string | false;
+  private readonly _find = new DocxFindController(
+    () => this.pageCount,
+    (page) => this._collectPageRuns(page),
+  );
+  private _findActive = false;
 
   constructor(container: HTMLElement, opts: DocxScrollViewerOptions = {}) {
     // A <canvas> is an HTMLElement too, so the type system cannot stop a caller
@@ -434,6 +442,8 @@ export class DocxScrollViewer implements ZoomableViewer {
       }
       this._doc = doc;
       previous?.destroy();
+      this._find.invalidate();
+      this._findActive = false;
       if (previous) {
         // Re-loading over a prior document: recycle every mounted slot (they hold
         // the OLD document's rendered canvases) and reset the top-index latch so
@@ -716,11 +726,17 @@ export class DocxScrollViewer implements ZoomableViewer {
         'overflow:hidden;pointer-events:none;user-select:text;-webkit-user-select:text;';
       wrapper.appendChild(textLayer);
     }
+    const highlightLayer = document.createElement('div');
+    highlightLayer.style.cssText =
+      'position:absolute;top:0;left:0;width:100%;height:100%;' +
+      'overflow:hidden;pointer-events:none;';
+    wrapper.appendChild(highlightLayer);
     this._scrollHost.appendChild(wrapper);
     const slot: PageSlot = {
       wrapper,
       canvas,
       textLayer,
+      highlightLayer,
       renderedPage: -1,
       renderedScale: -1,
       bitmap: null,
@@ -747,6 +763,9 @@ export class DocxScrollViewer implements ZoomableViewer {
       slot.textLayer.style.transform = '';
       slot.textLayer.style.transformOrigin = '';
     }
+    slot.highlightLayer.innerHTML = '';
+    slot.highlightLayer.style.transform = '';
+    slot.highlightLayer.style.transformOrigin = '';
     slot.renderedPage = -1;
     slot.renderedScale = -1;
     slot.wrapper.remove();
@@ -817,7 +836,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     // Main mode: render straight onto the slot's canvas.
     const runs: DocxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
-    const onTextRun = wantOverlay ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
+    const wantRuns = wantOverlay || this._findActive;
+    const onTextRun = wantRuns ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
     this._doc
       .renderPage(slot.canvas, i, {
         width: widthPx, // this page's own px width → uniform px-per-pt scale (§7)
@@ -846,6 +866,8 @@ export class DocxScrollViewer implements ZoomableViewer {
             (font) => this._measureForFont(font),
           );
         }
+        if (wantRuns) this._refreshFindRuns(i, runs);
+        this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
         this._reportRenderError(err);
@@ -896,7 +918,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._measureCtx = c.getContext('2d');
     }
     const ctx = this._measureCtx;
-    if (!ctx) return (s) => s.length;
+    if (!ctx || typeof ctx.measureText !== 'function') return (s) => s.length;
     ctx.font = font;
     return (s) => ctx.measureText(s).width;
   }
@@ -970,6 +992,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     // The runs ride back beside the bitmap (one round-trip), collected only when
     // an overlay is actually wanted.
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
+    const wantRuns = wantOverlay || this._findActive;
     const runs: DocxTextRunInfo[] = [];
     try {
       const bmp = await this._doc!.renderPageToBitmap(i, {
@@ -977,7 +1000,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         dpr,
         defaultTextColor: this._opts.defaultTextColor,
         showTrackChanges: this._opts.showTrackChanges,
-        onTextRun: wantOverlay ? (r) => runs.push(r) : undefined,
+        onTextRun: wantRuns ? (r) => runs.push(r) : undefined,
       });
       // Stale if EITHER (a) the epoch moved (a setScale rescaled mid-flight, so
       // this bitmap is at a superseded resolution — this catches the case where
@@ -1027,6 +1050,8 @@ export class DocxScrollViewer implements ZoomableViewer {
           );
         }
       }
+      if (wantRuns) this._refreshFindRuns(i, runs);
+      this._redrawSlotHighlights(i, slot);
       painted = true;
     } catch (err) {
       this._reportRenderError(err);
@@ -1397,7 +1422,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._applyPageShadow(spare);
     const runs: DocxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
-    const onTextRun = wantOverlay ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
+    const wantRuns = wantOverlay || this._findActive;
+    const onTextRun = wantRuns ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
     this._doc
       .renderPage(spare, i, {
         width: widthPx,
@@ -1439,6 +1465,8 @@ export class DocxScrollViewer implements ZoomableViewer {
             );
           }
         }
+        if (wantRuns) this._refreshFindRuns(i, runs);
+        this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
         this._reportRenderError(err);
@@ -1488,6 +1516,81 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._scrollHost.scrollTop = top;
     }
     this._mountVisible();
+  }
+
+  /** Search the complete document, including pages outside the virtualized
+   * mounted window. Matching is case-insensitive by default. */
+  async findText(
+    query: string,
+    opts: FindMatchesOptions = {},
+  ): Promise<FindMatch<DocxMatchLocation>[]> {
+    if (!this._doc) return [];
+    this._findActive = query.length > 0;
+    const matches = await this._find.find(query, opts);
+    this._redrawHighlights();
+    return matches;
+  }
+
+  /** Activate and reveal the next match, wrapping at the end. */
+  async findNext(): Promise<FindMatch<DocxMatchLocation> | null> {
+    return this._activateMatch(this._find.next());
+  }
+
+  /** Activate and reveal the previous match, wrapping at the beginning. */
+  async findPrev(): Promise<FindMatch<DocxMatchLocation> | null> {
+    return this._activateMatch(this._find.prev());
+  }
+
+  /** Clear the current query and every mounted highlight. */
+  clearFind(): void {
+    this._findActive = false;
+    this._find.invalidate();
+    this._redrawHighlights();
+  }
+
+  private async _activateMatch(
+    match: FindMatch<DocxMatchLocation> | null,
+  ): Promise<FindMatch<DocxMatchLocation> | null> {
+    if (match) this.scrollToPage(match.location.page);
+    this._redrawHighlights();
+    return match;
+  }
+
+  private async _collectPageRuns(page: number): Promise<DocxTextRunInfo[]> {
+    if (!this._doc) return [];
+    return this._doc.collectPageRuns(page, {
+      width: this._pageWidthPx(page),
+      defaultTextColor: this._opts.defaultTextColor,
+      showTrackChanges: this._opts.showTrackChanges,
+    });
+  }
+
+  private _redrawHighlights(): void {
+    for (const [page, slot] of this._slots) this._redrawSlotHighlights(page, slot);
+  }
+
+  private _refreshFindRuns(page: number, runs: DocxTextRunInfo[]): void {
+    if (this._findActive) this._find.setPageRuns(page, runs);
+  }
+
+  private _redrawSlotHighlights(page: number, slot: PageSlot): void {
+    if (!this._findActive) {
+      slot.highlightLayer.innerHTML = '';
+      return;
+    }
+    const runs = this._find.pageRuns(page);
+    if (!runs) {
+      slot.highlightLayer.innerHTML = '';
+      return;
+    }
+    buildDocxHighlightLayer(
+      slot.highlightLayer,
+      runs,
+      this._find.pageHighlights(page),
+      this._pageWidthPx(page),
+      this._pageHeightPx(page),
+      (font) => this._measureForFont(font),
+    );
   }
 
   /**
@@ -1634,6 +1737,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     // as superseded and its engine is cleaned up rather than installed onto a
     // torn-down viewer.
     this._loadGen++;
+    this._find.invalidate();
+    this._findActive = false;
     if (this._scrollListener) {
       this._scrollHost.removeEventListener('scroll', this._scrollListener);
       this._scrollListener = null;

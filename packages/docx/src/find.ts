@@ -51,6 +51,10 @@ export class DocxFindController {
   private _matches: DocxResolvedMatch[] = [];
   /** Active-match index into {@link _matches}, or -1 for none. */
   private _active = -1;
+  /** Invalidates in-flight searches on clear, reload, destroy, or a newer find. */
+  private _generation = 0;
+  /** Advances whenever visible rendering publishes newer run geometry. */
+  private _runsRevision = 0;
 
   constructor(
     private readonly _pageCount: () => number,
@@ -59,6 +63,8 @@ export class DocxFindController {
 
   /** Drop all cached runs + matches (call on reload / render-width change). */
   invalidate(): void {
+    this._generation++;
+    this._runsRevision++;
     this._pageRuns.clear();
     this._matches = [];
     this._active = -1;
@@ -73,6 +79,7 @@ export class DocxFindController {
   /** Cache a page's runs captured from the visible render, so find() reuses
    *  them instead of re-rendering that page offscreen. */
   setPageRuns(page: number, runs: DocxTextRunInfo[]): void {
+    this._runsRevision++;
     this._pageRuns.set(page, runs);
   }
 
@@ -110,13 +117,41 @@ export class DocxFindController {
   /** Run a fresh query across every page, resetting the cursor. Returns the
    *  public match list. An empty query clears matches. */
   async find(query: string, opts: FindMatchesOptions = {}): Promise<FindMatch<DocxMatchLocation>[]> {
-    this._matches = [];
-    this._active = -1;
-    if (query.length === 0) return [];
+    const generation = ++this._generation;
+    if (query.length === 0) {
+      this._runsRevision++;
+      this._pageRuns.clear();
+      this._matches = [];
+      this._active = -1;
+      return [];
+    }
 
+    const runsRevision = this._runsRevision;
+    const pageRuns = new Map(this._pageRuns);
     const pages = this._pageCount();
     for (let page = 0; page < pages; page++) {
-      const runs = await this._ensurePageRuns(page);
+      let runs = pageRuns.get(page);
+      if (!runs) {
+        runs = await this._collectPageRuns(page);
+        if (generation !== this._generation) return [];
+        pageRuns.set(page, runs);
+      }
+    }
+    if (generation !== this._generation) return [];
+
+    // A visible zoom-settle render can publish newer geometry while this scan
+    // awaits an offscreen page. Preserve those per-page updates instead of
+    // replacing them with the snapshot captured when find() began.
+    const committedRuns = runsRevision === this._runsRevision
+      ? pageRuns
+      : new Map([...pageRuns, ...this._pageRuns]);
+
+    // Build slices from the exact run lists being committed. Besides keeping
+    // highlight coordinates current, this keeps slice indices coherent if a
+    // fresh render changes run segmentation.
+    const matches: DocxResolvedMatch[] = [];
+    for (let page = 0; page < pages; page++) {
+      const runs = committedRuns.get(page) ?? [];
       const index = buildTextIndex(runs);
       for (const tm of findMatches(index, query, opts)) {
         // The matched text as it appears in the document: read it back from the
@@ -126,9 +161,13 @@ export class DocxFindController {
         const text = tm.slices
           .map((s) => runs[s.runIndex].text.slice(s.start, s.end))
           .join('');
-        this._matches.push({ page, text, slices: tm.slices });
+        matches.push({ page, text, slices: tm.slices });
       }
     }
+    this._runsRevision++;
+    this._pageRuns = committedRuns;
+    this._matches = matches;
+    this._active = -1;
     return this.matches();
   }
 
@@ -151,12 +190,4 @@ export class DocxFindController {
     return { matchIndex: this._active, text: m.text, location: { page: m.page } };
   }
 
-  /** Get (scanning + caching if needed) the runs for a page. */
-  private async _ensurePageRuns(page: number): Promise<DocxTextRunInfo[]> {
-    const cached = this._pageRuns.get(page);
-    if (cached) return cached;
-    const runs = await this._collectPageRuns(page);
-    this._pageRuns.set(page, runs);
-    return runs;
-  }
 }

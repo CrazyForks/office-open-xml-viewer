@@ -24,6 +24,7 @@ import { PptxScrollViewer } from '@silurus/ooxml-pptx';
 import { svgExtents, type ZoomableViewer } from '@silurus/ooxml-core';
 import { loadAtNaturalScale } from './naturalScale';
 import { captureUnhandledWheelZoom } from './wheelZoomFallback';
+import { FindPopupController, type FindableViewer } from './findPopup';
 // Side-effect import: bundles the self-contained MathJax + STIX Two Math engine
 // into the webview and sets globalThis.__ooxmlStix2. The library renders OMML
 // equations only when handed a `math` engine; its built-in engine loads lazily
@@ -66,8 +67,22 @@ function updateZoomLabel(scale: number): void {
   zoomLabel.textContent = `${Math.round(scale * 100)}%`;
 }
 
-function bindZoomViewer(viewer: ZoomableViewer): void {
+const findPopup = new FindPopupController(
+  {
+    root: document.getElementById('find-popup')!,
+    input: document.getElementById('find-input') as HTMLInputElement,
+    status: document.getElementById('find-status')!,
+    previous: document.getElementById('find-previous') as HTMLButtonElement,
+    next: document.getElementById('find-next') as HTMLButtonElement,
+    close: document.getElementById('find-close') as HTMLButtonElement,
+  },
+  window,
+  (err) => showError(`Error: ${err instanceof Error ? err.message : String(err)}`),
+);
+
+function bindZoomViewer(viewer: ZoomableViewer & FindableViewer): void {
   activeViewer = viewer;
+  findPopup.setViewer(viewer);
   zoomOutButton.disabled = false;
   zoomInButton.disabled = false;
   updateZoomLabel(viewer.getScale());
@@ -108,6 +123,10 @@ vscodeApi.postMessage({ type: 'webview-ready' });
 
 window.addEventListener('message', async (event: MessageEvent) => {
   const msg = event.data;
+  if (msg.type === 'show-find') {
+    findPopup.open();
+    return;
+  }
   if (msg.type !== 'ooxml-init') return;
 
   // Opt-in flag forwarded from the extension host (gated by the

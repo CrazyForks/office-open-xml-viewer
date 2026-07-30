@@ -70,4 +70,24 @@ describe('getWebviewHtml', () => {
       expect(html).toContain('id="zoom-label"');
     },
   );
+
+  it.each(['docx', 'xlsx', 'pptx'] as const)(
+    'includes the shared find popup for %s',
+    (fileType) => {
+      const html = getWebviewHtml(
+        {
+          cspSource: CSP_SOURCE,
+          asWebviewUri: () => 'vscode-webview://extension/dist/webview.js',
+        } as never,
+        {} as never,
+        fileType,
+      );
+
+      expect(html).toContain('id="find-popup"');
+      expect(html).toContain('id="find-input"');
+      expect(html).toContain('aria-label="Previous match"');
+      expect(html).toContain('aria-label="Next match"');
+      expect(html).toContain('id="find-close"');
+    },
+  );
 });

@@ -30,6 +30,13 @@ export function refreshAllWebviews(): void {
   }
 }
 
+/** Open the in-preview find popup in the active OOXML custom editor. */
+export async function showFindInActiveWebview(): Promise<void> {
+  const active = [...openViews].find((view) => view.panel.active);
+  if (!active) return;
+  await active.panel.webview.postMessage({ type: 'show-find' });
+}
+
 /** Set the webview HTML for a panel using the current effective flag. */
 function renderWebview(view: OpenView): void {
   view.panel.webview.html = getWebviewHtml(
