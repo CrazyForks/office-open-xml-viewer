@@ -24,3 +24,14 @@ export async function loadAtNaturalScale(
   viewer.setScale(NATURAL_DOCUMENT_SCALE);
   await viewer.load(source);
 }
+
+/**
+ * Load without latching an absolute scale. The ScrollViewer therefore uses its
+ * container-derived fit width, including its built-in left/right desk gutters.
+ */
+export async function loadAtContainerFit(
+  viewer: Pick<LoadableScrollViewer, 'load'>,
+  source: string | ArrayBuffer,
+): Promise<void> {
+  await viewer.load(source);
+}

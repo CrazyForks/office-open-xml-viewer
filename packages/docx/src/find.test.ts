@@ -144,4 +144,63 @@ describe('DocxFindController.invalidate', () => {
     expect(c.pageHighlights(0)).toHaveLength(0);
     expect(c.activePage()).toBeNull();
   });
+
+  it('prevents a pending find from restoring matches after invalidate', async () => {
+    let resolveRuns!: (runs: DocxTextRunInfo[]) => void;
+    const c = new DocxFindController(
+      () => 1,
+      () => new Promise((resolve) => { resolveRuns = resolve; }),
+    );
+    const pending = c.find('a');
+
+    c.invalidate();
+    resolveRuns([run('a')]);
+
+    await expect(pending).resolves.toEqual([]);
+    expect(c.matches()).toEqual([]);
+    expect(c.pageRuns(0)).toBeUndefined();
+    expect(c.next()).toBeNull();
+  });
+
+  it('commits collected page runs atomically only after the complete scan', async () => {
+    let resolveSecond!: (runs: DocxTextRunInfo[]) => void;
+    const c = new DocxFindController(
+      () => 2,
+      (page) => page === 0
+        ? Promise.resolve([run('a')])
+        : new Promise((resolve) => { resolveSecond = resolve; }),
+    );
+    const pending = c.find('a');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(c.pageRuns(0)).toBeUndefined();
+    resolveSecond([run('a')]);
+    await expect(pending).resolves.toHaveLength(2);
+    expect(c.pageRuns(0)).toEqual([run('a')]);
+    expect(c.pageRuns(1)).toEqual([run('a')]);
+  });
+
+  it('does not overwrite newer visible-render geometry when a pending scan completes', async () => {
+    let resolveSecond!: (runs: DocxTextRunInfo[]) => void;
+    const oldVisibleRuns = [{ ...run('a'), x: 1 }];
+    const freshVisibleRuns = [{ ...run('a'), x: 20 }];
+    const c = new DocxFindController(
+      () => 2,
+      (page) => page === 0
+        ? Promise.resolve(oldVisibleRuns)
+        : new Promise((resolve) => { resolveSecond = resolve; }),
+    );
+    c.setPageRuns(0, oldVisibleRuns);
+    const pending = c.find('a');
+    await Promise.resolve();
+
+    // A zoom-settle render publishes fresh geometry while the full-document
+    // scan is still waiting on another page.
+    c.setPageRuns(0, freshVisibleRuns);
+    resolveSecond([run('a')]);
+
+    await expect(pending).resolves.toHaveLength(2);
+    expect(c.pageRuns(0)).toBe(freshVisibleRuns);
+  });
 });

@@ -141,6 +141,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       methods: [
         { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a deck from a URL or ArrayBuffer and render the first window. Throws when an engine was injected via `presentation`.' },
         { sig: 'scrollToSlide(index: number, opts?: { behavior?: "auto" | "smooth" }): void', desc: 'Scroll so slide index’s top edge sits at the viewport top (index clamped).' },
+        ...findMethods('PptxMatchLocation'),
         { sig: 'setScale(scale: number): void', desc: 'Set the absolute zoom scale at runtime (clamped to zoomMin/zoomMax). Flicker-free. View-only.' },
         { sig: 'relayout(): void', desc: 'Force a re-fit + re-mount of the visible window. Called automatically after load / resize / zoom; use it when the container resizes in a way a ResizeObserver cannot observe (e.g. a late web-font load). Idempotent.' },
         { sig: 'get slideCount(): number', desc: 'Total slides (0 until loaded).' },
@@ -228,6 +229,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       methods: [
         { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a document from a URL or ArrayBuffer and render the first window. Throws when an engine was injected via `document`.' },
         { sig: 'scrollToPage(index: number, opts?: { behavior?: "auto" | "smooth" }): void', desc: 'Scroll so page index’s top edge sits at the viewport top (index clamped).' },
+        ...findMethods('DocxMatchLocation'),
         { sig: 'setScale(scale: number): void', desc: 'Set the absolute zoom scale at runtime (clamped to zoomMin/zoomMax). Flicker-free. View-only.' },
         { sig: 'relayout(): void', desc: 'Force a re-fit + re-mount of the visible window. Called automatically after load / resize / zoom; use it when the container resizes in a way a ResizeObserver cannot observe (e.g. a late web-font load). Idempotent.' },
         { sig: 'get pageCount(): number', desc: 'Total pages (0 until loaded).' },

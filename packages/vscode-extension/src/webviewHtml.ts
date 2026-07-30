@@ -85,6 +85,7 @@ export function getWebviewHtml(
       font-family: var(--vscode-font-family, sans-serif);
     }
     #viewer-root {
+      position: relative;
       width: 100%;
       height: 100%;
       min-height: 0;
@@ -138,6 +139,65 @@ export function getWebviewHtml(
       flex: 1 1 auto;
       overflow: hidden;
     }
+    #find-popup {
+      position: absolute;
+      z-index: 20;
+      top: 43px;
+      right: 12px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-radius: 4px;
+      background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+      color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+      box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35));
+    }
+    #find-popup[hidden] {
+      display: none;
+    }
+    #find-input {
+      width: min(240px, 42vw);
+      height: 24px;
+      padding: 2px 6px;
+      border: 1px solid var(--vscode-input-border, transparent);
+      outline: none;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      font: 12px/1.4 var(--vscode-font-family, sans-serif);
+    }
+    #find-input:focus {
+      border-color: var(--vscode-focusBorder);
+    }
+    #find-status {
+      min-width: 70px;
+      text-align: center;
+      white-space: nowrap;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    #find-popup button {
+      width: 24px;
+      height: 24px;
+      border: 1px solid transparent;
+      border-radius: 3px;
+      color: inherit;
+      background: transparent;
+      font: 14px/1 var(--vscode-font-family, sans-serif);
+      cursor: pointer;
+    }
+    #find-popup button:hover:not(:disabled) {
+      background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.2));
+    }
+    #find-popup button:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+    #find-popup button:disabled {
+      cursor: default;
+      opacity: 0.4;
+    }
     #status {
       position: absolute;
       inset: 0;
@@ -171,6 +231,13 @@ export function getWebviewHtml(
       <button id="zoom-out" type="button" aria-label="Zoom out" title="Zoom out" disabled>−</button>
       <span id="zoom-label" aria-live="polite">100%</span>
       <button id="zoom-in" type="button" aria-label="Zoom in" title="Zoom in" disabled>+</button>
+    </div>
+    <div id="find-popup" role="dialog" aria-label="Find" hidden>
+      <input id="find-input" type="text" aria-label="Find" placeholder="Find" autocomplete="off" spellcheck="false" />
+      <span id="find-status" aria-live="polite"></span>
+      <button id="find-previous" type="button" aria-label="Previous match" title="Previous match (Shift+Enter)" disabled>↑</button>
+      <button id="find-next" type="button" aria-label="Next match" title="Next match (Enter)" disabled>↓</button>
+      <button id="find-close" type="button" aria-label="Close find" title="Close (Escape)">×</button>
     </div>
     <div id="viewer-container">
       <div id="status"><div class="spinner"></div></div>

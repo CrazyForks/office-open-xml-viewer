@@ -1085,6 +1085,204 @@ describe('DocxScrollViewer — text selection (T5)', () => {
   });
 });
 
+describe('DocxScrollViewer — full-document find', () => {
+  const RUN = {
+    text: 'Alpha beta',
+    x: 4,
+    y: 6,
+    w: 60,
+    h: 12,
+    fontSize: 12,
+    font: '12px serif',
+  };
+
+  it('finds case-insensitively beyond the mounted window, navigates, and clears', async () => {
+    installDom();
+    const container = makeContainer(200, 120);
+    const engine = new FakeDocxEngine(
+      4,
+      Array.from({ length: 4 }, () => ({ widthPt: 100, heightPt: 200 })),
+    );
+    engine.feedTextRuns = [RUN];
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 0,
+      overscan: 0,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+    });
+    const scrollHost = container.children[0].children[0] as FakeEl;
+    scrollHost.clientHeight = 120;
+    v.relayout();
+
+    const matches = await v.findText('ALPHA');
+    expect(matches).toHaveLength(4);
+    expect(matches.map((match) => match.location.page)).toEqual([0, 1, 2, 3]);
+
+    await v.findNext();
+    const second = await v.findNext();
+    expect(second?.location.page).toBe(1);
+    expect(scrollHost.scrollTop).toBeGreaterThan(0);
+
+    const mountedHighlightLayers = scrollHost.children
+      .filter((child) => child.children.some((nested) => nested.tag === 'canvas'))
+      .map((slot) => slot.children.find((child) => child.tag === 'div') as FakeEl);
+    expect(mountedHighlightLayers.some((layer) => layer.children.length > 0)).toBe(true);
+
+    v.clearFind();
+    expect(mountedHighlightLayers.every((layer) => layer.children.length === 0)).toBe(true);
+    v.destroy();
+  });
+
+  it.each(['main', 'worker'] as const)(
+    'refreshes cached find geometry after a zoom settle render in %s mode',
+    async (mode) => {
+    vi.useFakeTimers();
+    try {
+      installDom();
+      const container = makeContainer(200, 120);
+      const engine = new FakeDocxEngine(1, [{ widthPt: 100, heightPt: 200 }], mode);
+      engine.feedTextRuns = [RUN];
+      const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+        document: engine.asDoc(),
+        gap: 0,
+        paddingTop: 0,
+        paddingBottom: 0,
+        paddingLeft: 0,
+        paddingRight: 0,
+      });
+      const scrollHost = container.children[0].children[0] as FakeEl;
+      scrollHost.clientHeight = 120;
+      v.relayout();
+      await v.findText('alpha');
+      await Promise.resolve();
+
+      const slot = scrollHost.children.find(
+        (child) => child.children.some((nested) => nested.tag === 'canvas'),
+      ) as FakeEl;
+      const highlightLayer = slot.children.find((child) => child.tag === 'div') as FakeEl;
+      expect(highlightLayer.children[0].style.left).toBe('2%');
+
+      engine.feedTextRuns = [{ ...RUN, x: 40 }];
+      v.setScale(v.getScale() * 2);
+      vi.advanceTimersByTime(200);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(highlightLayer.children[0].style.left).toBe('10%');
+      v.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+    },
+  );
+
+  it.each(['main', 'worker'] as const)(
+    'keeps zoom-settle geometry when an older pending find completes in %s mode',
+    async (mode) => {
+      vi.useFakeTimers();
+      try {
+        installDom();
+        const container = makeContainer(200, 120);
+        const engine = new FakeDocxEngine(
+          2,
+          Array.from({ length: 2 }, () => ({ widthPt: 100, heightPt: 200 })),
+          mode,
+        );
+        engine.feedTextRuns = [RUN];
+        let resolveSecond!: (runs: NonNullable<typeof engine.feedTextRuns>) => void;
+        engine.collectPageRuns = (page) => page === 1
+          ? new Promise((resolve) => { resolveSecond = resolve; })
+          : Promise.resolve([RUN]);
+        const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+          document: engine.asDoc(),
+          gap: 0,
+          overscan: 0,
+          paddingTop: 0,
+          paddingBottom: 0,
+          paddingLeft: 0,
+          paddingRight: 0,
+        });
+        const scrollHost = container.children[0].children[0] as FakeEl;
+        scrollHost.clientHeight = 120;
+        v.relayout();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const pending = v.findText('alpha');
+        await Promise.resolve();
+        await Promise.resolve();
+
+        engine.feedTextRuns = [{ ...RUN, x: 40 }];
+        v.setScale(v.getScale() * 2);
+        vi.advanceTimersByTime(200);
+        await Promise.resolve();
+        await Promise.resolve();
+
+        resolveSecond([RUN]);
+        await expect(pending).resolves.toHaveLength(2);
+
+        const slot = scrollHost.children.find(
+          (child) => child.children.some((nested) => nested.tag === 'canvas'),
+        ) as FakeEl;
+        const highlightLayer = slot.children.find((child) => child.tag === 'div') as FakeEl;
+        expect(highlightLayer.children[0].style.left).toBe('10%');
+        v.destroy();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['clear', 'destroy'] as const)(
+    'does not restore a pending find after %s',
+    async (action) => {
+      installDom();
+      const engine = new FakeDocxEngine(1, [{ widthPt: 100, heightPt: 200 }]);
+      let resolveRuns!: (runs: NonNullable<typeof engine.feedTextRuns>) => void;
+      engine.collectPageRuns = () => new Promise((resolve) => { resolveRuns = resolve; });
+      const v = new DocxScrollViewer(makeContainer(200, 120) as unknown as HTMLElement, {
+        document: engine.asDoc(),
+      });
+      const pending = v.findText('alpha');
+
+      if (action === 'clear') v.clearFind();
+      else v.destroy();
+      resolveRuns([RUN]);
+
+      await expect(pending).resolves.toEqual([]);
+      await expect(v.findNext()).resolves.toBeNull();
+      if (action === 'clear') v.destroy();
+    },
+  );
+
+  it('does not restore a pending find after reload', async () => {
+    installDom();
+    const first = new FakeDocxEngine(1, [{ widthPt: 100, heightPt: 200 }]);
+    const second = new FakeDocxEngine(1, [{ widthPt: 100, heightPt: 200 }]);
+    let resolveRuns!: (runs: NonNullable<typeof first.feedTextRuns>) => void;
+    first.collectPageRuns = () => new Promise((resolve) => { resolveRuns = resolve; });
+    vi.spyOn(DocxDocument, 'load')
+      .mockResolvedValueOnce(first.asDoc())
+      .mockResolvedValueOnce(second.asDoc());
+    const container = makeContainer(200, 120);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement);
+    const scrollHost = container.children[0].children[0] as FakeEl;
+    scrollHost.clientHeight = 120;
+    await v.load('first.docx');
+    const pending = v.findText('alpha');
+
+    await v.load('second.docx');
+    resolveRuns([RUN]);
+
+    await expect(pending).resolves.toEqual([]);
+    await expect(v.findNext()).resolves.toBeNull();
+    v.destroy();
+  });
+});
+
 describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
   const PT_TO_PX = 4 / 3;
   // container fit width 200, page widthPt 100 → base scale = 200/(100*PT_TO_PX)=1.5.

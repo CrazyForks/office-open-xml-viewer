@@ -1670,6 +1670,204 @@ describe('PptxScrollViewer — text selection (T5)', () => {
   });
 });
 
+describe('PptxScrollViewer — full-presentation find', () => {
+  const RUN = {
+    text: 'Alpha beta',
+    x: 4,
+    y: 6,
+    w: 60,
+    h: 12,
+    fontSize: 12,
+    font: '12px serif',
+    shapeX: 0,
+    shapeY: 0,
+    shapeW: 100,
+    shapeH: 40,
+    inShapeX: 4,
+    inShapeY: 6,
+    rotation: 0,
+  };
+
+  it('finds case-insensitively beyond the mounted window, navigates, and clears', async () => {
+    installDom();
+    const container = makeContainer(200, 80);
+    const engine = new FakePptxEngine(4, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.feedTextRuns = [RUN];
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 0,
+      overscan: 0,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+    });
+    const scrollHost = container.children[0].children[0] as FakeEl;
+    scrollHost.clientHeight = 80;
+    v.relayout();
+
+    const matches = await v.findText('ALPHA');
+    expect(matches).toHaveLength(4);
+    expect(matches.map((match) => match.location.slide)).toEqual([0, 1, 2, 3]);
+
+    await v.findNext();
+    const second = await v.findNext();
+    expect(second?.location.slide).toBe(1);
+    expect(scrollHost.scrollTop).toBeGreaterThan(0);
+
+    const mountedHighlightLayers = scrollHost.children
+      .filter((child) => child.children.some((nested) => nested.tag === 'canvas'))
+      .map((slot) => slot.children.find((child) => child.tag === 'div') as FakeEl);
+    expect(mountedHighlightLayers.some((layer) => layer.children.length > 0)).toBe(true);
+
+    v.clearFind();
+    expect(mountedHighlightLayers.every((layer) => layer.children.length === 0)).toBe(true);
+    v.destroy();
+  });
+
+  it.each(['main', 'worker'] as const)(
+    'refreshes cached find geometry after a zoom settle render in %s mode',
+    async (mode) => {
+    vi.useFakeTimers();
+    try {
+      installDom();
+      const container = makeContainer(200, 80);
+      const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU, mode);
+      engine.feedTextRuns = [RUN];
+      const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+        presentation: engine.asPres(),
+        gap: 0,
+        paddingTop: 0,
+        paddingBottom: 0,
+        paddingLeft: 0,
+        paddingRight: 0,
+      });
+      const scrollHost = container.children[0].children[0] as FakeEl;
+      scrollHost.clientHeight = 80;
+      v.relayout();
+      await v.findText('alpha');
+      await Promise.resolve();
+
+      const slot = scrollHost.children.find(
+        (child) => child.children.some((nested) => nested.tag === 'canvas'),
+      ) as FakeEl;
+      const highlightLayer = slot.children.find((child) => child.tag === 'div') as FakeEl;
+      expect(highlightLayer.children[0].children[0].style.left).toBe('4%');
+
+      engine.feedTextRuns = [{ ...RUN, inShapeX: 40 }];
+      v.setScale(v.getScale() * 2);
+      vi.advanceTimersByTime(200);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(highlightLayer.children[0].children[0].style.left).toBe('40%');
+      v.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+    },
+  );
+
+  it.each(['main', 'worker'] as const)(
+    'keeps zoom-settle geometry when an older pending find completes in %s mode',
+    async (mode) => {
+      vi.useFakeTimers();
+      try {
+        installDom();
+        const container = makeContainer(200, 80);
+        const engine = new FakePptxEngine(2, SLIDE_W_EMU, SLIDE_H_EMU, mode);
+        engine.feedTextRuns = [RUN];
+        let resolveSecond!: (runs: NonNullable<typeof engine.feedTextRuns>) => void;
+        engine.collectSlideRuns = (slide) => slide === 1
+          ? new Promise((resolve) => { resolveSecond = resolve; })
+          : Promise.resolve([RUN]);
+        const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+          presentation: engine.asPres(),
+          gap: 0,
+          overscan: 0,
+          paddingTop: 0,
+          paddingBottom: 0,
+          paddingLeft: 0,
+          paddingRight: 0,
+        });
+        const scrollHost = container.children[0].children[0] as FakeEl;
+        scrollHost.clientHeight = 80;
+        v.relayout();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const pending = v.findText('alpha');
+        await Promise.resolve();
+        await Promise.resolve();
+
+        engine.feedTextRuns = [{ ...RUN, inShapeX: 40 }];
+        v.setScale(v.getScale() * 2);
+        vi.advanceTimersByTime(200);
+        await Promise.resolve();
+        await Promise.resolve();
+
+        resolveSecond([RUN]);
+        await expect(pending).resolves.toHaveLength(2);
+
+        const slot = scrollHost.children.find(
+          (child) => child.children.some((nested) => nested.tag === 'canvas'),
+        ) as FakeEl;
+        const highlightLayer = slot.children.find((child) => child.tag === 'div') as FakeEl;
+        expect(highlightLayer.children[0].children[0].style.left).toBe('40%');
+        v.destroy();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['clear', 'destroy'] as const)(
+    'does not restore a pending find after %s',
+    async (action) => {
+      installDom();
+      const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+      let resolveRuns!: (runs: NonNullable<typeof engine.feedTextRuns>) => void;
+      engine.collectSlideRuns = () => new Promise((resolve) => { resolveRuns = resolve; });
+      const v = new PptxScrollViewer(makeContainer(200, 80) as unknown as HTMLElement, {
+        presentation: engine.asPres(),
+      });
+      const pending = v.findText('alpha');
+
+      if (action === 'clear') v.clearFind();
+      else v.destroy();
+      resolveRuns([RUN]);
+
+      await expect(pending).resolves.toEqual([]);
+      await expect(v.findNext()).resolves.toBeNull();
+      if (action === 'clear') v.destroy();
+    },
+  );
+
+  it('does not restore a pending find after reload', async () => {
+    installDom();
+    const first = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    const second = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    let resolveRuns!: (runs: NonNullable<typeof first.feedTextRuns>) => void;
+    first.collectSlideRuns = () => new Promise((resolve) => { resolveRuns = resolve; });
+    vi.spyOn(PptxPresentation, 'load')
+      .mockResolvedValueOnce(first.asPres())
+      .mockResolvedValueOnce(second.asPres());
+    const container = makeContainer(200, 80);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement);
+    const scrollHost = container.children[0].children[0] as FakeEl;
+    scrollHost.clientHeight = 80;
+    await v.load('first.pptx');
+    const pending = v.findText('alpha');
+
+    await v.load('second.pptx');
+    resolveRuns([RUN]);
+
+    await expect(pending).resolves.toEqual([]);
+    await expect(v.findNext()).resolves.toBeNull();
+    v.destroy();
+  });
+});
+
 describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
   // container fit width 200, natural slide width 200px → DIMENSIONLESS base scale
   // 200/200 = 1.0. slide height px = (SLIDE_H_EMU / 9525) * 1.0 = 120. gap 10 ⇒

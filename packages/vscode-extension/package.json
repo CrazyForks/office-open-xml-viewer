@@ -83,6 +83,11 @@
         "category": "OOXML Viewer"
       },
       {
+        "command": "ooxmlViewer.find",
+        "title": "Find in Preview",
+        "category": "OOXML Viewer"
+      },
+      {
         "command": "ooxmlViewer.installMcpServer",
         "title": "Install / Enable MCP Server",
         "category": "OOXML Viewer"
@@ -91,6 +96,14 @@
         "command": "ooxmlViewer.disableMcpServer",
         "title": "Disable MCP Server",
         "category": "OOXML Viewer"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "ooxmlViewer.find",
+        "key": "ctrl+f",
+        "mac": "cmd+f",
+        "when": "activeCustomEditorId == ooxmlViewer.docxEditor || activeCustomEditorId == ooxmlViewer.xlsxEditor || activeCustomEditorId == ooxmlViewer.pptxEditor"
       }
     ],
     "mcpServerDefinitionProviders": [

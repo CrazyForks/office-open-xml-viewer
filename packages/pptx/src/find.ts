@@ -37,6 +37,10 @@ export class PptxFindController {
   private _slideRuns = new Map<number, PptxTextRunInfo[]>();
   private _matches: PptxResolvedMatch[] = [];
   private _active = -1;
+  /** Invalidates in-flight searches on clear, reload, destroy, or a newer find. */
+  private _generation = 0;
+  /** Advances whenever visible rendering publishes newer run geometry. */
+  private _runsRevision = 0;
 
   constructor(
     private readonly _slideCount: () => number,
@@ -45,6 +49,8 @@ export class PptxFindController {
 
   /** Drop all cached runs + matches (call on reload). */
   invalidate(): void {
+    this._generation++;
+    this._runsRevision++;
     this._slideRuns.clear();
     this._matches = [];
     this._active = -1;
@@ -58,6 +64,7 @@ export class PptxFindController {
 
   /** Cache a slide's runs captured from the visible render. */
   setSlideRuns(slide: number, runs: PptxTextRunInfo[]): void {
+    this._runsRevision++;
     this._slideRuns.set(slide, runs);
   }
 
@@ -88,21 +95,52 @@ export class PptxFindController {
 
   /** Run a fresh query across every slide, resetting the cursor. */
   async find(query: string, opts: FindMatchesOptions = {}): Promise<FindMatch<PptxMatchLocation>[]> {
-    this._matches = [];
-    this._active = -1;
-    if (query.length === 0) return [];
+    const generation = ++this._generation;
+    if (query.length === 0) {
+      this._runsRevision++;
+      this._slideRuns.clear();
+      this._matches = [];
+      this._active = -1;
+      return [];
+    }
 
+    const runsRevision = this._runsRevision;
+    const slideRuns = new Map(this._slideRuns);
     const slides = this._slideCount();
     for (let slide = 0; slide < slides; slide++) {
-      const runs = await this._ensureSlideRuns(slide);
+      let runs = slideRuns.get(slide);
+      if (!runs) {
+        runs = await this._collectSlideRuns(slide);
+        if (generation !== this._generation) return [];
+        slideRuns.set(slide, runs);
+      }
+    }
+    if (generation !== this._generation) return [];
+
+    // A visible zoom-settle render can publish newer geometry while this scan
+    // awaits an offscreen slide. Preserve those per-slide updates instead of
+    // replacing them with the snapshot captured when find() began.
+    const committedRuns = runsRevision === this._runsRevision
+      ? slideRuns
+      : new Map([...slideRuns, ...this._slideRuns]);
+
+    // Resolve slices against the exact run lists being committed so slice
+    // indices and highlight geometry remain coherent after a fresh render.
+    const matches: PptxResolvedMatch[] = [];
+    for (let slide = 0; slide < slides; slide++) {
+      const runs = committedRuns.get(slide) ?? [];
       const index = buildTextIndex(runs);
       for (const tm of findMatches(index, query, opts)) {
         const text = tm.slices
           .map((s) => runs[s.runIndex].text.slice(s.start, s.end))
           .join('');
-        this._matches.push({ slide, text, slices: tm.slices });
+        matches.push({ slide, text, slices: tm.slices });
       }
     }
+    this._runsRevision++;
+    this._slideRuns = committedRuns;
+    this._matches = matches;
+    this._active = -1;
     return this.matches();
   }
 
@@ -122,11 +160,4 @@ export class PptxFindController {
     return { matchIndex: this._active, text: m.text, location: { slide: m.slide } };
   }
 
-  private async _ensureSlideRuns(slide: number): Promise<PptxTextRunInfo[]> {
-    const cached = this._slideRuns.get(slide);
-    if (cached) return cached;
-    const runs = await this._collectSlideRuns(slide);
-    this._slideRuns.set(slide, runs);
-    return runs;
-  }
 }

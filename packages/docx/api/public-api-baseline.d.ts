@@ -536,6 +536,8 @@ export declare class DocxScrollViewer implements ZoomableViewer {
     private _prevBase;
     private _lastFitWidth;
     private readonly _pageShadow;
+    private readonly _find;
+    private _findActive;
     constructor(container: HTMLElement, opts?: DocxScrollViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     get pageCount(): number;
@@ -581,6 +583,14 @@ export declare class DocxScrollViewer implements ZoomableViewer {
     scrollToPage(index: number, opts?: {
         behavior?: 'auto' | 'smooth';
     }): void;
+    findText(query: string, opts?: FindMatchesOptions): Promise<FindMatch<DocxMatchLocation>[]>;
+    findNext(): Promise<FindMatch<DocxMatchLocation> | null>;
+    findPrev(): Promise<FindMatch<DocxMatchLocation> | null>;
+    clearFind(): void;
+    private _activateMatch;
+    private _collectPageRuns;
+    private _redrawHighlights;
+    private _redrawSlotHighlights;
     private _onResize;
     get topVisiblePage(): number;
     destroy(): void;

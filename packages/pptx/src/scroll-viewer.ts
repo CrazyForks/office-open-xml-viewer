@@ -1,8 +1,10 @@
-import { computeVisibleRange, EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type VisibleRange, type HyperlinkTarget, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
+import { computeVisibleRange, EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindMatch, type FindMatchesOptions, type VisibleRange, type HyperlinkTarget, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
 import { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
 import { buildPptxTextLayer } from './text-layer';
+import { PptxFindController, type PptxMatchLocation } from './find';
+import { buildPptxHighlightLayer } from './find-highlight-layer';
 
 /**
  * Debounce window (ms) after the last `setScale` in a zoom burst before the
@@ -181,6 +183,7 @@ interface SlideSlot {
   wrapper: HTMLDivElement;
   canvas: HTMLCanvasElement;
   textLayer: HTMLDivElement | null;
+  highlightLayer: HTMLDivElement;
   /** slide index this slot is currently rendering / has rendered, or -1 when free. */
   renderedSlide: number;
   /** The `_scale` at which this slot's on-screen canvas bitmap (and text overlay)
@@ -336,6 +339,12 @@ export class PptxScrollViewer implements ZoomableViewer {
    *  `_settleSlot`) so a recycled/re-mounted slot and a settle-swapped spare all
    *  carry it. */
   private readonly _pageShadow: string | false;
+  private readonly _find = new PptxFindController(
+    () => this.slideCount,
+    (slide) => this._collectSlideRuns(slide),
+  );
+  private _findActive = false;
+  private _findMeasureCtx: CanvasRenderingContext2D | null | undefined;
 
   constructor(container: HTMLElement, opts: PptxScrollViewerOptions = {}) {
     // A <canvas> is an HTMLElement too, so the type system cannot stop a caller
@@ -471,6 +480,8 @@ export class PptxScrollViewer implements ZoomableViewer {
       }
       this._pres = pres;
       previous?.destroy();
+      this._find.invalidate();
+      this._findActive = false;
       if (previous) {
         // Re-loading over a prior deck: recycle every mounted slot (they hold the
         // OLD deck's rendered canvases) and reset the top-index latch so the new
@@ -774,11 +785,17 @@ export class PptxScrollViewer implements ZoomableViewer {
         'overflow:hidden;pointer-events:none;user-select:text;-webkit-user-select:text;';
       wrapper.appendChild(textLayer);
     }
+    const highlightLayer = document.createElement('div');
+    highlightLayer.style.cssText =
+      'position:absolute;top:0;left:0;width:100%;height:100%;' +
+      'overflow:hidden;pointer-events:none;';
+    wrapper.appendChild(highlightLayer);
     this._scrollHost.appendChild(wrapper);
     const slot: SlideSlot = {
       wrapper,
       canvas,
       textLayer,
+      highlightLayer,
       renderedSlide: -1,
       renderedScale: -1,
       bitmap: null,
@@ -817,6 +834,9 @@ export class PptxScrollViewer implements ZoomableViewer {
       slot.textLayer.style.transform = '';
       slot.textLayer.style.transformOrigin = '';
     }
+    slot.highlightLayer.innerHTML = '';
+    slot.highlightLayer.style.transform = '';
+    slot.highlightLayer.style.transformOrigin = '';
     slot.renderedSlide = -1;
     slot.renderedScale = -1;
     slot.wrapper.remove();
@@ -894,7 +914,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     // Main mode: render straight onto the slot's canvas.
     const runs: PptxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
-    const onTextRun = wantOverlay ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
+    const wantRuns = wantOverlay || this._findActive;
+    const onTextRun = wantRuns ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
     const canvas = slot.canvas;
     this._pres
       .renderSlide(canvas, i, {
@@ -927,6 +948,8 @@ export class PptxScrollViewer implements ZoomableViewer {
           // current scale (rounded).
           buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), this._hyperlinkHandler());
         }
+        if (wantRuns) this._refreshFindRuns(i, runs);
+        this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
         this._reportRenderError(err);
@@ -955,7 +978,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     slot.presentationHandle = null;
     const runs: PptxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
-    const onTextRun = wantOverlay ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
+    const wantRuns = wantOverlay || this._findActive;
+    const onTextRun = wantRuns ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
 
     this._pres
       .presentSlide(slot.canvas, i, { width: widthPx, dpr, onTextRun })
@@ -981,6 +1005,8 @@ export class PptxScrollViewer implements ZoomableViewer {
             this._hyperlinkHandler(),
           );
         }
+        if (wantRuns) this._refreshFindRuns(i, runs);
+        this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
         if (generation === slot.presentationGeneration) this._reportRenderError(err);
@@ -1092,12 +1118,13 @@ export class PptxScrollViewer implements ZoomableViewer {
     // The runs ride back beside the bitmap (one round-trip), collected only when
     // an overlay is actually wanted.
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
+    const wantRuns = wantOverlay || this._findActive;
     const runs: PptxTextRunInfo[] = [];
     try {
       const bmp = await this._pres!.renderSlideToBitmap(i, {
         width: widthPx,
         dpr,
-        onTextRun: wantOverlay ? (r) => runs.push(r) : undefined,
+        onTextRun: wantRuns ? (r) => runs.push(r) : undefined,
       });
       // Stale if EITHER (a) the epoch moved (a setScale rescaled mid-flight, so
       // this bitmap is at a superseded resolution — this catches the case where
@@ -1154,6 +1181,8 @@ export class PptxScrollViewer implements ZoomableViewer {
           );
         }
       }
+      if (wantRuns) this._refreshFindRuns(i, runs);
+      this._redrawSlotHighlights(i, slot);
       painted = true;
     } catch (err) {
       this._reportRenderError(err);
@@ -1543,7 +1572,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._applyPageShadow(spare);
     const runs: PptxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
-    const onTextRun = wantOverlay ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
+    const wantRuns = wantOverlay || this._findActive;
+    const onTextRun = wantRuns ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
     this._pres
       .renderSlide(spare, i, {
         width: widthPx,
@@ -1582,6 +1612,8 @@ export class PptxScrollViewer implements ZoomableViewer {
             buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), this._hyperlinkHandler());
           }
         }
+        if (wantRuns) this._refreshFindRuns(i, runs);
+        this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
         this._reportRenderError(err);
@@ -1608,7 +1640,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._applyPageShadow(spare);
     const runs: PptxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
-    const onTextRun = wantOverlay ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
+    const wantRuns = wantOverlay || this._findActive;
+    const onTextRun = wantRuns ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
 
     this._pres
       .presentSlide(spare, i, { width: widthPx, dpr, onTextRun })
@@ -1647,6 +1680,8 @@ export class PptxScrollViewer implements ZoomableViewer {
             );
           }
         }
+        if (wantRuns) this._refreshFindRuns(i, runs);
+        this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
         if (generation === slot.presentationGeneration) this._reportRenderError(err);
@@ -1696,6 +1731,88 @@ export class PptxScrollViewer implements ZoomableViewer {
       this._scrollHost.scrollTop = top;
     }
     this._mountVisible();
+  }
+
+  /** Search the complete presentation, including slides outside the
+   * virtualized mounted window. Matching is case-insensitive by default. */
+  async findText(
+    query: string,
+    opts: FindMatchesOptions = {},
+  ): Promise<FindMatch<PptxMatchLocation>[]> {
+    if (!this._pres) return [];
+    this._findActive = query.length > 0;
+    const matches = await this._find.find(query, opts);
+    this._redrawHighlights();
+    return matches;
+  }
+
+  /** Activate and reveal the next match, wrapping at the end. */
+  async findNext(): Promise<FindMatch<PptxMatchLocation> | null> {
+    return this._activateMatch(this._find.next());
+  }
+
+  /** Activate and reveal the previous match, wrapping at the beginning. */
+  async findPrev(): Promise<FindMatch<PptxMatchLocation> | null> {
+    return this._activateMatch(this._find.prev());
+  }
+
+  /** Clear the current query and every mounted highlight. */
+  clearFind(): void {
+    this._findActive = false;
+    this._find.invalidate();
+    this._redrawHighlights();
+  }
+
+  private async _activateMatch(
+    match: FindMatch<PptxMatchLocation> | null,
+  ): Promise<FindMatch<PptxMatchLocation> | null> {
+    if (match) this.scrollToSlide(match.location.slide);
+    this._redrawHighlights();
+    return match;
+  }
+
+  private async _collectSlideRuns(slide: number): Promise<PptxTextRunInfo[]> {
+    if (!this._pres) return [];
+    return this._pres.collectSlideRuns(slide, this._slideWidthPx());
+  }
+
+  private _redrawHighlights(): void {
+    for (const [slide, slot] of this._slots) this._redrawSlotHighlights(slide, slot);
+  }
+
+  private _refreshFindRuns(slide: number, runs: PptxTextRunInfo[]): void {
+    if (this._findActive) this._find.setSlideRuns(slide, runs);
+  }
+
+  private _redrawSlotHighlights(slide: number, slot: SlideSlot): void {
+    if (!this._findActive) {
+      slot.highlightLayer.innerHTML = '';
+      return;
+    }
+    const runs = this._find.slideRuns(slide);
+    if (!runs) {
+      slot.highlightLayer.innerHTML = '';
+      return;
+    }
+    buildPptxHighlightLayer(
+      slot.highlightLayer,
+      runs,
+      this._find.slideHighlights(slide),
+      this._slideWidthPx(),
+      this._slideHeightPx(),
+      (font) => this._measureForFind(font),
+    );
+  }
+
+  private _measureForFind(font: string): (text: string) => number {
+    if (this._findMeasureCtx === undefined) {
+      const canvas = document.createElement('canvas');
+      this._findMeasureCtx = canvas.getContext('2d');
+    }
+    const ctx = this._findMeasureCtx;
+    if (!ctx || typeof ctx.measureText !== 'function') return (text) => text.length;
+    ctx.font = font;
+    return (text) => ctx.measureText(text).width;
   }
 
   /**
@@ -1895,6 +2012,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     // as superseded and its engine is cleaned up rather than installed onto a
     // torn-down viewer.
     this._loadGen++;
+    this._find.invalidate();
+    this._findActive = false;
     if (this._scrollListener) {
       this._scrollHost.removeEventListener('scroll', this._scrollListener);
       this._scrollListener = null;
