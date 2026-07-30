@@ -22,7 +22,7 @@ import { XlsxViewer, type CellRange } from '@silurus/ooxml-xlsx';
 import { DocxScrollViewer } from '@silurus/ooxml-docx';
 import { PptxScrollViewer } from '@silurus/ooxml-pptx';
 import { svgExtents, type ZoomableViewer } from '@silurus/ooxml-core';
-import { loadAtNaturalScale } from './naturalScale';
+import { loadAtContainerFit, loadAtNaturalScale } from './naturalScale';
 import { captureUnhandledWheelZoom } from './wheelZoomFallback';
 import { FindPopupController, type FindableViewer } from './findPopup';
 // Side-effect import: bundles the self-contained MathJax + STIX Two Math engine
@@ -220,7 +220,7 @@ async function initPptx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
     math,
     useGoogleFonts,
     enableTextSelection: true,
-    refitOnResize: false,
+    refitOnResize: true,
     background: 'var(--vscode-editor-background)',
     onScaleChange: updateZoomLabel,
     onError(err) {
@@ -228,7 +228,9 @@ async function initPptx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
       showError(`Error: ${err.message}`);
     },
   });
-  await loadAtNaturalScale(viewer, buffer);
+  // Presentations default to the available editor width. The viewer subtracts
+  // its built-in desk gutters, leaving a small margin without horizontal scroll.
+  await loadAtContainerFit(viewer, buffer);
   if (loadFailed) return;
   bindZoomViewer(viewer);
   hideStatus();
