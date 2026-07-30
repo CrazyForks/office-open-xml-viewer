@@ -10,13 +10,13 @@ export const WORD_EXACT_ROW_HEIGHT_BOTTOM_PADDING = defineCompatibilityRule({
   description: 'Word adds the largest bottom cell margin to an exact trHeight instead of treating that margin as part of the authored height.',
 });
 
-export const WORD_NIL_TABLE_BORDER_SUPPRESSION = defineCompatibilityRule({
-  id: 'word-nil-table-border-suppression',
+export const WORD_TABLE_BORDER_LAYER_CASCADE = defineCompatibilityRule({
+  id: 'word-table-border-layer-cascade',
   evidence: {
     kind: 'microsoft-note',
     reference: '[MS-OI29500] §2.1.169',
   },
-  description: 'Word treats a table border value of none as omission while nil remains authored and suppresses the complete shared edge.',
+  description: 'During per-side border acquisition, none falls through to a lower-precedence layer while nil remains authored and blocks fallback only on that side.',
 });
 
 export const WORD_SPACED_CELL_INSIDE_BORDER_CONFLICT = defineCompatibilityRule({
@@ -174,6 +174,7 @@ export function wordExactRowFloorPt(
 export function wordAuthoredBorderParticipates(
   authoredStyle: string | null | undefined,
 ): boolean {
+  // `word-table-border-layer-cascade` owns this pre-conflict distinction.
   return authoredStyle !== null
     && authoredStyle !== undefined
     && authoredStyle !== 'none';
@@ -259,13 +260,6 @@ export function wordTableBorderWeight(
 ): number {
   if (style === 'dotted' || style === 'dashed') return 1;
   return Math.max(0, widthPt) * 8 * (WORD_BORDER_NUMBER[style] ?? 0);
-}
-
-export function wordNilBorderSuppressesSharedEdge(
-  firstStyle: string | null | undefined,
-  secondStyle: string | null | undefined,
-): boolean {
-  return firstStyle === 'nil' || secondStyle === 'nil';
 }
 
 export function wordTableRowHeightRule(

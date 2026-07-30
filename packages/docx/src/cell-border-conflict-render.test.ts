@@ -285,9 +285,9 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
     expect(colors.some((c) => c.includes('ff0000'))).toBe(false); // table thick loses
   });
 
-  it('Word nil suppresses the shared edge even when the other side is visible', async () => {
-    // [MS-OI29500] 2.1.169 differs from the base ECMA rule: nil suppresses the
-    // complete shared edge, whereas none merely loses to the opposing border.
+  it('nil loses to the opposing visible border', async () => {
+    // ECMA-376 §17.4.66: when either conflicting cell border is nil or none,
+    // the opposing border is displayed.
     const strokes = await render(tableOf([
       rowOf([
         cell('a', { right: bs({ style: 'nil' }) }),
@@ -295,10 +295,14 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
       ]),
     ]));
     const shared = verticalAt(strokes, 60);
-    expect(shared).toHaveLength(0);
+    expect(shared).toEqual([
+      expect.objectContaining({
+        color: expect.stringContaining('112233'),
+      }),
+    ]);
   });
 
-  it('nil on BOTH sides suppresses the shared gridline entirely', async () => {
+  it('does not paint a shared gridline when both sides are nil', async () => {
     const strokes = await render(tableOf([
       rowOf([
         cell('a', { right: bs({ style: 'nil' }) }),
@@ -391,6 +395,63 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
     expect(right.some((s) => s.color.toLowerCase().includes('222222'))).toBe(true);
   });
 
+  it('resolves each colSpan split segment independently when the spanning edge is nil', async () => {
+    // §17.4.66 applies independently to each segment at a 3-wide spanning
+    // owner → three independent cells boundary. The nil/nil left segment
+    // remains open while the omitted opposing edges on the middle and right
+    // segments admit the table insideH border.
+    const spanning = cell('intro', { bottom: bs({ style: 'nil' }) });
+    spanning.colSpan = 3;
+    const table = tableOf(
+      [
+        rowOf([spanning]),
+        rowOf([
+          cell('merge-start', { top: bs({ style: 'nil' }) }),
+          cell('label'),
+          cell('value'),
+        ]),
+      ],
+      { insideH: bs({ style: 'single', width: 1, color: '123456' }) },
+    );
+    table.layout = 'fixed';
+    table.widthPt = 180;
+    const strokes = await render(table);
+
+    expect(horizontalAt(strokes, 20)).toEqual([
+      expect.objectContaining({
+        x1: 60,
+        x2: 180,
+        color: expect.stringContaining('123456'),
+      }),
+    ]);
+  });
+
+  it('retains each above-cell bottom segment when the row below spans the full grid', async () => {
+    const bottom = bs({ style: 'single', width: 1, color: '123456' });
+    const spanning = cell('spanning');
+    spanning.colSpan = 3;
+    const strokes = await render(tableOf(
+      [
+        rowOf([
+          cell('left', { bottom }),
+          cell('middle', { bottom }),
+          cell('right', { bottom }),
+        ]),
+        rowOf([spanning]),
+      ],
+      { insideH: bs({ style: 'single', width: 1, color: '654321' }) },
+    ));
+
+    const shared = horizontalAt(strokes, 20);
+    expect(shared).toEqual([
+      expect.objectContaining({
+        x1: 0,
+        x2: 180,
+        color: expect.stringContaining('123456'),
+      }),
+    ]);
+  });
+
   it('§17.4.66 (#815): a vMerge cell resolves EACH right sub-segment against its own neighbour', async () => {
     // A tall cell (vMerge restart) spanning both rows faces TWO right neighbours
     // with DIFFERENT left borders. Its shared vertical edge must be split at the
@@ -410,6 +471,44 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
     const bot = seg.filter((s) => Math.max(s.y1, s.y2) > 30);
     expect(top.some((s) => s.color.toLowerCase().includes('111111'))).toBe(true);
     expect(bot.some((s) => s.color.toLowerCase().includes('222222'))).toBe(true);
+  });
+
+  it('resolves each vMerge split segment independently when the spanning edge is nil', async () => {
+    // §17.4.66 applies independently to each segment of a three-row merged
+    // owner whose nil right edge faces nil, omitted, and explicit opposing
+    // edges. The results are open, table insideV, and the explicit edge.
+    const restart = cell('merged', { right: bs({ style: 'nil' }) });
+    restart.vMerge = true;
+    const continuation1 = cell('', { right: bs({ style: 'nil' }) });
+    continuation1.vMerge = false;
+    const continuation2 = cell('', { right: bs({ style: 'nil' }) });
+    continuation2.vMerge = false;
+    const strokes = await render(tableOf(
+      [
+        rowOf([restart, cell('top', { left: bs({ style: 'nil' }) })]),
+        rowOf([continuation1, cell('middle')]),
+        rowOf([
+          continuation2,
+          cell('bottom', { left: bs({ style: 'single', width: 1, color: 'ff0000' }) }),
+        ]),
+      ],
+      { insideV: bs({ style: 'single', width: 1, color: '0000ff' }) },
+    ));
+
+    const shared = verticalAt(strokes, 60);
+    expect(shared.some((s) => Math.min(s.y1, s.y2) < 10)).toBe(false);
+    expect(shared).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        y1: 20,
+        y2: 40,
+        color: expect.stringContaining('0000ff'),
+      }),
+      expect.objectContaining({
+        y1: 40,
+        y2: 60,
+        color: expect.stringContaining('ff0000'),
+      }),
+    ]));
   });
 
   it('uses the final continuation cell border at the bottom of a vertical merge', async () => {
