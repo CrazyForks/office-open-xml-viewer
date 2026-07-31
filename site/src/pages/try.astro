@@ -63,7 +63,7 @@ import Nav from '../components/Nav.astro';
   </footer>
 
   <script>
-    import { renderFile, prewarmEngines } from '../lib/try';
+    import { disposeRenderedFile, renderFile, prewarmEngines } from '../lib/try';
     // Hot standby — prime the WASM engines + fonts on idle so the first dropped
     // file renders without the cold parser-load cost.
     prewarmEngines();
@@ -74,23 +74,36 @@ import Nav from '../components/Nav.astro';
     const stage = document.getElementById('stage') as HTMLElement;
     const fileLabel = document.getElementById('panel-file') as HTMLElement;
     const reset = document.getElementById('reset') as HTMLButtonElement;
+    let loadGeneration = 0;
 
     async function handle(file: File): Promise<void> {
+      const generation = ++loadGeneration;
       status.hidden = false;
       status.classList.remove('error');
       status.textContent = `Parsing ${file.name}…`;
-      panel.hidden = true;
+      // Keep the panel in layout while rendering so ScrollViewer observes the
+      // real preview viewport before its first paint.
+      panel.hidden = false;
+      panel.classList.add('loading');
+      stage.style.visibility = 'hidden';
       try {
         const t0 = performance.now();
         const res = await renderFile(stage, file);
+        if (generation !== loadGeneration) return;
         const ms = Math.round(performance.now() - t0);
         const count = res.units ? `${res.units} ${res.unitLabel}${res.units === 1 ? '' : 's'} · ` : '';
         fileLabel.textContent = file.name;
-        status.hidden = true;
-        panel.hidden = false;
+        panel.classList.remove('loading');
+        stage.style.visibility = '';
         status.textContent = `${count}rendered in ${ms} ms`;
         status.hidden = false;
       } catch (e) {
+        // A later selection owns the shared status/panel UI. The superseded load
+        // has already destroyed its viewer in renderFile; it must not hide or
+        // overwrite the newer result.
+        if (generation !== loadGeneration) return;
+        panel.classList.remove('loading');
+        stage.style.visibility = '';
         status.classList.add('error');
         status.textContent = e instanceof Error ? e.message : String(e);
         panel.hidden = true;
@@ -116,6 +129,7 @@ import Nav from '../components/Nav.astro';
       if (f) void handle(f);
     });
     reset.addEventListener('click', () => { input.value = ''; input.click(); });
+    window.addEventListener('pagehide', disposeRenderedFile, { once: true });
   </script>
 </Base>
 
@@ -166,6 +180,7 @@ import Nav from '../components/Nav.astro';
     display: flex; align-items: center; gap: 12px;
     padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--bg-elev);
   }
+  .try-panel.loading .try-panel-head { min-height: 53px; }
   .try-file { font-family: var(--mono); font-size: 13px; color: var(--text-dim); }
   .panel-badge {
     font-family: var(--mono); font-size: 11px; color: var(--accent);
@@ -177,7 +192,14 @@ import Nav from '../components/Nav.astro';
     font-size: 12.5px; padding: 6px 12px; border-radius: 8px; transition: border-color 0.15s, color 0.15s;
   }
   .try-reset:hover { border-color: var(--accent); color: var(--text); }
-  .try-stage :global(.lv-scroll), .try-stage :global(.lv-xlsx) { border-radius: 0; }
+  .try-stage :global(.lv-scroll-viewer), .try-stage :global(.lv-xlsx) { border-radius: 0; }
+  .try-stage :global(.lv-scroll-viewer) {
+    width: 100%;
+    height: min(74vh, 680px);
+    min-height: 360px;
+    background: radial-gradient(120% 80% at 50% 0%, #20242e, #161922 70%);
+  }
+  .try-stage :global(.lv-scroll-viewer canvas) { border-radius: 4px; }
 
   .try-fineprint { margin-top: 18px; font-size: 13px; color: var(--text-faint); text-align: center; }
 </style>

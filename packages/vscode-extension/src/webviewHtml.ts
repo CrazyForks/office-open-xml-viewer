@@ -79,30 +79,127 @@ export function getWebviewHtml(
     html, body {
       width: 100%;
       height: 100%;
+      overflow: hidden;
       background: var(--vscode-editor-background);
       color: var(--vscode-foreground);
       font-family: var(--vscode-font-family, sans-serif);
     }
-    /* xlsx fills the whole viewport; docx/pptx scroll inside #viewer-root. */
-    body.layout-xlsx { overflow: hidden; }
-    body.layout-stack { overflow: auto; }
     #viewer-root {
+      position: relative;
       width: 100%;
-      min-height: 100%;
-      display: flex;
-      justify-content: center;
-      align-items: flex-start;
-      padding: 16px;
-    }
-    body.layout-xlsx #viewer-root { padding: 0; height: 100%; }
-    #viewer-container { max-width: 100%; width: 100%; }
-    body.layout-stack #viewer-container {
+      height: 100%;
+      min-height: 0;
       display: flex;
       flex-direction: column;
+    }
+    #viewer-toolbar {
+      height: 35px;
+      flex: 0 0 35px;
+      display: flex;
       align-items: center;
+      justify-content: flex-end;
+      gap: 4px;
+      padding: 0 8px;
+      border-bottom: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.35));
+      background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
+      user-select: none;
+    }
+    #viewer-toolbar button {
+      width: 26px;
+      height: 24px;
+      border: 1px solid transparent;
+      border-radius: 3px;
+      color: var(--vscode-foreground);
+      background: transparent;
+      font: 16px/1 var(--vscode-font-family, sans-serif);
+      cursor: pointer;
+    }
+    #viewer-toolbar button:hover:not(:disabled) {
+      background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.2));
+    }
+    #viewer-toolbar button:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+    #viewer-toolbar button:disabled {
+      cursor: default;
+      opacity: 0.4;
+    }
+    #zoom-label {
+      min-width: 46px;
+      text-align: center;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    #viewer-container {
+      position: relative;
+      width: 100%;
+      min-width: 0;
+      min-height: 0;
+      flex: 1 1 auto;
+      overflow: hidden;
+    }
+    #find-popup {
+      position: absolute;
+      z-index: 20;
+      top: 43px;
+      right: 12px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-radius: 4px;
+      background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+      color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+      box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35));
+    }
+    #find-popup[hidden] {
+      display: none;
+    }
+    #find-input {
+      width: min(240px, 42vw);
+      height: 24px;
+      padding: 2px 6px;
+      border: 1px solid var(--vscode-input-border, transparent);
+      outline: none;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      font: 12px/1.4 var(--vscode-font-family, sans-serif);
+    }
+    #find-input:focus {
+      border-color: var(--vscode-focusBorder);
+    }
+    #find-status {
+      min-width: 70px;
+      text-align: center;
+      white-space: nowrap;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    #find-popup button {
+      width: 24px;
+      height: 24px;
+      border: 1px solid transparent;
+      border-radius: 3px;
+      color: inherit;
+      background: transparent;
+      font: 14px/1 var(--vscode-font-family, sans-serif);
+      cursor: pointer;
+    }
+    #find-popup button:hover:not(:disabled) {
+      background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.2));
+    }
+    #find-popup button:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+    #find-popup button:disabled {
+      cursor: default;
+      opacity: 0.4;
     }
     #status {
-      position: fixed;
+      position: absolute;
       inset: 0;
       display: flex;
       align-items: center;
@@ -126,40 +223,22 @@ export function getWebviewHtml(
       animation: spin 0.9s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    /* docx / pptx scroll-stack styling */
-    .page-stack {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 16px;
-      width: 100%;
-    }
-    .page-wrapper {
-      position: relative;
-      width: 100%;
-      margin: 0 auto;
-    }
-    .page-canvas {
-      display: block;
-      width: 100%;
-      background: #fff;
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
-    }
-    .text-layer {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      pointer-events: none;
-      user-select: text;
-      -webkit-user-select: text;
-    }
   </style>
 </head>
-<body class="${fileType === 'xlsx' ? 'layout-xlsx' : 'layout-stack'}">
+<body>
   <div id="viewer-root">
+    <div id="viewer-toolbar" role="toolbar" aria-label="Zoom controls">
+      <button id="zoom-out" type="button" aria-label="Zoom out" title="Zoom out" disabled>−</button>
+      <span id="zoom-label" aria-live="polite">100%</span>
+      <button id="zoom-in" type="button" aria-label="Zoom in" title="Zoom in" disabled>+</button>
+    </div>
+    <div id="find-popup" role="dialog" aria-label="Find" hidden>
+      <input id="find-input" type="text" aria-label="Find" placeholder="Find" autocomplete="off" spellcheck="false" />
+      <span id="find-status" aria-live="polite"></span>
+      <button id="find-previous" type="button" aria-label="Previous match" title="Previous match (Shift+Enter)" disabled>↑</button>
+      <button id="find-next" type="button" aria-label="Next match" title="Next match (Enter)" disabled>↓</button>
+      <button id="find-close" type="button" aria-label="Close find" title="Close (Escape)">×</button>
+    </div>
     <div id="viewer-container">
       <div id="status"><div class="spinner"></div></div>
     </div>

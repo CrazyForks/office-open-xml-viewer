@@ -3,9 +3,13 @@ import { describe, expect, it, vi } from 'vitest';
 // `vscode` only exists inside the extension host. `buildContentSecurityPolicy`
 // does not touch it, but importing the module pulls in the top-level
 // `import * as vscode` — stub it so the unit under test loads in plain Node.
-vi.mock('vscode', () => ({}));
+vi.mock('vscode', () => ({
+  Uri: {
+    joinPath: (...parts: unknown[]) => parts,
+  },
+}));
 
-import { buildContentSecurityPolicy } from './webviewHtml';
+import { buildContentSecurityPolicy, getWebviewHtml } from './webviewHtml';
 
 const CSP_SOURCE = 'vscode-webview://abc';
 const NONCE = 'testnonce';
@@ -44,4 +48,46 @@ describe('buildContentSecurityPolicy', () => {
     expect(connectSrc).not.toContain('googleapis');
     expect(connectSrc).not.toContain('gstatic');
   });
+});
+
+describe('getWebviewHtml', () => {
+  it.each(['docx', 'xlsx', 'pptx'] as const)(
+    'includes shared zoom-out and zoom-in controls for %s',
+    (fileType) => {
+      const html = getWebviewHtml(
+        {
+          cspSource: CSP_SOURCE,
+          asWebviewUri: () => 'vscode-webview://extension/dist/webview.js',
+        } as never,
+        {} as never,
+        fileType,
+      );
+
+      expect(html).toContain('id="zoom-out"');
+      expect(html).toContain('aria-label="Zoom out"');
+      expect(html).toContain('id="zoom-in"');
+      expect(html).toContain('aria-label="Zoom in"');
+      expect(html).toContain('id="zoom-label"');
+    },
+  );
+
+  it.each(['docx', 'xlsx', 'pptx'] as const)(
+    'includes the shared find popup for %s',
+    (fileType) => {
+      const html = getWebviewHtml(
+        {
+          cspSource: CSP_SOURCE,
+          asWebviewUri: () => 'vscode-webview://extension/dist/webview.js',
+        } as never,
+        {} as never,
+        fileType,
+      );
+
+      expect(html).toContain('id="find-popup"');
+      expect(html).toContain('id="find-input"');
+      expect(html).toContain('aria-label="Previous match"');
+      expect(html).toContain('aria-label="Next match"');
+      expect(html).toContain('id="find-close"');
+    },
+  );
 });

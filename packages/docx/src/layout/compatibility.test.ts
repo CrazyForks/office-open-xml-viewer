@@ -111,11 +111,11 @@ import {
   WORD_AUTHORED_AUTO_ROW_HEIGHT_FLOOR,
   WORD_EFFECTIVE_FLOATING_TABLE_POSITIONING,
   WORD_FIRST_ROW_TABLE_EXCEPTION_SCOPE,
-  WORD_NIL_TABLE_BORDER_SUPPRESSION,
   WORD_OMITTED_ROW_HEIGHT_RULE_AT_LEAST,
   WORD_OVER_PAGE_CANT_SPLIT_CLIP,
   WORD_POSITIONED_TABLE_ADJACENCY_EXCLUSION,
   WORD_SPACED_CELL_INSIDE_BORDER_CONFLICT,
+  WORD_TABLE_BORDER_LAYER_CASCADE,
   WORD_TABLE_BORDER_WEIGHT_PRECEDENCE,
   WORD_TABLE_BORDER_STYLE_PRECEDENCE,
   WORD_TABLE_CELL_SPACING_SCOPE_SHADOW,
@@ -131,7 +131,6 @@ import {
   wordDropsTrailingStructuralCellMarker,
   wordExactRowFloorPt,
   wordExactRowVerticalClipBounds,
-  wordNilBorderSuppressesSharedEdge,
   wordSpacedCellInsideBorderOverridesTable,
   wordTableBorderWeight,
   wordTableCellSpacingValuePt,
@@ -280,7 +279,7 @@ describe('layout compatibility inventory', () => {
       WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION,
       WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE,
       WORD_EXACT_ROW_HEIGHT_BOTTOM_PADDING,
-      WORD_NIL_TABLE_BORDER_SUPPRESSION,
+      WORD_TABLE_BORDER_LAYER_CASCADE,
       WORD_SPACED_CELL_INSIDE_BORDER_CONFLICT,
       WORD_TABLE_INDENT_ALL_ALIGNMENTS,
       WORD_EXACT_ROW_VERTICAL_CLIP_ONLY,
@@ -597,8 +596,6 @@ describe('layout compatibility inventory', () => {
     expect(wordTableBorderWeight('single', 1.5)).toBe(12);
     expect(wordTableBorderWeight('dotted', 99)).toBe(1);
     expect(wordTableBorderWeight('unknown', 2)).toBe(0);
-    expect(wordNilBorderSuppressesSharedEdge('nil', 'single')).toBe(true);
-    expect(wordNilBorderSuppressesSharedEdge('none', 'single')).toBe(false);
     expect(wordTableRowHeightRule('auto', false)).toBe('atLeast');
     expect(wordTableRowHeightRule('auto', true)).toBe('auto');
     expect(wordAuthoredAutoRowHeightUsesFloor('auto', 0)).toBe(true);

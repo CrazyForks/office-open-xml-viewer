@@ -83,4 +83,63 @@ describe('PptxFindController cursor + highlights', () => {
     expect(c.matches()).toHaveLength(0);
     expect(c.activeSlide()).toBeNull();
   });
+
+  it('prevents a pending find from restoring matches after invalidate', async () => {
+    let resolveRuns!: (runs: PptxTextRunInfo[]) => void;
+    const c = new PptxFindController(
+      () => 1,
+      () => new Promise((resolve) => { resolveRuns = resolve; }),
+    );
+    const pending = c.find('a');
+
+    c.invalidate();
+    resolveRuns([run('a')]);
+
+    await expect(pending).resolves.toEqual([]);
+    expect(c.matches()).toEqual([]);
+    expect(c.slideRuns(0)).toBeUndefined();
+    expect(c.next()).toBeNull();
+  });
+
+  it('commits collected slide runs atomically only after the complete scan', async () => {
+    let resolveSecond!: (runs: PptxTextRunInfo[]) => void;
+    const c = new PptxFindController(
+      () => 2,
+      (slide) => slide === 0
+        ? Promise.resolve([run('a')])
+        : new Promise((resolve) => { resolveSecond = resolve; }),
+    );
+    const pending = c.find('a');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(c.slideRuns(0)).toBeUndefined();
+    resolveSecond([run('a')]);
+    await expect(pending).resolves.toHaveLength(2);
+    expect(c.slideRuns(0)).toEqual([run('a')]);
+    expect(c.slideRuns(1)).toEqual([run('a')]);
+  });
+
+  it('does not overwrite newer visible-render geometry when a pending scan completes', async () => {
+    let resolveSecond!: (runs: PptxTextRunInfo[]) => void;
+    const oldVisibleRuns = [{ ...run('a'), inShapeX: 1 }];
+    const freshVisibleRuns = [{ ...run('a'), inShapeX: 20 }];
+    const c = new PptxFindController(
+      () => 2,
+      (slide) => slide === 0
+        ? Promise.resolve(oldVisibleRuns)
+        : new Promise((resolve) => { resolveSecond = resolve; }),
+    );
+    c.setSlideRuns(0, oldVisibleRuns);
+    const pending = c.find('a');
+    await Promise.resolve();
+
+    // A zoom-settle render publishes fresh geometry while the full-deck scan
+    // is still waiting on another slide.
+    c.setSlideRuns(0, freshVisibleRuns);
+    resolveSecond([run('a')]);
+
+    await expect(pending).resolves.toHaveLength(2);
+    expect(c.slideRuns(0)).toBe(freshVisibleRuns);
+  });
 });

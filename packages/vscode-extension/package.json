@@ -2,7 +2,7 @@
   "name": "office-open-xml-viewer",
   "displayName": "Office Viewer — DOCX, XLSX, PPTX",
   "description": "High-fidelity viewer for Office files (.docx / .xlsx / .pptx). Local-only — files never leave your machine. Powered by a Rust/WASM parser and Canvas renderer.",
-  "version": "0.74.2",
+  "version": "0.74.4",
   "publisher": "silurus",
   "license": "MIT",
   "icon": "icon.png",
@@ -83,6 +83,11 @@
         "category": "OOXML Viewer"
       },
       {
+        "command": "ooxmlViewer.find",
+        "title": "Find in Preview",
+        "category": "OOXML Viewer"
+      },
+      {
         "command": "ooxmlViewer.installMcpServer",
         "title": "Install / Enable MCP Server",
         "category": "OOXML Viewer"
@@ -91,6 +96,14 @@
         "command": "ooxmlViewer.disableMcpServer",
         "title": "Disable MCP Server",
         "category": "OOXML Viewer"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "ooxmlViewer.find",
+        "key": "ctrl+f",
+        "mac": "cmd+f",
+        "when": "activeCustomEditorId == ooxmlViewer.docxEditor || activeCustomEditorId == ooxmlViewer.xlsxEditor || activeCustomEditorId == ooxmlViewer.pptxEditor"
       }
     ],
     "mcpServerDefinitionProviders": [

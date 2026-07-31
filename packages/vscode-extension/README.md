@@ -19,6 +19,7 @@ A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a 
 - **DOCX** — Continuous **scroll view** of every page with a transparent text layer (PDF.js-style) — drag to select, copy as plain text.
 - **XLSX** — Spreadsheet viewer with cell / row / column / range selection, tab-separated copy (Ctrl+C / Cmd+C), freeze-pane support, and a multi-sheet tab bar.
 - **PPTX** — Continuous **scroll view** of every slide with a transparent text layer that handles rotated text boxes correctly.
+- **Find in preview** — Press **Ctrl+F / Cmd+F** to search the complete document, workbook, or presentation. Matching is case-insensitive; Enter / Shift+Enter moves between results.
 - **High fidelity** — Charts, conditional formatting, theme colors, custom geometry shapes, math equations (OMML, via MathJax + STIX Two Math), and more rendered straight from the OOXML spec.
 - **MCP server (opt-in)** — Lets AI coding agents (Copilot, Claude, etc.) read `.xlsx` / `.docx` / `.pptx` files in your workspace through dedicated tools instead of unzipping XML by hand. See [MCP server for AI agents](#mcp-server-for-ai-agents) below.
 
@@ -34,6 +35,14 @@ If a different editor opens by default, right-click the file → **Reopen Editor
 
 - **DOCX / PPTX** — Drag across rendered text to select, then **Ctrl+C / Cmd+C** to copy as plain text. The transparent overlay matches the canvas glyph positions, so selection feels native. *(This dual-layer rendering is planned to be unified once the Canvas [`drawElement`](https://github.com/WICG/html-in-canvas) API ships across browsers.)*
 - **XLSX** — Click a cell to select it, drag for a range, click row/column headers for full-row/column selection, click the corner box for sheet-wide selection. **Ctrl+C / Cmd+C** copies as TSV.
+
+### Find
+
+Press **Ctrl+F / Cmd+F** inside any OOXML preview to open the search popup.
+Search is case-insensitive across the complete file, including pages or slides
+outside the currently rendered scroll window. Press **Enter** for the next match,
+**Shift+Enter** for the previous match, and **Escape** or the **×** button to
+close the popup and clear highlights.
 
 ## MCP server for AI agents
 

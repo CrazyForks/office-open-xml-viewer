@@ -5,7 +5,7 @@ import { defineConfig } from 'vitest/config';
 // keep it out of the tests/visual directories.
 export default defineConfig({
   test: {
-    include: ['packages/**/src/**/*.test.ts'],
+    include: ['packages/**/src/**/*.test.ts', 'site/src/**/*.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/tests/visual/**'],
   },
 });

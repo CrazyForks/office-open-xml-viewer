@@ -1,12 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { resolveBorderConflict } from './cell-border-conflict.js';
-import type { BorderSpec } from './types';
+import { resolveBorderConflict, resolveCellEdges } from './cell-border-conflict.js';
+import type { BorderSpec, CellBorders, TableBorders } from './types';
 
-// ECMA-376 §17.4.66 with Word deviations from [MS-OI29500] 2.1.169 —
-// adjacent table cell border conflict resolution. When cell spacing is zero,
-// two cells that share an interior gridline both contribute a border for that
-// edge; the DISPLAYED border is chosen by these rules (in order):
-//   0. none loses to the opposing border; nil suppresses the shared edge.
+// ECMA-376 §17.4.66 — adjacent table cell border conflict resolution. When
+// cell spacing is zero, two cells that share an interior gridline both
+// contribute a border for that edge; the DISPLAYED border is chosen by these
+// rules (in order):
+//   0. nil and none lose to the opposing border.
 //   1. a CELL border beats a TABLE border.
 //   2. Word weight = width in eighth-points × Word border number; dotted and
 //      dashed have weight 1 regardless of width.
@@ -24,14 +24,17 @@ const cell = (over: Partial<BorderSpec> = {}) => ({ spec: spec(over), source: 'c
 const tbl = (over: Partial<BorderSpec> = {}) => ({ spec: spec(over), source: 'table' as const });
 
 describe('§17.4.66 resolveBorderConflict', () => {
-  it('Word rule 0: none loses to a real border', () => {
+  it('rule 0: none loses to a real border', () => {
     expect(resolveBorderConflict(cell({ style: 'single' }), cell({ style: 'none' }))!.spec.style).toBe('single');
   });
 
-  it('Word rule 0: nil suppresses the shared edge even against a real border', () => {
-    expect(resolveBorderConflict(cell({ style: 'nil' }), cell({ style: 'single' }))).toBeNull();
-    expect(resolveBorderConflict(cell({ style: 'double' }), cell({ style: 'nil' }))).toBeNull();
+  it('rule 0: nil loses to the opposing visible border', () => {
+    expect(resolveBorderConflict(cell({ style: 'nil' }), cell({ style: 'single' }))!.spec.style).toBe('single');
+    expect(resolveBorderConflict(cell({ style: 'double' }), cell({ style: 'nil' }))!.spec.style).toBe('double');
+    expect(resolveBorderConflict(cell({ style: 'nil' }), tbl({ style: 'single' }))!.source).toBe('table');
     expect(resolveBorderConflict(cell({ style: 'nil' }), cell({ style: 'none' }))).toBeNull();
+    expect(resolveBorderConflict(cell({ style: 'nil' }), null)).toBeNull();
+    expect(resolveBorderConflict(cell({ style: 'none' }), cell({ style: 'none' }))).toBeNull();
   });
 
   it('one side null (absent) ⇒ the other wins', () => {
@@ -112,5 +115,51 @@ describe('§17.4.66 resolveBorderConflict', () => {
     const b = cell({ style: 'single', color: '808080' });
     const r = resolveBorderConflict(a, b);
     expect(r).toBe(a); // same reference — `a` is displayed
+  });
+});
+
+describe('cell border cascade before §17.4.66 conflict resolution', () => {
+  const empty = (): CellBorders => ({
+    top: null,
+    right: null,
+    bottom: null,
+    left: null,
+    insideH: null,
+    insideV: null,
+  });
+
+  it('lets none fall through while nil blocks lower-precedence fallback on its own side', () => {
+    const tableInside = spec({ style: 'single', color: '123456' });
+    const table: TableBorders = { ...empty(), insideH: tableInside };
+    const flags = { topRow: false, bottomRow: false, leftCol: false, rightCol: false };
+
+    const withNone = resolveCellEdges(
+      { ...empty(), bottom: spec({ style: 'none' }) },
+      table,
+      flags,
+      false,
+    );
+    expect(withNone.bottom).toMatchObject({ source: 'table', spec: tableInside });
+
+    const withNil = resolveCellEdges(
+      { ...empty(), bottom: spec({ style: 'nil' }) },
+      table,
+      flags,
+      false,
+    );
+    expect(withNil.bottom).toMatchObject({ source: 'cell', spec: { style: 'nil' } });
+  });
+
+  it('keeps a conditional cell inside border as a cell conflict candidate', () => {
+    const conditionalInside = spec({ style: 'single', color: '123456' });
+    const tableInside = spec({ style: 'double', color: '654321' });
+    const edges = resolveCellEdges(
+      { ...empty(), insideV: conditionalInside },
+      { ...empty(), insideV: tableInside },
+      { topRow: false, bottomRow: false, leftCol: false, rightCol: false },
+      false,
+    );
+
+    expect(edges.right).toMatchObject({ source: 'cell', spec: conditionalInside });
   });
 });

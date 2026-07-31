@@ -204,6 +204,12 @@ width to the container width and re-fits on resize; a `0`-width container defers
 layout until it has width. Call `destroy()` to tear down (a self-loaded engine is
 destroyed with it; an injected one is not — see below).
 
+Pass `refitOnResize: false` when the viewport must not determine the document's
+physical display size. An explicit pre-load `setScale(1)` then keeps the same
+authored font size at roughly the same on-screen size for portrait pages,
+landscape pages, and slides; users can still zoom or call `fitWidth()` /
+`fitPage()` explicitly.
+
 **Desk appearance.** The viewer paints each page/slide on its own white canvas
 with a soft drop shadow, over a transparent "desk". Style the desk and the sheet
 gaps without any wrapper CSS:
@@ -227,11 +233,12 @@ CSS preview and settles into a crisp re-render when it pauses. Bounds are the
 absolute scale factors `zoomMin` / `zoomMax` (default `0.1` / `4`), and
 `setScale(scale)` sets it programmatically. Pass `enableZoom: false` to disable.
 
-**Text selection** (main mode only). Pass `enableTextSelection: true` to overlay
-a transparent, selectable text layer per page/slide for native copy. In
-`mode: 'worker'` the overlay stays empty (the per-run geometry cannot cross the
-worker boundary) and the viewer logs one warning — use the default `mode: 'main'`
-for selectable text.
+**Text selection and find.** Pass `enableTextSelection: true` to overlay a
+transparent, selectable text layer per page/slide for native copy. It works in
+both `mode: 'main'` and `mode: 'worker'`; worker rendering returns the retained
+text-run geometry beside each bitmap. `findText()`, `findNext()`, `findPrev()`,
+and `clearFind()` search the complete document, including virtualized pages or
+slides outside the mounted window.
 
 **Hyperlinks.** For DOCX/PPTX the link hit regions live on the text-selection
 overlay, so hyperlink interaction requires `enableTextSelection: true`; when that
@@ -265,6 +272,11 @@ doc.destroy();    // release it yourself when every pane is gone
 
 `PptxScrollViewer` takes the same shape with `{ presentation: pres }`
 (`await PptxPresentation.load(...)`).
+
+For presentations, `enableMediaPlayback: true` makes embedded audio and video
+interactive inside the real viewport plus `mediaOverscan` slides. Other mounted
+slides remain static and selectable, avoiding offscreen media blobs and
+animation loops.
 
 Both viewers also expose `relayout()` (force a re-fit when the container resizes
 in a way a `ResizeObserver` cannot see — e.g. a late web-font load),

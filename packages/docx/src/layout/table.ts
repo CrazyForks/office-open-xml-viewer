@@ -448,6 +448,18 @@ function ownerGrid(
   return { owners, occupancy };
 }
 
+function terminalMergeCell(
+  input: TableLayoutInput,
+  owner: CellOwner,
+): TableCellLayoutInput {
+  if (owner.lastRowIndex === owner.rowIndex) return owner.input;
+  return input.rows[owner.lastRowIndex]?.cells.find((cell) => (
+    cell.columnStart === owner.input.columnStart
+    && cell.columnSpan === owner.input.columnSpan
+    && cell.verticalMerge === 'continue'
+  )) ?? owner.input;
+}
+
 function resolvedBoundaries(input: TableLayoutInput): Readonly<{
   horizontal: readonly (readonly (HorizontalBoundary | null)[])[];
   vertical: readonly (readonly (ResolvedBoundary | null)[])[];
@@ -456,20 +468,23 @@ function resolvedBoundaries(input: TableLayoutInput): Readonly<{
   const rowCount = input.rows.length;
   const columnCount = input.columnWidthsPt.length;
   const { owners, occupancy } = ownerGrid(input);
-  const edgesOf = (ownerIndex: number) => {
+  const edgesOf = (ownerIndex: number, terminal = false) => {
     const owner = owners[ownerIndex];
-    return owner
-      ? physicalCellEdges(
-          owner.input,
-          input.borders,
-          input.rows[owner.rowIndex]?.exceptionBorders ?? null,
-          owner.rowIndex,
-          owner.lastRowIndex,
-          rowCount,
-          columnCount,
-          input.bidiVisual,
-        )
-      : null;
+    if (!owner) return null;
+    const cell = terminal ? terminalMergeCell(input, owner) : owner.input;
+    const exceptionRowIndex = terminal && cell !== owner.input
+      ? owner.lastRowIndex
+      : owner.rowIndex;
+    return physicalCellEdges(
+      cell,
+      input.borders,
+      input.rows[exceptionRowIndex]?.exceptionBorders ?? null,
+      owner.rowIndex,
+      owner.lastRowIndex,
+      rowCount,
+      columnCount,
+      input.bidiVisual,
+    );
   };
 
   const horizontal = Array.from({ length: rowCount + 1 }, (_unused, boundary) => (
@@ -477,7 +492,6 @@ function resolvedBoundaries(input: TableLayoutInput): Readonly<{
       const aboveIndex = boundary > 0 ? occupancy[boundary - 1]?.[column] ?? -1 : -1;
       const belowIndex = boundary < rowCount ? occupancy[boundary]?.[column] ?? -1 : -1;
       if (aboveIndex >= 0 && aboveIndex === belowIndex) return null;
-      const above = edgesOf(aboveIndex);
       const below = edgesOf(belowIndex);
       const edge: HorizontalBoundary['edge'] = boundary === 0
         ? 'top'
@@ -485,7 +499,7 @@ function resolvedBoundaries(input: TableLayoutInput): Readonly<{
       return {
         above: {
           owner: owners[aboveIndex] ?? null,
-          border: above?.bottom ?? null,
+          border: edgesOf(aboveIndex, true)?.bottom ?? null,
         },
         below: {
           owner: owners[belowIndex] ?? null,
