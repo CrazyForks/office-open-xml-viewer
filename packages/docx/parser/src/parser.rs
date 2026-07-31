@@ -5,14 +5,13 @@ use ooxml_common::blip::{
 use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::drawing::{parse_xsd_bool, DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use ooxml_common::ns::{attr_ns, is_w_ns, is_wp_ns, math, relationships, wordprocessingml};
-use ooxml_common::zip::read_zip_string;
+use ooxml_common::package_session::{PackageOperation, PackageSessionHandle};
 // Production parses go through `ooxml_common::depth::parse_guarded` (depth-guarded
 // before roxmltree's recursive tree builder). The `XmlDoc` alias survives only for
 // the in-module unit tests, which parse trusted, hand-written fixtures directly.
 #[cfg(test)]
 use roxmltree::Document as XmlDoc;
 use std::collections::{BTreeMap, HashMap};
-use zip::ZipArchive;
 
 use crate::drawing_compatibility::apply_word_direct_group_rect;
 use crate::numbering::{LevelDef, NumberingMap};
@@ -25,13 +24,100 @@ use crate::xml_util::*;
 
 const DEFAULT_FONT_SIZE: f64 = 10.0; // pt fallback
 
-/// The parser's ZIP archive type. Owns its backing bytes (`Cursor<Vec<u8>>`)
-/// rather than borrowing them, so a `DocxArchive` handle can keep a single
-/// opened archive alive across `parse` / `extract_image` / `to_markdown` calls —
-/// the central directory is scanned once and the bytes are copied into WASM once.
-/// `ZipArchive<Cursor<Vec<u8>>>` is fully self-contained (no borrow into the
-/// input), which is what lets the `#[wasm_bindgen]` handle store it as a field.
-pub(crate) type Zip = ZipArchive<std::io::Cursor<Vec<u8>>>;
+/// DOCX-local adapter over one owned, validated package session. Every public
+/// call owns one explicit operation. Focused parser tests lazily receive a
+/// compatibility operation while using the same bounded decoder path.
+pub(crate) struct Zip {
+    session: PackageSessionHandle,
+    operation: Option<PackageOperation>,
+}
+
+impl Zip {
+    #[cfg(test)]
+    pub(crate) fn new(source: std::io::Cursor<Vec<u8>>) -> Result<Self, String> {
+        open_zip(source.into_inner())
+    }
+
+    pub(crate) fn begin_operation(&mut self, name: &str) -> Result<(), String> {
+        if self.operation.is_some() {
+            return Err("docx package operation is already active".to_string());
+        }
+        self.operation = Some(self.session.begin_operation(name)?);
+        Ok(())
+    }
+
+    fn operation(&mut self) -> Result<&PackageOperation, String> {
+        if self.operation.is_none() {
+            #[cfg(test)]
+            {
+                self.operation = Some(self.session.begin_operation("docx-parser-compat")?);
+            }
+            #[cfg(not(test))]
+            {
+                return Err("docx package read requires an active operation".to_string());
+            }
+        }
+        Ok(self
+            .operation
+            .as_ref()
+            .expect("operation initialized above"))
+    }
+
+    fn finish_operation(&mut self) -> Result<(), String> {
+        let Some(mut operation) = self.operation.take() else {
+            return Ok(());
+        };
+        operation.finish()
+    }
+
+    fn cancel_operation(&mut self) {
+        if let Some(mut operation) = self.operation.take() {
+            let _ = operation.cancel();
+        }
+    }
+
+    pub(crate) fn run_operation<T>(
+        &mut self,
+        name: &str,
+        run: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.begin_operation(name)?;
+        let result = run(self);
+        if let Err(resource_error) = self.assert_healthy() {
+            self.cancel_operation();
+            return Err(resource_error);
+        }
+        match result {
+            Ok(value) => match self.finish_operation() {
+                Ok(()) => Ok(value),
+                Err(error) => {
+                    self.cancel_operation();
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                self.cancel_operation();
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn assert_healthy(&self) -> Result<(), String> {
+        self.session.assert_healthy()
+    }
+
+    fn index_for_name(&self, path: &str) -> Option<()> {
+        self.session.contains_entry(path).then_some(())
+    }
+}
+
+fn read_zip_string(zip: &mut Zip, path: &str) -> Result<String, String> {
+    zip.operation()?.read_string(path)
+}
+
+pub(crate) fn read_zip_bytes(zip: &mut Zip, path: &str) -> Result<Vec<u8>, String> {
+    zip.operation()?.read_bytes(path)
+}
 
 /// Section-level header/footer references collected from sectPr.
 /// Maps reference type ("default" | "first" | "even") to the target xml path (e.g. "header1.xml").
@@ -568,8 +654,27 @@ fn resolve_section_refs(
 /// indication that the CONTAINER (not some inner part) is the problem. Naming the
 /// failure lets the caller build a `degraded_document` tagged with the container,
 /// symmetric with how a corrupt `word/document.xml` is tagged inside [`parse`].
+#[cfg(test)]
 pub(crate) fn open_zip(data: Vec<u8>) -> Result<Zip, String> {
-    ooxml_common::zip::open_validated_zip(data).map_err(ooxml_common::zip::tag_container_error)
+    open_zip_with_limits(data, None, None)
+}
+
+pub(crate) fn open_zip_with_limits(
+    data: Vec<u8>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+) -> Result<Zip, String> {
+    PackageSessionHandle::open(
+        data,
+        ooxml_common::resource::OoxmlFormat::Docx,
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+    )
+    .map(|session| Zip {
+        session,
+        operation: None,
+    })
+    .map_err(ooxml_common::zip::tag_container_error)
 }
 
 /// A placeholder [`Document`] for a docx whose ZIP CONTAINER could not be opened
@@ -589,12 +694,27 @@ pub(crate) fn degraded_container_document(parse_error: String) -> Document {
 /// RB7 (MAJOR): a corrupt / truncated CONTAINER degrades to a placeholder
 /// (`degraded_container_document`) rather than erroring, consistent with a corrupt
 /// inner part — the viewer shows a "could not display" page instead of nothing.
+#[cfg(any(test, not(target_arch = "wasm32")))]
 pub fn parse_from_bytes(data: &[u8]) -> Result<Document, String> {
-    let mut zip = match open_zip(data.to_vec()) {
+    parse_from_bytes_with_limits(data, None, None, "parse")
+}
+
+pub(crate) fn parse_from_bytes_with_limits(
+    data: &[u8],
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+    operation: &str,
+) -> Result<Document, String> {
+    let mut zip = match open_zip_with_limits(
+        data.to_vec(),
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+    ) {
         Ok(zip) => zip,
+        Err(e) if e.starts_with("OOXML_RESOURCE_LIMIT:") => return Err(e),
         Err(e) => return Ok(degraded_container_document(e)),
     };
-    parse(&mut zip)
+    zip.run_operation(operation, parse)
 }
 
 pub fn parse(zip: &mut Zip) -> Result<Document, String> {
@@ -16658,7 +16778,7 @@ mod svg_blip_tests {
             put("word/media/footnote.png", PNG_1X1);
             zw.finish().unwrap();
         }
-        let mut zip: Zip = ZipArchive::new(Cursor::new(buf)).unwrap();
+        let mut zip = Zip::new(Cursor::new(buf)).unwrap();
 
         // A part at word/charts/chart1.xml references the media one directory up.
         let mut rel_map: HashMap<String, String> = HashMap::new();
