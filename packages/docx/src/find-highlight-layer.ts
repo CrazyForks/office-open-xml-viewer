@@ -20,7 +20,12 @@
  * distinct emphasis colour so the user can tell it apart from the other hits,
  * matching a browser find bar's current-vs-other highlighting.
  */
-import { sliceHorizontalExtent, overlayPercent, type MatchRunSlice } from '@silurus/ooxml-core';
+import {
+  sliceHorizontalExtent,
+  overlayPercent,
+  type FindHighlightColors,
+  type MatchRunSlice,
+} from '@silurus/ooxml-core';
 import type { DocxTextRunInfo } from './renderer';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
 
@@ -37,12 +42,8 @@ export interface DocxHighlightMatch {
 export const DEFAULT_FIND_HIGHLIGHT = 'rgba(255, 214, 0, 0.42)';
 export const DEFAULT_FIND_ACTIVE_HIGHLIGHT = 'rgba(255, 140, 0, 0.55)';
 
-export interface DocxHighlightColors {
-  /** Fill for non-active matches. */
-  match?: string;
-  /** Fill for the active match. */
-  active?: string;
-}
+/** Format-specific compatibility alias for the shared colour contract. */
+export type DocxHighlightColors = FindHighlightColors;
 
 /**
  * Populate a highlight overlay layer with one box per matched run-slice.

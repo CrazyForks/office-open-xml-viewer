@@ -8,6 +8,7 @@ import { nextVisibleIndex, resolveVisibleIndex, countVisible } from './hidden';
 import type { DimOptions } from './types';
 import {
   type HyperlinkTarget,
+  type FindHighlightColors,
   type FindMatch,
   type FindMatchesOptions,
   type ZoomableViewer,
@@ -54,6 +55,8 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
    * browser's native text selection works on slide content.
    */
   enableTextSelection?: boolean;
+  /** CSS backgrounds for ordinary and active in-document search matches. */
+  findHighlightColors?: FindHighlightColors;
   /**
    * How hidden slides (`<p:sld show="0">`, §19.3.1.38) are presented:
    * - `'show'` (default): drawn like any other slide.
@@ -521,8 +524,14 @@ export class PptxViewer implements ZoomableViewer {
     const layer = this.highlightLayer;
     if (!layer) return;
     const highlights: PptxHighlightMatch[] = this._find.slideHighlights(this.currentSlide);
-    buildPptxHighlightLayer(layer, runs, highlights, cssWidth, cssHeight, (font) =>
-      this._measureForFont(font),
+    buildPptxHighlightLayer(
+      layer,
+      runs,
+      highlights,
+      cssWidth,
+      cssHeight,
+      (font) => this._measureForFont(font),
+      this.opts.findHighlightColors,
     );
   }
 

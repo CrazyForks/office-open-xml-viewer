@@ -489,10 +489,7 @@ export declare interface DocxDocumentModel {
     settings?: DocSettings;
     parseError?: string;
 }
-export declare interface DocxHighlightColors {
-    match?: string;
-    active?: string;
-}
+export declare type DocxHighlightColors = FindHighlightColors;
 export declare interface DocxHighlightMatch {
     slices: MatchRunSlice[];
     active: boolean;
@@ -604,6 +601,7 @@ export declare interface DocxScrollViewerOptions extends Omit<RenderPageOptions,
     paddingRight?: number;
     overscan?: number;
     enableTextSelection?: boolean;
+    findHighlightColors?: FindHighlightColors;
     zoomMin?: number;
     zoomMax?: number;
     enableZoom?: boolean;
@@ -735,6 +733,7 @@ export declare class DocxViewer implements ZoomableViewer {
 export declare interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
     container?: HTMLElement;
     enableTextSelection?: boolean;
+    findHighlightColors?: FindHighlightColors;
     onPageChange?: (index: number, total: number) => void;
     zoomMin?: number;
     zoomMax?: number;
@@ -777,6 +776,10 @@ export declare interface FindMatch<Loc = unknown> {
     matchIndex: number;
     text: string;
     location: Loc;
+}
+export declare interface FindHighlightColors {
+    match?: string;
+    active?: string;
 }
 export declare interface FindMatchesOptions {
     caseSensitive?: boolean;

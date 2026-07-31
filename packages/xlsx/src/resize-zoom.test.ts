@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { colWidthToPx, rowHeightToPx, pxToColWidth, pxToRowHeight } from './renderer.js';
-import { resizeHitIndex, selectionOverlayStyle, zoomStepScale } from './viewer.js';
+import { findHighlightOverlayStyle, resizeHitIndex, selectionOverlayStyle, zoomStepScale } from './viewer.js';
 
 /**
  * Drag-to-resize (issue #567) stores the user's dragged pixel size back into the
@@ -43,6 +43,14 @@ describe('selectionOverlayStyle', () => {
     expect(selectionOverlayStyle('rgb(0,128,0)').background).toBe(
       'color-mix(in srgb, rgb(0,128,0) 8%, transparent)',
     );
+  });
+});
+
+describe('findHighlightOverlayStyle', () => {
+  it('uses caller-provided match and active background colours verbatim', () => {
+    const colors = { match: 'rgba(1, 2, 3, 0.4)', active: '#ff00ff99' };
+    expect(findHighlightOverlayStyle(false, colors).background).toBe(colors.match);
+    expect(findHighlightOverlayStyle(true, colors).background).toBe(colors.active);
   });
 });
 

@@ -238,7 +238,9 @@ transparent, selectable text layer per page/slide for native copy. It works in
 both `mode: 'main'` and `mode: 'worker'`; worker rendering returns the retained
 text-run geometry beside each bitmap. `findText()`, `findNext()`, `findPrev()`,
 and `clearFind()` search the complete document, including virtualized pages or
-slides outside the mounted window.
+slides outside the mounted window. Set `findHighlightColors: { match, active }`
+on any viewer to override the two overlay backgrounds with CSS colors; use an
+alpha color when the canvas text should remain visible through the highlight.
 
 **Hyperlinks.** For DOCX/PPTX the link hit regions live on the text-selection
 overlay, so hyperlink interaction requires `enableTextSelection: true`; when that
