@@ -17,8 +17,8 @@ use crate::text::{
 use crate::theme::PptxSchemeResolver;
 use crate::types::*;
 use crate::{
-    attr, attr_f64, attr_i64, attr_r, child, find_rel_target_by_type, read_zip_str, resolve_path,
-    table_style_presets, PptxZip, TableStyleDef,
+    attr, attr_f64, attr_i64, attr_r, child, find_rel_target_by_type, read_zip_head, read_zip_str,
+    resolve_path, table_style_presets, PptxZip, TableStyleDef,
 };
 use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect, svg_blip_rid};
 use ooxml_common::depth::{parse_guarded, DepthGuard};
@@ -642,7 +642,9 @@ pub(crate) fn resolve_blip_source(
         let r_id = attr_r(&blip, "embed")?;
         let rel_target = rels.get(&r_id)?;
         let path = resolve_path(slide_dir, rel_target);
-        let image_bytes = ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
+        // PNG dimensions live in the first 24 bytes. Do not inflate a potentially
+        // huge image merely to discover its intrinsic size.
+        let image_bytes = read_zip_head(zip, &path, 24).ok()?;
         // Intrinsic PNG size for the ink-fallback centering (None for non-PNG,
         // unchanged from the former png_size_from_data_url semantics).
         let size = png_size_from_bytes(&image_bytes);
@@ -1542,7 +1544,7 @@ pub(crate) fn parse_sp_tree_node(
                     if t.cx > 0 && t.cy > 0 {
                         if let Some(target) = rels.get(rid) {
                             let image_path = resolve_path(slide_dir, target);
-                            if let Ok(bytes) = ooxml_common::zip::read_zip_bytes(zip, &image_path) {
+                            if let Ok(bytes) = read_zip_head(zip, &image_path, 24) {
                                 let mime_type = mime_from_ext(&image_path).to_owned();
                                 let (intrinsic_width_px, intrinsic_height_px) =
                                     match png_size_from_bytes(&bytes) {
@@ -1712,9 +1714,7 @@ pub(crate) fn parse_sp_tree_node(
                         if let Some(rid) = r_id {
                             if let Some(rel_target) = rels.get(&rid) {
                                 let image_path = resolve_path(slide_dir, rel_target);
-                                if let Ok(image_bytes) =
-                                    ooxml_common::zip::read_zip_bytes(zip, &image_path)
-                                {
+                                if let Ok(image_bytes) = read_zip_head(zip, &image_path, 24) {
                                     let mime_type = mime_from_ext(&image_path).to_owned();
                                     let (intrinsic_width_px, intrinsic_height_px) =
                                         match png_size_from_bytes(&image_bytes) {
@@ -2453,7 +2453,7 @@ mod ole_tests {
             }
             w.finish().unwrap();
         }
-        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+        PptxZip::new(Cursor::new(buf)).unwrap()
     }
 
     const OLE_URI: &str = "http://schemas.openxmlformats.org/presentationml/2006/ole";
@@ -2873,7 +2873,7 @@ mod hidden_tests {
                 let w = zip::ZipWriter::new(Cursor::new(&mut buf));
                 w.finish().unwrap();
             }
-            zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+            PptxZip::new(Cursor::new(buf)).unwrap()
         };
         let rels = HashMap::new();
         let mut out = Vec::new();
@@ -3079,7 +3079,7 @@ mod smartart_hidden_tests {
                 let w = zip::ZipWriter::new(Cursor::new(&mut buf));
                 w.finish().unwrap();
             }
-            zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+            PptxZip::new(Cursor::new(buf)).unwrap()
         };
         parse_smartart_drawing(&xml, &gf_xfrm, &theme, &mut out, &mut zip);
         out
@@ -3189,7 +3189,7 @@ mod strict_namespace_tests {
             }
             w.finish().unwrap();
         }
-        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+        PptxZip::new(Cursor::new(buf)).unwrap()
     }
 
     /// Parse each child of the `<p:spTree>` root, mirroring the real slide

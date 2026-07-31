@@ -581,7 +581,7 @@ mod tests {
             }
             w.finish().unwrap();
         }
-        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+        PptxZip::new(Cursor::new(buf)).unwrap()
     }
 
     const DGM_NS: &str = concat!(

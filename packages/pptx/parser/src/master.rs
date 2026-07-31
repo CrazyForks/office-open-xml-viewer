@@ -1787,7 +1787,7 @@ mod placeholder_geometry_tests {
     fn empty_zip() -> PptxZip {
         let writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let cursor = writer.finish().unwrap();
-        zip::ZipArchive::new(cursor).unwrap()
+        PptxZip::new(cursor).unwrap()
     }
 
     fn parse_layout_geometry(layout_shape: &str) -> LayoutPlaceholders {
