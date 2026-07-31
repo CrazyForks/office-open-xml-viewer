@@ -8,16 +8,22 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 #[cfg(test)]
 use std::io::Cursor;
-use std::io::{BufRead, BufReader, Read};
+#[cfg(test)]
+use std::io::Read;
+use std::io::{BufRead, BufReader};
 use std::rc::Rc;
 
+use ooxml_common::bounded_xml::{
+    self, BoundedXmlError, BoundedXmlReadError, BoundedXmlReader, MceScope as StreamedMceScope,
+    NamespaceContext as StreamedNamespaceContext,
+};
 use ooxml_common::depth::{parse_guarded, MAX_XML_DEPTH};
+use ooxml_common::mce::ChoiceRequiresClassification;
 use ooxml_common::ns::is_x_ns;
 use ooxml_common::package_session::{PackageEntryStream, PackageLimitReporter};
-use ooxml_common::resource::{observe_hard_limit, HardResourceLimitKind};
+use ooxml_common::resource::HardResourceLimitKind;
 use quick_xml::events::Event;
-use quick_xml::name::ResolveResult;
-use quick_xml::{NsReader, Writer};
+use quick_xml::NsReader;
 
 use crate::{
     attr_bool, parse_row_cells, resolve_implicit_ordinal, xlsx_understands_ns, Row, SharedString,
@@ -152,6 +158,19 @@ fn worksheet_projector_limit(
     }
 }
 
+fn map_bounded_xml_error(
+    error: BoundedXmlError,
+    kind: WorksheetProjectorLimitKind,
+    part: Option<&str>,
+) -> WorksheetProjectorError {
+    match error {
+        BoundedXmlError::Xml(message) => WorksheetProjectorError::Xml(message),
+        BoundedXmlError::Limit { limit, observed } => {
+            worksheet_projector_limit(kind, part, limit, observed)
+        }
+    }
+}
+
 /// Map the projecter's internal hard-limit vocabulary exactly once at its
 /// state-machine boundary. Package-backed callers poison their owning package
 /// operation through the explicit capability; compatibility callers retain the
@@ -180,107 +199,12 @@ fn report_projector_limit(
             HardResourceLimitKind::WorksheetShellProjectionBytes
         }
     };
-    let limit = u64::try_from(limit).unwrap_or(u64::MAX);
-    let observed = u64::try_from(observed).unwrap_or(u64::MAX);
-    let report = if let Some(reporter) = reporter {
-        reporter.observe_hard_limit(common_kind, part.as_deref(), limit, observed)
-    } else {
-        observe_hard_limit(common_kind, part.as_deref(), limit, observed)
-    };
+    let report =
+        bounded_xml::report_hard_limit(reporter, common_kind, part.as_deref(), limit, observed);
     if let Err(message) = report {
         return WorksheetProjectorError::Xml(message);
     }
     error
-}
-
-/// A `BufRead` adapter whose allowance is reset before every quick-xml event.
-/// Once one event consumes the allowance, the next `fill_buf` fails before
-/// quick-xml can append another byte to its caller-owned event buffer.
-struct EventBudgetReader<R> {
-    inner: R,
-    limit: usize,
-    remaining: usize,
-    exceeded: bool,
-    current_event_bytes: usize,
-    max_event_bytes: usize,
-}
-
-impl<R> EventBudgetReader<R> {
-    fn new(inner: R, limit: usize) -> Self {
-        Self {
-            inner,
-            limit,
-            remaining: limit,
-            exceeded: false,
-            current_event_bytes: 0,
-            max_event_bytes: 0,
-        }
-    }
-
-    fn reset_event_budget(&mut self) {
-        self.remaining = self.limit;
-        self.exceeded = false;
-        self.current_event_bytes = 0;
-    }
-
-    fn exceeded(&self) -> bool {
-        self.exceeded
-    }
-
-    #[cfg(test)]
-    fn max_event_bytes(&self) -> usize {
-        self.max_event_bytes
-    }
-}
-
-impl<R: BufRead> Read for EventBudgetReader<R> {
-    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
-        let available = self.fill_buf()?;
-        let count = available.len().min(output.len());
-        output[..count].copy_from_slice(&available[..count]);
-        self.consume(count);
-        Ok(count)
-    }
-}
-
-impl<R: BufRead> BufRead for EventBudgetReader<R> {
-    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-        if self.remaining == 0 {
-            if self.inner.fill_buf()?.is_empty() {
-                // Exact exhaustion at true source EOF is not proof of limit+1.
-                // Let quick-xml classify an unterminated exact-limit token as
-                // ordinary malformed XML.
-                return Ok(&[]);
-            }
-            self.exceeded = true;
-            return Err(std::io::Error::other(
-                "worksheet XML event exceeded its hidden byte ceiling",
-            ));
-        }
-        let available = self.inner.fill_buf()?;
-        Ok(&available[..available.len().min(self.remaining)])
-    }
-
-    fn consume(&mut self, amount: usize) {
-        let consumed = amount.min(self.remaining);
-        self.inner.consume(consumed);
-        self.remaining -= consumed;
-        self.current_event_bytes = self.current_event_bytes.saturating_add(consumed);
-        self.max_event_bytes = self.max_event_bytes.max(self.current_event_bytes);
-    }
-}
-
-fn resolved_namespace_is(
-    namespace: &ResolveResult<'_>,
-    predicate: impl FnOnce(&str) -> bool,
-) -> bool {
-    match namespace {
-        ResolveResult::Bound(namespace) => std::str::from_utf8(namespace.as_ref())
-            .ok()
-            .map(predicate)
-            .unwrap_or(false),
-        ResolveResult::Unbound | ResolveResult::Unknown(_) => false,
-    }
 }
 
 /// Keep each temporary roxmltree arena small while amortizing its allocation
@@ -323,83 +247,6 @@ struct ActiveStreamedRow {
     xml: Vec<u8>,
 }
 
-#[derive(Default)]
-struct StreamedMceScope {
-    parent: Option<Rc<StreamedMceScope>>,
-    ignorable: HashSet<String>,
-    process_content: HashSet<(String, String)>,
-    active_bytes: usize,
-}
-
-impl StreamedMceScope {
-    fn is_ignorable(&self, namespace: &str) -> bool {
-        self.ignorable.contains(namespace)
-            || self
-                .parent
-                .as_deref()
-                .is_some_and(|parent| parent.is_ignorable(namespace))
-    }
-
-    fn processes_content(&self, namespace: &str, local_name: &str) -> bool {
-        self.process_content
-            .iter()
-            .any(|(candidate_namespace, candidate_local)| {
-                candidate_namespace == namespace
-                    && (candidate_local == local_name || candidate_local == "*")
-            })
-            || self
-                .parent
-                .as_deref()
-                .is_some_and(|parent| parent.processes_content(namespace, local_name))
-    }
-}
-
-#[derive(Default)]
-struct StreamedNamespaceContext {
-    parent: Option<Rc<StreamedNamespaceContext>>,
-    declarations: Vec<(Option<String>, String)>,
-    active_bytes: usize,
-}
-
-impl StreamedNamespaceContext {
-    fn namespace_for_prefix(&self, prefix: &str) -> Option<&str> {
-        self.declarations
-            .iter()
-            .rev()
-            .find_map(|(candidate, namespace)| {
-                (candidate.as_deref() == Some(prefix)).then_some(namespace.as_str())
-            })
-            .or_else(|| {
-                self.parent
-                    .as_deref()
-                    .and_then(|parent| parent.namespace_for_prefix(prefix))
-            })
-    }
-
-    fn effective_bindings(&self) -> Vec<(Option<String>, String)> {
-        let mut chain = Vec::new();
-        let mut context = Some(self);
-        while let Some(current) = context {
-            chain.push(current);
-            context = current.parent.as_deref();
-        }
-        let mut bindings: Vec<(Option<String>, String)> = Vec::new();
-        for current in chain.into_iter().rev() {
-            for (prefix, namespace) in &current.declarations {
-                if let Some(existing) = bindings
-                    .iter_mut()
-                    .find(|(candidate, _)| candidate == prefix)
-                {
-                    existing.1.clone_from(namespace);
-                } else {
-                    bindings.push((prefix.clone(), namespace.clone()));
-                }
-            }
-        }
-        bindings
-    }
-}
-
 enum StreamedElementKind {
     Retained {
         namespace: Option<String>,
@@ -440,25 +287,6 @@ impl StreamedElementFrame {
             self.kind,
             StreamedElementKind::Retained { opaque: true, .. }
         )
-    }
-}
-
-fn streamed_namespace_uri(namespace: &ResolveResult<'_>) -> Result<Option<String>, String> {
-    match namespace {
-        // `NsReader` exposes the lexical namespace declaration bytes. MCE
-        // comparisons use the namespace name after XML entity expansion, just
-        // like `Attribute::unescape_value` used by our persistent context.
-        ResolveResult::Bound(namespace) => {
-            let namespace = std::str::from_utf8(namespace.as_ref()).map_err(|e| e.to_string())?;
-            quick_xml::escape::unescape(namespace)
-                .map(|namespace| Some(namespace.into_owned()))
-                .map_err(|e| format!("worksheet namespace URI: {e}"))
-        }
-        ResolveResult::Unbound => Ok(None),
-        ResolveResult::Unknown(prefix) => Err(format!(
-            "worksheet XML uses unbound namespace prefix {}",
-            String::from_utf8_lossy(prefix.as_ref())
-        )),
     }
 }
 
@@ -547,12 +375,14 @@ fn streamed_mce_attributes<R>(
     let mut process_content = HashSet::new();
     let mut must_understand = Vec::new();
     let mut declared_process_content = Vec::new();
-    let base_context_bytes = context.active_bytes.saturating_add(inherited.active_bytes);
+    let base_context_bytes = context
+        .active_bytes()
+        .saturating_add(inherited.active_bytes());
     let mut derived_bytes = 0usize;
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|e| format!("worksheet MCE attribute: {e}"))?;
         let (namespace, local_name) = reader.resolve_attribute(attribute.key);
-        if !resolved_namespace_is(&namespace, |namespace| namespace == MCE_NS) {
+        if !bounded_xml::resolved_namespace_is(&namespace, |namespace| namespace == MCE_NS) {
             continue;
         }
         let value = attribute
@@ -604,16 +434,7 @@ fn streamed_mce_attributes<R>(
         }
         process_content.insert((namespace, local_name));
     }
-    let scope = if ignorable.is_empty() && process_content.is_empty() {
-        Rc::clone(inherited)
-    } else {
-        Rc::new(StreamedMceScope {
-            parent: Some(Rc::clone(inherited)),
-            ignorable,
-            process_content,
-            active_bytes: inherited.active_bytes.saturating_add(derived_bytes),
-        })
-    };
+    let scope = StreamedMceScope::derive(inherited, ignorable, process_content, derived_bytes);
     Ok(StreamedMceAttributes {
         scope,
         must_understand,
@@ -667,7 +488,7 @@ fn ensure_unwrapped_element_has_no_xml_context_attributes<R>(
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|e| format!("worksheet MCE attribute: {e}"))?;
         let (namespace, local_name) = reader.resolve_attribute(attribute.key);
-        if resolved_namespace_is(&namespace, |namespace| namespace == XML_NS)
+        if bounded_xml::resolved_namespace_is(&namespace, |namespace| namespace == XML_NS)
             && matches!(local_name.as_ref(), b"base" | b"lang" | b"space")
         {
             return Err(
@@ -685,82 +506,16 @@ fn inject_moved_element_namespaces(
     processed_parent_context: Option<&StreamedNamespaceContext>,
     part: Option<&str>,
 ) -> Result<(), WorksheetProjectorError> {
-    let mut locally_declared = HashSet::new();
-    for attribute in element.attributes() {
-        let attribute = attribute.map_err(|e| {
-            WorksheetProjectorError::Xml(format!("worksheet namespace attribute: {e}"))
-        })?;
-        let key = attribute.key.as_ref();
-        if key == b"xmlns" {
-            locally_declared.insert(None);
-        } else if let Some(prefix) = key.strip_prefix(b"xmlns:") {
-            locally_declared.insert(Some(
-                std::str::from_utf8(prefix)
-                    .map_err(|e| WorksheetProjectorError::Xml(e.to_string()))?
-                    .to_string(),
-            ));
-        }
-    }
-    let element_namespaces = element_context.effective_bindings();
-    let processed_parent_namespaces = processed_parent_context
-        .map(StreamedNamespaceContext::effective_bindings)
-        .unwrap_or_default();
-    let mut missing = Vec::new();
-    let mut injected_bytes = 0usize;
-    for (prefix, namespace) in element_namespaces {
-        let parent_preserves_binding =
-            processed_parent_namespaces
-                .iter()
-                .any(|(parent_prefix, parent_namespace)| {
-                    parent_prefix == &prefix && parent_namespace == &namespace
-                });
-        if locally_declared.contains(&prefix) || parent_preserves_binding {
-            continue;
-        }
-        let escaped_namespace_bytes = quick_xml::escape::escape(&namespace).len();
-        injected_bytes = injected_bytes
-            .checked_add(escaped_namespace_bytes)
-            .and_then(|total| total.checked_add(prefix.as_ref().map_or(9, |p| p.len() + 10)))
-            .unwrap_or(usize::MAX);
-        missing.push((prefix, namespace));
-    }
-    let observed = element.len().saturating_add(injected_bytes);
-    if observed > STREAMED_XML_CONTEXT_BYTES {
-        return Err(worksheet_projector_limit(
-            WorksheetProjectorLimitKind::XmlContextBytes,
-            part,
-            STREAMED_XML_CONTEXT_BYTES,
-            observed,
-        ));
-    }
-    // Preflight and collect every missing declaration before mutating the
-    // start tag, so an allocation/limit failure cannot leave partial output.
-    for (prefix, namespace) in &missing {
-        match prefix {
-            Some(prefix) => {
-                let key = format!("xmlns:{prefix}");
-                element.push_attribute((key.as_str(), namespace.as_str()));
-            }
-            None => element.push_attribute(("xmlns", namespace.as_str())),
-        }
-    }
-    Ok(())
-}
-
-fn projected_event_bytes(event: &Event<'_>) -> usize {
-    match event {
-        Event::Start(event) => event.len().saturating_add(2),
-        Event::End(event) => event.len().saturating_add(3),
-        Event::Empty(event) => event.len().saturating_add(3),
-        Event::Text(event) => event.len(),
-        Event::Comment(event) => event.len().saturating_add(7),
-        Event::CData(event) => event.len().saturating_add(12),
-        Event::Decl(event) => event.len().saturating_add(4),
-        Event::PI(event) => event.len().saturating_add(4),
-        Event::DocType(event) => event.len().saturating_add(11),
-        Event::GeneralRef(event) => event.len().saturating_add(2),
-        Event::Eof => 0,
-    }
+    bounded_xml::inject_missing_namespaces(
+        element,
+        element_context,
+        processed_parent_context,
+        STREAMED_XML_CONTEXT_BYTES,
+        "worksheet",
+    )
+    .map_err(|error| {
+        map_bounded_xml_error(error, WorksheetProjectorLimitKind::XmlContextBytes, part)
+    })
 }
 
 fn append_projected_event(
@@ -771,22 +526,8 @@ fn append_projected_event(
     kind: WorksheetProjectorLimitKind,
     part: Option<&str>,
 ) -> Result<(), WorksheetProjectorError> {
-    let event_bytes = projected_event_bytes(event);
-    let observed = retained_overhead
-        .checked_add(target.len())
-        .and_then(|current| current.checked_add(event_bytes))
-        .unwrap_or(usize::MAX);
-    if observed > limit {
-        return Err(worksheet_projector_limit(kind, part, limit, observed));
-    }
-    // Reserve only after the aggregate preflight. Writer then cannot trigger a
-    // geometric Vec growth while emitting this already-accounted event.
-    target
-        .try_reserve_exact(event_bytes)
-        .map_err(|error| WorksheetProjectorError::Xml(error.to_string()))?;
-    Writer::new(target)
-        .write_event(event.borrow())
-        .map_err(|error| WorksheetProjectorError::Xml(format!("worksheet XML projection: {error}")))
+    bounded_xml::append_projected_event(target, event, retained_overhead, limit, "worksheet")
+        .map_err(|error| map_bounded_xml_error(error, kind, part))
 }
 
 /// Apply the same application-configuration predicate as the shared DOM MCE
@@ -799,30 +540,20 @@ fn streamed_choice_is_understood<R>(
     choice: &quick_xml::events::BytesStart<'_>,
     context: &StreamedNamespaceContext,
 ) -> Result<bool, String> {
-    let mut requires = None;
-    for attribute in choice.attributes() {
-        let attribute = attribute.map_err(|e| format!("worksheet MCE Choice attribute: {e}"))?;
-        if attribute.key.as_ref() == b"Requires" {
-            requires = Some(
-                attribute
-                    .unescape_value()
-                    .map_err(|e| format!("worksheet MCE Requires: {e}"))?
-                    .into_owned(),
-            );
+    match bounded_xml::classify_mce_choice_requires(
+        choice,
+        context,
+        &worksheet_understands_ns,
+        "worksheet",
+    )? {
+        ChoiceRequiresClassification::Missing | ChoiceRequiresClassification::Blank => {
+            Err("worksheet MCE Choice must have a non-empty Requires attribute".to_string())
         }
+        ChoiceRequiresClassification::Unresolved | ChoiceRequiresClassification::Unsupported => {
+            Ok(false)
+        }
+        ChoiceRequiresClassification::Understood => Ok(true),
     }
-    let requires = requires.ok_or_else(|| {
-        "worksheet MCE Choice must have a non-empty Requires attribute".to_string()
-    })?;
-    let prefixes: Vec<&str> = requires.split_whitespace().collect();
-    if prefixes.is_empty() {
-        return Err("worksheet MCE Choice must have a non-empty Requires attribute".to_string());
-    }
-    Ok(prefixes.iter().all(|required| {
-        context
-            .namespace_for_prefix(required)
-            .is_some_and(worksheet_understands_ns)
-    }))
 }
 
 /// Append a tiny namespace-preserving wrapper around one raw `<row>`.
@@ -957,61 +688,10 @@ fn derive_streamed_namespace_context(
     inherited: &Rc<StreamedNamespaceContext>,
     part: Option<&str>,
 ) -> Result<Rc<StreamedNamespaceContext>, WorksheetProjectorError> {
-    let mut local_context_bytes = 0usize;
-    for attribute in element.attributes() {
-        let attribute = attribute.map_err(|error| {
-            WorksheetProjectorError::Xml(format!("worksheet namespace attribute: {error}"))
-        })?;
-        let key = attribute.key.as_ref();
-        if key == b"xmlns" || key.starts_with(b"xmlns:") {
-            local_context_bytes = local_context_bytes
-                .checked_add(key.len())
-                .and_then(|total| total.checked_add(attribute.value.len()))
-                .unwrap_or(usize::MAX);
-        }
-    }
-    if local_context_bytes == 0 {
-        return Ok(Rc::clone(inherited));
-    }
-    let active_bytes = inherited.active_bytes.saturating_add(local_context_bytes);
-    if active_bytes > STREAMED_XML_CONTEXT_BYTES {
-        return Err(worksheet_projector_limit(
-            WorksheetProjectorLimitKind::XmlContextBytes,
-            part,
-            STREAMED_XML_CONTEXT_BYTES,
-            active_bytes,
-        ));
-    }
-    let mut declarations = Vec::new();
-    for attribute in element.attributes() {
-        let attribute = attribute.map_err(|error| {
-            WorksheetProjectorError::Xml(format!("worksheet namespace attribute: {error}"))
-        })?;
-        let key = attribute.key.as_ref();
-        let prefix = if key == b"xmlns" {
-            Some(None)
-        } else if let Some(prefix) = key.strip_prefix(b"xmlns:") {
-            Some(Some(
-                std::str::from_utf8(prefix)
-                    .map_err(|error| WorksheetProjectorError::Xml(error.to_string()))?
-                    .to_string(),
-            ))
-        } else {
-            None
-        };
-        if let Some(prefix) = prefix {
-            let namespace = attribute
-                .unescape_value()
-                .map_err(|error| WorksheetProjectorError::Xml(error.to_string()))?
-                .into_owned();
-            declarations.push((prefix, namespace));
-        }
-    }
-    Ok(Rc::new(StreamedNamespaceContext {
-        parent: Some(Rc::clone(inherited)),
-        declarations,
-        active_bytes,
-    }))
+    StreamedNamespaceContext::derive(element, inherited, STREAMED_XML_CONTEXT_BYTES, "worksheet")
+        .map_err(|error| {
+            map_bounded_xml_error(error, WorksheetProjectorLimitKind::XmlContextBytes, part)
+        })
 }
 
 struct StreamedElementIdentity<'a> {
@@ -1037,7 +717,7 @@ fn classify_streamed_element<R>(
     let inherited = frames
         .last()
         .map(|frame| Rc::clone(&frame.scope))
-        .unwrap_or_else(|| Rc::new(StreamedMceScope::default()));
+        .unwrap_or_else(StreamedMceScope::root);
     if !visible {
         return Ok((StreamedElementKind::Ignored, inherited));
     }
@@ -1416,8 +1096,7 @@ where
     S: AsRef<[SharedString]>,
     T: AsRef<[String]>,
 {
-    reader: Option<NsReader<EventBudgetReader<R>>>,
-    event_buf: Vec<u8>,
+    reader: Option<BoundedXmlReader<R>>,
     frames: Vec<StreamedElementFrame>,
     processed_root_count: usize,
     sheet_data_count: usize,
@@ -1492,16 +1171,9 @@ where
         part: Option<String>,
         limit_reporter: Option<PackageLimitReporter>,
     ) -> Self {
-        let mut reader = NsReader::from_reader(EventBudgetReader::new(source, event_limit));
-        // Cell text, formulas, rich strings, CDATA and `xml:space` must reach
-        // the established roxmltree row parser byte-for-byte.
-        reader.config_mut().trim_text(false);
+        let reader = BoundedXmlReader::new(source, event_limit, "worksheet");
         Self {
             reader: Some(reader),
-            // Pre-reserve the exact lexical-event ceiling so Vec's geometric
-            // growth policy cannot round an otherwise bounded token allocation
-            // above the named hard limit.
-            event_buf: Vec::with_capacity(event_limit),
             frames: Vec::new(),
             processed_root_count: 0,
             sheet_data_count: 0,
@@ -1571,37 +1243,33 @@ where
             .reader
             .as_mut()
             .expect("reading projector owns an XML reader");
-        reader.get_mut().reset_event_budget();
-        let read = reader.read_resolved_event_into(&mut self.event_buf);
-        let (namespace, event) = match read {
+        let read = match reader.read_event() {
             Ok(read) => read,
-            Err(error) => {
+            Err(BoundedXmlReadError::EventLimit { limit, observed }) => {
                 #[cfg(test)]
                 {
-                    self.max_event_bytes_observed = reader.get_mut().max_event_bytes();
+                    self.max_event_bytes_observed = reader.max_event_bytes();
                 }
-                if reader.get_mut().exceeded() {
-                    let limit = reader.get_mut().limit;
-                    return Err(worksheet_projector_limit(
-                        WorksheetProjectorLimitKind::XmlEventBytes,
-                        self.part.as_deref(),
-                        limit,
-                        limit.saturating_add(1),
-                    ));
+                return Err(worksheet_projector_limit(
+                    WorksheetProjectorLimitKind::XmlEventBytes,
+                    self.part.as_deref(),
+                    limit,
+                    observed,
+                ));
+            }
+            Err(BoundedXmlReadError::Xml(error)) => {
+                #[cfg(test)]
+                {
+                    self.max_event_bytes_observed = reader.max_event_bytes();
                 }
-                return Err(WorksheetProjectorError::Xml(format!(
-                    "worksheet XML stream: {error}"
-                )));
+                return Err(WorksheetProjectorError::Xml(error));
             }
         };
-        let namespace = streamed_namespace_uri(&namespace)?;
-        let event = event.into_owned();
         #[cfg(test)]
         {
-            self.max_event_bytes_observed = reader.get_mut().max_event_bytes();
+            self.max_event_bytes_observed = reader.max_event_bytes();
         }
-        self.event_buf.clear();
-        Ok((namespace, event))
+        Ok((read.namespace, read.event))
     }
 
     fn process_start(
@@ -1644,7 +1312,8 @@ where
         let reader = self
             .reader
             .as_ref()
-            .expect("reading projector owns an XML reader");
+            .expect("reading projector owns an XML reader")
+            .reader();
         let (mut kind, scope) = classify_streamed_element(
             reader,
             &start,
@@ -1661,8 +1330,8 @@ where
         {
             self.max_context_bytes_observed = self.max_context_bytes_observed.max(
                 namespace_context
-                    .active_bytes
-                    .saturating_add(scope.active_bytes),
+                    .active_bytes()
+                    .saturating_add(scope.active_bytes()),
             );
         }
         let mut role = None;
@@ -1763,7 +1432,8 @@ where
         let reader = self
             .reader
             .as_ref()
-            .expect("reading projector owns an XML reader");
+            .expect("reading projector owns an XML reader")
+            .reader();
         let (mut kind, _scope) = classify_streamed_element(
             reader,
             &empty,
@@ -1780,8 +1450,8 @@ where
         {
             self.max_context_bytes_observed = self.max_context_bytes_observed.max(
                 namespace_context
-                    .active_bytes
-                    .saturating_add(_scope.active_bytes),
+                    .active_bytes()
+                    .saturating_add(_scope.active_bytes()),
             );
         }
 
@@ -2034,7 +1704,6 @@ where
         // its decoder/lease is released even when the failed projector handle
         // itself remains stored for a later diagnostic call.
         self.reader.take();
-        self.event_buf = Vec::new();
         self.frames = Vec::new();
         self.active_row = None;
         self.sheet_data_depth = None;
@@ -2351,8 +2020,6 @@ mod worksheet_streaming_tests {
                 observed: STREAMED_XML_EVENT_BYTES + 1,
             }
         );
-        assert!(projector.event_buf.len() <= STREAMED_XML_EVENT_BYTES);
-        assert!(projector.event_buf.capacity() <= STREAMED_XML_EVENT_BYTES);
         assert_eq!(projector.max_event_bytes(), STREAMED_XML_EVENT_BYTES);
     }
 
@@ -2378,8 +2045,7 @@ mod worksheet_streaming_tests {
                 observed: STREAMED_XML_EVENT_BYTES + 1,
             }
         );
-        assert!(projector.event_buf.len() <= STREAMED_XML_EVENT_BYTES);
-        assert!(projector.event_buf.capacity() <= STREAMED_XML_EVENT_BYTES);
+        assert_eq!(projector.max_event_bytes(), STREAMED_XML_EVENT_BYTES);
     }
 
     #[test]
@@ -2850,8 +2516,6 @@ mod worksheet_streaming_tests {
             .next_item()
             .expect_err("malformed persistent projector must fail");
         assert!(projector.reader.is_none());
-        assert!(projector.event_buf.is_empty());
-        assert_eq!(projector.event_buf.capacity(), 0);
         assert!(projector.frames.is_empty());
         assert!(projector.active_row.is_none());
         assert!(projector.shell_xml.is_empty());
@@ -3007,11 +2671,16 @@ mod worksheet_streaming_tests {
     #[test]
     fn moved_namespace_injection_limit_counts_escaped_serialized_uri() {
         let namespace = "urn:a&b".to_string();
-        let context = StreamedNamespaceContext {
-            parent: None,
-            declarations: vec![(Some("f".to_string()), namespace.clone())],
-            active_bytes: namespace.len(),
-        };
+        let root = StreamedNamespaceContext::root();
+        let declaration =
+            quick_xml::events::BytesStart::from_content(r#"r xmlns:f="urn:a&amp;b""#, 1);
+        let context = StreamedNamespaceContext::derive(
+            &declaration,
+            &root,
+            STREAMED_XML_CONTEXT_BYTES,
+            "worksheet",
+        )
+        .expect("escaped namespace declaration is valid");
         let injected_bytes = 10 + "f".len() + quick_xml::escape::escape(&namespace).len();
 
         let exact_base = quick_xml::events::BytesStart::new("x:worksheet");
@@ -3410,6 +3079,22 @@ mod worksheet_streaming_tests {
                 .expect_err("Choice requires a non-empty Requires attribute");
             assert!(error.contains("Choice must have a non-empty Requires attribute"));
         }
+    }
+
+    #[test]
+    fn unbound_choice_requires_selects_fallback() {
+        let xml = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
+          <mc:AlternateContent>
+            <mc:Choice Requires="missing"><x:sheetData/></mc:Choice>
+            <mc:Fallback><x:sheetData><x:row r="7"/></x:sheetData></mc:Fallback>
+          </mc:AlternateContent>
+        </x:worksheet>"#;
+        let streamed = stream_sheet_data(xml, &[], &[])
+            .expect("unresolved Requires prefix must allow Fallback");
+        assert_eq!(streamed.rows.len(), 1);
+        assert_eq!(streamed.rows[0].index, 7);
     }
 
     #[test]

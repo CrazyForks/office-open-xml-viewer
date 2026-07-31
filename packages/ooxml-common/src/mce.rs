@@ -33,6 +33,58 @@
 
 use roxmltree::Node;
 
+/// Namespace support result for one prefix named by `Choice/@Requires`.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequiredNamespaceSupport {
+    Unresolved,
+    Unsupported,
+    Understood,
+}
+
+/// Format-neutral classification of one `Choice/@Requires` value.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChoiceRequiresClassification {
+    Missing,
+    Blank,
+    Unresolved,
+    Unsupported,
+    Understood,
+}
+
+/// Classify the §9.3 all-required-namespaces predicate without deciding how a
+/// host treats non-conformant missing or blank attributes.
+#[doc(hidden)]
+pub fn classify_choice_requires(
+    requires: Option<&str>,
+    mut support_for_prefix: impl FnMut(&str) -> RequiredNamespaceSupport,
+) -> ChoiceRequiresClassification {
+    let Some(requires) = requires else {
+        return ChoiceRequiresClassification::Missing;
+    };
+    let mut prefixes = requires.split_whitespace().peekable();
+    if prefixes.peek().is_none() {
+        return ChoiceRequiresClassification::Blank;
+    }
+    let mut unsupported = false;
+    let mut unresolved = false;
+    for prefix in prefixes {
+        match support_for_prefix(prefix) {
+            RequiredNamespaceSupport::Unresolved => unresolved = true,
+            RequiredNamespaceSupport::Unsupported => unsupported = true,
+            RequiredNamespaceSupport::Understood => {}
+        }
+    }
+    if unresolved {
+        ChoiceRequiresClassification::Unresolved
+    } else if unsupported {
+        ChoiceRequiresClassification::Unsupported
+    } else {
+        ChoiceRequiresClassification::Understood
+    }
+}
+
 /// Select the active branch of an `<mc:AlternateContent>` per ECMA-376 Part 3
 /// §9.3 (Step 2), returning the selected `<mc:Choice>` / `<mc:Fallback>` element
 /// node, or `None` when neither a selectable Choice nor a Fallback exists.
@@ -62,18 +114,14 @@ pub fn select_alternate_content<'a, 'i>(
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "Choice")
     {
-        let requires = choice.attribute("Requires").unwrap_or("");
-        let prefixes: Vec<&str> = requires.split_whitespace().collect();
-        // §9.3(1): each Requires prefix must resolve, via an in-scope namespace
-        // declaration, to an understood namespace. A conformant Choice lists ≥1
-        // prefix; an empty list can never be "all understood".
-        let all_understood = !prefixes.is_empty()
-            && prefixes.iter().all(|prefix| {
-                choice
-                    .lookup_namespace_uri(Some(*prefix))
-                    .is_some_and(understood)
-            });
-        if all_understood {
+        let classification = classify_choice_requires(choice.attribute("Requires"), |prefix| {
+            match choice.lookup_namespace_uri(Some(prefix)) {
+                None => RequiredNamespaceSupport::Unresolved,
+                Some(namespace) if understood(namespace) => RequiredNamespaceSupport::Understood,
+                Some(_) => RequiredNamespaceSupport::Unsupported,
+            }
+        });
+        if classification == ChoiceRequiresClassification::Understood {
             // §9.3(2): first matching Choice wins; later Choices are ignored.
             return Some(choice);
         }
@@ -215,6 +263,17 @@ mod tests {
     }
 
     #[test]
+    fn unbound_requires_prefix_is_never_selected() {
+        let xml = format!(
+            r#"<mc:AlternateContent {NS}>
+                 <mc:Choice id="c1" Requires="missing"><x/></mc:Choice>
+                 <mc:Fallback id="fb"><x/></mc:Fallback>
+               </mc:AlternateContent>"#
+        );
+        assert_eq!(select_id(&xml, &["urn:known:one"]).as_deref(), Some("fb"));
+    }
+
+    #[test]
     fn no_selectable_choice_and_no_fallback_returns_none() {
         let xml = format!(
             r#"<mc:AlternateContent {NS}>
@@ -244,5 +303,41 @@ mod tests {
                </mc:AlternateContent>"#
         );
         assert_eq!(select_id(&xml, &[]).as_deref(), Some("fb"));
+    }
+
+    #[test]
+    fn requires_classification_distinguishes_host_mapping_cases() {
+        assert_eq!(
+            classify_choice_requires(None, |_| RequiredNamespaceSupport::Understood),
+            ChoiceRequiresClassification::Missing
+        );
+        assert_eq!(
+            classify_choice_requires(Some("  "), |_| RequiredNamespaceSupport::Understood),
+            ChoiceRequiresClassification::Blank
+        );
+        assert_eq!(
+            classify_choice_requires(Some("k missing"), |prefix| {
+                if prefix == "missing" {
+                    RequiredNamespaceSupport::Unresolved
+                } else {
+                    RequiredNamespaceSupport::Understood
+                }
+            }),
+            ChoiceRequiresClassification::Unresolved
+        );
+        assert_eq!(
+            classify_choice_requires(Some("k u"), |prefix| {
+                if prefix == "u" {
+                    RequiredNamespaceSupport::Unsupported
+                } else {
+                    RequiredNamespaceSupport::Understood
+                }
+            }),
+            ChoiceRequiresClassification::Unsupported
+        );
+        assert_eq!(
+            classify_choice_requires(Some("k1 k2"), |_| { RequiredNamespaceSupport::Understood }),
+            ChoiceRequiresClassification::Understood
+        );
     }
 }

@@ -7,6 +7,8 @@
 //! consuming crate.
 
 pub mod blip;
+#[doc(hidden)]
+pub mod bounded_xml;
 pub mod chart;
 pub mod color;
 pub mod depth;
