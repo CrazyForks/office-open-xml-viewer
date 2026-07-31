@@ -35,7 +35,13 @@ import Nav from '../components/Nav.astro';
         <span class="panel-badge">live · WASM</span>
         <button class="try-reset" id="reset">Try another →</button>
       </div>
-      <div class="try-stage" id="stage"></div>
+      <div class="try-stage-shell">
+        <div class="try-stage" id="stage"></div>
+        <div class="try-stage-progress" id="stage-progress" role="status" aria-live="polite" hidden>
+          <span class="try-progress-circle" aria-hidden="true"></span>
+          <span>Parsing document…</span>
+        </div>
+      </div>
     </div>
 
     <p class="try-fineprint">
@@ -72,6 +78,7 @@ import Nav from '../components/Nav.astro';
     const status = document.getElementById('status') as HTMLElement;
     const panel = document.getElementById('panel') as HTMLElement;
     const stage = document.getElementById('stage') as HTMLElement;
+    const stageProgress = document.getElementById('stage-progress') as HTMLElement;
     const fileLabel = document.getElementById('panel-file') as HTMLElement;
     const reset = document.getElementById('reset') as HTMLButtonElement;
     let loadGeneration = 0;
@@ -86,6 +93,7 @@ import Nav from '../components/Nav.astro';
       panel.hidden = false;
       panel.classList.add('loading');
       stage.style.visibility = 'hidden';
+      stageProgress.hidden = false;
       try {
         const t0 = performance.now();
         const res = await renderFile(stage, file);
@@ -95,6 +103,7 @@ import Nav from '../components/Nav.astro';
         fileLabel.textContent = file.name;
         panel.classList.remove('loading');
         stage.style.visibility = '';
+        stageProgress.hidden = true;
         status.textContent = `${count}rendered in ${ms} ms`;
         status.hidden = false;
       } catch (e) {
@@ -104,6 +113,7 @@ import Nav from '../components/Nav.astro';
         if (generation !== loadGeneration) return;
         panel.classList.remove('loading');
         stage.style.visibility = '';
+        stageProgress.hidden = true;
         status.classList.add('error');
         status.textContent = e instanceof Error ? e.message : String(e);
         panel.hidden = true;
@@ -192,6 +202,27 @@ import Nav from '../components/Nav.astro';
     font-size: 12.5px; padding: 6px 12px; border-radius: 8px; transition: border-color 0.15s, color 0.15s;
   }
   .try-reset:hover { border-color: var(--accent); color: var(--text); }
+  .try-stage-shell { position: relative; }
+  .try-panel.loading .try-stage-shell {
+    height: min(74vh, 680px);
+    min-height: 360px;
+    background: radial-gradient(120% 80% at 50% 0%, #20242e, #161922 70%);
+  }
+  .try-stage-progress {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    color: var(--text-dim); font-family: var(--mono); font-size: 13px;
+  }
+  .try-stage-progress[hidden] { display: none; }
+  .try-progress-circle {
+    width: 34px; height: 34px; box-sizing: border-box; border-radius: 50%;
+    border: 3px solid rgba(148, 163, 184, 0.24); border-top-color: var(--accent);
+    animation: try-progress-spin 0.8s linear infinite;
+  }
+  @keyframes try-progress-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .try-progress-circle { animation: none; }
+  }
   .try-stage :global(.lv-scroll-viewer), .try-stage :global(.lv-xlsx) { border-radius: 0; }
   .try-stage :global(.lv-scroll-viewer) {
     width: 100%;
