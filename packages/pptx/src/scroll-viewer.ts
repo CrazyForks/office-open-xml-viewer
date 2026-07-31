@@ -840,6 +840,12 @@ export class PptxScrollViewer implements ZoomableViewer {
     slot.highlightLayer.innerHTML = '';
     slot.highlightLayer.style.transform = '';
     slot.highlightLayer.style.transformOrigin = '';
+    // `_previewSlot` pins an explicit CSS height while stretching the current
+    // bitmap during a zoom burst. A slot can leave the visible range before the
+    // debounced settle replaces that canvas, so do not carry the old-scale height
+    // into its next slide. Main-mode renderSlide intentionally updates only the
+    // CSS width and lets height follow the backing-store aspect ratio.
+    slot.canvas.style.height = '';
     slot.renderedSlide = -1;
     slot.renderedScale = -1;
     slot.wrapper.remove();
