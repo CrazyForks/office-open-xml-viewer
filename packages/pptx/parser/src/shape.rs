@@ -10,7 +10,7 @@ use crate::fill::{
     parse_fill, parse_scene3d, parse_shadow, parse_sp3d, parse_stroke, parse_table_style_fill,
     parse_xfrm, EffectLst,
 };
-use crate::master::LayoutPlaceholders;
+use crate::master::{InheritedShapeGeometry, LayoutPlaceholders};
 use crate::text::{
     empty_level_bullets, parse_text_body, LevelBullets, LevelFontSizes, LevelIndents, ShapeKind,
 };
@@ -259,16 +259,27 @@ pub(crate) fn parse_shape(
             .and_then(|bp| attr(&bp, "anchor"))
             .map(|a| a == "b")
             .unwrap_or(false);
-    // custGeom takes priority over prstGeom
-    let cust_geom_node = sp_pr.and_then(|p| child(p, "custGeom"));
-    let prst_geom_node = sp_pr.and_then(|p| child(p, "prstGeom"));
-    let geometry = if cust_geom_node.is_some() {
-        "custGeom".into()
-    } else {
-        prst_geom_node
-            .and_then(|n| attr(&n, "prst"))
-            .unwrap_or_else(|| "rect".into())
-    };
+    // Presentation slides inherit layout information unless they provide a
+    // local override (ECMA-376 Part 1, Annex L.3.2.3). Geometry is part of the
+    // shape properties: a placeholder with only a local xfrm can still inherit
+    // an ellipse/custom geometry from the matching layout placeholder.
+    let shape_geometry = sp_pr
+        .and_then(InheritedShapeGeometry::from_sp_pr)
+        .or_else(|| {
+            if ph_node.is_some() {
+                lph.lookup_geometry(&ph_type, ph_idx)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| InheritedShapeGeometry {
+            geometry: "rect".to_owned(),
+            cust_geom: None,
+            adjustments: [None; 8],
+        });
+    let geometry = shape_geometry.geometry;
+    let cust_geom = shape_geometry.cust_geom;
+    let [adj, adj2, adj3, adj4, adj5, adj6, adj7, adj8] = shape_geometry.adjustments;
 
     // cy=0 means "auto-height" for body-text shapes, but connector-type
     // geometries (line, *Connector*) legitimately use cy=0 to represent
@@ -295,70 +306,6 @@ pub(crate) fn parse_shape(
     } else {
         t.cy
     };
-    let cust_geom = cust_geom_node.map(|n| parse_cust_geom(n));
-
-    // Parse adjustment values from prstGeom avLst (e.g. trapezoid inset)
-    // Collect all gd elements; first is adj (name="adj" or "adj1"), second is adj2
-    let parse_gd_val = |gd: roxmltree::Node<'_, '_>| -> Option<f64> {
-        attr(&gd, "fmla")
-            .and_then(|f| f.strip_prefix("val ").map(|s| s.to_owned()))
-            .and_then(|s| s.parse::<f64>().ok())
-    };
-    let av_node = prst_geom_node.and_then(|n| child(n, "avLst"));
-    let gd_nodes: Vec<_> = av_node
-        .map(|av| {
-            av.children()
-                .filter(|n| n.is_element() && n.tag_name().name() == "gd")
-                .collect()
-        })
-        .unwrap_or_default();
-    // First gd = adj (match by name "adj" or "adj1", fallback to position 0)
-    let adj: Option<f64> = gd_nodes
-        .iter()
-        .find(|n| matches!(attr(n, "name").as_deref(), Some("adj") | Some("adj1")))
-        .or_else(|| gd_nodes.first())
-        .and_then(|n| parse_gd_val(*n));
-    // Second gd = adj2 (match by name "adj2", fallback to position 1)
-    let adj2: Option<f64> = gd_nodes
-        .iter()
-        .find(|n| attr(n, "name").as_deref() == Some("adj2"))
-        .or_else(|| gd_nodes.get(1))
-        .and_then(|n| parse_gd_val(*n));
-    // Third gd = adj3 (match by name "adj3", fallback to position 2)
-    let adj3: Option<f64> = gd_nodes
-        .iter()
-        .find(|n| attr(n, "name").as_deref() == Some("adj3"))
-        .or_else(|| gd_nodes.get(2))
-        .and_then(|n| parse_gd_val(*n));
-    // Fourth gd = adj4 (match by name "adj4", fallback to position 3)
-    let adj4: Option<f64> = gd_nodes
-        .iter()
-        .find(|n| attr(n, "name").as_deref() == Some("adj4"))
-        .or_else(|| gd_nodes.get(3))
-        .and_then(|n| parse_gd_val(*n));
-    // adj5-adj8 for callouts that specify extra polyline vertices
-    // (accentBorderCallout3 etc.).
-    let adj5: Option<f64> = gd_nodes
-        .iter()
-        .find(|n| attr(n, "name").as_deref() == Some("adj5"))
-        .or_else(|| gd_nodes.get(4))
-        .and_then(|n| parse_gd_val(*n));
-    let adj6: Option<f64> = gd_nodes
-        .iter()
-        .find(|n| attr(n, "name").as_deref() == Some("adj6"))
-        .or_else(|| gd_nodes.get(5))
-        .and_then(|n| parse_gd_val(*n));
-    let adj7: Option<f64> = gd_nodes
-        .iter()
-        .find(|n| attr(n, "name").as_deref() == Some("adj7"))
-        .or_else(|| gd_nodes.get(6))
-        .and_then(|n| parse_gd_val(*n));
-    let adj8: Option<f64> = gd_nodes
-        .iter()
-        .find(|n| attr(n, "name").as_deref() == Some("adj8"))
-        .or_else(|| gd_nodes.get(7))
-        .and_then(|n| parse_gd_val(*n));
-
     // --- Shape style (p:style) provides fill/stroke/text-color fallbacks ---
     let style_node = child(sp_node, "style");
 
