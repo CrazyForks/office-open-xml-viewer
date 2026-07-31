@@ -64,14 +64,26 @@ function isViolation(value: unknown): value is OoxmlResourceViolation {
       data.part.length > 0
     );
   }
-  if (data.resource !== 'archive') return false;
-  if (data.metric === 'entry-count') {
-    return data.configurable === false && !('part' in data);
+  if (data.resource === 'archive') {
+    if (data.metric === 'entry-count' || data.metric === 'central-directory-bytes') {
+      return data.configurable === false && !('part' in data);
+    }
+    return (
+      data.metric === 'distinct-inflated-bytes' &&
+      typeof data.part === 'string' &&
+      data.part.length > 0
+    );
   }
+  const validOptionalPart =
+    !('part' in data) || (typeof data.part === 'string' && data.part.length > 0);
+  if (data.configurable !== false || !validOptionalPart) return false;
+  if (data.resource === 'xml-event' || data.resource === 'xml-context') {
+    return data.metric === 'bytes';
+  }
+  if (data.resource === 'xml-tree') return data.metric === 'depth';
   return (
-    data.metric === 'distinct-inflated-bytes' &&
-    typeof data.part === 'string' &&
-    data.part.length > 0
+    (data.resource === 'worksheet-row' || data.resource === 'worksheet-shell') &&
+    data.metric === 'projected-bytes'
   );
 }
 
@@ -83,7 +95,9 @@ function isResourceLimitDetails(value: unknown): value is OoxmlResourceLimitErro
   const expectedStage =
     metric === 'actual-inflated-bytes' || metric === 'distinct-inflated-bytes'
       ? 'decompression'
-      : 'container';
+      : metric === 'bytes' || metric === 'depth' || metric === 'projected-bytes'
+        ? 'parsing'
+        : 'container';
   return details.stage === expectedStage;
 }
 

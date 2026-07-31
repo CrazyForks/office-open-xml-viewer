@@ -12,6 +12,10 @@ pub const STANDARD_MAX_TOTAL_INFLATED_BYTES: u64 = 256 * 1024 * 1024;
 pub const HARD_MAX_ARCHIVE_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 pub const HARD_MAX_TOTAL_INFLATED_BYTES: u64 = 1024 * 1024 * 1024;
 pub const HARD_MAX_ARCHIVE_ENTRIES: u64 = 20_000;
+/// Conservative browser-safety budget for central-directory/footer input plus
+/// filename bytes retained by the ZIP index. This bounds name copies and index
+/// growth; it is deliberately not an exact accounting of allocator heap use.
+pub const HARD_MAX_CENTRAL_DIRECTORY_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -60,6 +64,32 @@ pub struct ResourceUsage {
     pub declared_inflated_bytes: u64,
     pub distinct_inflated_bytes: u64,
     pub operation_inflated_bytes: u64,
+}
+
+/// Closed vocabulary for non-configurable parser/model safety ceilings.
+/// Format parsers choose a semantic kind; this shared layer owns its stable
+/// wire discriminants so stage/resource/metric strings cannot drift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HardResourceLimitKind {
+    XmlEventBytes,
+    XmlContextBytes,
+    XmlNestingDepth,
+    WorksheetRowProjectionBytes,
+    WorksheetShellProjectionBytes,
+}
+
+impl HardResourceLimitKind {
+    const fn wire_fields(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::XmlEventBytes => ("parsing", "xml-event", "bytes"),
+            Self::XmlContextBytes => ("parsing", "xml-context", "bytes"),
+            Self::XmlNestingDepth => ("parsing", "xml-tree", "depth"),
+            Self::WorksheetRowProjectionBytes => ("parsing", "worksheet-row", "projected-bytes"),
+            Self::WorksheetShellProjectionBytes => {
+                ("parsing", "worksheet-shell", "projected-bytes")
+            }
+        }
+    }
 }
 
 impl ResourceUsage {
@@ -371,6 +401,56 @@ pub(crate) fn observe_archive_metadata(
     Ok(())
 }
 
+/// Enforce the non-configurable aggregate ZIP-index metadata ceiling.
+pub(crate) fn observe_archive_central_directory_bytes(observed: u64) -> Result<(), String> {
+    let Some(governor) = active_governor() else {
+        return Ok(());
+    };
+    let mut state = governor.0.borrow_mut();
+    state.assert_healthy()?;
+    if observed > HARD_MAX_CENTRAL_DIRECTORY_BYTES {
+        return Err(state.fail(LimitCrossing {
+            stage: "container",
+            resource: "archive",
+            metric: "central-directory-bytes",
+            part: None,
+            limit: HARD_MAX_CENTRAL_DIRECTORY_BYTES,
+            observed,
+            configurable: false,
+        }));
+    }
+    Ok(())
+}
+
+/// Latch a proven non-configurable parser/model ceiling crossing. Without an
+/// active package scope this remains a no-op so pure native parser helpers can
+/// still return their local structured error.
+pub fn observe_hard_limit(
+    kind: HardResourceLimitKind,
+    part: Option<&str>,
+    limit: u64,
+    observed: u64,
+) -> Result<(), String> {
+    if observed <= limit {
+        return Ok(());
+    }
+    let Some(governor) = active_governor() else {
+        return Ok(());
+    };
+    let mut state = governor.0.borrow_mut();
+    state.assert_healthy()?;
+    let (stage, resource, metric) = kind.wire_fields();
+    Err(state.fail(LimitCrossing {
+        stage,
+        resource,
+        metric,
+        part,
+        limit,
+        observed,
+        configurable: false,
+    }))
+}
+
 pub(crate) fn read_allowance(
     part_id: usize,
     path: &str,
@@ -511,5 +591,41 @@ mod tests {
         let later = read_allowance(1, "ppt/media/b.png", 1).unwrap_err();
         assert_eq!(later, first);
         assert!(first.starts_with("OOXML_RESOURCE_LIMIT:"));
+    }
+
+    #[test]
+    fn hard_parser_limit_uses_closed_wire_discriminants_and_poisons() {
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, None, None);
+        let _scope = governor.scope("parse-sheet");
+        observe_hard_limit(
+            HardResourceLimitKind::WorksheetRowProjectionBytes,
+            Some("xl/worksheets/sheet1.xml"),
+            8,
+            8,
+        )
+        .unwrap();
+        let error = observe_hard_limit(
+            HardResourceLimitKind::WorksheetRowProjectionBytes,
+            Some("xl/worksheets/sheet1.xml"),
+            8,
+            9,
+        )
+        .unwrap_err();
+        let json: serde_json::Value = serde_json::from_str(
+            error
+                .strip_prefix("OOXML_RESOURCE_LIMIT:")
+                .expect("typed envelope prefix"),
+        )
+        .unwrap();
+        let violation = &json["details"]["violation"];
+        assert_eq!(json["details"]["stage"], "parsing");
+        assert_eq!(violation["resource"], "worksheet-row");
+        assert_eq!(violation["metric"], "projected-bytes");
+        assert_eq!(violation["part"], "xl/worksheets/sheet1.xml");
+        assert_eq!(violation["configurable"], false);
+        assert_eq!(
+            observe_hard_limit(HardResourceLimitKind::XmlEventBytes, None, 1, 2).unwrap_err(),
+            error
+        );
     }
 }

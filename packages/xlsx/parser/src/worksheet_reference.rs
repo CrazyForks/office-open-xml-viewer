@@ -1,6 +1,6 @@
+use crate::worksheet_projector::{WorksheetProjectorItem, WorksheetRowProjector};
 use crate::{resolve_sheet_path, Row};
 use crate::{CellRange, CellValue, SharedString, SheetMeta, Worksheet, XlsxZip};
-use ooxml_common::zip::read_zip_string;
 use std::collections::HashMap;
 
 pub(crate) const MAX_REFERENCE_CELLS: usize = 1_000_000;
@@ -248,6 +248,7 @@ pub(crate) fn parse_a1_range(reference: &str) -> Option<CellRange> {
     })
 }
 
+#[cfg(test)]
 fn parse_worksheet_cells(
     sheet_xml: &str,
     shared_strings: &[SharedString],
@@ -262,6 +263,25 @@ fn parse_worksheet_cells(
     })
     .ok()?;
     Some(builder.finish())
+}
+
+fn parse_package_worksheet_cells(
+    archive: &mut XlsxZip,
+    part: &str,
+    shared_strings: &[SharedString],
+    max_cells: usize,
+    max_string_bytes: usize,
+) -> Option<IndexedWorksheet> {
+    let entry = archive.operation().ok()?.open_entry(part).ok()?;
+    let mut projector =
+        WorksheetRowProjector::from_package_entry(entry, shared_strings, &[] as &[String]).ok()?;
+    let mut builder = IndexedWorksheetBuilder::new(shared_strings, max_cells, max_string_bytes);
+    loop {
+        match projector.next_item().ok()? {
+            WorksheetProjectorItem::Row(row) => builder.push_row(row)?,
+            WorksheetProjectorItem::Finished(_) => return Some(builder.finish()),
+        }
+    }
 }
 
 fn reference_cell_count(range: &CellRange) -> Option<usize> {
@@ -349,10 +369,10 @@ pub(crate) fn resolve_worksheet_reference(
                 .iter()
                 .find(|sheet| sheet.name == sheet_name)
                 .and_then(|sheet| resolve_sheet_path(workbook_rels, &sheet.r_id))
-                .and_then(|path| read_zip_string(archive, &format!("xl/{path}")).ok())
-                .and_then(|xml| {
-                    parse_worksheet_cells(
-                        &xml,
+                .and_then(|path| {
+                    parse_package_worksheet_cells(
+                        archive,
+                        &format!("xl/{path}"),
                         shared_strings,
                         session.remaining_indexed_cells,
                         session.remaining_indexed_string_bytes,

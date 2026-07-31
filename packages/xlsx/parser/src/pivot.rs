@@ -1,7 +1,7 @@
+use crate::read_zip_string;
 use ooxml_common::{
     depth::parse_guarded,
     ns::{is_x_ns, relationships},
-    zip::read_zip_string,
 };
 
 const PACKAGE_REL_NS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
@@ -30,7 +30,7 @@ pub(crate) fn load_sheet_pivots(
         return (Vec::new(), Vec::new());
     };
     let rels_path = format!("xl/{sheet_dir}/_rels/{sheet_file}.rels");
-    let rels_exists = archive.file_names().any(|name| name == rels_path);
+    let rels_exists = archive.index_for_name(&rels_path).is_some();
     let Ok(rels_xml) = read_zip_string(archive, &rels_path) else {
         return if rels_exists {
             (
@@ -489,7 +489,7 @@ fn pivot_cache_target(archive: &mut XlsxZip, pivot_part: &str) -> CacheLink {
         return CacheLink::Missing;
     };
     let rels_path = format!("{dir}/_rels/{file}.rels");
-    let rels_exists = archive.file_names().any(|name| name == rels_path);
+    let rels_exists = archive.index_for_name(&rels_path).is_some();
     let Ok(xml) = read_zip_string(archive, &rels_path) else {
         return if rels_exists {
             CacheLink::Unreadable

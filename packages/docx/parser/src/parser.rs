@@ -569,11 +569,7 @@ fn resolve_section_refs(
 /// failure lets the caller build a `degraded_document` tagged with the container,
 /// symmetric with how a corrupt `word/document.xml` is tagged inside [`parse`].
 pub(crate) fn open_zip(data: Vec<u8>) -> Result<Zip, String> {
-    ooxml_common::zip::preflight_archive_limits(&data)?;
-    let mut archive =
-        ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| format!("(zip container): {e}"))?;
-    ooxml_common::zip::validate_archive_limits(&mut archive)?;
-    Ok(archive)
+    ooxml_common::zip::open_validated_zip(data).map_err(ooxml_common::zip::tag_container_error)
 }
 
 /// A placeholder [`Document`] for a docx whose ZIP CONTAINER could not be opened

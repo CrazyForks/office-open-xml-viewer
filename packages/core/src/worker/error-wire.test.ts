@@ -62,6 +62,58 @@ describe('worker error wire', () => {
     expect((restored as OoxmlResourceLimitError).details.violation).not.toHaveProperty('part');
   });
 
+  it('preserves the hard central-directory metadata limit', () => {
+    const error = new OoxmlResourceLimitError('central directory is too large', {
+      stage: 'container',
+      violation: {
+        format: 'xlsx',
+        operation: 'open',
+        resource: 'archive',
+        metric: 'central-directory-bytes',
+        limit: 16 * 1024 * 1024,
+        observed: 16 * 1024 * 1024 + 1,
+        configurable: false,
+        usage: USAGE,
+      },
+    });
+    const restored = deserializeWorkerError(serializeWorkerError(error));
+    expect(restored).toBeInstanceOf(OoxmlResourceLimitError);
+    expect((restored as OoxmlResourceLimitError).details.violation).toMatchObject({
+      resource: 'archive',
+      metric: 'central-directory-bytes',
+      configurable: false,
+    });
+    expect((restored as OoxmlResourceLimitError).details.violation).not.toHaveProperty('part');
+  });
+
+  it('preserves non-configurable parser-buffer limits and their part context', () => {
+    const error = new OoxmlResourceLimitError('worksheet row is too large', {
+      stage: 'parsing',
+      violation: {
+        format: 'xlsx',
+        operation: 'parse-sheet',
+        resource: 'worksheet-row',
+        metric: 'projected-bytes',
+        part: 'xl/worksheets/sheet1.xml',
+        limit: 8 * 1024 * 1024,
+        observed: 8 * 1024 * 1024 + 1,
+        configurable: false,
+        usage: USAGE,
+      },
+    });
+    const restored = deserializeWorkerError(serializeWorkerError(error));
+    expect(restored).toBeInstanceOf(OoxmlResourceLimitError);
+    expect((restored as OoxmlResourceLimitError).details).toMatchObject({
+      stage: 'parsing',
+      violation: {
+        resource: 'worksheet-row',
+        metric: 'projected-bytes',
+        part: 'xl/worksheets/sheet1.xml',
+        configurable: false,
+      },
+    });
+  });
+
   it('preserves a non-configurable hard per-entry violation', () => {
     const hardError = rustError.replace('"configurable":true', '"configurable":false');
     const error = parseResourceLimitError(hardError);
@@ -104,6 +156,23 @@ describe('worker error wire', () => {
         },
       }),
     ).not.toBeInstanceOf(OoxmlResourceLimitError);
+
+    const wrongParserStage = new OoxmlResourceLimitError('wrong stage', {
+      stage: 'parsing',
+      violation: {
+        format: 'xlsx',
+        operation: 'parse-sheet',
+        resource: 'xml-event',
+        metric: 'bytes',
+        limit: 1,
+        observed: 2,
+        configurable: false,
+        usage: USAGE,
+      },
+    });
+    const payload = structuredClone(serializeWorkerError(wrongParserStage));
+    if (payload.resourceLimit) Object.assign(payload.resourceLimit, { stage: 'container' });
+    expect(deserializeWorkerError(payload)).not.toBeInstanceOf(OoxmlResourceLimitError);
   });
 
   it('rejects removed declared-total metrics and fractional wire counters', () => {

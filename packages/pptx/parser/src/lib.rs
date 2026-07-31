@@ -940,11 +940,7 @@ fn load_pptx_comments(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Vec<
 /// caller build a `degraded_container_presentation` tagged with the container,
 /// symmetric with how a corrupt slide part is tagged inside [`parse_presentation`].
 pub(crate) fn open_zip(data: Vec<u8>) -> Result<PptxZip, String> {
-    ooxml_common::zip::preflight_archive_limits(&data)?;
-    let mut archive =
-        zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("(zip container): {e}"))?;
-    ooxml_common::zip::validate_archive_limits(&mut archive)?;
-    Ok(archive)
+    ooxml_common::zip::open_validated_zip(data).map_err(ooxml_common::zip::tag_container_error)
 }
 
 /// A placeholder [`Presentation`] for a pptx whose ZIP CONTAINER could not be

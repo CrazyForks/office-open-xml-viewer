@@ -1,3 +1,4 @@
+use crate::read_zip_string;
 use crate::types::*;
 use crate::worksheet_reference::{
     resolve_worksheet_reference, ReferencedCellValue, WorksheetReferenceSession,
@@ -5,7 +6,6 @@ use crate::worksheet_reference::{
 use crate::{find_rel_target_by_type, parse_rels_map, resolve_fill_color, resolve_zip_path};
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{is_c_ns, is_r_ns, is_xdr_ns};
-use ooxml_common::zip::read_zip_string;
 
 pub(crate) struct ChartReferenceContext<'a, 'input, 'session> {
     pub(crate) worksheet: &'a Worksheet,
@@ -647,7 +647,7 @@ mod hidden_tests {
 
             zw.finish().unwrap();
         }
-        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+        crate::XlsxZip::new(Cursor::new(buf)).unwrap()
     }
 
     #[test]
@@ -740,7 +740,7 @@ mod worksheet_reference_tests {
             writer.write_all(DATA_XML.as_bytes()).unwrap();
             writer.finish().unwrap();
         }
-        zip::ZipArchive::new(Cursor::new(bytes)).unwrap()
+        crate::XlsxZip::new(Cursor::new(bytes)).unwrap()
     }
 
     fn sheets() -> Vec<SheetMeta> {
@@ -944,7 +944,7 @@ mod chartex_tests {
 
             zw.finish().unwrap();
         }
-        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+        crate::XlsxZip::new(Cursor::new(buf)).unwrap()
     }
 
     #[test]

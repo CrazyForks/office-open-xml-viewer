@@ -6,10 +6,13 @@
 //! selected compressed byte range. The original `Vec<u8>` allocation moves into
 //! `Rc` unchanged; opening a reader does not copy the complete package.
 
-use crate::resource::{OoxmlFormat, ResourceGovernor, ResourceOperation, ResourceUsage};
+use crate::resource::{
+    HardResourceLimitKind, OoxmlFormat, ResourceGovernor, ResourceOperation, ResourceUsage,
+};
 use crate::{resource, zip as bounded_zip};
 use crc32fast::Hasher;
 use flate2::read::DeflateDecoder;
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Cursor, Read};
 use std::rc::Rc;
@@ -17,19 +20,20 @@ use zip::CompressionMethod;
 
 /// Raw entry payload returned by one bounded pull.
 #[derive(Debug, PartialEq, Eq)]
-pub struct EntryChunk {
-    pub bytes: Vec<u8>,
-    pub done: bool,
+pub(crate) struct EntryChunk {
+    bytes: Vec<u8>,
+    done: bool,
 }
 
 /// Opaque identity of one active bounded archive-entry reader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct EntryReaderId(u64);
+pub(crate) struct EntryReaderId(u64);
 
 /// Backpressure ceiling for a single raw-entry pull. Resource limits remain
 /// independent and may be lower.
-pub const MAX_ENTRY_PULL_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_ENTRY_PULL_BYTES: usize = 1024 * 1024;
 const MAX_ACTIVE_OPERATIONS: usize = 4096;
+const HARD_MAX_ACTIVE_ENTRY_READERS: usize = 1024;
 const MAX_FINALIZED_OPERATION_RECORDS: usize = 256;
 
 #[derive(Clone)]
@@ -214,7 +218,12 @@ impl BoundedEntryReader {
         Ok(false)
     }
 
-    fn pull(&mut self, credit: usize, resource_allowance: u64) -> Result<EntryChunk, String> {
+    fn pull(
+        &mut self,
+        credit: usize,
+        resource_allowance: u64,
+        probe_eof: bool,
+    ) -> Result<EntryChunk, String> {
         if credit == 0 || credit > MAX_ENTRY_PULL_BYTES {
             return Err(format!(
                 "entry pull credit must be between 1 and {MAX_ENTRY_PULL_BYTES} bytes"
@@ -265,7 +274,7 @@ impl BoundedEntryReader {
             output.extend_from_slice(&scratch[..count]);
         }
 
-        let done = self.probe_after_full_chunk()?;
+        let done = probe_eof && self.probe_after_full_chunk()?;
         Ok(EntryChunk {
             bytes: output,
             done,
@@ -293,7 +302,7 @@ enum SessionState {
 
 /// One random-access OOXML package, its persistent resource governor, logical
 /// operations, and active owned entry decoders.
-pub struct PackageSession {
+pub(crate) struct PackageSession {
     source: Option<PackageBytes>,
     entries: Vec<EntryMetadata>,
     by_name: HashMap<String, usize>,
@@ -306,7 +315,7 @@ pub struct PackageSession {
 }
 
 impl PackageSession {
-    pub fn open(
+    pub(crate) fn open(
         data: Vec<u8>,
         format: OoxmlFormat,
         max_archive_entry_bytes: Option<u64>,
@@ -316,10 +325,7 @@ impl PackageSession {
         let governor =
             ResourceGovernor::from_wasm(format, max_archive_entry_bytes, max_total_inflated_bytes);
         let _scope = governor.scope("open");
-        bounded_zip::preflight_archive_limits(source.as_slice())?;
-        let mut archive = zip::ZipArchive::new(Cursor::new(source.as_slice()))
-            .map_err(|error| format!("zip open error: {error}"))?;
-        bounded_zip::validate_archive_limits(&mut archive)?;
+        let mut archive = bounded_zip::open_validated_cursor(Cursor::new(source.as_slice()))?;
 
         let mut entries = Vec::with_capacity(archive.len());
         let mut by_name = HashMap::with_capacity(archive.len());
@@ -418,7 +424,7 @@ impl PackageSession {
         }
     }
 
-    pub fn begin_operation(
+    pub(crate) fn begin_operation(
         &mut self,
         name: impl Into<String>,
     ) -> Result<ResourceOperation, String> {
@@ -445,7 +451,7 @@ impl PackageSession {
         Ok(id)
     }
 
-    pub fn open_entry(
+    pub(crate) fn open_entry(
         &mut self,
         operation_id: ResourceOperation,
         path: &str,
@@ -460,13 +466,18 @@ impl PackageSession {
         self.open_entry_by_index(operation_id, index)
     }
 
-    pub fn open_entry_by_index(
+    pub(crate) fn open_entry_by_index(
         &mut self,
         operation_id: ResourceOperation,
         index: usize,
     ) -> Result<EntryReaderId, String> {
         self.ensure_healthy()?;
         self.assert_operation_active(operation_id)?;
+        if self.readers.len() >= HARD_MAX_ACTIVE_ENTRY_READERS {
+            return Err(format!(
+                "package session cannot exceed {HARD_MAX_ACTIVE_ENTRY_READERS} active entry readers"
+            ));
+        }
         let metadata = self
             .entries
             .get(index)
@@ -490,16 +501,42 @@ impl PackageSession {
             }
         };
         let id = EntryReaderId(self.next_reader_id);
-        self.next_reader_id = self.next_reader_id.saturating_add(1);
+        let next_reader_id = self
+            .next_reader_id
+            .checked_add(1)
+            .ok_or_else(|| "package entry reader ID space is exhausted".to_string())?;
+        if self.readers.contains_key(&id) {
+            return Err("package entry reader ID space is exhausted".to_string());
+        }
+        self.next_reader_id = next_reader_id;
         self.readers.insert(id, reader);
         Ok(id)
     }
 
-    pub fn pull_entry(
+    pub(crate) fn pull_entry(
         &mut self,
         operation_id: ResourceOperation,
         reader_id: EntryReaderId,
         max_bytes: usize,
+    ) -> Result<EntryChunk, String> {
+        self.pull_entry_with_eof_probe(operation_id, reader_id, max_bytes, true)
+    }
+
+    fn pull_entry_prefix(
+        &mut self,
+        operation_id: ResourceOperation,
+        reader_id: EntryReaderId,
+        max_bytes: usize,
+    ) -> Result<EntryChunk, String> {
+        self.pull_entry_with_eof_probe(operation_id, reader_id, max_bytes, false)
+    }
+
+    fn pull_entry_with_eof_probe(
+        &mut self,
+        operation_id: ResourceOperation,
+        reader_id: EntryReaderId,
+        max_bytes: usize,
+        probe_eof: bool,
     ) -> Result<EntryChunk, String> {
         self.ensure_healthy()?;
         if max_bytes == 0 || max_bytes > MAX_ENTRY_PULL_BYTES {
@@ -528,7 +565,7 @@ impl PackageSession {
             &reader.metadata.path,
             reader.metadata.declared_size,
         )
-        .and_then(|allowance| reader.pull(max_bytes, allowance));
+        .and_then(|allowance| reader.pull(max_bytes, allowance, probe_eof));
         drop(scope);
 
         match result {
@@ -548,11 +585,33 @@ impl PackageSession {
         }
     }
 
-    pub fn release_entry(&mut self, reader_id: EntryReaderId) {
+    pub(crate) fn release_entry(&mut self, reader_id: EntryReaderId) {
         self.readers.remove(&reader_id);
     }
 
-    pub fn finish_operation(&mut self, operation_id: ResourceOperation) -> Result<(), String> {
+    /// Number of entries exposed by the validated, uniquely named ZIP index.
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether a validated package contains this exact entry path.
+    pub(crate) fn contains_entry(&self, path: &str) -> bool {
+        self.by_name.contains_key(path)
+    }
+
+    /// Clone entry paths in deterministic validated-index order without
+    /// exposing decoder metadata or borrowing the session internals.
+    pub(crate) fn entry_paths(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+
+    pub(crate) fn finish_operation(
+        &mut self,
+        operation_id: ResourceOperation,
+    ) -> Result<(), String> {
         self.ensure_healthy()?;
         let Some(operation) = self.operations.get_mut(&operation_id) else {
             return Err(format!("unknown package operation: {operation_id:?}"));
@@ -568,7 +627,10 @@ impl PackageSession {
         Ok(())
     }
 
-    pub fn cancel_operation(&mut self, operation_id: ResourceOperation) -> Result<(), String> {
+    pub(crate) fn cancel_operation(
+        &mut self,
+        operation_id: ResourceOperation,
+    ) -> Result<(), String> {
         if self.state == SessionState::Closed {
             return Ok(());
         }
@@ -586,7 +648,7 @@ impl PackageSession {
         Ok(())
     }
 
-    pub fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         if self.state == SessionState::Closed {
             return;
         }
@@ -600,21 +662,44 @@ impl PackageSession {
         self.state = SessionState::Closed;
     }
 
-    pub fn usage(&self) -> ResourceUsage {
+    pub(crate) fn usage(&self) -> ResourceUsage {
         self.governor.usage()
     }
 
     /// Return a checkpoint with the session-wide counters and the selected
     /// logical operation's cumulative work, even when another operation pulled
     /// most recently.
-    pub fn usage_for_operation(&self, operation_id: ResourceOperation) -> Option<ResourceUsage> {
+    pub(crate) fn usage_for_operation(
+        &self,
+        operation_id: ResourceOperation,
+    ) -> Option<ResourceUsage> {
         let operation = self.operations.get(&operation_id)?;
         operation
             .final_usage
             .or_else(|| self.governor.usage_for_operation(operation_id))
     }
 
-    pub fn operation_inflated_bytes(&self, operation_id: ResourceOperation) -> Option<u64> {
+    fn observe_hard_limit(
+        &mut self,
+        operation_id: ResourceOperation,
+        kind: HardResourceLimitKind,
+        part: Option<&str>,
+        limit: u64,
+        observed: u64,
+    ) -> Result<(), String> {
+        self.ensure_healthy()?;
+        self.assert_operation_active(operation_id)?;
+        let scope = self.governor.scope_operation(operation_id)?;
+        let result = resource::observe_hard_limit(kind, part, limit, observed);
+        drop(scope);
+        if result.is_err() {
+            self.converge_poison();
+        }
+        result
+    }
+
+    #[cfg(test)]
+    fn operation_inflated_bytes(&self, operation_id: ResourceOperation) -> Option<u64> {
         self.usage_for_operation(operation_id)
             .map(|usage| usage.operation_inflated_bytes)
     }
@@ -623,6 +708,334 @@ impl PackageSession {
 impl Drop for PackageSession {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+/// Cloneable, single-threaded ownership boundary for one OOXML package.
+///
+/// Every clone points at the same source bytes, decoder registry, and resource
+/// governor. Lifecycle mutation stays behind RAII [`PackageOperation`] and
+/// [`PackageEntryStream`] values rather than being exposed as raw identifiers
+/// to parser code.
+#[derive(Clone)]
+pub struct PackageSessionHandle {
+    inner: Rc<RefCell<PackageSession>>,
+}
+
+impl PackageSessionHandle {
+    pub fn open(
+        data: Vec<u8>,
+        format: OoxmlFormat,
+        max_archive_entry_bytes: Option<u64>,
+        max_total_inflated_bytes: Option<u64>,
+    ) -> Result<Self, String> {
+        PackageSession::open(
+            data,
+            format,
+            max_archive_entry_bytes,
+            max_total_inflated_bytes,
+        )
+        .map(Self::new)
+    }
+
+    pub(crate) fn new(session: PackageSession) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(session)),
+        }
+    }
+
+    pub fn begin_operation(&self, name: impl Into<String>) -> Result<PackageOperation, String> {
+        let id = self.inner.borrow_mut().begin_operation(name)?;
+        Ok(PackageOperation {
+            handle: self.clone(),
+            id,
+            state: OwnedOperationState::Active,
+        })
+    }
+
+    /// Verify that the package is still open and has not encountered a
+    /// package-wide resource failure.
+    pub fn assert_healthy(&self) -> Result<(), String> {
+        self.inner.borrow().ensure_healthy()
+    }
+
+    pub fn usage(&self) -> ResourceUsage {
+        self.inner.borrow().usage()
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.inner.borrow().entry_count()
+    }
+
+    pub fn contains_entry(&self, path: &str) -> bool {
+        self.inner.borrow().contains_entry(path)
+    }
+
+    pub fn entry_paths(&self) -> Vec<String> {
+        self.inner.borrow().entry_paths()
+    }
+
+    /// Close the shared package. All handle clones, operations, and entry
+    /// streams observe the same closed state.
+    pub fn close(&self) {
+        self.inner.borrow_mut().close();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnedOperationState {
+    Active,
+    Finished,
+    Canceled,
+}
+
+/// RAII owner of one logical resource-accounting operation.
+///
+/// Dropping an active operation cancels it and releases every reader opened by
+/// that operation. Explicit finish and cancel calls are idempotent.
+pub struct PackageOperation {
+    handle: PackageSessionHandle,
+    id: ResourceOperation,
+    state: OwnedOperationState,
+}
+
+impl PackageOperation {
+    fn assert_active(&self) -> Result<(), String> {
+        if self.state != OwnedOperationState::Active {
+            return Err("package operation is not active".to_string());
+        }
+        let session = self.handle.inner.borrow();
+        session.ensure_healthy()?;
+        session.assert_operation_active(self.id)
+    }
+
+    pub fn open_entry(&self, path: &str) -> Result<PackageEntryStream, String> {
+        self.assert_active()?;
+        let reader_id = self.handle.inner.borrow_mut().open_entry(self.id, path)?;
+        Ok(PackageEntryStream {
+            handle: self.handle.clone(),
+            operation_id: self.id,
+            reader_id: Some(reader_id),
+            part: path.to_string(),
+            done: false,
+            eof_probe: true,
+        })
+    }
+
+    pub fn open_entry_by_index(&self, index: usize) -> Result<PackageEntryStream, String> {
+        self.assert_active()?;
+        let part = self
+            .handle
+            .inner
+            .borrow()
+            .entries
+            .get(index)
+            .map(|entry| entry.path.clone())
+            .ok_or_else(|| format!("ZIP archive entry index is out of range: {index}"))?;
+        let reader_id = self
+            .handle
+            .inner
+            .borrow_mut()
+            .open_entry_by_index(self.id, index)?;
+        Ok(PackageEntryStream {
+            handle: self.handle.clone(),
+            operation_id: self.id,
+            reader_id: Some(reader_id),
+            part,
+            done: false,
+            eof_probe: true,
+        })
+    }
+
+    fn open_entry_prefix(&self, path: &str) -> Result<PackageEntryStream, String> {
+        self.assert_active()?;
+        let reader_id = self.handle.inner.borrow_mut().open_entry(self.id, path)?;
+        Ok(PackageEntryStream {
+            handle: self.handle.clone(),
+            operation_id: self.id,
+            reader_id: Some(reader_id),
+            part: path.to_string(),
+            done: false,
+            eof_probe: false,
+        })
+    }
+
+    /// Materialize one entry through the same bounded decoder and accounting
+    /// path used by streaming consumers.
+    pub fn read_bytes(&self, path: &str) -> Result<Vec<u8>, String> {
+        let mut stream = self.open_entry(path)?;
+        let mut bytes = Vec::new();
+        stream
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        Ok(bytes)
+    }
+
+    pub fn read_string(&self, path: &str) -> Result<String, String> {
+        String::from_utf8(self.read_bytes(path)?)
+            .map_err(|error| format!("ZIP entry is not valid UTF-8 ({path}): {error}"))
+    }
+
+    /// Read at most `max_bytes` from the start of an entry. Dropping the local
+    /// stream releases its decoder. Prefix reads deliberately skip the normal
+    /// one-byte EOF probe, so accounting includes only bytes returned here.
+    pub fn read_head(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+        // Open even for an empty prefix so path existence, operation state,
+        // session health, and declared entry limits remain consistently
+        // validated without inflating any entry bytes.
+        let mut stream = self.open_entry_prefix(path)?;
+        if max_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let mut bytes = Vec::with_capacity(max_bytes.min(32 * 1024));
+        let mut scratch = [0u8; 8 * 1024];
+        while bytes.len() < max_bytes {
+            let wanted = (max_bytes - bytes.len()).min(scratch.len());
+            let count = stream
+                .read(&mut scratch[..wanted])
+                .map_err(|error| error.to_string())?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&scratch[..count]);
+        }
+        Ok(bytes)
+    }
+
+    pub fn usage(&self) -> Option<ResourceUsage> {
+        self.handle.inner.borrow().usage_for_operation(self.id)
+    }
+
+    pub fn finish(&mut self) -> Result<(), String> {
+        if self.state != OwnedOperationState::Active {
+            return Ok(());
+        }
+        self.handle.inner.borrow_mut().finish_operation(self.id)?;
+        self.state = OwnedOperationState::Finished;
+        Ok(())
+    }
+
+    pub fn cancel(&mut self) -> Result<(), String> {
+        if self.state != OwnedOperationState::Active {
+            return Ok(());
+        }
+        self.handle.inner.borrow_mut().cancel_operation(self.id)?;
+        self.state = OwnedOperationState::Canceled;
+        Ok(())
+    }
+}
+
+impl Drop for PackageOperation {
+    fn drop(&mut self) {
+        let _ = self.cancel();
+    }
+}
+
+/// Operation-bound reporting capability for parser/model safety ceilings.
+///
+/// This capability does not own operation lifecycle. Dropping it is inert, and
+/// using it after the operation finishes or cancels is rejected.
+#[derive(Clone)]
+pub struct PackageLimitReporter {
+    handle: PackageSessionHandle,
+    operation_id: ResourceOperation,
+}
+
+impl PackageLimitReporter {
+    pub fn observe_hard_limit(
+        &self,
+        kind: HardResourceLimitKind,
+        part: Option<&str>,
+        limit: u64,
+        observed: u64,
+    ) -> Result<(), String> {
+        self.handle.inner.borrow_mut().observe_hard_limit(
+            self.operation_id,
+            kind,
+            part,
+            limit,
+            observed,
+        )
+    }
+}
+
+/// Owned, resumable archive-entry reader suitable for `quick_xml::Reader`.
+///
+/// A `Read` call never asks the underlying package session for more than
+/// the internal 1 MiB pull ceiling, even when the caller supplies a larger
+/// buffer.
+pub struct PackageEntryStream {
+    handle: PackageSessionHandle,
+    operation_id: ResourceOperation,
+    reader_id: Option<EntryReaderId>,
+    part: String,
+    done: bool,
+    eof_probe: bool,
+}
+
+impl PackageEntryStream {
+    pub fn part_name(&self) -> &str {
+        &self.part
+    }
+
+    /// Derive parser-limit reporting from the entry stream itself so inflated
+    /// bytes and parser/model ceilings cannot be attributed to different
+    /// package operations.
+    pub fn limit_reporter(&self) -> Result<PackageLimitReporter, String> {
+        let session = self.handle.inner.borrow();
+        session.ensure_healthy()?;
+        session.assert_operation_active(self.operation_id)?;
+        Ok(PackageLimitReporter {
+            handle: self.handle.clone(),
+            operation_id: self.operation_id,
+        })
+    }
+}
+
+impl Read for PackageEntryStream {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if output.is_empty() || self.done {
+            return Ok(0);
+        }
+        let Some(reader_id) = self.reader_id else {
+            return Ok(0);
+        };
+        let credit = output.len().min(MAX_ENTRY_PULL_BYTES);
+        let chunk = match if self.eof_probe {
+            self.handle
+                .inner
+                .borrow_mut()
+                .pull_entry(self.operation_id, reader_id, credit)
+        } else {
+            self.handle
+                .inner
+                .borrow_mut()
+                .pull_entry_prefix(self.operation_id, reader_id, credit)
+        } {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                // `PackageSession::pull_entry` consumes a failed decoder.
+                self.reader_id = None;
+                return Err(std::io::Error::other(error));
+            }
+        };
+        let count = chunk.bytes.len();
+        output[..count].copy_from_slice(&chunk.bytes);
+        if chunk.done {
+            // A terminal chunk can still contain bytes. Return those bytes now
+            // and report EOF on the next call, as required by `Read`.
+            self.done = true;
+            self.reader_id = None;
+        }
+        Ok(count)
+    }
+}
+
+impl Drop for PackageEntryStream {
+    fn drop(&mut self) {
+        if let Some(reader_id) = self.reader_id.take() {
+            self.handle.inner.borrow_mut().release_entry(reader_id);
+        }
     }
 }
 
@@ -679,6 +1092,24 @@ mod tests {
             assert_eq!(drain(&mut session, operation, reader, 5).unwrap(), body);
             assert_eq!(session.operation_inflated_bytes(operation), Some(26));
         }
+    }
+
+    #[test]
+    fn validated_archive_offset_is_used_for_prefixed_packages() {
+        let package = package(&[(
+            "xl/workbook.xml",
+            b"prefixed package",
+            CompressionMethod::Deflated,
+        )]);
+        let mut prefixed = b"MZ\x90\0self-extracting-prefix".to_vec();
+        prefixed.extend_from_slice(&package);
+        let handle =
+            PackageSessionHandle::open(prefixed, OoxmlFormat::Xlsx, Some(64), Some(64)).unwrap();
+        let operation = handle.begin_operation("parse").unwrap();
+        assert_eq!(
+            operation.read_bytes("xl/workbook.xml").unwrap(),
+            b"prefixed package"
+        );
     }
 
     #[test]
@@ -920,5 +1351,329 @@ mod tests {
         assert!(session.usage_for_operation(first.unwrap()).is_none());
         assert!(session.usage_for_operation(latest.unwrap()).is_some());
         assert_eq!(session.operations.len(), MAX_FINALIZED_OPERATION_RECORDS);
+    }
+
+    #[test]
+    fn handle_clones_share_one_session_and_distinct_accounting() {
+        let bytes = package(&[("xl/sharedStrings.xml", b"shared", CompressionMethod::Stored)]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64)).unwrap();
+        let clone = handle.clone();
+        assert!(Rc::ptr_eq(&handle.inner, &clone.inner));
+
+        let mut first = handle.begin_operation("first").unwrap();
+        let mut second = clone.begin_operation("second").unwrap();
+        assert_eq!(first.read_bytes("xl/sharedStrings.xml").unwrap(), b"shared");
+        assert_eq!(
+            second.read_bytes("xl/sharedStrings.xml").unwrap(),
+            b"shared"
+        );
+        assert_eq!(handle.usage().distinct_inflated_bytes, 6);
+        assert_eq!(first.usage().unwrap().operation_inflated_bytes, 6);
+        assert_eq!(second.usage().unwrap().operation_inflated_bytes, 6);
+        first.finish().unwrap();
+        second.finish().unwrap();
+    }
+
+    #[test]
+    fn package_metadata_preserves_validated_index_order() {
+        let bytes = package(&[
+            ("xl/a.xml", b"first", CompressionMethod::Stored),
+            ("xl/c.xml", b"other", CompressionMethod::Deflated),
+            ("xl/b.xml", b"last", CompressionMethod::Stored),
+        ]);
+        let session = PackageSession::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64)).unwrap();
+        assert_eq!(session.entry_count(), 3);
+        assert!(session.contains_entry("xl/a.xml"));
+        assert!(!session.contains_entry("xl/missing.xml"));
+        assert_eq!(
+            session.entry_paths(),
+            vec![
+                "xl/a.xml".to_string(),
+                "xl/c.xml".to_string(),
+                "xl/b.xml".to_string()
+            ]
+        );
+
+        let handle = PackageSessionHandle::new(session);
+        assert_eq!(handle.entry_count(), 3);
+        assert!(handle.contains_entry("xl/a.xml"));
+        assert_eq!(handle.entry_paths()[1], "xl/c.xml");
+        let operation = handle.begin_operation("lookup").unwrap();
+        assert_eq!(operation.read_bytes("xl/a.xml").unwrap(), b"first");
+
+        handle.close();
+        assert_eq!(handle.entry_count(), 0);
+        assert!(!handle.contains_entry("xl/a.xml"));
+        assert!(handle.entry_paths().is_empty());
+    }
+
+    #[test]
+    fn package_open_rejects_duplicate_and_ascii_case_colliding_item_names() {
+        let mut exact = package(&[
+            ("xl/a.xml", b"first", CompressionMethod::Stored),
+            ("xl/b.xml", b"last", CompressionMethod::Stored),
+        ]);
+        // ZipWriter rejects duplicate names. Forge equal-length local and
+        // central-directory names after producing an otherwise valid archive.
+        for offset in 0..=exact.len() - b"xl/b.xml".len() {
+            if &exact[offset..offset + b"xl/b.xml".len()] == b"xl/b.xml" {
+                exact[offset..offset + b"xl/b.xml".len()].copy_from_slice(b"xl/a.xml");
+            }
+        }
+        let exact_error = PackageSession::open(exact, OoxmlFormat::Xlsx, Some(64), Some(64))
+            .err()
+            .unwrap();
+        assert!(exact_error.contains("ZIP item names must be unique"));
+        assert!(!exact_error.starts_with("OOXML_RESOURCE_LIMIT:"));
+
+        let case_collision = package(&[
+            ("xl/a.xml", b"first", CompressionMethod::Stored),
+            ("XL/A.XML", b"second", CompressionMethod::Stored),
+        ]);
+        let case_error =
+            PackageSession::open(case_collision, OoxmlFormat::Xlsx, Some(64), Some(64))
+                .err()
+                .unwrap();
+        assert!(case_error.contains("unique ignoring ASCII case"));
+        assert!(!case_error.starts_with("OOXML_RESOURCE_LIMIT:"));
+    }
+
+    #[test]
+    fn owned_entry_streams_can_be_interleaved() {
+        let bytes = package(&[
+            ("xl/a.xml", b"abcdef", CompressionMethod::Deflated),
+            ("xl/b.xml", b"12345", CompressionMethod::Stored),
+        ]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64)).unwrap();
+        let operation = handle.begin_operation("sheet").unwrap();
+        let mut first = operation.open_entry("xl/a.xml").unwrap();
+        let mut second = operation.open_entry("xl/b.xml").unwrap();
+        let mut buffer = [0u8; 2];
+
+        assert_eq!(first.read(&mut buffer).unwrap(), 2);
+        assert_eq!(&buffer, b"ab");
+        assert_eq!(second.read(&mut buffer).unwrap(), 2);
+        assert_eq!(&buffer, b"12");
+        let mut first_rest = Vec::new();
+        let mut second_rest = Vec::new();
+        first.read_to_end(&mut first_rest).unwrap();
+        second.read_to_end(&mut second_rest).unwrap();
+        assert_eq!(first_rest, b"cdef");
+        assert_eq!(second_rest, b"345");
+    }
+
+    #[test]
+    fn operation_finish_cancel_and_drop_are_idempotent() {
+        let bytes = package(&[("word/a.xml", b"body", CompressionMethod::Stored)]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64)).unwrap();
+
+        let mut finished = handle.begin_operation("finished").unwrap();
+        let finished_id = finished.id;
+        finished.finish().unwrap();
+        finished.finish().unwrap();
+        finished.cancel().unwrap();
+        assert!(finished.read_head("word/a.xml", 0).is_err());
+        assert_eq!(
+            handle.inner.borrow().operations[&finished_id].status,
+            OperationStatus::Finished
+        );
+
+        let mut canceled = handle.begin_operation("canceled").unwrap();
+        let canceled_id = canceled.id;
+        canceled.cancel().unwrap();
+        canceled.cancel().unwrap();
+        canceled.finish().unwrap();
+        assert!(canceled.read_head("word/a.xml", 0).is_err());
+        assert_eq!(
+            handle.inner.borrow().operations[&canceled_id].status,
+            OperationStatus::Canceled
+        );
+
+        let dropped_id = {
+            let dropped = handle.begin_operation("dropped").unwrap();
+            dropped.id
+        };
+        assert_eq!(
+            handle.inner.borrow().operations[&dropped_id].status,
+            OperationStatus::Canceled
+        );
+    }
+
+    #[test]
+    fn entry_stream_reports_eof_after_returning_exact_credit() {
+        let bytes = package(&[("ppt/slide.xml", b"12345678", CompressionMethod::Deflated)]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Pptx, Some(8), Some(8)).unwrap();
+        let operation = handle.begin_operation("slide").unwrap();
+        let mut stream = operation.open_entry("ppt/slide.xml").unwrap();
+        let mut exact = [0u8; 8];
+        assert_eq!(stream.read(&mut exact).unwrap(), 8);
+        assert_eq!(&exact, b"12345678");
+        assert_eq!(stream.read(&mut exact).unwrap(), 0);
+        assert_eq!(stream.read(&mut exact).unwrap(), 0);
+    }
+
+    #[test]
+    fn stream_resource_failure_poisons_the_shared_handle() {
+        let bytes = package(&[
+            ("word/a.xml", b"1234", CompressionMethod::Stored),
+            ("word/b.xml", b"5678", CompressionMethod::Stored),
+        ]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(6)).unwrap();
+        let operation = handle.begin_operation("parse").unwrap();
+        assert_eq!(operation.read_bytes("word/a.xml").unwrap(), b"1234");
+        let error = operation.read_bytes("word/b.xml").unwrap_err();
+        assert!(error.contains("distinct-inflated-bytes"));
+        assert_eq!(handle.assert_healthy().unwrap_err(), error);
+        assert_eq!(
+            operation.read_head("word/missing.xml", 0).unwrap_err(),
+            error
+        );
+        assert!(handle.inner.borrow().readers.is_empty());
+    }
+
+    #[test]
+    fn operation_limit_reporter_poison_is_shared_with_sibling_operations() {
+        let bytes = package(&[(
+            "xl/worksheets/sheet1.xml",
+            b"<x/>",
+            CompressionMethod::Stored,
+        )]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64)).unwrap();
+        let primary = handle.begin_operation("parse-sheet").unwrap();
+        let sibling = handle.begin_operation("inspect").unwrap();
+        let stream = primary.open_entry("xl/worksheets/sheet1.xml").unwrap();
+        let reporter = stream.limit_reporter().unwrap();
+
+        reporter
+            .observe_hard_limit(
+                HardResourceLimitKind::XmlEventBytes,
+                Some("xl/worksheets/sheet1.xml"),
+                8,
+                8,
+            )
+            .unwrap();
+        let error = reporter
+            .observe_hard_limit(
+                HardResourceLimitKind::XmlEventBytes,
+                Some("xl/worksheets/sheet1.xml"),
+                8,
+                9,
+            )
+            .unwrap_err();
+        assert!(error.starts_with("OOXML_RESOURCE_LIMIT:"));
+        assert!(error.contains("\"operation\":\"parse-sheet\""));
+        assert!(error.contains("\"resource\":\"xml-event\""));
+        assert!(error.contains("\"part\":\"xl/worksheets/sheet1.xml\""));
+        assert_eq!(handle.assert_healthy().unwrap_err(), error);
+        assert_eq!(
+            sibling
+                .read_head("xl/worksheets/sheet1.xml", 1)
+                .unwrap_err(),
+            error
+        );
+        assert!(handle.inner.borrow().readers.is_empty());
+    }
+
+    #[test]
+    fn limit_reporter_does_not_outlive_operation_lifecycle() {
+        let bytes = package(&[("word/document.xml", b"<w/>", CompressionMethod::Stored)]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64)).unwrap();
+        let reporter = {
+            let mut operation = handle.begin_operation("parse").unwrap();
+            let stream = operation.open_entry("word/document.xml").unwrap();
+            let reporter = stream.limit_reporter().unwrap();
+            operation.finish().unwrap();
+            reporter
+        };
+        let error = reporter
+            .observe_hard_limit(HardResourceLimitKind::XmlNestingDepth, None, 256, 257)
+            .unwrap_err();
+        assert!(error.contains("operation is not active"));
+        assert!(handle.assert_healthy().is_ok());
+    }
+
+    #[test]
+    fn read_head_releases_its_entry_reader() {
+        let bytes = package(&[("word/a.xml", b"abcdefgh", CompressionMethod::Stored)]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64)).unwrap();
+        let operation = handle.begin_operation("inspect").unwrap();
+        assert!(operation.read_head("word/missing.xml", 0).is_err());
+        assert_eq!(operation.read_head("word/a.xml", 0).unwrap(), b"");
+        assert_eq!(operation.usage().unwrap().operation_inflated_bytes, 0);
+        assert_eq!(operation.read_head("word/a.xml", 3).unwrap(), b"abc");
+        assert!(handle.inner.borrow().readers.is_empty());
+        assert_eq!(operation.usage().unwrap().operation_inflated_bytes, 3);
+        assert_eq!(handle.usage().distinct_inflated_bytes, 3);
+    }
+
+    #[test]
+    fn active_reader_count_and_id_allocation_have_hard_stops() {
+        let bytes = package(&[("word/a.xml", b"a", CompressionMethod::Stored)]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64)).unwrap();
+        let operation = handle.begin_operation("many-readers").unwrap();
+        let mut streams = Vec::with_capacity(HARD_MAX_ACTIVE_ENTRY_READERS);
+        for _ in 0..HARD_MAX_ACTIVE_ENTRY_READERS {
+            streams.push(operation.open_entry("word/a.xml").unwrap());
+        }
+        let ceiling = operation.open_entry("word/a.xml").err().unwrap();
+        assert!(ceiling.contains("active entry readers"));
+        streams.pop();
+        streams.push(operation.open_entry("word/a.xml").unwrap());
+        drop(streams);
+        assert!(handle.inner.borrow().readers.is_empty());
+
+        handle.inner.borrow_mut().next_reader_id = u64::MAX;
+        let exhausted = operation.open_entry("word/a.xml").err().unwrap();
+        assert!(exhausted.contains("reader ID space is exhausted"));
+        assert!(handle.inner.borrow().readers.is_empty());
+    }
+
+    #[test]
+    fn finishing_or_dropping_an_operation_invalidates_live_streams() {
+        let bytes = package(&[("word/a.xml", b"body", CompressionMethod::Stored)]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64)).unwrap();
+
+        let mut finished = handle.begin_operation("finished").unwrap();
+        let mut finished_stream = finished.open_entry("word/a.xml").unwrap();
+        finished.finish().unwrap();
+        assert!(handle.inner.borrow().readers.is_empty());
+        let mut byte = [0u8; 1];
+        assert!(finished_stream.read(&mut byte).is_err());
+
+        let mut dropped_stream = {
+            let dropped = handle.begin_operation("dropped").unwrap();
+            dropped.open_entry("word/a.xml").unwrap()
+        };
+        assert!(handle.inner.borrow().readers.is_empty());
+        assert!(dropped_stream.read(&mut byte).is_err());
+    }
+
+    #[test]
+    fn closing_a_handle_invalidates_all_clones_and_owned_streams() {
+        let bytes = package(&[("word/a.xml", b"body", CompressionMethod::Stored)]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64)).unwrap();
+        let clone = handle.clone();
+        let operation = clone.begin_operation("parse").unwrap();
+        let mut stream = operation.open_entry("word/a.xml").unwrap();
+
+        handle.close();
+        handle.close();
+        assert!(clone.assert_healthy().is_err());
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            stream.read(&mut byte).unwrap_err().kind(),
+            std::io::ErrorKind::Other
+        );
     }
 }

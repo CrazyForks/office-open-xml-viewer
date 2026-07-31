@@ -93,17 +93,35 @@ export type OoxmlResourceViolation =
     })
   | (OoxmlResourceViolationBase & {
       resource: 'archive';
-      metric: 'entry-count';
+      metric: 'entry-count' | 'central-directory-bytes';
       configurable: false;
     })
   | (OoxmlResourceViolationBase & {
       resource: 'archive';
       metric: 'distinct-inflated-bytes';
       part: string;
+    })
+  | (OoxmlResourceViolationBase & {
+      resource: 'xml-event' | 'xml-context';
+      metric: 'bytes';
+      configurable: false;
+      part?: string;
+    })
+  | (OoxmlResourceViolationBase & {
+      resource: 'xml-tree';
+      metric: 'depth';
+      configurable: false;
+      part?: string;
+    })
+  | (OoxmlResourceViolationBase & {
+      resource: 'worksheet-row' | 'worksheet-shell';
+      metric: 'projected-bytes';
+      configurable: false;
+      part?: string;
     });
 
 export interface OoxmlResourceLimitErrorDetails {
-  readonly stage: 'container' | 'decompression';
+  readonly stage: 'container' | 'decompression' | 'parsing';
   readonly violation: OoxmlResourceViolation;
 }
 

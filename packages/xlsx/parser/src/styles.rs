@@ -1,8 +1,8 @@
 use crate::parse_color;
+use crate::read_zip_string;
 use crate::types::*;
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::is_x_ns;
-use ooxml_common::zip::read_zip_string;
 
 /// Resolve the workbook's Normal-style font (family name + point size) by
 /// following `<cellStyleXfs>[0].fontId` → `<fonts>[fontId]`. Returns `(None,
