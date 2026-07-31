@@ -2505,6 +2505,37 @@ describe('PptxScrollViewer — flicker-free zoom (T8)', () => {
     v.destroy();
   });
 
+  it('pool reuse clears a CSS-preview height from a slide recycled during a zoom burst', () => {
+    vi.useFakeTimers();
+    try {
+      const { v, scrollHost } = setup();
+
+      // Base geometry is 200×120. The first zoom keeps slide 3 mounted and
+      // previews it at 240×144; the second zoom shrinks the visible range and
+      // recycles that slot before it can receive the new 400×240 preview.
+      v.setScale(1.2);
+      const recycled = slotAtTop(scrollHost, '462px')!;
+      const canvas = recycled.children.find((k) => k.tag === 'canvas') as FakeEl;
+      expect(canvas.style.height).toBe('144px');
+      v.setScale(2);
+      expect(recycled.parentElement).toBeNull();
+
+      // Scrolling mounts slide 3 again from the pool while the zoom settle is
+      // still pending. The real main-mode renderer synchronously replaces the
+      // CSS width but deliberately leaves height to the canvas aspect ratio, so
+      // the pooled preview height must have been cleared before reuse.
+      scrollHost.scrollTop = 250;
+      scrollHost.dispatch('scroll');
+      const remounted = slotAtTop(scrollHost, '750px')!;
+      expect(remounted).toBe(recycled);
+      expect(remounted.style.height).toBe('240px');
+      expect(canvas.style.height).toBe('');
+      v.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('CSS preview: text layer gets a transform: scale(ratio) matching newScale / renderedScale', async () => {
     const { v, scrollHost, engine } = setup(20, { enableTextSelection: true });
     engine.feedTextRuns = [
