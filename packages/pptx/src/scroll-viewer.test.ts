@@ -1014,6 +1014,35 @@ describe('PptxScrollViewer — interactive media lifecycle', () => {
     },
   );
 
+  it('routes asynchronous media failures through the viewer onError callback', () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(2, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
+    const onError = vi.fn();
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableMediaPlayback: true,
+      onError,
+      gap: 10,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientWidth = 200;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+
+    const call = engine.presentationCalls[0];
+    expect(call.reportError).toEqual(expect.any(Function));
+    call.reportError?.(new Error('media decode failed'));
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0].message).toContain('media decode failed');
+    v.destroy();
+  });
+
   it('keeps interactive media bounded when text-selection overscan mounts a large deck', () => {
     installDom();
     const container = makeContainer(200, 400);

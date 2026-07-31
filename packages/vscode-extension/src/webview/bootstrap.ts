@@ -220,6 +220,8 @@ async function initPptx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
     math,
     useGoogleFonts,
     enableTextSelection: true,
+    enableMediaPlayback: true,
+    mediaOverscan: 1,
     refitOnResize: true,
     background: 'var(--vscode-editor-background)',
     onScaleChange: updateZoomLabel,

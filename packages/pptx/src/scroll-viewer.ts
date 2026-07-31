@@ -151,9 +151,10 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
   /** Error callback. When set, `load()` invokes it and resolves (otherwise the
    *  error is rethrown — shared viewer error contract). It ALSO fires for async
    *  per-slot render failures (both main `renderSlide` and worker
-   *  `renderSlideToBitmap` rejections); a failed slide is left blank rather than
-   *  crashing the loop. Without an `onError`, render failures are logged via
-   *  `console.error` so they are never fully silent. */
+   *  `renderSlideToBitmap` rejections) and embedded-media fetch/decode/playback
+   *  failures. A failed slide is left blank rather than crashing the loop.
+   *  Without an `onError`, failures are logged via `console.error` so they are
+   *  never fully silent. */
   onError?: (err: Error) => void;
   /**
    * IX1 (design decision — NOT user-confirmed, integrator may veto). Fires on a
@@ -982,7 +983,14 @@ export class PptxScrollViewer implements ZoomableViewer {
     const onTextRun = wantRuns ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
 
     this._pres
-      .presentSlide(slot.canvas, i, { width: widthPx, dpr, onTextRun })
+      .presentSlide(slot.canvas, i, {
+        width: widthPx,
+        dpr,
+        onTextRun,
+        onError: (error) => {
+          if (generation === slot.presentationGeneration) this._reportRenderError(error);
+        },
+      })
       .then((handle) => {
         if (
           generation !== slot.presentationGeneration ||
@@ -1644,7 +1652,14 @@ export class PptxScrollViewer implements ZoomableViewer {
     const onTextRun = wantRuns ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
 
     this._pres
-      .presentSlide(spare, i, { width: widthPx, dpr, onTextRun })
+      .presentSlide(spare, i, {
+        width: widthPx,
+        dpr,
+        onTextRun,
+        onError: (error) => {
+          if (generation === slot.presentationGeneration) this._reportRenderError(error);
+        },
+      })
       .then((handle) => {
         if (
           generation !== slot.presentationGeneration ||
