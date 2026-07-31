@@ -22,3 +22,4 @@ export {
   type WorkerErrorPayload,
 } from './error-wire.js';
 export { parserResourceLimitsForWasm } from './parser-resource-limits.js';
+export { disposeRejectedLoad } from './rejected-load.js';

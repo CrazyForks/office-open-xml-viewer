@@ -15,7 +15,7 @@ import {
   type ParserResourceLimits,
   type MathRenderer,
 } from '@silurus/ooxml-core';
-import { deserializeWorkerError } from '@silurus/ooxml-core/worker';
+import { deserializeWorkerError, disposeRejectedLoad } from '@silurus/ooxml-core/worker';
 import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
 import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
@@ -164,8 +164,9 @@ export class DocxDocument {
       mode === 'worker'
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
-    const doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
+    let doc: DocxDocument | undefined;
     try {
+      doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
       // In worker mode the worker preloads fonts before paginating (pagination
       // measures text), so the flag is forwarded; in main mode fonts are loaded
       // here after parse, before the lazy first pagination.
@@ -197,7 +198,11 @@ export class DocxDocument {
       // text measures/draws with the authored typeface. Worker mode does this
       // inside the worker (before it paginates); here it runs on the main thread.
       if (doc._mode === 'main' && doc._document?.embeddedFonts?.length) {
-        doc._embeddedFontFaces = await loadEmbeddedFonts(doc._document, (p) => doc.getFontBytes(p));
+        const loadingDocument = doc;
+        doc._embeddedFontFaces = await loadEmbeddedFonts(
+          doc._document,
+          (p) => loadingDocument.getFontBytes(p),
+        );
       }
       let localMetrics: Awaited<ReturnType<typeof loadDocxLocalFontMetrics>> | undefined;
       if (doc._mode === 'main' && doc._document) {
@@ -234,7 +239,8 @@ export class DocxDocument {
       }
       return doc;
     } catch (error) {
-      doc.destroy();
+      const rejectedDocument = doc;
+      disposeRejectedLoad(worker, rejectedDocument ? () => rejectedDocument.destroy() : undefined);
       throw error;
     }
   }

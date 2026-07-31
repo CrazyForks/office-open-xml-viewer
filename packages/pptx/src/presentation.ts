@@ -21,7 +21,7 @@ import {
   type ParserResourceLimits,
   type MathRenderer,
 } from '@silurus/ooxml-core';
-import { deserializeWorkerError } from '@silurus/ooxml-core/worker';
+import { deserializeWorkerError, disposeRejectedLoad } from '@silurus/ooxml-core/worker';
 import { PPTX_GOOGLE_FONTS, pptxFontPreloadNames } from './google-fonts';
 import { findMimeTypeForPath } from './media-mime';
 import type {
@@ -180,27 +180,34 @@ export class PptxPresentation {
       mode === 'worker'
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
-    const pres = new PptxPresentation(worker, mode, opts.wasmUrl);
-    if (opts.math && mode === 'worker') {
-      console.warn(
-        "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
+    let pres: PptxPresentation | undefined;
+    try {
+      pres = new PptxPresentation(worker, mode, opts.wasmUrl);
+      if (opts.math && mode === 'worker') {
+        console.warn(
+          "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
+        );
+      }
+      pres._math = mode === 'worker' ? undefined : opts.math;
+      await pres._parse(
+        buffer,
+        opts.maxZipEntryBytes,
+        opts.parserResourceLimits,
+        mode === 'worker' ? !!opts.useGoogleFonts : false,
+        opts.workerTimeoutMs,
       );
+      if (mode === 'main' && opts.useGoogleFonts && pres._presentation) {
+        pres._googleFontFaces = await preloadGoogleFonts(
+          pptxFontPreloadNames(pres._presentation),
+          PPTX_GOOGLE_FONTS,
+        );
+      }
+      return pres;
+    } catch (error) {
+      const rejectedPresentation = pres;
+      disposeRejectedLoad(worker, rejectedPresentation ? () => rejectedPresentation.destroy() : undefined);
+      throw error;
     }
-    pres._math = mode === 'worker' ? undefined : opts.math;
-    await pres._parse(
-      buffer,
-      opts.maxZipEntryBytes,
-      opts.parserResourceLimits,
-      mode === 'worker' ? !!opts.useGoogleFonts : false,
-      opts.workerTimeoutMs,
-    );
-    if (mode === 'main' && opts.useGoogleFonts && pres._presentation) {
-      pres._googleFontFaces = await preloadGoogleFonts(
-        pptxFontPreloadNames(pres._presentation),
-        PPTX_GOOGLE_FONTS,
-      );
-    }
-    return pres;
   }
 
   private async _parse(

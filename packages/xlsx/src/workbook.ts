@@ -14,7 +14,7 @@ import {
   type MathRenderer,
   type ParserResourceLimits,
 } from '@silurus/ooxml-core';
-import { deserializeWorkerError } from '@silurus/ooxml-core/worker';
+import { deserializeWorkerError, disposeRejectedLoad } from '@silurus/ooxml-core/worker';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
@@ -122,9 +122,16 @@ export class XlsxWorkbook {
       mode === 'worker'
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
-    const wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
-    await wb._load(buffer, opts);
-    return wb;
+    let wb: XlsxWorkbook | undefined;
+    try {
+      wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
+      await wb._load(buffer, opts);
+      return wb;
+    } catch (error) {
+      const rejectedWorkbook = wb;
+      disposeRejectedLoad(worker, rejectedWorkbook ? () => rejectedWorkbook.destroy() : undefined);
+      throw error;
+    }
   }
 
   // `load()` always resolves a URL/string source to an ArrayBuffer (via
