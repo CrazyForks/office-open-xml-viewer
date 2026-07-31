@@ -28,7 +28,7 @@ const DEFAULT_HIDDEN_DIM: DimOptions = { color: '#ffffff', opacity: 0.6 };
 export interface PptxViewerOptions extends RenderOptions, LoadOptions {
   /** Called when a slide finishes rendering */
   onSlideChange?: (index: number, total: number) => void;
-  /** Called on parse or render errors */
+  /** Called on parse, render, or embedded-media playback errors. */
   onError?: (err: Error) => void;
   /** IX9 zoom contract ({@link ZoomableViewer}) — the clamp range for
    *  {@link PptxViewer.setScale} / `zoomIn` / `zoomOut` / `fitWidth` / `fitPage`,
@@ -490,6 +490,7 @@ export class PptxViewer implements ZoomableViewer {
           dpr,
           dim,
           onTextRun,
+          onError: (error) => this._reportRenderError(error),
         });
       } else if (isWorker) {
         const bmp = await this.engine.renderSlideToBitmap(this.currentSlide, { width: targetWidth, dpr, dim, onTextRun });

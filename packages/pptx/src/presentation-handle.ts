@@ -15,6 +15,8 @@ interface MediaState {
   posterRect: { x: number; y: number; w: number; h: number };
   media: HTMLVideoElement | HTMLAudioElement;
   objectUrl: string;
+  loadState: 'loading' | 'metadata' | 'ready' | 'error';
+  detachListeners: () => void;
 }
 
 export interface PresentationHandle {
@@ -48,6 +50,8 @@ export interface PresentOptions {
   fetchImage: (imagePath: string, mimeType: string) => Promise<Blob>;
   /** Draw the static slide (poster + play badge) onto the canvas. */
   drawBase: () => Promise<void>;
+  /** Report an embedded-media fetch, decode, or playback failure. */
+  onError?: (error: Error) => void;
 }
 
 /**
@@ -76,12 +80,34 @@ export async function createPresentationHandle(
   baseCtx.drawImage(canvas, 0, 0);
 
   const states: MediaState[] = [];
+  const unavailableRects: Array<{ x: number; y: number; w: number; h: number }> = [];
+  let disposed = false;
+
+  const reportError = (error: Error) => {
+    if (disposed) return;
+    if (opts.onError) opts.onError(error);
+    else console.error('[ooxml] PPTX embedded media failed:', error);
+  };
+
+  // Media extraction can be noticeably slower than the static slide paint
+  // (large embedded videos are common). Keep the already-painted slide visible
+  // and make the pending state explicit while each Blob is read from the PPTX.
+  if (mediaElements.length > 0) {
+    ctx.save();
+    ctx.setTransform(opts.dpr, 0, 0, opts.dpr, 0, 0);
+    for (const el of mediaElements) {
+      drawMediaStatus(ctx, mediaRect(el, slideScale), 'Loading media…');
+    }
+    ctx.restore();
+  }
 
   for (const el of mediaElements) {
     let blob: Blob;
     try {
       blob = await opts.fetchMedia(el.mediaPath);
-    } catch {
+    } catch (cause) {
+      reportError(mediaFetchError(el, cause));
+      unavailableRects.push(mediaRect(el, slideScale));
       continue;
     }
     // getMedia already types the blob in main mode; re-wrapping copies the whole
@@ -100,12 +126,7 @@ export async function createPresentationHandle(
     if (el.mediaKind === 'video') {
       (media as HTMLVideoElement).playsInline = true;
     }
-    const posterRect = {
-      x: emuToPx(el.x, slideScale),
-      y: emuToPx(el.y, slideScale),
-      w: emuToPx(el.width, slideScale),
-      h: emuToPx(el.height, slideScale),
-    };
+    const posterRect = mediaRect(el, slideScale);
     // Audio icons in pptx are often small (40–80 px); a bar that narrow is
     // unusable, so expand the control surface horizontally and push it
     // downward below the icon so the bar sits clearly under the speaker —
@@ -119,11 +140,44 @@ export async function createPresentationHandle(
           h: posterRect.h + 36,
         }
       : posterRect;
-    states.push({ el, rect, posterRect, media, objectUrl: url });
+    const state: MediaState = {
+      el,
+      rect,
+      posterRect,
+      media,
+      objectUrl: url,
+      loadState: 'loading',
+      detachListeners: () => {},
+    };
+    const onLoadedMetadata = () => {
+      if (!disposed) state.loadState = 'metadata';
+    };
+    const onCanPlay = () => {
+      if (!disposed) state.loadState = 'ready';
+    };
+    const onMediaError = () => {
+      if (disposed) return;
+      state.loadState = 'error';
+      reportError(mediaRuntimeError(el, media, 'decode'));
+    };
+    media.addEventListener('loadedmetadata', onLoadedMetadata);
+    media.addEventListener('canplay', onCanPlay);
+    media.addEventListener('error', onMediaError);
+    state.detachListeners = () => {
+      media.removeEventListener('loadedmetadata', onLoadedMetadata);
+      media.removeEventListener('canplay', onCanPlay);
+      media.removeEventListener('error', onMediaError);
+    };
+    states.push(state);
+    try {
+      media.load();
+    } catch (cause) {
+      state.loadState = 'error';
+      reportError(mediaRuntimeError(el, media, 'load', cause));
+    }
   }
 
   let rafId: number | null = null;
-  let disposed = false;
   let hoveredState: MediaState | null = null;
 
   const drawFrame = () => {
@@ -132,8 +186,21 @@ export async function createPresentationHandle(
     const cssH = canvas.height / opts.dpr;
     ctx.drawImage(base, 0, 0, canvas.width, canvas.height, 0, 0, cssW, cssH);
 
+    for (const rect of unavailableRects) {
+      drawMediaStatus(ctx, rect, 'Media unavailable');
+    }
+
     for (const s of states) {
       const media = s.media;
+
+      if (s.loadState === 'loading') {
+        drawMediaStatus(ctx, s.posterRect, 'Loading media…');
+        continue;
+      }
+      if (s.loadState === 'error') {
+        drawMediaStatus(ctx, s.posterRect, 'Media unavailable');
+        continue;
+      }
 
       // Draw the current video frame whenever the element has pixel data —
       // paused or playing. Paused should hold the frame you stopped on, not
@@ -218,6 +285,16 @@ export async function createPresentationHandle(
     state.media.currentTime = duration * fraction;
   };
 
+  const playMedia = (state: MediaState) => {
+    try {
+      void state.media.play().catch((cause: unknown) => {
+        reportError(mediaRuntimeError(state.el, state.media, 'play', cause));
+      });
+    } catch (cause) {
+      reportError(mediaRuntimeError(state.el, state.media, 'play', cause));
+    }
+  };
+
   const onPointerDown = (e: PointerEvent) => {
     const { x: lx, y: ly } = toLocal(e.clientX, e.clientY);
     const hit = hitTest(lx, ly);
@@ -229,7 +306,7 @@ export async function createPresentationHandle(
       canvas.setPointerCapture(e.pointerId);
       e.preventDefault();
     } else {
-      if (hit.state.media.paused) void hit.state.media.play().catch(() => undefined);
+      if (hit.state.media.paused) playMedia(hit.state);
       else hit.state.media.pause();
     }
   };
@@ -261,7 +338,7 @@ export async function createPresentationHandle(
     const { wasPlaying, state } = seeking;
     seeking = null;
     canvas.releasePointerCapture(e.pointerId);
-    if (wasPlaying) void state.media.play().catch(() => undefined);
+    if (wasPlaying) playMedia(state);
   };
 
   // Slides without media: no playback overlay, so skip the RAF loop and
@@ -274,13 +351,18 @@ export async function createPresentationHandle(
     canvas.addEventListener('pointercancel', onPointerUp);
     canvas.style.cursor = 'pointer';
     tick();
+  } else if (unavailableRects.length > 0) {
+    // A slide whose every media fetch failed has no RAF-backed state. Replace
+    // the provisional loading badges once so the canvas does not remain stuck
+    // on "Loading media…" after the failure was already reported.
+    drawFrame();
   }
 
   return {
     play(mediaPath) {
       for (const s of states) {
         if (!mediaPath || s.el.mediaPath === mediaPath) {
-          void s.media.play().catch(() => undefined);
+          playMedia(s);
         }
       }
     },
@@ -300,6 +382,7 @@ export async function createPresentationHandle(
       canvas.removeEventListener('pointercancel', onPointerUp);
       canvas.style.cursor = '';
       for (const s of states) {
+        s.detachListeners();
         s.media.pause();
         s.media.removeAttribute('src');
         s.media.load();
@@ -307,6 +390,83 @@ export async function createPresentationHandle(
       }
     },
   };
+}
+
+function mediaRect(el: MediaElement, slideScale: number) {
+  return {
+    x: emuToPx(el.x, slideScale),
+    y: emuToPx(el.y, slideScale),
+    w: emuToPx(el.width, slideScale),
+    h: emuToPx(el.height, slideScale),
+  };
+}
+
+function drawMediaStatus(
+  ctx: CanvasRenderingContext2D,
+  rect: { x: number; y: number; w: number; h: number },
+  label: string,
+): void {
+  const fontSize = Math.max(10, Math.min(14, rect.h * 0.12));
+  ctx.save();
+  ctx.font = `500 ${fontSize}px system-ui, -apple-system, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const padX = 12;
+  const h = fontSize + 12;
+  const w = Math.min(rect.w, Math.max(100, ctx.measureText(label).width + padX * 2));
+  const x = rect.x + (rect.w - w) / 2;
+  const y = rect.y + (rect.h - h) / 2;
+  roundedRect(ctx, x, y, w, h, h / 2);
+  ctx.fillStyle = 'rgba(20, 20, 20, 0.72)';
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+  ctx.fillText(label, rect.x + rect.w / 2, rect.y + rect.h / 2);
+  ctx.restore();
+}
+
+function mediaFetchError(el: MediaElement, cause: unknown): Error {
+  return new Error(
+    `Embedded ${el.mediaKind} fetch failed for "${el.mediaPath}" ` +
+      `(mime=${el.mimeType || 'unknown'}): ${describeCause(cause)}`,
+  );
+}
+
+function mediaRuntimeError(
+  el: MediaElement,
+  media: HTMLMediaElement,
+  stage: 'load' | 'decode' | 'play',
+  cause?: unknown,
+): Error {
+  let support = '';
+  try {
+    support = el.mimeType ? media.canPlayType(el.mimeType) : '';
+  } catch {
+    // Diagnostic only; failure reporting itself must remain reliable.
+  }
+  const nativeError = media.error;
+  const details = [
+    `mime=${el.mimeType || 'unknown'}`,
+    `canPlayType=${support || 'no'}`,
+    `readyState=${media.readyState}`,
+    `networkState=${media.networkState}`,
+  ];
+  if (nativeError) {
+    details.push(
+      `mediaError=${nativeError.code}${nativeError.message ? ` ${nativeError.message}` : ''}`,
+    );
+  }
+  const causeText = cause === undefined ? '' : `: ${describeCause(cause)}`;
+  return new Error(
+    `Embedded ${el.mediaKind} ${stage} failed for "${el.mediaPath}" ` +
+      `(${details.join('; ')})${causeText}`,
+  );
+}
+
+function describeCause(cause: unknown): string {
+  if (cause instanceof Error) {
+    return `${cause.name || 'Error'}${cause.message ? `: ${cause.message}` : ''}`;
+  }
+  return String(cause);
 }
 
 const AUDIO_PILL_H = 28;
