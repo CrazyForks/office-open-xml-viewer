@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   OoxmlError,
-  ParserResourceLimitError,
+  OoxmlResourceLimitError,
   type OoxmlErrorCode,
 } from './ooxml-error';
 
@@ -32,26 +32,39 @@ describe('OoxmlError', () => {
     }
   });
 
-  it('uses a separate additive error class for parser resource diagnostics', () => {
-    const err = new ParserResourceLimitError('too large', {
+  it('uses a separate additive error class with discriminated resource details', () => {
+    const err = new OoxmlResourceLimitError('too large', {
       stage: 'decompression',
-      source: 'zip-part',
-      part: 'word/document.xml',
-      metric: 'parsed-part-inflated-bytes',
-      limit: 10,
-      observed: 11,
+      violation: {
+        format: 'docx',
+        operation: 'parse',
+        resource: 'archive-entry',
+        part: 'word/document.xml',
+        metric: 'actual-inflated-bytes',
+        limit: 10,
+        observed: 11,
+        configurable: true,
+        usage: {
+          archiveEntryCount: 1,
+          declaredInflatedBytes: 11,
+          distinctInflatedBytes: 11,
+          operationInflatedBytes: 11,
+        },
+      },
     });
     expect(err).toBeInstanceOf(Error);
-    expect(err).toBeInstanceOf(ParserResourceLimitError);
-    expect(err.code).toBe('parser-resource-limit');
-    expect(err).toMatchObject({
-      stage: 'decompression',
-      source: 'zip-part',
+    expect(err).toBeInstanceOf(OoxmlResourceLimitError);
+    expect(err.code).toBe('ooxml-resource-limit');
+    expect(err.details.violation).toMatchObject({
+      format: 'docx',
+      operation: 'parse',
+      resource: 'archive-entry',
       part: 'word/document.xml',
-      metric: 'parsed-part-inflated-bytes',
-      limit: 10,
-      observed: 11,
+      metric: 'actual-inflated-bytes',
     });
+    expect(Object.isFrozen(err.details)).toBe(true);
+    expect(Object.isFrozen(err.details.violation)).toBe(true);
+    expect(Object.isFrozen(err.details.violation.usage)).toBe(true);
   });
 
   it('captures a stack trace', () => {

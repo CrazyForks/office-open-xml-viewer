@@ -202,8 +202,7 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
       DocxDocument.prototype as unknown as {
         _parse(
           buffer: ArrayBuffer,
-          maxZipEntryBytes?: number,
-          parserResourceLimits?: object,
+          resourcePolicy: object,
           useGoogleFonts?: boolean,
           timeoutMs?: number,
         ): Promise<void>;
@@ -224,8 +223,7 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
       DocxDocument.prototype as unknown as {
         _parse(
           buffer: ArrayBuffer,
-          maxZipEntryBytes?: number,
-          parserResourceLimits?: object,
+          resourcePolicy: object,
           useGoogleFonts?: boolean,
           timeoutMs?: number,
         ): Promise<void>;
@@ -250,6 +248,21 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     ).rejects.toThrow();
     expect(SilentWorker.instances).toHaveLength(1);
     expect(SilentWorker.instances[0].terminated).toBe(true);
+  });
+
+  it('rejects invalid resource options before fetch or worker creation', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    const fetch = vi.fn();
+    G.fetch = fetch;
+
+    await expect(
+      DocxDocument.load('/document.docx', {
+        resourceLimits: { maxArchiveEntryBytes: 0 },
+      }),
+    ).rejects.toThrow(/resourceLimits\.maxArchiveEntryBytes/);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(SilentWorker.instances).toHaveLength(0);
   });
 
   it('returns no bookmark before load or after destroy without poisoning loaded lookup', () => {

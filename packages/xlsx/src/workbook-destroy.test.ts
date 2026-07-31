@@ -163,6 +163,21 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     expect(SilentWorker.instances[0].terminated).toBe(true);
   });
 
+  it('rejects invalid resource options before fetch or worker creation', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    const fetch = vi.fn();
+    G.fetch = fetch;
+
+    await expect(
+      XlsxWorkbook.load('/workbook.xlsx', {
+        resourceLimits: { maxTotalInflatedBytes: Number.POSITIVE_INFINITY },
+      }),
+    ).rejects.toThrow(/resourceLimits\.maxTotalInflatedBytes/);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(SilentWorker.instances).toHaveLength(0);
+  });
+
   // Wiring guard: destroy() must actually release the Google-Fonts substitutes
   // the workbook preloaded. The other tests set `googleFontFaces = []`, so they
   // never exercise the unload branch — a dropped call would go unnoticed.

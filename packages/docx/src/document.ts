@@ -12,10 +12,14 @@ import {
   resolveOoxmlContainer,
   toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
-  type ParserResourceLimits,
   type MathRenderer,
 } from '@silurus/ooxml-core';
-import { deserializeWorkerError, disposeRejectedLoad } from '@silurus/ooxml-core/worker';
+import {
+  deserializeWorkerError,
+  disposeRejectedLoad,
+  normalizeLoadResourceOptions,
+  type NormalizedOoxmlResourcePolicy,
+} from '@silurus/ooxml-core/worker';
 import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
 import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
@@ -40,8 +44,8 @@ import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
- *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`) with the
- *  opt-in math engine. */
+ *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, and the
+ *  deprecated `maxZipEntryBytes` alias) with the opt-in math engine. */
 export interface LoadOptions extends CoreLoadOptions {
   /**
    * Opt-in OMML equation engine. Import it from the separate `@silurus/ooxml/math`
@@ -116,7 +120,7 @@ export class DocxDocument {
       correlate: (res) => res.id,
       toError: (res) => {
         if (res.type !== 'error') return undefined;
-        if (res.code === 'parser-resource-limit') return deserializeWorkerError(res);
+        if (res.code === 'ooxml-resource-limit') return deserializeWorkerError(res);
         return Object.assign(new Error(res.message), {
           name: res.errorName ?? 'Error',
           ...(res.code !== undefined ? { code: res.code } : {}),
@@ -141,6 +145,7 @@ export class DocxDocument {
   }
 
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<DocxDocument> {
+    const resourceOptions = normalizeLoadResourceOptions(opts);
     const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
@@ -172,8 +177,7 @@ export class DocxDocument {
       // here after parse, before the lazy first pagination.
       await doc._parse(
         buffer,
-        opts.maxZipEntryBytes,
-        opts.parserResourceLimits,
+        resourceOptions.policy,
         mode === 'worker' ? !!opts.useGoogleFonts : false,
         opts.workerTimeoutMs,
       );
@@ -247,16 +251,15 @@ export class DocxDocument {
 
   private async _parse(
     buffer: ArrayBuffer,
-    maxZipEntryBytes?: number,
-    parserResourceLimits?: ParserResourceLimits,
+    resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts = false,
     timeoutMs?: number,
   ): Promise<void> {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, maxZipEntryBytes, parserResourceLimits, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs } satisfies RenderWorkerRequest)
-          : ({ type: 'parse', id, data: buffer, maxZipEntryBytes, parserResourceLimits } satisfies WorkerRequest),
+          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs } satisfies RenderWorkerRequest)
+          : ({ type: 'parse', id, data: buffer, resourcePolicy } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
     );

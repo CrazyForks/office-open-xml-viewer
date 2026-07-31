@@ -22,6 +22,7 @@ import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import { stableFingerprint } from './layout/fingerprint.js';
 import { buildBookmarkPageMap } from './bookmark-nav.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
+import { DEFAULT_OOXML_RESOURCE_LIMITS } from '@silurus/ooxml-core/worker';
 
 function services(): LayoutServices {
   return Object.freeze({
@@ -463,6 +464,7 @@ describe('render worker canonical layout parity', () => {
   it('pins worker request and response protocol shapes including structured failures', () => {
     const parse = {
       type: 'parse', id: 1, data: new ArrayBuffer(0), useGoogleFonts: false,
+      resourcePolicy: DEFAULT_OOXML_RESOURCE_LIMITS,
       defaultCurrentDateMs: 10,
     } satisfies RenderWorkerRequest;
     const render = {

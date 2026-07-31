@@ -1,10 +1,12 @@
 import type {
   ChartModel,
   MathNode,
-  ParserResourceLimits,
   SpaceLine,
 } from '@silurus/ooxml-core';
-import type { WorkerErrorPayload } from '@silurus/ooxml-core/worker';
+import type {
+  NormalizedOoxmlResourcePolicy,
+  WorkerErrorPayload,
+} from '@silurus/ooxml-core/worker';
 
 export interface Workbook {
   sheets: SheetMeta[];
@@ -1074,8 +1076,7 @@ export type WorkerRequest =
       type: 'parse';
       id: number;
       data: ArrayBuffer;
-      maxZipEntryBytes?: number;
-      parserResourceLimits?: ParserResourceLimits;
+      resourcePolicy: NormalizedOoxmlResourcePolicy;
     }
   /** Parse one sheet lazily. Deliberately carries NO `data`: the worker already
    *  retained the whole-workbook buffer on the preceding `parse`, so re-sending
@@ -1087,8 +1088,6 @@ export type WorkerRequest =
       id: number;
       sheetIndex: number;
       sheetName: string;
-      maxZipEntryBytes?: number;
-      parserResourceLimits?: ParserResourceLimits;
     }
   /** Pull one embedded image's raw bytes by zip path from the buffer the worker
    *  retained at parse time. Twin of pptx/docx `extractImage`; xlsx uses the

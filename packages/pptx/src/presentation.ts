@@ -18,10 +18,14 @@ import {
   resolveOoxmlContainer,
   toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
-  type ParserResourceLimits,
   type MathRenderer,
 } from '@silurus/ooxml-core';
-import { deserializeWorkerError, disposeRejectedLoad } from '@silurus/ooxml-core/worker';
+import {
+  deserializeWorkerError,
+  disposeRejectedLoad,
+  normalizeLoadResourceOptions,
+  type NormalizedOoxmlResourcePolicy,
+} from '@silurus/ooxml-core/worker';
 import { PPTX_GOOGLE_FONTS, pptxFontPreloadNames } from './google-fonts';
 import { findMimeTypeForPath } from './media-mime';
 import type {
@@ -156,6 +160,7 @@ export class PptxPresentation {
     source: string | ArrayBuffer,
     opts: LoadOptions = {},
   ): Promise<PptxPresentation> {
+    const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
       throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
@@ -191,8 +196,7 @@ export class PptxPresentation {
       pres._math = mode === 'worker' ? undefined : opts.math;
       await pres._parse(
         buffer,
-        opts.maxZipEntryBytes,
-        opts.parserResourceLimits,
+        resourceOptions.policy,
         mode === 'worker' ? !!opts.useGoogleFonts : false,
         opts.workerTimeoutMs,
       );
@@ -212,16 +216,15 @@ export class PptxPresentation {
 
   private async _parse(
     buffer: ArrayBuffer,
-    maxZipEntryBytes?: number,
-    parserResourceLimits?: ParserResourceLimits,
+    resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts = false,
     timeoutMs?: number,
   ): Promise<void> {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ kind: 'parse', id, buffer, maxZipEntryBytes, parserResourceLimits, useGoogleFonts } satisfies RenderWorkerRequest)
-          : ({ kind: 'parse', id, buffer, maxZipEntryBytes, parserResourceLimits } satisfies WorkerRequest),
+          ? ({ kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts } satisfies RenderWorkerRequest)
+          : ({ kind: 'parse', id, buffer, resourcePolicy } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
     );

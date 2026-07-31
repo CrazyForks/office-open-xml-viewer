@@ -22,12 +22,16 @@ export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core
 // narrow on `err.code`.
 export {
   OoxmlError,
-  ParserResourceLimitError,
+  OoxmlResourceLimitError,
   type OoxmlErrorCode,
   type OoxmlErrorSource,
   type OoxmlErrorStage,
-  type ParserResourceLimitErrorDetails,
-  type ParserResourceLimits,
+  type OoxmlFormat,
+  type OoxmlResourceLimit,
+  type OoxmlResourceLimitErrorDetails,
+  type OoxmlResourceLimits,
+  type OoxmlResourceUsageSnapshot,
+  type OoxmlResourceViolation,
 } from '@silurus/ooxml-core';
 export { noteText } from './types';
 export type {

@@ -12,9 +12,14 @@ import {
   toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
-  type ParserResourceLimits,
 } from '@silurus/ooxml-core';
-import { deserializeWorkerError, disposeRejectedLoad } from '@silurus/ooxml-core/worker';
+import {
+  deserializeWorkerError,
+  disposeRejectedLoad,
+  normalizeLoadResourceOptions,
+  normalizeResourcePolicy,
+  type NormalizedOoxmlResourcePolicy,
+} from '@silurus/ooxml-core/worker';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
@@ -33,8 +38,8 @@ import type {
 } from './worker-protocol.js';
 
 /** Options for {@link XlsxWorkbook.load}. Extends the shared load-options type
- *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`, `math`)
- *  with the worker-rendering mode. */
+ *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, the
+ *  deprecated `maxZipEntryBytes` alias, and `math`) with worker rendering. */
 export interface LoadOptions extends CoreLoadOptions {
   /**
    * 'main' (default): parse in a worker, render on the main thread (current
@@ -66,8 +71,7 @@ export class XlsxWorkbook {
   private readonly _fetchImage = (path: string, mime: string): Promise<Blob> =>
     this.getImage(path, mime);
   private rawData: ArrayBuffer | null = null;
-  private maxZipEntryBytes: number | undefined;
-  private parserResourceLimits: ParserResourceLimits | undefined;
+  private resourcePolicy: NormalizedOoxmlResourcePolicy | null = null;
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
    *  `renderViewport` call reuses it — equations in shapes render when present,
    *  and are skipped (engine tree-shaken) when omitted. */
@@ -96,6 +100,7 @@ export class XlsxWorkbook {
 
   /** Parse an XLSX from a URL or ArrayBuffer. */
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<XlsxWorkbook> {
+    const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
       throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
@@ -125,7 +130,7 @@ export class XlsxWorkbook {
     let wb: XlsxWorkbook | undefined;
     try {
       wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
-      await wb._load(buffer, opts);
+      await wb._load(buffer, opts, resourceOptions.policy);
       return wb;
     } catch (error) {
       const rejectedWorkbook = wb;
@@ -138,10 +143,13 @@ export class XlsxWorkbook {
   // resolveOoxmlContainer, so decryption sees the container before the render
   // worker is constructed) before calling `_load`, so this only ever receives
   // an ArrayBuffer — no separate string-source fetch branch is needed here.
-  private async _load(data: ArrayBuffer, opts: LoadOptions = {}): Promise<void> {
+  private async _load(
+    data: ArrayBuffer,
+    opts: LoadOptions = {},
+    resourcePolicy: NormalizedOoxmlResourcePolicy = normalizeResourcePolicy(opts),
+  ): Promise<void> {
     this.rawData = data;
-    this.maxZipEntryBytes = opts.maxZipEntryBytes;
-    this.parserResourceLimits = opts.parserResourceLimits;
+    this.resourcePolicy = resourcePolicy;
     this.math = opts.math;
     if (opts.math && this._mode === 'worker') {
       console.warn(
@@ -158,16 +166,14 @@ export class XlsxWorkbook {
               type: 'parse',
               id,
               data: data.slice(0),
-              maxZipEntryBytes: this.maxZipEntryBytes,
-              parserResourceLimits: this.parserResourceLimits,
+              resourcePolicy,
               useGoogleFonts: !!opts.useGoogleFonts,
             } satisfies RenderWorkerRequest)
           : ({
               type: 'parse',
               id,
               data: data.slice(0),
-              maxZipEntryBytes: this.maxZipEntryBytes,
-              parserResourceLimits: this.parserResourceLimits,
+              resourcePolicy,
             } satisfies WorkerRequest),
       undefined,
       { timeoutMs: opts.workerTimeoutMs },
@@ -255,8 +261,6 @@ export class XlsxWorkbook {
       id,
       sheetIndex,
       sheetName: sheetMeta.name,
-      maxZipEntryBytes: this.maxZipEntryBytes,
-      parserResourceLimits: this.parserResourceLimits,
     }));
     // Parse mode: the worker forwards the sheet as transferred UTF-8 JSON bytes
     // — decode + parse once here. Worker (render) mode: the worker already

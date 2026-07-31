@@ -115,8 +115,7 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
       PptxPresentation.prototype as unknown as {
         _parse(
           buffer: ArrayBuffer,
-          maxZipEntryBytes?: number,
-          parserResourceLimits?: object,
+          resourcePolicy: object,
           useGoogleFonts?: boolean,
           timeoutMs?: number,
         ): Promise<void>;
@@ -137,8 +136,7 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
       PptxPresentation.prototype as unknown as {
         _parse(
           buffer: ArrayBuffer,
-          maxZipEntryBytes?: number,
-          parserResourceLimits?: object,
+          resourcePolicy: object,
           useGoogleFonts?: boolean,
           timeoutMs?: number,
         ): Promise<void>;
@@ -163,6 +161,19 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     ).rejects.toThrow();
     expect(SilentWorker.instances).toHaveLength(1);
     expect(SilentWorker.instances[0].terminated).toBe(true);
+  });
+
+  it('rejects invalid resource options before fetch or worker creation', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    const fetch = vi.fn();
+    G.fetch = fetch;
+
+    await expect(
+      PptxPresentation.load('/presentation.pptx', { debug: 'yes' as never }),
+    ).rejects.toThrow(/debug must be a boolean/);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(SilentWorker.instances).toHaveLength(0);
   });
 
   // Wiring guard: destroy() must actually release the Google-Fonts substitutes

@@ -2,10 +2,7 @@ import {
   decodeDataUrl,
   WasmParserHost,
 } from '@silurus/ooxml-core';
-import {
-  parserResourceLimitsForWasm,
-  serializeWorkerError,
-} from '@silurus/ooxml-core/worker';
+import { resourcePolicyForWasm, serializeWorkerError } from '@silurus/ooxml-core/worker';
 import type { WorkerRequest, WorkerResponse } from './types';
 import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 
@@ -50,14 +47,12 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const id = req.id;
   try {
     await host.ensureReady();
+    if (req.kind !== 'parse' && host.archive) {
+      const retained = host.archive;
+      host.run(() => retained.assert_healthy());
+    }
     if (req.kind === 'parse') {
-      const max =
-        typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
-          ? BigInt(req.maxZipEntryBytes)
-          : undefined;
-      const [maxParsedPart, maxOperation] = parserResourceLimitsForWasm(
-        req.parserResourceLimits,
-      );
+      const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
       const bytes = new Uint8Array(req.buffer);
       // Both the construction and `parse()` run under `host.run` so a trap in
       // EITHER poisons + recycles the instance (and frees the archive). Adopting
@@ -67,7 +62,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       // buffer, so forward it to the main thread as a transferable — no clone,
       // no decode here. The single decode + JSON.parse happens once, on main.
       const json = host.run(() => {
-        const archive = new PptxArchive(bytes, max, maxParsedPart, maxOperation);
+        const archive = new PptxArchive(bytes, maxEntry, maxTotal);
         host.setArchive(archive);
         return archive.parse();
       });

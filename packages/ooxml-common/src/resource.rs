@@ -1,0 +1,438 @@
+//! Persistent, format-neutral resource policy and accounting for one OOXML
+//! package session. ZIP readers report observations here; they do not interpret
+//! public options or own poisoning/error serialization.
+
+use serde::Serialize;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+pub const STANDARD_MAX_ARCHIVE_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
+pub const STANDARD_MAX_TOTAL_INFLATED_BYTES: u64 = 256 * 1024 * 1024;
+pub const HARD_MAX_ARCHIVE_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+pub const HARD_MAX_TOTAL_INFLATED_BYTES: u64 = 1024 * 1024 * 1024;
+pub const HARD_MAX_ARCHIVE_ENTRIES: u64 = 20_000;
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OoxmlFormat {
+    Docx,
+    Xlsx,
+    Pptx,
+}
+
+#[derive(Clone)]
+pub struct ResourceGovernor(Rc<RefCell<GovernorState>>);
+
+#[derive(Clone, Copy)]
+struct ResourcePolicy {
+    public_entry: Option<u64>,
+    public_total: Option<u64>,
+}
+
+struct GovernorState {
+    format: OoxmlFormat,
+    policy: ResourcePolicy,
+    operation: String,
+    usage: ResourceUsage,
+    // Central-directory identity, not a display path: duplicate ZIP names must
+    // not accidentally share accounting state.
+    max_actual_by_part: HashMap<usize, u64>,
+    first_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceUsage {
+    pub archive_entry_count: u64,
+    pub declared_inflated_bytes: u64,
+    pub distinct_inflated_bytes: u64,
+    pub operation_inflated_bytes: u64,
+}
+
+impl ResourceUsage {
+    fn for_wire(self) -> Self {
+        const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+        Self {
+            archive_entry_count: self.archive_entry_count.min(JS_MAX_SAFE_INTEGER),
+            declared_inflated_bytes: self.declared_inflated_bytes.min(JS_MAX_SAFE_INTEGER),
+            distinct_inflated_bytes: self.distinct_inflated_bytes.min(JS_MAX_SAFE_INTEGER),
+            operation_inflated_bytes: self.operation_inflated_bytes.min(JS_MAX_SAFE_INTEGER),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceLimitEnvelope<'a> {
+    code: &'static str,
+    details: ResourceLimitDetails<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceLimitDetails<'a> {
+    stage: &'static str,
+    violation: ResourceViolation<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceViolation<'a> {
+    format: OoxmlFormat,
+    operation: &'a str,
+    resource: &'static str,
+    metric: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    part: Option<&'a str>,
+    limit: u64,
+    observed: u64,
+    configurable: bool,
+    usage: ResourceUsage,
+}
+
+struct LimitCrossing<'a> {
+    stage: &'static str,
+    resource: &'static str,
+    metric: &'static str,
+    part: Option<&'a str>,
+    limit: u64,
+    observed: u64,
+    configurable: bool,
+}
+
+thread_local! {
+    static ACTIVE_GOVERNOR: RefCell<Option<ResourceGovernor>> = const { RefCell::new(None) };
+}
+
+/// Dynamic routing scope for legacy ZIP helper call sites. The durable state is
+/// owned by [`ResourceGovernor`], not this thread-local slot.
+#[must_use = "binding the scope keeps the package governor active"]
+pub struct ResourceScope {
+    governor: ResourceGovernor,
+    previous_active: Option<ResourceGovernor>,
+    previous_operation: String,
+    previous_operation_bytes: u64,
+    restore_parent_operation: bool,
+}
+
+impl Drop for ResourceScope {
+    fn drop(&mut self) {
+        if self.restore_parent_operation {
+            let mut state = self.governor.0.borrow_mut();
+            state.operation = std::mem::take(&mut self.previous_operation);
+            state.usage.operation_inflated_bytes = self.previous_operation_bytes;
+        }
+        ACTIVE_GOVERNOR.with(|active| {
+            *active.borrow_mut() = self.previous_active.take();
+        });
+    }
+}
+
+impl ResourceScope {
+    pub fn resource_limit_error(&self) -> Option<String> {
+        self.governor.first_error()
+    }
+}
+
+impl ResourceGovernor {
+    /// Construct a browser policy from the normalized WASM scalar ABI.
+    ///
+    /// `None` means an older/native caller omitted the value and receives the
+    /// standard default. `Some(0)` is the explicit public `null` sentinel and
+    /// disables that configurable limit while retaining hard safety ceilings.
+    pub fn from_wasm(
+        format: OoxmlFormat,
+        max_archive_entry_bytes: Option<u64>,
+        max_total_inflated_bytes: Option<u64>,
+    ) -> Self {
+        fn decode(value: Option<u64>, standard: u64) -> Option<u64> {
+            match value {
+                None => Some(standard),
+                Some(0) => None,
+                Some(value) => Some(value),
+            }
+        }
+        Self(Rc::new(RefCell::new(GovernorState {
+            format,
+            policy: ResourcePolicy {
+                public_entry: decode(max_archive_entry_bytes, STANDARD_MAX_ARCHIVE_ENTRY_BYTES),
+                public_total: decode(max_total_inflated_bytes, STANDARD_MAX_TOTAL_INFLATED_BYTES),
+            },
+            operation: "open".to_string(),
+            usage: ResourceUsage::default(),
+            max_actual_by_part: HashMap::new(),
+            first_error: None,
+        })))
+    }
+
+    pub fn scope(&self, operation: impl Into<String>) -> ResourceScope {
+        let mut state = self.0.borrow_mut();
+        let previous_operation = std::mem::replace(&mut state.operation, operation.into());
+        let previous_operation_bytes = state.usage.operation_inflated_bytes;
+        state.usage.operation_inflated_bytes = 0;
+        drop(state);
+        let previous_active =
+            ACTIVE_GOVERNOR.with(|active| active.borrow_mut().replace(self.clone()));
+        let restore_parent_operation = previous_active
+            .as_ref()
+            .is_some_and(|active| Rc::ptr_eq(&active.0, &self.0));
+        ResourceScope {
+            governor: self.clone(),
+            previous_active,
+            previous_operation,
+            previous_operation_bytes,
+            restore_parent_operation,
+        }
+    }
+
+    pub fn first_error(&self) -> Option<String> {
+        self.0.borrow().first_error.clone()
+    }
+
+    pub fn usage(&self) -> ResourceUsage {
+        self.0.borrow().usage
+    }
+}
+
+pub(crate) fn active_governor() -> Option<ResourceGovernor> {
+    ACTIVE_GOVERNOR.with(|active| active.borrow().clone())
+}
+
+fn effective_limit(public: Option<u64>, hard: u64) -> (u64, bool) {
+    match public {
+        Some(limit) if limit <= hard => (limit, true),
+        _ => (hard, false),
+    }
+}
+
+fn safe_part(path: &str) -> &str {
+    let safe = !path.is_empty()
+        && path.len() <= 1024
+        && !path.starts_with('/')
+        && !path.split('/').any(|segment| segment == "..")
+        && !path.chars().any(char::is_control);
+    if safe {
+        path
+    } else {
+        "[untrusted archive entry]"
+    }
+}
+
+impl GovernorState {
+    fn fail(&mut self, crossing: LimitCrossing<'_>) -> String {
+        if let Some(error) = &self.first_error {
+            return error.clone();
+        }
+        let part = crossing.part.map(safe_part);
+        let operation = self.operation.clone();
+        let envelope = ResourceLimitEnvelope {
+            code: "ooxml-resource-limit",
+            details: ResourceLimitDetails {
+                stage: crossing.stage,
+                violation: ResourceViolation {
+                    format: self.format,
+                    operation: &operation,
+                    resource: crossing.resource,
+                    metric: crossing.metric,
+                    part,
+                    limit: crossing.limit,
+                    // Keep every wire number exactly representable in JS and
+                    // freeze known crossings at the first byte beyond the cap.
+                    observed: crossing.observed.min(crossing.limit.saturating_add(1)),
+                    configurable: crossing.configurable,
+                    usage: self.usage.for_wire(),
+                },
+            },
+        };
+        let error = format!(
+            "OOXML_RESOURCE_LIMIT:{}",
+            serde_json::to_string(&envelope).expect("resource-limit details serialize")
+        );
+        self.first_error = Some(error.clone());
+        error
+    }
+
+    fn assert_healthy(&self) -> Result<(), String> {
+        match &self.first_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
+    }
+}
+
+pub(crate) fn assert_healthy() -> Result<(), String> {
+    let Some(governor) = active_governor() else {
+        return Ok(());
+    };
+    let result = governor.0.borrow().assert_healthy();
+    result
+}
+
+pub(crate) fn observe_archive_metadata(
+    entry_count: u64,
+    declared_inflated_bytes: u64,
+) -> Result<(), String> {
+    let Some(governor) = active_governor() else {
+        return Ok(());
+    };
+    let mut state = governor.0.borrow_mut();
+    state.assert_healthy()?;
+    state.usage.archive_entry_count = state.usage.archive_entry_count.max(entry_count);
+    state.usage.declared_inflated_bytes = declared_inflated_bytes;
+    if entry_count > HARD_MAX_ARCHIVE_ENTRIES {
+        return Err(state.fail(LimitCrossing {
+            stage: "container",
+            resource: "archive",
+            metric: "entry-count",
+            part: None,
+            limit: HARD_MAX_ARCHIVE_ENTRIES,
+            observed: entry_count,
+            configurable: false,
+        }));
+    }
+    Ok(())
+}
+
+pub(crate) fn read_allowance(
+    part_id: usize,
+    path: &str,
+    declared_size: u64,
+) -> Result<u64, String> {
+    let Some(governor) = active_governor() else {
+        return Ok(HARD_MAX_ARCHIVE_ENTRY_BYTES);
+    };
+    let mut state = governor.0.borrow_mut();
+    state.assert_healthy()?;
+    let (entry_limit, entry_configurable) =
+        effective_limit(state.policy.public_entry, HARD_MAX_ARCHIVE_ENTRY_BYTES);
+    if declared_size > entry_limit {
+        return Err(state.fail(LimitCrossing {
+            stage: "container",
+            resource: "archive-entry",
+            metric: "declared-inflated-bytes",
+            part: Some(path),
+            limit: entry_limit,
+            observed: declared_size,
+            configurable: entry_configurable,
+        }));
+    }
+    let old = state.max_actual_by_part.get(&part_id).copied().unwrap_or(0);
+    let (total_limit, _) =
+        effective_limit(state.policy.public_total, HARD_MAX_TOTAL_INFLATED_BYTES);
+    let total_allowance =
+        old.saturating_add(total_limit.saturating_sub(state.usage.distinct_inflated_bytes));
+    Ok(entry_limit.min(total_allowance))
+}
+
+pub(crate) fn observe_inflated(
+    part_id: usize,
+    path: &str,
+    cumulative_for_read: u64,
+    delivered_increment: u64,
+) -> Result<(), String> {
+    let Some(governor) = active_governor() else {
+        return Ok(());
+    };
+    let mut state = governor.0.borrow_mut();
+    state.assert_healthy()?;
+    state.usage.operation_inflated_bytes = state
+        .usage
+        .operation_inflated_bytes
+        .saturating_add(delivered_increment);
+
+    let old = state.max_actual_by_part.get(&part_id).copied().unwrap_or(0);
+    let next = old.max(cumulative_for_read);
+    let next_total = state
+        .usage
+        .distinct_inflated_bytes
+        .saturating_add(next.saturating_sub(old));
+    state.max_actual_by_part.insert(part_id, next);
+    state.usage.distinct_inflated_bytes = next_total;
+
+    let (entry_limit, entry_configurable) =
+        effective_limit(state.policy.public_entry, HARD_MAX_ARCHIVE_ENTRY_BYTES);
+    if cumulative_for_read > entry_limit {
+        return Err(state.fail(LimitCrossing {
+            stage: "decompression",
+            resource: "archive-entry",
+            metric: "actual-inflated-bytes",
+            part: Some(path),
+            limit: entry_limit,
+            observed: cumulative_for_read,
+            configurable: entry_configurable,
+        }));
+    }
+    let (total_limit, total_configurable) =
+        effective_limit(state.policy.public_total, HARD_MAX_TOTAL_INFLATED_BYTES);
+    if next_total > total_limit {
+        return Err(state.fail(LimitCrossing {
+            stage: "decompression",
+            resource: "archive",
+            metric: "distinct-inflated-bytes",
+            part: Some(path),
+            limit: total_limit,
+            observed: next_total,
+            configurable: total_configurable,
+        }));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_wire_value_disables_only_the_public_limit() {
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(0), Some(0));
+        let state = governor.0.borrow();
+        assert_eq!(state.policy.public_entry, None);
+        assert_eq!(state.policy.public_total, None);
+        assert_eq!(effective_limit(state.policy.public_entry, 10), (10, false));
+    }
+
+    #[test]
+    fn scope_restores_outer_operation_but_retains_session_usage() {
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(100), Some(100));
+        {
+            let _outer = governor.scope("parse");
+            observe_inflated(0, "xl/a.xml", 4, 4).unwrap();
+            {
+                let _inner = governor.scope("parse-sheet");
+                observe_inflated(1, "xl/b.xml", 4, 4).unwrap();
+            }
+            assert_eq!(governor.0.borrow().operation, "parse");
+        }
+        assert_eq!(governor.usage().distinct_inflated_bytes, 8);
+        assert_eq!(governor.usage().operation_inflated_bytes, 4);
+    }
+
+    #[test]
+    fn completed_top_level_scope_retains_its_operation_usage() {
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(100), Some(100));
+        {
+            let _scope = governor.scope("parse");
+            observe_inflated(0, "word/document.xml", 7, 7).unwrap();
+        }
+        assert_eq!(governor.0.borrow().operation, "parse");
+        assert_eq!(governor.usage().operation_inflated_bytes, 7);
+
+        {
+            let _scope = governor.scope("markdown");
+            observe_inflated(0, "word/document.xml", 7, 7).unwrap();
+        }
+        assert_eq!(governor.0.borrow().operation, "markdown");
+        assert_eq!(governor.usage().operation_inflated_bytes, 7);
+    }
+
+    #[test]
+    fn first_violation_poison_is_stable() {
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Pptx, Some(4), Some(20));
+        let _scope = governor.scope("extract-image");
+        let first = observe_inflated(0, "ppt/media/a.png", 5, 5).unwrap_err();
+        let later = read_allowance(1, "ppt/media/b.png", 1).unwrap_err();
+        assert_eq!(later, first);
+        assert!(first.starts_with("OOXML_RESOURCE_LIMIT:"));
+    }
+}

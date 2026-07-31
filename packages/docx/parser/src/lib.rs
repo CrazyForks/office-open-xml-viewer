@@ -19,15 +19,15 @@ mod xml_util;
 #[wasm_bindgen]
 pub fn parse_docx(
     data: &[u8],
-    max_zip_entry_bytes: Option<u64>,
-    max_parsed_part_inflated_bytes: Option<u64>,
-    max_operation_inflated_bytes: Option<u64>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
 ) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
     let guard = ooxml_common::zip::scoped_limits(
-        max_zip_entry_bytes,
-        max_parsed_part_inflated_bytes,
-        max_operation_inflated_bytes,
+        ooxml_common::resource::OoxmlFormat::Docx,
+        "parse",
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
     );
     let doc = parser::parse_from_bytes(data);
     if let Some(error) = guard.resource_limit_error() {
@@ -41,10 +41,23 @@ pub fn parse_docx(
 /// GitHub-flavoured markdown of headings / paragraphs / tables / footnotes,
 /// discarding positioning, section properties, fonts, and drawing shapes.
 #[wasm_bindgen]
-pub fn docx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
+pub fn docx_to_markdown(
+    data: &[u8],
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
-    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    let doc = parser::parse_from_bytes(data).map_err(|e| JsValue::from_str(&e))?;
+    let guard = ooxml_common::zip::scoped_limits(
+        ooxml_common::resource::OoxmlFormat::Docx,
+        "markdown",
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+    );
+    let doc = parser::parse_from_bytes(data);
+    if let Some(error) = guard.resource_limit_error() {
+        return Err(JsValue::from_str(&error));
+    }
+    let doc = doc.map_err(|e| JsValue::from_str(&e))?;
     Ok(markdown::render_document(&doc))
 }
 
@@ -56,10 +69,17 @@ pub fn docx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result
 pub fn extract_image(
     data: &[u8],
     path: &str,
-    max_zip_entry_bytes: Option<u64>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
 ) -> Result<Vec<u8>, JsValue> {
-    ooxml_common::zip::extract_zip_entry(data, path, max_zip_entry_bytes)
-        .map_err(|e| JsValue::from_str(&e))
+    ooxml_common::zip::extract_zip_entry(
+        data,
+        path,
+        ooxml_common::resource::OoxmlFormat::Docx,
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+    )
+    .map_err(|e| JsValue::from_str(&e))
 }
 
 /// A stateful handle over an opened docx archive.
@@ -85,9 +105,7 @@ pub struct DocxArchive {
     /// document (symmetric with a corrupt inner part) rather than the constructor
     /// throwing an opaque error the viewer can't turn into a placeholder page.
     archive: Result<parser::Zip, String>,
-    max: Option<u64>,
-    max_parsed_part_inflated_bytes: Option<u64>,
-    max_operation_inflated_bytes: Option<u64>,
+    governor: ooxml_common::resource::ResourceGovernor,
 }
 
 #[wasm_bindgen]
@@ -105,20 +123,25 @@ impl DocxArchive {
     #[wasm_bindgen(constructor)]
     pub fn new(
         data: Vec<u8>,
-        max_zip_entry_bytes: Option<u64>,
-        max_parsed_part_inflated_bytes: Option<u64>,
-        max_operation_inflated_bytes: Option<u64>,
+        max_archive_entry_bytes: Option<u64>,
+        max_total_inflated_bytes: Option<u64>,
     ) -> Result<DocxArchive, JsValue> {
         console_error_panic_hook::set_once();
         // RB7 (MAJOR): a truncated / corrupt CONTAINER is deferred, not thrown, so
         // `parse()` can degrade it to a placeholder document instead of the
         // constructor failing with an opaque error.
-        Ok(DocxArchive {
-            archive: parser::open_zip(data),
-            max: max_zip_entry_bytes,
-            max_parsed_part_inflated_bytes,
-            max_operation_inflated_bytes,
-        })
+        let governor = ooxml_common::resource::ResourceGovernor::from_wasm(
+            ooxml_common::resource::OoxmlFormat::Docx,
+            max_archive_entry_bytes,
+            max_total_inflated_bytes,
+        );
+        let scope = governor.scope("open");
+        let archive = parser::open_zip(data);
+        if let Some(error) = scope.resource_limit_error() {
+            return Err(JsValue::from_str(&error));
+        }
+        drop(scope);
+        Ok(DocxArchive { archive, governor })
     }
 
     /// Parse the retained archive and return the model as UTF-8 JSON bytes.
@@ -126,11 +149,7 @@ impl DocxArchive {
     /// same serializer, same error strings. When the CONTAINER failed to open
     /// (RB7 MAJOR) the model is a degraded placeholder tagged with the container.
     pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
-        let guard = ooxml_common::zip::scoped_limits(
-            self.max,
-            self.max_parsed_part_inflated_bytes,
-            self.max_operation_inflated_bytes,
-        );
+        let guard = ooxml_common::zip::scoped_governor(&self.governor, "parse");
         let doc = match self.archive.as_mut() {
             Ok(zip) => parser::parse(zip),
             Err(e) => Ok(parser::degraded_container_document(e.clone())),
@@ -142,12 +161,20 @@ impl DocxArchive {
         serde_json::to_vec(&doc).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
     }
 
+    /// Fail cached worker operations after this package session was poisoned.
+    pub fn assert_healthy(&self) -> Result<(), JsValue> {
+        match self.governor.first_error() {
+            Some(error) => Err(JsValue::from_str(&error)),
+            None => Ok(()),
+        }
+    }
+
     /// Extract raw bytes for one embedded entry (e.g. "word/media/image1.png")
     /// from the retained archive. Twin of the free `extract_image`, but reads
     /// through the already-open archive instead of re-opening it. A corrupt
     /// container has no entries, so this surfaces the container-open error.
     pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let _guard = ooxml_common::zip::scoped_governor(&self.governor, "extract-image");
         let zip = self
             .archive
             .as_mut()
@@ -158,11 +185,7 @@ impl DocxArchive {
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
     /// free `docx_to_markdown`. A corrupt container degrades to an empty document.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
-        let guard = ooxml_common::zip::scoped_limits(
-            self.max,
-            self.max_parsed_part_inflated_bytes,
-            self.max_operation_inflated_bytes,
-        );
+        let guard = ooxml_common::zip::scoped_governor(&self.governor, "markdown");
         let doc = match self.archive.as_mut() {
             Ok(zip) => parser::parse(zip),
             Err(e) => Ok(parser::degraded_container_document(e.clone())),
@@ -209,7 +232,10 @@ mod tests {
             w.write_all(b"X").unwrap();
             w.finish().unwrap();
         }
-        assert_eq!(extract_image(&buf, "word/media/i.png", None).unwrap(), b"X");
+        assert_eq!(
+            extract_image(&buf, "word/media/i.png", None, None).unwrap(),
+            b"X"
+        );
     }
 
     /// The docx JSON path never hand-assembles `{"error":"…"}` — a message with a

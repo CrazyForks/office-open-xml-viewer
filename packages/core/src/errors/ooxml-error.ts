@@ -67,39 +67,62 @@ export class OoxmlError extends Error {
   }
 }
 
-export interface ParserResourceLimitErrorDetails {
-  stage: OoxmlErrorStage;
-  source: OoxmlErrorSource;
-  part: string;
-  metric: string;
-  limit: number;
-  observed: number;
+export type OoxmlFormat = 'docx' | 'xlsx' | 'pptx';
+
+export interface OoxmlResourceUsageSnapshot {
+  readonly archiveEntryCount: number;
+  readonly declaredInflatedBytes: number;
+  readonly distinctInflatedBytes: number;
+  readonly operationInflatedBytes: number;
 }
 
-/**
- * Deterministic parser rejection caused by an opt-in inflated-I/O budget.
- *
- * This is separate from {@link OoxmlError}: extending the pre-existing closed
- * `OoxmlErrorCode` union would break downstream exhaustive switches.
- */
-export class ParserResourceLimitError extends Error {
-  readonly code = 'parser-resource-limit' as const;
-  readonly stage: OoxmlErrorStage;
-  readonly source: OoxmlErrorSource;
-  readonly part: string;
-  readonly metric: string;
-  readonly limit: number;
-  readonly observed: number;
+interface OoxmlResourceViolationBase {
+  format: OoxmlFormat;
+  operation: string;
+  limit: number;
+  observed: number;
+  configurable: boolean;
+  usage: OoxmlResourceUsageSnapshot;
+}
 
-  constructor(message: string, details: ParserResourceLimitErrorDetails) {
+export type OoxmlResourceViolation =
+  | (OoxmlResourceViolationBase & {
+      resource: 'archive-entry';
+      metric: 'declared-inflated-bytes' | 'actual-inflated-bytes';
+      part: string;
+    })
+  | (OoxmlResourceViolationBase & {
+      resource: 'archive';
+      metric: 'entry-count';
+      configurable: false;
+    })
+  | (OoxmlResourceViolationBase & {
+      resource: 'archive';
+      metric: 'distinct-inflated-bytes';
+      part: string;
+    });
+
+export interface OoxmlResourceLimitErrorDetails {
+  readonly stage: 'container' | 'decompression';
+  readonly violation: OoxmlResourceViolation;
+}
+
+/** Deterministic rejection caused by a measured OOXML resource-policy breach. */
+export class OoxmlResourceLimitError extends Error {
+  readonly code = 'ooxml-resource-limit' as const;
+  readonly details: OoxmlResourceLimitErrorDetails;
+
+  constructor(message: string, details: OoxmlResourceLimitErrorDetails) {
     super(message);
-    this.name = 'ParserResourceLimitError';
-    this.stage = details.stage;
-    this.source = details.source;
-    this.part = details.part;
-    this.metric = details.metric;
-    this.limit = details.limit;
-    this.observed = details.observed;
-    Object.setPrototypeOf(this, ParserResourceLimitError.prototype);
+    this.name = 'OoxmlResourceLimitError';
+    const violation = {
+      ...details.violation,
+      usage: Object.freeze({ ...details.violation.usage }),
+    } as OoxmlResourceViolation;
+    this.details = Object.freeze({
+      ...details,
+      violation: Object.freeze(violation),
+    });
+    Object.setPrototypeOf(this, OoxmlResourceLimitError.prototype);
   }
 }

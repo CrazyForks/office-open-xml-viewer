@@ -65,15 +65,15 @@ fn note_layout_master_parse() {
 #[wasm_bindgen]
 pub fn parse_pptx(
     data: &[u8],
-    max_zip_entry_bytes: Option<u64>,
-    max_parsed_part_inflated_bytes: Option<u64>,
-    max_operation_inflated_bytes: Option<u64>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
 ) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
     let guard = ooxml_common::zip::scoped_limits(
-        max_zip_entry_bytes,
-        max_parsed_part_inflated_bytes,
-        max_operation_inflated_bytes,
+        ooxml_common::resource::OoxmlFormat::Pptx,
+        "parse",
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
     );
     let presentation = parse_presentation_from_bytes(data);
     if let Some(error) = guard.resource_limit_error() {
@@ -91,15 +91,15 @@ pub fn parse_pptx(
 #[wasm_bindgen]
 pub fn pptx_to_markdown(
     data: &[u8],
-    max_zip_entry_bytes: Option<u64>,
-    max_parsed_part_inflated_bytes: Option<u64>,
-    max_operation_inflated_bytes: Option<u64>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
 ) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
     let guard = ooxml_common::zip::scoped_limits(
-        max_zip_entry_bytes,
-        max_parsed_part_inflated_bytes,
-        max_operation_inflated_bytes,
+        ooxml_common::resource::OoxmlFormat::Pptx,
+        "markdown",
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
     );
     let pres = parse_presentation_from_bytes(data);
     if let Some(error) = guard.resource_limit_error() {
@@ -133,10 +133,17 @@ pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
 pub fn extract_media(
     data: &[u8],
     path: &str,
-    max_zip_entry_bytes: Option<u64>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
 ) -> Result<Vec<u8>, JsValue> {
-    ooxml_common::zip::extract_zip_entry(data, path, max_zip_entry_bytes)
-        .map_err(|e| JsValue::from_str(&e))
+    ooxml_common::zip::extract_zip_entry(
+        data,
+        path,
+        ooxml_common::resource::OoxmlFormat::Pptx,
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+    )
+    .map_err(|e| JsValue::from_str(&e))
 }
 
 /// Extract raw bytes for a single embedded image entry (e.g.
@@ -147,10 +154,17 @@ pub fn extract_media(
 pub fn extract_image(
     data: &[u8],
     path: &str,
-    max_zip_entry_bytes: Option<u64>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
 ) -> Result<Vec<u8>, JsValue> {
-    ooxml_common::zip::extract_zip_entry(data, path, max_zip_entry_bytes)
-        .map_err(|e| JsValue::from_str(&e))
+    ooxml_common::zip::extract_zip_entry(
+        data,
+        path,
+        ooxml_common::resource::OoxmlFormat::Pptx,
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+    )
+    .map_err(|e| JsValue::from_str(&e))
 }
 
 /// A stateful handle over an opened pptx archive.
@@ -178,9 +192,7 @@ pub struct PptxArchive {
     /// the constructor throwing an opaque error the viewer can't turn into a
     /// placeholder slide.
     archive: Result<PptxZip, String>,
-    max: Option<u64>,
-    max_parsed_part_inflated_bytes: Option<u64>,
-    max_operation_inflated_bytes: Option<u64>,
+    governor: ooxml_common::resource::ResourceGovernor,
 }
 
 #[wasm_bindgen]
@@ -198,20 +210,25 @@ impl PptxArchive {
     #[wasm_bindgen(constructor)]
     pub fn new(
         data: Vec<u8>,
-        max_zip_entry_bytes: Option<u64>,
-        max_parsed_part_inflated_bytes: Option<u64>,
-        max_operation_inflated_bytes: Option<u64>,
+        max_archive_entry_bytes: Option<u64>,
+        max_total_inflated_bytes: Option<u64>,
     ) -> Result<PptxArchive, JsValue> {
         console_error_panic_hook::set_once();
         // #774 (RB7 MAJOR): a truncated / corrupt CONTAINER is deferred, not
         // thrown, so `parse()` can degrade it to a placeholder presentation
         // instead of the constructor failing with an opaque error.
-        Ok(PptxArchive {
-            archive: open_zip(data),
-            max: max_zip_entry_bytes,
-            max_parsed_part_inflated_bytes,
-            max_operation_inflated_bytes,
-        })
+        let governor = ooxml_common::resource::ResourceGovernor::from_wasm(
+            ooxml_common::resource::OoxmlFormat::Pptx,
+            max_archive_entry_bytes,
+            max_total_inflated_bytes,
+        );
+        let scope = governor.scope("open");
+        let archive = open_zip(data);
+        if let Some(error) = scope.resource_limit_error() {
+            return Err(JsValue::from_str(&error));
+        }
+        drop(scope);
+        Ok(PptxArchive { archive, governor })
     }
 
     /// Parse the retained archive and return the model as UTF-8 JSON bytes.
@@ -219,11 +236,7 @@ impl PptxArchive {
     /// CONTAINER failed to open (#774) the model is a degraded placeholder
     /// presentation tagged with the container.
     pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
-        let guard = ooxml_common::zip::scoped_limits(
-            self.max,
-            self.max_parsed_part_inflated_bytes,
-            self.max_operation_inflated_bytes,
-        );
+        let guard = ooxml_common::zip::scoped_governor(&self.governor, "parse");
         let presentation = match self.archive.as_mut() {
             Ok(zip) => parse_presentation(zip),
             Err(e) => Ok(degraded_container_presentation(e.clone())),
@@ -237,12 +250,20 @@ impl PptxArchive {
             .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
     }
 
+    /// Fail cached worker operations after this package session was poisoned.
+    pub fn assert_healthy(&self) -> Result<(), JsValue> {
+        match self.governor.first_error() {
+            Some(error) => Err(JsValue::from_str(&error)),
+            None => Ok(()),
+        }
+    }
+
     /// Extract raw bytes for one media entry (e.g. "ppt/media/media2.mp4") from
     /// the retained archive. Twin of the free `extract_media`, but reads through
     /// the already-open archive instead of re-opening it. A corrupt container has
     /// no entries, so this surfaces the container-open error.
     pub fn extract_media(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let _guard = ooxml_common::zip::scoped_governor(&self.governor, "extract-media");
         let zip = self
             .archive
             .as_mut()
@@ -255,7 +276,7 @@ impl PptxArchive {
     /// `extract_image`. A corrupt container has no entries, so this surfaces the
     /// container-open error.
     pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let _guard = ooxml_common::zip::scoped_governor(&self.governor, "extract-image");
         let zip = self
             .archive
             .as_mut()
@@ -266,11 +287,7 @@ impl PptxArchive {
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
     /// free `pptx_to_markdown`. A corrupt container degrades to an empty deck.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
-        let guard = ooxml_common::zip::scoped_limits(
-            self.max,
-            self.max_parsed_part_inflated_bytes,
-            self.max_operation_inflated_bytes,
-        );
+        let guard = ooxml_common::zip::scoped_governor(&self.governor, "markdown");
         let pres = match self.archive.as_mut() {
             Ok(zip) => parse_presentation(zip),
             Err(e) => Ok(degraded_container_presentation(e.clone())),
@@ -923,7 +940,11 @@ fn load_pptx_comments(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Vec<
 /// caller build a `degraded_container_presentation` tagged with the container,
 /// symmetric with how a corrupt slide part is tagged inside [`parse_presentation`].
 pub(crate) fn open_zip(data: Vec<u8>) -> Result<PptxZip, String> {
-    zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("(zip container): {e}"))
+    ooxml_common::zip::preflight_archive_limits(&data)?;
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("(zip container): {e}"))?;
+    ooxml_common::zip::validate_archive_limits(&mut archive)?;
+    Ok(archive)
 }
 
 /// A placeholder [`Presentation`] for a pptx whose ZIP CONTAINER could not be
@@ -1760,7 +1781,10 @@ mod tests {
             w.write_all(b"X").unwrap();
             w.finish().unwrap();
         }
-        assert_eq!(extract_image(&buf, "ppt/media/i.png", None).unwrap(), b"X");
+        assert_eq!(
+            extract_image(&buf, "ppt/media/i.png", None, None).unwrap(),
+            b"X"
+        );
     }
 
     /// A `PictureElement` serializes its blip as a zip path + mime, never as an
@@ -5547,7 +5571,7 @@ mod tests {
             "svg_image_path must point at the .svg part",
         );
         // And the resolved path must hold the original SVG bytes.
-        let svg_bytes = extract_image(&data, "ppt/media/image2.svg", None)
+        let svg_bytes = extract_image(&data, "ppt/media/image2.svg", None, None)
             .expect("svg part must be readable by its resolved path");
         assert_eq!(
             svg_bytes, SVG,
@@ -5739,7 +5763,7 @@ mod tests {
         assert_eq!(pic.intrinsic_width_px, None, "no PNG intrinsic for SVG");
         assert_eq!(pic.intrinsic_height_px, None);
         // The resolved SVG path must hold the original SVG bytes.
-        let svg_bytes = extract_image(&data, "ppt/media/image2.svg", None)
+        let svg_bytes = extract_image(&data, "ppt/media/image2.svg", None, None)
             .expect("svg part must be readable by its resolved path");
         assert_eq!(
             svg_bytes, SVG,
@@ -7306,9 +7330,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_entry_path_enforces_the_parsed_part_budget() {
+    fn parse_entry_path_enforces_the_archive_entry_budget() {
         let data = build_three_slide_deck(9, "<unused/>");
-        let guard = ooxml_common::zip::scoped_limits(None, Some(32), None);
+        let guard = ooxml_common::zip::scoped_limits(
+            ooxml_common::resource::OoxmlFormat::Pptx,
+            "parse",
+            Some(32),
+            Some(16 * 1024),
+        );
         let _ = parse_presentation_from_bytes(&data);
         let error = guard
             .resource_limit_error()
@@ -7319,16 +7348,22 @@ mod tests {
                 .expect("typed resource-limit envelope"),
         )
         .unwrap();
-        assert_eq!(details["part"], "ppt/presentation.xml");
-        assert_eq!(details["metric"], "parsed-part-inflated-bytes");
-        assert_eq!(details["limit"], 32);
-        assert_eq!(details["observed"], 33);
+        let violation = &details["details"]["violation"];
+        assert_eq!(violation["part"], "ppt/presentation.xml");
+        assert_eq!(violation["metric"], "declared-inflated-bytes");
+        assert_eq!(violation["limit"], 32);
+        assert_eq!(violation["observed"], 33);
     }
 
     #[test]
-    fn parse_entry_path_enforces_the_operation_budget_across_parts() {
+    fn parse_entry_path_enforces_the_distinct_total_across_parts() {
         let data = build_three_slide_deck(9, "<unused/>");
-        let guard = ooxml_common::zip::scoped_limits(None, None, Some(500));
+        let guard = ooxml_common::zip::scoped_limits(
+            ooxml_common::resource::OoxmlFormat::Pptx,
+            "parse",
+            Some(16 * 1024),
+            Some(500),
+        );
         let _ = parse_presentation_from_bytes(&data);
         let error = guard
             .resource_limit_error()
@@ -7339,9 +7374,10 @@ mod tests {
                 .expect("typed resource-limit envelope"),
         )
         .unwrap();
-        assert_eq!(details["metric"], "operation-inflated-bytes");
-        assert_eq!(details["limit"], 500);
-        assert_eq!(details["observed"], 501);
-        assert!(details["part"].as_str().unwrap().starts_with("ppt/"));
+        let violation = &details["details"]["violation"];
+        assert_eq!(violation["metric"], "distinct-inflated-bytes");
+        assert_eq!(violation["limit"], 500);
+        assert_eq!(violation["observed"], 501);
+        assert!(violation["part"].as_str().unwrap().starts_with("ppt/"));
     }
 }

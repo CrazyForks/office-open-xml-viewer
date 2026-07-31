@@ -21,5 +21,12 @@ export {
   serializeWorkerError,
   type WorkerErrorPayload,
 } from './error-wire.js';
-export { parserResourceLimitsForWasm } from './parser-resource-limits.js';
+export {
+  DEFAULT_OOXML_RESOURCE_LIMITS,
+  normalizeLoadResourceOptions,
+  normalizeResourcePolicy,
+  resourcePolicyForWasm,
+  type NormalizedOoxmlResourceOptions,
+  type NormalizedOoxmlResourcePolicy,
+} from './resource-policy.js';
 export { disposeRejectedLoad } from './rejected-load.js';

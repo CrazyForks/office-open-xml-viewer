@@ -4,9 +4,11 @@ import type {
   MathNode,
   ChartModel,
   Duotone,
-  ParserResourceLimits,
 } from '@silurus/ooxml-core';
-import type { WorkerErrorPayload } from '@silurus/ooxml-core/worker';
+import type {
+  NormalizedOoxmlResourcePolicy,
+  WorkerErrorPayload,
+} from '@silurus/ooxml-core/worker';
 
 export interface DocxDocumentModel {
   section: SectionProps;
@@ -1505,7 +1507,7 @@ export interface CellBorders {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number; parserResourceLimits?: ParserResourceLimits }
+  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy }
   | { type: 'extractImage'; id: number; path: string }
   // Project the retained archive to GitHub-flavoured markdown (`DocxArchive.to_markdown`,
   // the handle already opened at `parse` — no re-copy of the file). Twin of

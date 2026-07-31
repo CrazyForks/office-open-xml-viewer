@@ -888,7 +888,8 @@ declare interface LoadOptions_2 {
     password?: string;
     wasmUrl?: string | URL;
     maxZipEntryBytes?: number;
-    parserResourceLimits?: ParserResourceLimits;
+    resourceLimits?: OoxmlResourceLimits;
+    debug?: boolean;
     workerTimeoutMs?: number;
     math?: MathRenderer;
 }
@@ -1041,6 +1042,48 @@ export declare class OoxmlError extends Error {
 export declare type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml';
 export declare type OoxmlErrorSource = 'container' | 'zip-part' | 'parser' | 'serializer' | 'layout' | 'renderer' | 'worker';
 export declare type OoxmlErrorStage = 'container' | 'decompression' | 'parsing' | 'serialization' | 'layout' | 'rendering' | 'worker';
+export declare type OoxmlFormat = 'docx' | 'xlsx' | 'pptx';
+export declare type OoxmlResourceLimit = number | null;
+export declare class OoxmlResourceLimitError extends Error {
+    readonly code: 'ooxml-resource-limit';
+    readonly details: OoxmlResourceLimitErrorDetails;
+    constructor(message: string, details: OoxmlResourceLimitErrorDetails);
+}
+export declare interface OoxmlResourceLimitErrorDetails {
+    readonly stage: 'container' | 'decompression';
+    readonly violation: OoxmlResourceViolation;
+}
+export declare interface OoxmlResourceLimits {
+    maxArchiveEntryBytes?: OoxmlResourceLimit;
+    maxTotalInflatedBytes?: OoxmlResourceLimit;
+}
+export declare interface OoxmlResourceUsageSnapshot {
+    readonly archiveEntryCount: number;
+    readonly declaredInflatedBytes: number;
+    readonly distinctInflatedBytes: number;
+    readonly operationInflatedBytes: number;
+}
+export declare type OoxmlResourceViolation = (OoxmlResourceViolationBase & {
+    resource: 'archive-entry';
+    metric: 'declared-inflated-bytes' | 'actual-inflated-bytes';
+    part: string;
+}) | (OoxmlResourceViolationBase & {
+    resource: 'archive';
+    metric: 'entry-count';
+    configurable: false;
+}) | (OoxmlResourceViolationBase & {
+    resource: 'archive';
+    metric: 'distinct-inflated-bytes';
+    part: string;
+});
+declare interface OoxmlResourceViolationBase {
+    format: OoxmlFormat;
+    operation: string;
+    limit: number;
+    observed: number;
+    configurable: boolean;
+    usage: OoxmlResourceUsageSnapshot;
+}
 export declare function openExternalHyperlink(url: string, allowed?: readonly string[], win?: Pick<Window, 'open'> | undefined): boolean;
 export declare interface PageBorderEdge {
     style: string;
@@ -1073,28 +1116,6 @@ export declare interface ParagraphBorders {
     left: ParaBorderEdge | null;
     right: ParaBorderEdge | null;
     between: ParaBorderEdge | null;
-}
-export declare class ParserResourceLimitError extends Error {
-    readonly code: 'parser-resource-limit';
-    readonly stage: OoxmlErrorStage;
-    readonly source: OoxmlErrorSource;
-    readonly part: string;
-    readonly metric: string;
-    readonly limit: number;
-    readonly observed: number;
-    constructor(message: string, details: ParserResourceLimitErrorDetails);
-}
-export declare interface ParserResourceLimitErrorDetails {
-    stage: OoxmlErrorStage;
-    source: OoxmlErrorSource;
-    part: string;
-    metric: string;
-    limit: number;
-    observed: number;
-}
-export declare interface ParserResourceLimits {
-    maxParsedPartInflatedBytes?: number;
-    maxOperationInflatedBytes?: number;
 }
 export declare type PathCmd = {
     cmd: 'moveTo';

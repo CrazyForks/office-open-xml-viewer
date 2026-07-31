@@ -18,10 +18,7 @@ import {
   dropDuotoneBitmapCache,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
-import {
-  parserResourceLimitsForWasm,
-  serializeWorkerError,
-} from '@silurus/ooxml-core/worker';
+import { resourcePolicyForWasm, serializeWorkerError } from '@silurus/ooxml-core/worker';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { resolveSharedStrings } from './shared-strings.js';
@@ -113,6 +110,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
   const id = req.id;
   try {
     await host.ensureReady();
+    if (req.type !== 'parse' && host.archive) {
+      const retained = host.archive;
+      host.run(() => retained.assert_healthy());
+    }
     if (req.type === 'parse') {
       // A re-parse starts a fresh document: drop any cached sheets / images so
       // we never serve stale data from a previous load. `imageCache` is now a
@@ -129,13 +130,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       dropDuotoneBitmapCache(getImage);
       dropSvgImageCache(getImage);
       imageBlobCache.clear();
-      const max =
-        typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
-          ? BigInt(req.maxZipEntryBytes)
-          : undefined;
-      const [maxParsedPart, maxOperation] = parserResourceLimitsForWasm(
-        req.parserResourceLimits,
-      );
+      const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
       // Construction + `parse()` run under `host.run` so a trap in EITHER poisons
       // + recycles the instance (and frees the archive). `setArchive` frees any
       // prior handle first — the re-parse dispose. `parse()` returns UTF-8 JSON
@@ -144,9 +139,8 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       workbook = host.run(() => {
         const archive = new XlsxArchive(
           new Uint8Array(req.data),
-          max,
-          maxParsedPart,
-          maxOperation,
+          maxEntry,
+          maxTotal,
         );
         host.setArchive(archive);
         return JSON.parse(new TextDecoder().decode(archive.parse())) as ParsedWorkbook;

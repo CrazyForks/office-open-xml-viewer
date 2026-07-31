@@ -285,8 +285,8 @@ in a way a `ResizeObserver` cannot see — e.g. a late web-font load),
 `onVisiblePageChange` / `onVisibleSlideChange` (fires when the top-most visible
 page/slide changes), and `onError` (async per-page render failures are routed
 here instead of crashing the scroll loop). The parse/render knobs from the
-headless engines (`mode`, `useGoogleFonts`, `maxZipEntryBytes`, `math`, `dpr`)
-are accepted too.
+headless engines (`mode`, `useGoogleFonts`, `resourceLimits`, the deprecated
+`maxZipEntryBytes` alias, `math`, `dpr`) are accepted too.
 
 ### Markdown export
 
@@ -919,22 +919,20 @@ cd packages/pptx/parser && wasm-pack build --target web && cp pkg/pptx_parser_bg
 ## Security & Privacy
 
 - **Canvas-only rendering.** Documents are decoded and drawn to an `HTMLCanvasElement`. No script, link, form, or other active content from the source file is executed or injected into the DOM.
-- **ZIP decompression cap.** Each entry in the source archive is limited to 512 MiB of uncompressed output by default to block zip-bomb DoS. Override per viewer with `maxZipEntryBytes` (bytes) — raise it for legitimate decks with large embedded media, lower it to tighten the budget for untrusted input:
+- **Bounded OOXML package expansion.** DOCX, XLSX, and PPTX use the same resource policy. By default, one archive entry may inflate to at most 128 MiB and the distinct entries visited during one package session may inflate to at most 256 MiB. Override either budget with a plain `resourceLimits` object on a viewer or `load(...)` call:
   ```ts
-  new PptxViewer(canvas, { maxZipEntryBytes: 64 * 1024 * 1024 }); // 64 MiB
+  new XlsxViewer(container, {
+    resourceLimits: {
+      maxArchiveEntryBytes: 64 * 1024 * 1024,
+      maxTotalInflatedBytes: 192 * 1024 * 1024,
+    },
+  });
   ```
-  Supported uniformly by `DocxViewer`, `PptxViewer`, and `XlsxViewer`. Zero / negative values fall back to the default.
-- **Parse resource limits.** `maxZipEntryBytes` is a ZIP-bomb guard, not a guarantee that a part below 512 MiB can be parsed in available memory: XML trees and document models can be several times larger than their inflated XML. Applications that accept untrusted or unusually large documents can opt into deterministic preemption based on inflated ZIP-part I/O:
-  ```ts
-  const parserResourceLimits = {
-    maxParsedPartInflatedBytes: 128 * 1024 * 1024,
-    maxOperationInflatedBytes: 256 * 1024 * 1024,
-  };
-  new XlsxViewer(container, { parserResourceLimits });
-  ```
-  These limits are disabled by default for compatibility and are supported uniformly by DOCX, XLSX, and PPTX viewers and `load(...)` factories. Every supplied value must be a positive safe integer number of bytes; zero, negative, fractional, non-finite, and unsafe values throw. A violation rejects with `ParserResourceLimitError`; its `code` is `parser-resource-limit`, and its `stage`, `source`, `part`, `metric`, `limit`, and `observed` fields are safe to use for diagnostics and fallback UI.
+  `maxArchiveEntryBytes` applies to every XML, text, image, media, and other package part that the parser reads. `maxTotalInflatedBytes` counts the largest amount actually read from each distinct part during the lifetime of the loaded package; reading the same part again does not consume that budget twice. Set an individual field to `null` to disable that configurable budget. Internal hard safety ceilings still apply, so disabling a budget does not make arbitrary archives acceptable. Values other than `null` must be positive safe-integer byte counts.
 
-  `maxParsedPartInflatedBytes` applies to each parsed XML/text part. `maxOperationInflatedBytes` is an aggregate for the whole parser operation and also counts binary/media parts that the parser reads, so media-heavy presentations can reach it even when every XML part is small. The counters measure bytes actually inflated through parser ZIP readers. They do **not** measure peak JS/WASM memory, detect an out-of-memory condition, or guarantee that an arbitrarily large document can be parsed. The XLSX parser avoids building a second full DOM for worksheet row data, but its public `Worksheet` model and serialized JSON still grow with the number of cells. With these opt-in limits omitted, an OOM or Rust panic remains a `parser-crashed` worker failure.
+  A violation rejects with `OoxmlResourceLimitError` (`code === 'ooxml-resource-limit'`). Its discriminated `details.violation` reports the applicable metric, limit, observed value, usage snapshot, and part name when a particular part caused the failure. The deprecated `maxZipEntryBytes` option remains as a compatibility alias for `resourceLimits.maxArchiveEntryBytes`; new code should use `resourceLimits`.
+
+  These are deterministic inflated-byte admission limits, not exact JavaScript/WASM memory limits. XML trees, decoded images, document models, and renderer state can require several times the inflated input size, so the defaults reduce risk but cannot promise that an OOM is impossible on every device. Running parse and render work in `mode: 'worker'` can contain many failures away from the main UI thread, but a Worker is not a separate operating-system process or a strict memory sandbox.
 - **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, theme webfonts, Office font metric substitutes (Carlito/Caladea), and the script fallback fonts are **not** loaded from Google Fonts unless you pass `useGoogleFonts: true` to the relevant `Viewer` / `load(...)` options — supported uniformly by `DocxViewer`, `PptxViewer`, and `XlsxViewer`. When enabled, fonts for non-Latin scripts are supplied on demand from Noto families so text does not fall back to tofu: Arabic (Noto Naskh/Sans Arabic), CJK (Noto Sans/Serif KR · SC · TC · JP, picked per document language so shared Han glyphs take the right shapes), Cyrillic (Noto Sans/Serif), Hebrew (Noto Sans/Serif Hebrew, RTL), Thai (Noto Sans Thai) and Devanagari (Noto Sans Devanagari). No font binaries ship in the bundle. Enabling this option causes the end-user's browser to send an HTTP request (IP and User-Agent) to `fonts.googleapis.com`, which may have GDPR implications for your application — consider self-hosting the required fonts via `@font-face` instead.
 - **XML parsing.** Uses `roxmltree`, which does not resolve external entities (XXE-safe by default).
 - **Encrypted OOXML ([MS-OFFCRYPTO] Agile Encryption).** Password-protected `.docx` / `.xlsx` / `.pptx` files are OLE2/CFB containers, not ZIPs. Pass `password` to `load(...)` and the file is decrypted **client-side** via WebCrypto — no bytes and no password leave the browser:

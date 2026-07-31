@@ -1,5 +1,7 @@
-import type { ParserResourceLimits } from '@silurus/ooxml-core';
-import type { WorkerErrorPayload } from '@silurus/ooxml-core/worker';
+import type {
+  NormalizedOoxmlResourcePolicy,
+  WorkerErrorPayload,
+} from '@silurus/ooxml-core/worker';
 
 // ===== Shared types re-exported from @silurus/ooxml-core =====
 export type {
@@ -610,7 +612,7 @@ export interface PictureElement {
 
 export type WorkerRequest =
   | { kind: 'init'; wasmUrl: string }
-  | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number; parserResourceLimits?: ParserResourceLimits }
+  | { kind: 'parse'; id: number; buffer: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy }
   | { kind: 'extractMedia'; id: number; path: string }
   | { kind: 'extractImage'; id: number; path: string }
   // Project the retained archive to GitHub-flavoured markdown (`PptxArchive.to_markdown`,

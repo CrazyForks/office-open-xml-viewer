@@ -11,6 +11,11 @@ can create an XML arena, a format model, serialized output, and renderer state
 at the same time. Issue #1102 demonstrates this amplification with one large
 SpreadsheetML worksheet.
 
+The package boundary follows ISO/IEC 29500-1 section 9 (Packages), and the ZIP
+mapping follows ISO/IEC 29500-2 section 7.3.6 (ZIP package limitations). Resource
+budgets are implementation admission policy layered around that package model;
+they do not redefine valid OOXML content or infer trust from ZIP declarations.
+
 The existing 512 MiB `maxZipEntryBytes` guard only caps one inflated ZIP entry.
 It does not bound aggregate inflation, parser work, model growth, serialization,
 layout state, canvas allocation, or the copies made at worker boundaries.
@@ -70,8 +75,8 @@ can silently change the public contract.
 - Implement the two public limits, deprecated alias reconciliation, practical
   defaults, hidden hard quotas, discriminated errors, usage snapshots, and
   poison semantics.
-- Enforce archive entry count plus declared and actual per-entry/aggregate
-  inflation without trusting ZIP declarations.
+- Enforce raw archive entry count, selected-entry declared/actual inflation,
+  and actual distinct-entry aggregate inflation without trusting declarations.
 
 Exit: adversarial Rust and TypeScript tests cover forged sizes, actual overrun,
 repeat reads, conflict validation, worker error transport, and poisoned sessions.
@@ -276,9 +281,12 @@ The session records distinct concepts instead of forcing them into one counter:
 - observed WASM linear-memory pages;
 - image and canvas dimensions/pixels before allocation.
 
-Declared ZIP sizes are attacker-controlled. A declaration already above a
-limit is sufficient for early rejection, but a declaration below a limit is not
-proof of safety. Actual output is checked while it is inflated, using
+Declared ZIP sizes are attacker-controlled. A selected entry declaration above
+its per-entry limit is sufficient for early rejection, but a declaration below
+a limit is not proof of safety. The whole archive's declared total is recorded
+for diagnostics; it is not charged to the public distinct-inflation limit before
+those entries are visited, because unused lazy media must not consume an
+actual-byte session budget. Actual output is checked while it is inflated, using
 `limit + 1` semantics where necessary to distinguish exact completion from
 truncation.
 

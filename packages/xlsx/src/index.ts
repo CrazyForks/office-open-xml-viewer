@@ -21,12 +21,16 @@ export { resolveSharedStrings } from './shared-strings.js';
 // narrow on `err.code`.
 export {
   OoxmlError,
-  ParserResourceLimitError,
+  OoxmlResourceLimitError,
   type OoxmlErrorCode,
   type OoxmlErrorSource,
   type OoxmlErrorStage,
-  type ParserResourceLimitErrorDetails,
-  type ParserResourceLimits,
+  type OoxmlFormat,
+  type OoxmlResourceLimit,
+  type OoxmlResourceLimitErrorDetails,
+  type OoxmlResourceLimits,
+  type OoxmlResourceUsageSnapshot,
+  type OoxmlResourceViolation,
 } from '@silurus/ooxml-core';
 export type {
   Workbook,

@@ -16,10 +16,7 @@ import {
   dropBitmapCacheByPath,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
-import {
-  parserResourceLimitsForWasm,
-  serializeWorkerError,
-} from '@silurus/ooxml-core/worker';
+import { resourcePolicyForWasm, serializeWorkerError } from '@silurus/ooxml-core/worker';
 import type { DocxDocumentModel } from './types';
 import { renderDocumentToCanvas, dropColorReplacedCache } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
@@ -78,6 +75,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
   const id = req.id;
   try {
     await host.ensureReady();
+    if (req.type !== 'parse' && host.archive) {
+      const retained = host.archive;
+      host.run(() => retained.assert_healthy());
+    }
     if (req.type === 'parse') {
       doc = null;
       if (localMetricFontFaces.length > 0) {
@@ -97,13 +98,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       dropBitmapCacheByPath(getImage);
       dropColorReplacedCache(getImage);
       dropSvgImageCache(getImage);
-      const max =
-        typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
-          ? BigInt(req.maxZipEntryBytes)
-          : undefined;
-      const [maxParsedPart, maxOperation] = parserResourceLimitsForWasm(
-        req.parserResourceLimits,
-      );
+      const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
       const bytes = new Uint8Array(req.data);
       // Construction + `parse()` run under `host.run` so a trap in EITHER poisons
       // + recycles the instance (and frees the archive). `setArchive` frees any
@@ -113,7 +108,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // the model in-worker, so decode + parse it here (one decode, no
       // passthrough).
       const parsedModel = host.run(() => {
-        const archive = new DocxArchive(bytes, max, maxParsedPart, maxOperation);
+        const archive = new DocxArchive(bytes, maxEntry, maxTotal);
         host.setArchive(archive);
         return JSON.parse(new TextDecoder().decode(archive.parse())) as DocxDocumentModel;
       });
