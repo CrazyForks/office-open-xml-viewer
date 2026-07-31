@@ -5,6 +5,7 @@ interface Manifest {
   contributes: {
     commands: Array<{ command: string }>;
     keybindings: Array<{ command: string; key: string; mac?: string; when?: string }>;
+    colors: Array<{ id: string }>;
   };
 }
 
@@ -24,5 +25,14 @@ describe('VS Code find contribution', () => {
       when:
         'activeCustomEditorId == ooxmlViewer.docxEditor || activeCustomEditorId == ooxmlViewer.xlsxEditor || activeCustomEditorId == ooxmlViewer.pptxEditor',
     });
+  });
+
+  it('contributes theme colours for ordinary and active find matches', () => {
+    expect(manifest.contributes.colors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'ooxmlViewer.findMatchBackground' }),
+        expect.objectContaining({ id: 'ooxmlViewer.findActiveMatchBackground' }),
+      ]),
+    );
   });
 });

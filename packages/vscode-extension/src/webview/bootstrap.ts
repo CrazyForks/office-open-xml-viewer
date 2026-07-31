@@ -51,6 +51,10 @@ const viewerContainer = document.getElementById('viewer-container')!;
 const zoomOutButton = document.getElementById('zoom-out') as HTMLButtonElement;
 const zoomInButton = document.getElementById('zoom-in') as HTMLButtonElement;
 const zoomLabel = document.getElementById('zoom-label')!;
+const findHighlightColors = {
+  match: 'var(--vscode-ooxmlViewer-findMatchBackground, rgba(255, 214, 0, 0.42))',
+  active: 'var(--vscode-ooxmlViewer-findActiveMatchBackground, rgba(255, 140, 0, 0.55))',
+};
 let activeViewer: ZoomableViewer | null = null;
 
 function showError(msg: string): void {
@@ -165,6 +169,7 @@ async function initXlsx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
     math,
     useGoogleFonts,
     showZoomSlider: false,
+    findHighlightColors,
     onScaleChange: updateZoomLabel,
     onError(err) {
       loadFailed = true;
@@ -198,6 +203,7 @@ async function initDocx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
     math,
     useGoogleFonts,
     enableTextSelection: true,
+    findHighlightColors,
     refitOnResize: false,
     background: 'var(--vscode-editor-background)',
     onScaleChange: updateZoomLabel,
@@ -220,6 +226,7 @@ async function initPptx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
     math,
     useGoogleFonts,
     enableTextSelection: true,
+    findHighlightColors,
     enableMediaPlayback: true,
     mediaOverscan: 1,
     refitOnResize: true,

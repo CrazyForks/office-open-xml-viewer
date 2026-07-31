@@ -1,4 +1,4 @@
-import { computeVisibleRange, EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindMatch, type FindMatchesOptions, type VisibleRange, type HyperlinkTarget, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
+import { computeVisibleRange, EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindHighlightColors, type FindMatch, type FindMatchesOptions, type VisibleRange, type HyperlinkTarget, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
 import { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
@@ -78,6 +78,8 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    *  shipped back beside the slide bitmap, so the overlay is populated identically
    *  to main mode (no more empty overlay / one-time warning). */
   enableTextSelection?: boolean;
+  /** CSS backgrounds for ordinary and active in-document search matches. */
+  findHighlightColors?: FindHighlightColors;
   /**
    * Enable interactive audio/video playback. When true, mounted slides render
    * through {@link PptxPresentation.presentSlide} only while they are inside the
@@ -1816,6 +1818,7 @@ export class PptxScrollViewer implements ZoomableViewer {
       this._slideWidthPx(),
       this._slideHeightPx(),
       (font) => this._measureForFind(font),
+      this._opts.findHighlightColors,
     );
   }
 

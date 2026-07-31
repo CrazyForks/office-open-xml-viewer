@@ -44,6 +44,11 @@ outside the currently rendered scroll window. Press **Enter** for the next match
 **Shift+Enter** for the previous match, and **Escape** or the **×** button to
 close the popup and clear highlights.
 
+The ordinary and active match backgrounds are themeable through
+`ooxmlViewer.findMatchBackground` and
+`ooxmlViewer.findActiveMatchBackground`. Override them under
+`workbench.colorCustomizations` in VS Code settings.
+
 ## MCP server for AI agents
 
 Open a workspace that contains a `.xlsx` / `.docx` / `.pptx` file and the extension offers to enable an [MCP server](https://modelcontextprotocol.io/) — a tiny native binary that lets AI coding agents read those files directly. Without it, agents typically resort to running `unzip` + XML parsing in Python; with it, they call typed tools like `xlsx_get_cell_range`, `docx_extract_text`, or `pptx_get_slide_structure`.
