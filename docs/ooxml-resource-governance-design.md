@@ -125,14 +125,37 @@ bounded transient retention, and cleanup on rejection, reload, and destroy.
 
 ### M5 — DOCX sequential layout pipeline
 
-- Feed normalized body blocks into the single immutable acquisition ->
-  normalization -> layout -> paint pipeline without creating a legacy layout
-  path or promising random page access before pagination.
-- Align recoverable parse/layout containment with Issue #1088 and retain the
-  state required for page count, fields, bookmarks, and stable Viewer readiness.
+- Move every DOCX package read onto the shared `PackageSession`; keep ordinary
+  corrupt-container and malformed required-part degradation from Issue #1088,
+  but let a resource violation poison the package and win over optional-part
+  fallback.
+- Read `word/document.xml` through a two-pass bounded cursor. The first pass
+  retains only the compact section, table-adjacency, and content-control plan
+  needed by later blocks. The second pass converts one complete logical body
+  block at a time through the existing specification-first semantic parser.
+- Feed those blocks into a sealed, replayable layout-source store in the realm
+  that owns layout, then use the single immutable acquisition -> normalization
+  -> layout -> paint pipeline. The full-model compatibility adapter and the
+  streamed Viewer adapter must converge on that same store; no streamed-only or
+  legacy paginator is permitted.
+- Keep pagination after the store is sealed. Sequential section inheritance,
+  fields, notes, bookmarks, convergence, total page count, and stable Viewer
+  readiness do not permit random page access or final page metadata before the
+  complete required part has been validated.
+- Preserve source compatibility for lower-level APIs that synchronously expose
+  a complete document model by materializing their stream. Such adapters do not
+  receive a bounded-retention claim. The self-loaded Viewer path must avoid the
+  simultaneous full document XML, whole-document XML arena, Rust model, and
+  monolithic JSON representations.
+- Align recoverable parse/layout containment with Issue #1088. Resource limits,
+  malformed required XML, invariant failures, and non-convergence remain fatal;
+  already-produced chunks are never promoted to partial success after them.
 
 Exit: pagination and visual behavior remain stable, recoverable failures yield
-the defined partial result, resource failures are deterministic, and the DOCX
+the defined partial result, resource failures are deterministic, synthetic
+documents cross multiple acknowledged pulls, the Viewer path has no
+whole-document XML or JSON materialization, measured transient retention tracks
+the largest bounded unit rather than total document XML, and the DOCX
 architecture audit passes.
 
 ### M6 — Containment and Ratatui-inspired diagnostics
@@ -161,9 +184,10 @@ a reproducible local command.
 
 ### M8 — Independent critical review and Draft handoff
 
-- Obtain independent Fable and GPT-5.6 Sol reviews of OOXML specification
-  fidelity, responsibility boundaries, duplicate logic, API consistency, error
-  semantics, and the claims made about bounded processing.
+- Obtain independent GPT-5.6 Sol reviews of OOXML specification fidelity,
+  responsibility boundaries, duplicate logic, API consistency, error semantics,
+  and the claims made about bounded processing. Fable is intentionally excluded
+  because it is unavailable for this delivery.
 - Fix every accepted finding and re-run the affected gates.
 - Push the reviewed branch and update Draft PR #1120 without merging it.
 
@@ -510,7 +534,7 @@ resource measurement remain separate responsibilities.
   serialization, worker transfer, layout, and rendering stages.
 - Rust tests and clippy, rebuilt WASM, focused and full TypeScript tests,
   typecheck, build, public API checks, and the DOCX architecture audit.
-- Independent Fable and GPT-5.6 Sol reviews followed by fixes and re-verification.
+- Independent GPT-5.6 Sol reviews followed by fixes and re-verification.
 
 The Draft PR is not merged until these gates are satisfied and the user has
 reviewed the result locally.
