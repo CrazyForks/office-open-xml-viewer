@@ -4,6 +4,31 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.74.5 — 2026-07-31
+
+Patch. Restores inherited PowerPoint placeholder geometry and authored text
+spacing, enables presentation media in VS Code previews, and improves find and
+loading feedback across the viewers.
+
+- **pptx parser:** inherit a placeholder's position and extent from the matching
+  layout or master placeholder when the slide-level shape omits its transform,
+  while preserving any geometry authored directly on the slide. (#1121)
+- **pptx / vscode:** make embedded audio and video interactive in VS Code
+  presentation previews, with bounded media lifecycles and graceful handling of
+  unsupported or failed media sources. (#1122)
+- **pptx / xlsx:** honor explicitly authored DrawingML percentage line spacing
+  independently of substituted-font design-height floors. Implicit single
+  spacing retains the compatibility floor for tall-metric fonts such as Meiryo,
+  while `spcPct` and absolute point spacing follow the document value.
+  (§21.1.2.2.5, §21.1.2.2.11; #1123)
+- **viewers / vscode:** expose separate CSS colors for ordinary and active find
+  matches across DOCX, XLSX, and PPTX. VS Code previews map the colors to
+  `ooxmlViewer.findMatchBackground` and
+  `ooxmlViewer.findActiveMatchBackground` theme contributions. (#1125)
+- **website:** show an accessible progress indicator in Try Yours while a file
+  is being parsed and rendered, without replacing the preview surface or
+  allowing an older load to overwrite a newer one. (#1125)
+
 ## 0.74.4 — 2026-07-31
 
 Patch. Corrects Word measure and table-border semantics, and completes the
