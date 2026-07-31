@@ -98,6 +98,18 @@ describe('shape-text line spacing (§21.1.2.2.5 <a:lnSpc>) + normAutofit lnSpcRe
     expect(spaced).toBeCloseTo(gap([para('A'), para('B')]) * 2, 5);
   });
 
+  it.each(['Meiryo UI', 'Sakkal Majalla'])(
+    'does not let the %s design-height floor override an explicit spcPct',
+    (fontFace) => {
+      const pct100 = { type: 'pct', val: 100000 } as const;
+      const explicit = gap([
+        para('A', pct100, fontFace),
+        para('B', pct100, fontFace),
+      ]);
+      expect(explicit).toBeCloseTo(naturalSingle, 5);
+    },
+  );
+
   it('spcPts 40 makes each line an absolute 40 pt (cs-scaled) height', () => {
     const spaced = gap([para('A', { type: 'pts', val: 40 }), para('B', { type: 'pts', val: 40 })]);
     expect(spaced).toBeCloseTo(40 * PT_TO_PX * cs, 5);
@@ -130,11 +142,11 @@ describe('shape-text line spacing (§21.1.2.2.5 <a:lnSpc>) + normAutofit lnSpcRe
   });
 });
 
-// Commit-1 companion: the natural single line is FLOORED by the authored font's
-// design line (intendedSingleLinePx) before line spacing is applied. A tabled
-// face (Meiryo, 1.5962×em) must measure to its taller design box; an untabled
-// face (Calibri) stays on the flat 1.2×em. The mock canvas is metric-agnostic,
-// so this exercises the pure design-metric floor keyed on the authored name.
+// For OMITTED line spacing, the natural single line is FLOORED by the authored
+// font's design line (intendedSingleLinePx). A tabled face (Meiryo, 1.5962×em)
+// must measure to its taller design box; an untabled face (Calibri) stays on
+// the flat 1.2×em. Explicit spcPct is covered above and deliberately bypasses
+// this implicit-spacing floor.
 describe('shape-text single-line height floor by font design metric (§21.1.2.1.1)', () => {
   const em = 20 * PT_TO_PX;
 
