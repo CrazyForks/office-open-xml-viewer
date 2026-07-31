@@ -1014,6 +1014,35 @@ describe('PptxScrollViewer — interactive media lifecycle', () => {
     },
   );
 
+  it('routes asynchronous media failures through the viewer onError callback', () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(2, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
+    const onError = vi.fn();
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableMediaPlayback: true,
+      onError,
+      gap: 10,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientWidth = 200;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+
+    const call = engine.presentationCalls[0];
+    expect(call.reportError).toEqual(expect.any(Function));
+    call.reportError?.(new Error('media decode failed'));
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0].message).toContain('media decode failed');
+    v.destroy();
+  });
+
   it('keeps interactive media bounded when text-selection overscan mounts a large deck', () => {
     installDom();
     const container = makeContainer(200, 400);
@@ -1695,6 +1724,10 @@ describe('PptxScrollViewer — full-presentation find', () => {
     engine.feedTextRuns = [RUN];
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
+      findHighlightColors: {
+        match: 'rgba(1, 2, 3, 0.4)',
+        active: 'rgba(4, 5, 6, 0.7)',
+      },
       gap: 0,
       overscan: 0,
       paddingTop: 0,
@@ -1710,6 +1743,16 @@ describe('PptxScrollViewer — full-presentation find', () => {
     expect(matches).toHaveLength(4);
     expect(matches.map((match) => match.location.slide)).toEqual([0, 1, 2, 3]);
 
+    const initiallyMountedHighlightLayers = scrollHost.children
+      .filter((child) => child.children.some((nested) => nested.tag === 'canvas'))
+      .map((slot) => slot.children.find((child) => child.tag === 'div') as FakeEl);
+    expect(
+      initiallyMountedHighlightLayers
+        .flatMap((layer) => layer.children)
+        .flatMap((shape) => shape.children)
+        .find((box) => box.style.background === 'rgba(1, 2, 3, 0.4)'),
+    ).toBeDefined();
+
     await v.findNext();
     const second = await v.findNext();
     expect(second?.location.slide).toBe(1);
@@ -1719,6 +1762,12 @@ describe('PptxScrollViewer — full-presentation find', () => {
       .filter((child) => child.children.some((nested) => nested.tag === 'canvas'))
       .map((slot) => slot.children.find((child) => child.tag === 'div') as FakeEl);
     expect(mountedHighlightLayers.some((layer) => layer.children.length > 0)).toBe(true);
+    expect(
+      mountedHighlightLayers
+        .flatMap((layer) => layer.children)
+        .flatMap((shape) => shape.children)
+        .find((box) => box.style.background === 'rgba(4, 5, 6, 0.7)'),
+    ).toBeDefined();
 
     v.clearFind();
     expect(mountedHighlightLayers.every((layer) => layer.children.length === 0)).toBe(true);

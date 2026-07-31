@@ -281,6 +281,7 @@ export interface RenderCall {
 
 export interface PresentationCall extends RenderCall {
   handle: PresentationHandle & { destroy: ReturnType<typeof vi.fn> };
+  reportError?: (error: Error) => void;
 }
 
 /** A fake PptxPresentation covering exactly the surface PptxScrollViewer consumes.
@@ -395,6 +396,7 @@ export class FakePptxEngine {
         width: opts?.width,
         canvas,
         handle,
+        reportError: opts?.onError,
         resolve: () => resolve(handle),
         reject,
       };

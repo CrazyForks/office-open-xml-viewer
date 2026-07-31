@@ -536,3 +536,4 @@ export {
 export { sliceHorizontalExtent, overlayPercent } from './search/highlight-rect';
 export { nextActive, prevActive, clampActive } from './search/find-cursor';
 export type { FindMatch } from './search/find-match';
+export type { FindHighlightColors } from './search/find-highlight';

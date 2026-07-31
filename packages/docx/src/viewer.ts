@@ -6,7 +6,7 @@ import { buildDocxTextLayer } from './text-layer';
 import { buildDocxHighlightLayer, type DocxHighlightMatch } from './find-highlight-layer';
 import { DocxFindController, type DocxMatchLocation } from './find';
 import { openExternalHyperlink, PT_TO_PX, nextZoomStep, prevZoomStep, clampScale, fitScale } from '@silurus/ooxml-core';
-import type { HyperlinkTarget, FindMatch, FindMatchesOptions, ZoomableViewer } from '@silurus/ooxml-core';
+import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, ZoomableViewer } from '@silurus/ooxml-core';
 
 export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   container?: HTMLElement;
@@ -15,6 +15,8 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
    * browser's native text selection works on document content.
    */
   enableTextSelection?: boolean;
+  /** CSS backgrounds for ordinary and active in-document search matches. */
+  findHighlightColors?: FindHighlightColors;
   /** Called when a page finishes rendering. */
   onPageChange?: (index: number, total: number) => void;
   /** IX9 zoom contract ({@link ZoomableViewer}) — the clamp range for
@@ -555,6 +557,7 @@ export class DocxViewer implements ZoomableViewer {
       width,
       height,
       (font) => this._measureForFont(font),
+      this._opts.findHighlightColors,
     );
   }
 

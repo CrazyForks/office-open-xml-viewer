@@ -14,7 +14,12 @@
  * coordinate frame (`inShapeX`/`inShapeY`), so the shape div's `rotate()` lays
  * them along the glyphs. The active match uses a distinct emphasis colour.
  */
-import { sliceHorizontalExtent, overlayPercent, type MatchRunSlice } from '@silurus/ooxml-core';
+import {
+  sliceHorizontalExtent,
+  overlayPercent,
+  type FindHighlightColors,
+  type MatchRunSlice,
+} from '@silurus/ooxml-core';
 import type { PptxTextRunInfo } from './renderer';
 
 export interface PptxHighlightMatch {
@@ -26,10 +31,8 @@ export interface PptxHighlightMatch {
 export const DEFAULT_FIND_HIGHLIGHT = 'rgba(255, 214, 0, 0.42)';
 export const DEFAULT_FIND_ACTIVE_HIGHLIGHT = 'rgba(255, 140, 0, 0.55)';
 
-export interface PptxHighlightColors {
-  match?: string;
-  active?: string;
-}
+/** Format-specific compatibility alias for the shared colour contract. */
+export type PptxHighlightColors = FindHighlightColors;
 
 /**
  * Populate a highlight overlay layer with a box per matched run-slice, grouped

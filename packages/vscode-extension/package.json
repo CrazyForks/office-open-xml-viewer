@@ -98,6 +98,28 @@
         "category": "OOXML Viewer"
       }
     ],
+    "colors": [
+      {
+        "id": "ooxmlViewer.findMatchBackground",
+        "description": "Background of ordinary search matches in Office previews.",
+        "defaults": {
+          "dark": "#FFD6006B",
+          "light": "#FFD6006B",
+          "highContrast": "#FFD60099",
+          "highContrastLight": "#C28A0099"
+        }
+      },
+      {
+        "id": "ooxmlViewer.findActiveMatchBackground",
+        "description": "Background of the active search match in Office previews.",
+        "defaults": {
+          "dark": "#FF8C008C",
+          "light": "#FF8C008C",
+          "highContrast": "#FF8C00CC",
+          "highContrastLight": "#B85E00CC"
+        }
+      }
+    ],
     "keybindings": [
       {
         "command": "ooxmlViewer.find",

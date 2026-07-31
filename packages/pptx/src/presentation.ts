@@ -83,6 +83,11 @@ export interface RenderSlideOptions {
   skipMediaControls?: boolean;
   /** Translucent overlay drawn over the finished slide (hidden-slide dimming). */
   dim?: DimOptions;
+  /**
+   * Called for asynchronous embedded-media fetch, decode, and playback
+   * failures created by {@link PptxPresentation.presentSlide}.
+   */
+  onError?: (error: Error) => void;
 }
 
 /**
@@ -572,6 +577,7 @@ export class PptxPresentation {
       fetchMedia: (path) => this.getMedia(path),
       fetchImage: this._fetchImage,
       drawBase,
+      onError: opts.onError,
     });
   }
 

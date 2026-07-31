@@ -6,7 +6,8 @@
 //! `MasterBundle` → `ParsedMaster` type rename (fields unchanged).
 
 use crate::fill::{
-    parse_background, parse_blip_alpha, parse_color_node, parse_fill, parse_stroke, parse_xfrm,
+    parse_background, parse_blip_alpha, parse_color_node, parse_cust_geom, parse_fill,
+    parse_stroke, parse_xfrm,
 };
 use crate::shape::extract_decorative_shapes;
 use crate::text::{
@@ -117,6 +118,74 @@ pub(crate) struct LayoutPlaceholders {
     /// Same as `by_idx_fill` but keyed by placeholder type (fallback when idx
     /// doesn't match a layout shape).
     pub(crate) by_type_fill: HashMap<String, Fill>,
+    /// Shape geometry from the matching layout placeholder. Presentation slides
+    /// inherit layout information unless they provide a local override
+    /// (ECMA-376 Part 1, Annex L.3.2.3). This includes the preset/custom
+    /// geometry and preset adjustment values, not just the transform and paint.
+    pub(crate) by_idx_geometry: HashMap<u32, InheritedShapeGeometry>,
+    /// Type-keyed geometry fallback for placeholders that do not declare `idx`.
+    pub(crate) by_type_geometry: HashMap<String, InheritedShapeGeometry>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct InheritedShapeGeometry {
+    pub(crate) geometry: String,
+    pub(crate) cust_geom: Option<Vec<Vec<PathCmd>>>,
+    pub(crate) adjustments: [Option<f64>; 8],
+}
+
+impl InheritedShapeGeometry {
+    /// Parse the geometry-bearing portion of `<p:spPr>`. `None` means the shape
+    /// did not locally specify geometry and therefore remains eligible for
+    /// placeholder inheritance.
+    pub(crate) fn from_sp_pr(sp_pr: roxmltree::Node<'_, '_>) -> Option<Self> {
+        let cust_geom_node = child(sp_pr, "custGeom");
+        let prst_geom_node = child(sp_pr, "prstGeom");
+        if let Some(cust_geom_node) = cust_geom_node {
+            return Some(Self {
+                geometry: "custGeom".to_owned(),
+                cust_geom: Some(parse_cust_geom(cust_geom_node)),
+                adjustments: [None; 8],
+            });
+        }
+
+        let prst_geom_node = prst_geom_node?;
+        let geometry = attr(&prst_geom_node, "prst")?;
+        let gd_nodes: Vec<_> = child(prst_geom_node, "avLst")
+            .map(|av| {
+                av.children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "gd")
+                    .collect()
+            })
+            .unwrap_or_default();
+        let adjustment = |index: usize| -> Option<f64> {
+            let expected_name = if index == 0 {
+                None
+            } else {
+                Some(format!("adj{}", index + 1))
+            };
+            gd_nodes
+                .iter()
+                .find(|n| {
+                    let name = attr(n, "name");
+                    if index == 0 {
+                        matches!(name.as_deref(), Some("adj") | Some("adj1"))
+                    } else {
+                        name == expected_name
+                    }
+                })
+                .or_else(|| gd_nodes.get(index))
+                .and_then(|gd| attr(gd, "fmla"))
+                .and_then(|fmla| fmla.strip_prefix("val ").map(str::to_owned))
+                .and_then(|value| value.parse::<f64>().ok())
+        };
+
+        Some(Self {
+            geometry,
+            cust_geom: None,
+            adjustments: std::array::from_fn(adjustment),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -490,6 +559,27 @@ impl LayoutPlaceholders {
         self.by_type_fill.get(ph_type).cloned().or_else(|| {
             if ph_type == "body" {
                 self.by_type_fill.get("").cloned()
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Look up geometry from the matching layout placeholder. Like fill,
+    /// stroke, and blipFill, an explicit `idx` is strict: a slide placeholder
+    /// must never borrow geometry from a different body slot merely because
+    /// their placeholder types happen to match.
+    pub(crate) fn lookup_geometry(
+        &self,
+        ph_type: &str,
+        ph_idx: Option<u32>,
+    ) -> Option<InheritedShapeGeometry> {
+        if let Some(i) = ph_idx {
+            return self.by_idx_geometry.get(&i).cloned();
+        }
+        self.by_type_geometry.get(ph_type).cloned().or_else(|| {
+            if ph_type == "body" {
+                self.by_type_geometry.get("").cloned()
             } else {
                 None
             }
@@ -1166,6 +1256,7 @@ pub(crate) fn parse_layout_placeholders(
         // slide. We deliberately exclude grpFill here (group inheritance is
         // resolved at slide parse time, not from the layout).
         let layout_fill: Option<Fill> = parse_fill(sp_pr, theme);
+        let layout_geometry = InheritedShapeGeometry::from_sp_pr(sp_pr);
 
         // Layout spPr > blipFill → image that bleeds through when the slide's
         // matching placeholder has no own blipFill (picture placeholder inheritance).
@@ -1248,6 +1339,11 @@ pub(crate) fn parse_layout_placeholders(
                 }
                 if let Some(ref f) = layout_fill {
                     lph.by_idx_fill.entry(idx).or_insert(f.clone());
+                }
+                if let Some(ref geometry) = layout_geometry {
+                    lph.by_idx_geometry
+                        .entry(idx)
+                        .or_insert_with(|| geometry.clone());
                 }
                 // Alignment for this idx: layout's own algn, else master per-type
                 // (incl. master txStyles, now folded into master_alignments).
@@ -1337,6 +1433,11 @@ pub(crate) fn parse_layout_placeholders(
             }
             if let Some(f) = layout_fill {
                 lph.by_type_fill.entry(ph_type.clone()).or_insert(f);
+            }
+            if let Some(geometry) = layout_geometry {
+                lph.by_type_geometry
+                    .entry(ph_type.clone())
+                    .or_insert(geometry);
             }
             if let Some(t) = t_opt {
                 lph.by_type.entry(ph_type).or_insert(t);
@@ -1674,5 +1775,123 @@ pub(crate) fn build_master_bundle(
         master_italic,
         master_caps,
         master_color,
+    }
+}
+
+#[cfg(test)]
+mod placeholder_geometry_tests {
+    use super::*;
+    use crate::shape::parse_shape;
+    use std::io::Cursor;
+
+    fn empty_zip() -> PptxZip {
+        let writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let cursor = writer.finish().unwrap();
+        zip::ZipArchive::new(cursor).unwrap()
+    }
+
+    fn parse_layout_geometry(layout_shape: &str) -> LayoutPlaceholders {
+        let xml = format!(
+            r#"<p:sldLayout
+                  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                  <p:cSld><p:spTree>{layout_shape}</p:spTree></p:cSld>
+                </p:sldLayout>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let mut zip = empty_zip();
+        parse_layout_placeholders(
+            doc.root_element(),
+            &HashMap::<String, f64>::new(),
+            &HashMap::<String, LevelFontSizes>::new(),
+            &HashMap::<String, LevelIndents>::new(),
+            &HashMap::<String, LevelBullets>::new(),
+            &HashMap::<String, String>::new(),
+            &HashMap::<String, Transform>::new(),
+            &HashMap::<String, String>::new(),
+            &HashMap::<String, bool>::new(),
+            &HashMap::<String, i64>::new(),
+            &HashMap::<String, i64>::new(),
+            &HashMap::<String, f64>::new(),
+            &HashMap::new(),
+            "ppt/slideLayouts",
+            &HashMap::new(),
+            &mut zip,
+        )
+    }
+
+    fn parse_slide_shape(shape: &str, placeholders: &LayoutPlaceholders) -> ShapeElement {
+        let xml = format!(
+            r#"<p:sp
+                  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                  {shape}
+                </p:sp>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let mut zip = empty_zip();
+        parse_shape(
+            doc.root_element(),
+            placeholders,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &mut zip,
+        )
+        .unwrap()
+    }
+
+    const LAYOUT_ELLIPSE: &str = r#"
+        <p:sp>
+          <p:nvSpPr><p:cNvPr id="27" name="Quarter"/><p:cNvSpPr/>
+            <p:nvPr><p:ph type="body" idx="18"/></p:nvPr>
+          </p:nvSpPr>
+          <p:spPr>
+            <a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></a:xfrm>
+            <a:prstGeom prst="ellipse"><a:avLst><a:gd name="adj" fmla="val 25000"/></a:avLst></a:prstGeom>
+          </p:spPr>
+        </p:sp>"#;
+
+    const SLIDE_PLACEHOLDER: &str = r#"
+        <p:nvSpPr><p:cNvPr id="27" name="Quarter"/><p:cNvSpPr/>
+          <p:nvPr><p:ph type="body" idx="18"/></p:nvPr>
+        </p:nvSpPr>
+        <p:spPr>
+          <a:xfrm><a:off x="100" y="200"/><a:ext cx="300" cy="400"/></a:xfrm>
+        </p:spPr>"#;
+
+    #[test]
+    fn slide_placeholder_inherits_geometry_and_adjustments_from_matching_layout_idx() {
+        let placeholders = parse_layout_geometry(LAYOUT_ELLIPSE);
+        let shape = parse_slide_shape(SLIDE_PLACEHOLDER, &placeholders);
+
+        assert_eq!(shape.geometry, "ellipse");
+        assert_eq!(shape.adj, Some(25000.0));
+        assert_eq!(
+            (shape.x, shape.y, shape.width, shape.height),
+            (100, 200, 300, 400)
+        );
+    }
+
+    #[test]
+    fn slide_placeholder_local_geometry_overrides_layout_geometry() {
+        let placeholders = parse_layout_geometry(LAYOUT_ELLIPSE);
+        let own_rect = SLIDE_PLACEHOLDER.replace(
+            "</p:spPr>",
+            "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr>",
+        );
+        let shape = parse_slide_shape(&own_rect, &placeholders);
+
+        assert_eq!(shape.geometry, "rect");
+        assert_eq!(shape.adj, None);
+    }
+
+    #[test]
+    fn explicit_idx_does_not_borrow_geometry_from_another_layout_slot() {
+        let placeholders = parse_layout_geometry(LAYOUT_ELLIPSE);
+        let different_idx = SLIDE_PLACEHOLDER.replace("idx=\"18\"", "idx=\"19\"");
+        let shape = parse_slide_shape(&different_idx, &placeholders);
+
+        assert_eq!(shape.geometry, "rect");
     }
 }

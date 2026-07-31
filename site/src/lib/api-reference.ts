@@ -52,6 +52,13 @@ const findMethods = (loc: string): ApiMethod[] => [
   { sig: 'clearFind(): void', desc: 'Clear all highlights and reset the find state.' },
 ];
 
+const FIND_HIGHLIGHT_COLORS: ApiOption = {
+  name: 'findHighlightColors',
+  type: '{ match?: string; active?: string }',
+  def: 'yellow / orange',
+  desc: 'CSS backgrounds for ordinary and active find matches. Values are applied verbatim; use an alpha color to keep the canvas text visible through the overlay.',
+};
+
 export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
   pptx: [
     {
@@ -63,6 +70,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         DPR,
         GFONTS,
         { name: 'enableTextSelection', type: 'boolean', def: 'false', desc: 'Overlay a transparent text layer so users can select & copy slide text.' },
+        FIND_HIGHLIGHT_COLORS,
         { name: 'enableMediaPlayback', type: 'boolean', def: 'false', desc: 'Make embedded audio/video interactive (the viewer draws its own play chrome).' },
         { name: 'hiddenSlideMode', type: "'show' | 'skip' | 'dim'", def: "'show'", desc: 'How hidden slides (`<p:sld show="0">`, §19.3.1.38) are presented. `show` draws them like any other slide; `skip` makes sequential navigation (nextSlide/prevSlide and the initial load) jump over them while keeping absolute indices unchanged (an explicit goToSlide to a hidden slide is still honored); `dim` draws them under a translucent overlay (the PowerPoint thumbnail look).' },
         { name: 'hiddenSlideDim', type: 'Partial<DimOptions>', def: "{ color: '#ffffff', opacity: 0.6 }", desc: 'Overrides for the `dim` overlay, merged over the default white 60% wash. A partial so it stays in sync if DimOptions gains a field.' },
@@ -128,6 +136,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Absolute zoom scale bounds (10%–400%).' },
         { name: 'refitOnResize', type: 'boolean', def: 'true', desc: 'Re-fit to the container width when it resizes. Set false to preserve an absolute scale independently of viewport width; explicit fitWidth() / fitPage() still work.' },
         { name: 'enableTextSelection', type: 'boolean', def: 'false', desc: 'Overlay a transparent, selectable text layer per slide for native copy in both render modes.' },
+        FIND_HIGHLIGHT_COLORS,
         { name: 'enableMediaPlayback', type: 'boolean', def: 'false', desc: 'Make embedded audio/video interactive inside the real viewport plus mediaOverscan. Other mounted slides remain static and selectable without allocating media blobs or RAF loops.' },
         { name: 'mediaOverscan', type: 'number', def: '1', desc: 'Slides beyond the real viewport that may keep interactive media handles. Independent from the general overscan used for mounted canvases/text overlays.' },
         ON_HYPERLINK_CLICK,
@@ -165,6 +174,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         DPR,
         GFONTS,
         { name: 'enableTextSelection', type: 'boolean', def: 'false', desc: 'Overlay a transparent text layer for native selection & copy.' },
+        FIND_HIGHLIGHT_COLORS,
         { name: 'showTrackChanges', type: 'boolean', desc: 'Render tracked insertions/deletions with author colours.' },
         ZIP,
         PARSER_LIMITS,
@@ -220,6 +230,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Absolute zoom scale bounds (10%–400%).' },
         { name: 'refitOnResize', type: 'boolean', def: 'true', desc: 'Re-fit to the container width when it resizes. Set false to preserve an absolute scale independently of viewport width; explicit fitWidth() / fitPage() still work.' },
         { name: 'enableTextSelection', type: 'boolean', def: 'false', desc: 'Overlay a transparent, selectable text layer per page for native copy in both render modes.' },
+        FIND_HIGHLIGHT_COLORS,
         ON_HYPERLINK_CLICK,
         ENABLE_HYPERLINKS,
         { name: 'showTrackChanges', type: 'boolean', desc: 'Render tracked insertions/deletions with author colours (forwarded to each page render).' },
@@ -257,6 +268,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom slider bounds as scale factors (10%–400%).' },
         { name: 'resizable', type: 'boolean', def: 'true', desc: 'Allow resizing columns/rows by dragging header borders. View-only — it changes the on-screen view only and never modifies the loaded file. Set false to disable.' },
         { name: 'selectionColor', type: 'string', def: "'#1a73e8'", desc: 'Accent color for the cell-selection rectangle (any CSS color). The fill is the same color at 8% opacity.' },
+        FIND_HIGHLIGHT_COLORS,
         { name: 'hiddenSheetMode', type: "'show' | 'skip' | 'dim'", def: "'show'", desc: 'How hidden / very-hidden sheets (`<sheet state>`, §18.2.19) appear in the tab bar. `show` renders a tab like any other; `skip` hides the tab (`display:none`) and makes sequential navigation jump over it; `dim` renders the tab at reduced opacity. Mirrors pptx `hiddenSlideMode`.' },
         GFONTS,
         ZIP,

@@ -18,7 +18,7 @@ A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a 
 
 - **DOCX** — Continuous **scroll view** of every page with a transparent text layer (PDF.js-style) — drag to select, copy as plain text.
 - **XLSX** — Spreadsheet viewer with cell / row / column / range selection, tab-separated copy (Ctrl+C / Cmd+C), freeze-pane support, and a multi-sheet tab bar.
-- **PPTX** — Continuous **scroll view** of every slide with a transparent text layer that handles rotated text boxes correctly.
+- **PPTX** — Continuous **scroll view** of every slide with a transparent text layer that handles rotated text boxes correctly, plus interactive playback for embedded audio and video.
 - **Find in preview** — Press **Ctrl+F / Cmd+F** to search the complete document, workbook, or presentation. Matching is case-insensitive; Enter / Shift+Enter moves between results.
 - **High fidelity** — Charts, conditional formatting, theme colors, custom geometry shapes, math equations (OMML, via MathJax + STIX Two Math), and more rendered straight from the OOXML spec.
 - **MCP server (opt-in)** — Lets AI coding agents (Copilot, Claude, etc.) read `.xlsx` / `.docx` / `.pptx` files in your workspace through dedicated tools instead of unzipping XML by hand. See [MCP server for AI agents](#mcp-server-for-ai-agents) below.
@@ -43,6 +43,11 @@ Search is case-insensitive across the complete file, including pages or slides
 outside the currently rendered scroll window. Press **Enter** for the next match,
 **Shift+Enter** for the previous match, and **Escape** or the **×** button to
 close the popup and clear highlights.
+
+The ordinary and active match backgrounds are themeable through
+`ooxmlViewer.findMatchBackground` and
+`ooxmlViewer.findActiveMatchBackground`. Override them under
+`workbench.colorCustomizations` in VS Code settings.
 
 ## MCP server for AI agents
 
@@ -89,7 +94,9 @@ VS Code's own telemetry is independent of this extension and can be controlled v
 - XLSX: formula evaluation is not yet supported (raw cached values are shown).
 - DOCX: image-anchored float wrap, footnotes, and header/footer rendering may differ slightly from Word.
 - PPTX: a small number of obscure preset shapes fall back to a rectangle placeholder.
-- Media playback (audio / video) is not supported in the Webview.
+- PPTX media: VS Code Webviews support MP3 audio and H.264 video, but not AAC
+  audio tracks. An H.264/AAC MP4 therefore plays video without sound; use a
+  separate MP3 audio track when sound is required.
 
 ## Issues & Contributions
 

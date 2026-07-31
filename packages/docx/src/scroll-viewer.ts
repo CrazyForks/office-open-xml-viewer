@@ -1,5 +1,5 @@
 import { computeVisibleRange, openExternalHyperlink, PT_TO_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type VisibleRange } from '@silurus/ooxml-core';
-import type { FindMatch, FindMatchesOptions, HyperlinkTarget, ZoomableViewer } from '@silurus/ooxml-core';
+import type { FindHighlightColors, FindMatch, FindMatchesOptions, HyperlinkTarget, ZoomableViewer } from '@silurus/ooxml-core';
 import { DocxDocument } from './document';
 import type { LoadOptions } from './document';
 import type { DocxTextRunInfo } from './renderer';
@@ -74,6 +74,8 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    *  shipped back beside the page bitmap, so the overlay is populated identically
    *  to main mode (no more empty overlay / one-time warning). */
   enableTextSelection?: boolean;
+  /** CSS backgrounds for ordinary and active in-document search matches. */
+  findHighlightColors?: FindHighlightColors;
   /** Minimum zoom scale (px-per-pt multiplier floor). Default 0.1. */
   zoomMin?: number;
   /** Maximum zoom scale. Default 4. */
@@ -1591,6 +1593,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._pageWidthPx(page),
       this._pageHeightPx(page),
       (font) => this._measureForFont(font),
+      this._opts.findHighlightColors,
     );
   }
 

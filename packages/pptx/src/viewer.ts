@@ -8,6 +8,7 @@ import { nextVisibleIndex, resolveVisibleIndex, countVisible } from './hidden';
 import type { DimOptions } from './types';
 import {
   type HyperlinkTarget,
+  type FindHighlightColors,
   type FindMatch,
   type FindMatchesOptions,
   type ZoomableViewer,
@@ -28,7 +29,7 @@ const DEFAULT_HIDDEN_DIM: DimOptions = { color: '#ffffff', opacity: 0.6 };
 export interface PptxViewerOptions extends RenderOptions, LoadOptions {
   /** Called when a slide finishes rendering */
   onSlideChange?: (index: number, total: number) => void;
-  /** Called on parse or render errors */
+  /** Called on parse, render, or embedded-media playback errors. */
   onError?: (err: Error) => void;
   /** IX9 zoom contract ({@link ZoomableViewer}) — the clamp range for
    *  {@link PptxViewer.setScale} / `zoomIn` / `zoomOut` / `fitWidth` / `fitPage`,
@@ -54,6 +55,8 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
    * browser's native text selection works on slide content.
    */
   enableTextSelection?: boolean;
+  /** CSS backgrounds for ordinary and active in-document search matches. */
+  findHighlightColors?: FindHighlightColors;
   /**
    * How hidden slides (`<p:sld show="0">`, §19.3.1.38) are presented:
    * - `'show'` (default): drawn like any other slide.
@@ -491,6 +494,7 @@ export class PptxViewer implements ZoomableViewer {
           dpr,
           dim,
           onTextRun,
+          onError: (error) => this._reportRenderError(error),
         });
       } else if (isWorker) {
         const bmp = await this.engine.renderSlideToBitmap(this.currentSlide, { width: targetWidth, dpr, dim, onTextRun });
@@ -521,8 +525,14 @@ export class PptxViewer implements ZoomableViewer {
     const layer = this.highlightLayer;
     if (!layer) return;
     const highlights: PptxHighlightMatch[] = this._find.slideHighlights(this.currentSlide);
-    buildPptxHighlightLayer(layer, runs, highlights, cssWidth, cssHeight, (font) =>
-      this._measureForFont(font),
+    buildPptxHighlightLayer(
+      layer,
+      runs,
+      highlights,
+      cssWidth,
+      cssHeight,
+      (font) => this._measureForFont(font),
+      this.opts.findHighlightColors,
     );
   }
 

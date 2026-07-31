@@ -3207,14 +3207,13 @@ export function renderTextBody(
       // defaults like `defRPr sz="30000"` (300pt prompt-text marker) would
       // inflate lineHeight and push real 24pt runs far below the anchor.
       let maxSizePx = 0;
-      // Design single-line-height FLOOR (ECMA-376 §17.3.1.33, shared with docx
-      // via core's `intendedSingleLinePx`). PowerPoint sizes single spacing as a
-      // flat 1.2×em; for a SUBSTITUTED face whose Windows design line height is
-      // taller than that (Meiryo 1.596×em, Sakkal Majalla 1.3965×em) the flat
-      // ratio understates Word/PowerPoint's line box and lines overlap. This is
-      // a FLOOR, not a replacement: `intendedSingleLinePx` returns 0 for every
-      // non-tabled family, so `max(1.2×em, 0)` leaves all other fonts (all Latin,
-      // installed CJK, etc.) exactly on PowerPoint's 1.2×em convention.
+      // Design single-line-height FLOOR for IMPLICIT single spacing, shared
+      // with docx via core's `intendedSingleLinePx`. For a substituted face
+      // whose Windows design line height is taller than the 1.2×em fallback
+      // (Meiryo 1.596×em, Sakkal Majalla 1.3965×em), the floor keeps omitted
+      // `<a:lnSpc>` from collapsing. It must not override an explicitly
+      // authored `<a:spcPct>`; §21.1.2.2.5 / §21.1.2.2.11 define percentage
+      // spacing from the line's largest text size.
       let designSingle = 0;
       for (const seg of line.segments) {
         // For an equation, the line must be at least as tall as its own font
@@ -3246,22 +3245,21 @@ export function renderTextBody(
         maxSizePx = bulletImage.sizePx;
       }
 
-      // Single-line base with the design-line-height floor applied (see the
-      // `designSingle` loop above). `singleLine` replaces the bare `maxSizePx *
-      // 1.2` everywhere the base is a MULTIPLE of the single line (the pct and
-      // no-spaceLine cases); the exact-pt `spcPts` case is an absolute height
-      // and is deliberately NOT floored.
-      const singleLine = Math.max(maxSizePx * 1.2, designSingle);
+      // PowerPoint's existing natural-line approximation for authored
+      // percentage spacing. The document-font design floor applies only when
+      // line spacing is omitted; an explicit percentage is already the
+      // author's vertical-spacing decision, and `spcPts` remains absolute.
+      const naturalSingle = maxSizePx * 1.2;
+      const implicitSingle = Math.max(naturalSingle, designSingle);
       let lineHeight: number;
       if (para.spaceLine) {
         if (para.spaceLine.type === 'pct') {
-          // spcPct 100% = single line spacing = natural font leading ≈ 1.2× em
-          lineHeight = singleLine * (para.spaceLine.val / 100000);
+          lineHeight = naturalSingle * (para.spaceLine.val / 100000);
         } else {
           lineHeight = para.spaceLine.val * PT_TO_EMU * scale;
         }
       } else {
-        lineHeight = singleLine;
+        lineHeight = implicitSingle;
       }
       // normAutofit lnSpcReduction (ECMA-376 §21.1.2.1.3): PowerPoint reduces
       // each paragraph's line spacing by this fraction alongside the font

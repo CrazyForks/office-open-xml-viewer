@@ -3978,10 +3978,11 @@ export function drawShapeText(
     let lineHeight = 0;
     let lineAscent = 0;
     let hasMath = false;
-    // ECMA-376 §21.1.2.2.5 <a:lnSpc> + §21.1.2.1.3 normAutofit lnSpcReduction,
-    // applied to a natural (design-floored) single-line height. Mirrors the pptx
-    // renderer. `h` is the natural single line, so it is the correct pct base;
-    // pts is an absolute per-line height (cs-scaled, like the cell/run px sizes).
+    // ECMA-376 §21.1.2.2.5 <a:lnSpc> + §21.1.2.1.3 normAutofit lnSpcReduction.
+    // An explicitly authored spcPct uses the natural 1.2×em line base; the
+    // document-font design floor is reserved for omitted line spacing. spcPts
+    // remains an absolute per-line height (cs-scaled, like the cell/run px sizes).
+    const hasExplicitPct = p.spaceLine?.type === 'pct';
     const applyLineSpacing = (h: number): number => {
       let out = h;
       if (p.spaceLine) {
@@ -4017,7 +4018,10 @@ export function drawShapeText(
           intendedSingleLinePx(lastTextFace, fallbackPx),
           intendedSingleLinePx(lastTextFaceEa, fallbackPx),
         );
-        lineHeight = Math.max(fallbackPx * 1.2, designFloor);
+        const naturalSingle = fallbackPx * 1.2;
+        lineHeight = hasExplicitPct
+          ? naturalSingle
+          : Math.max(naturalSingle, designFloor);
         // An empty line carries no segment, so this ascent is never consumed by
         // the draw pass (no text/math to place on the baseline); it is set only
         // to keep the Line shape consistent. Measure it the same way as text
@@ -4082,15 +4086,18 @@ export function drawShapeText(
       lastTextFaceEa = run.fontFaceEa;
       const { font, px: pxSize } = textFont(run);
       const color = run.color ?? '#000000';
-      // Floor the natural single line (Excel's flat 1.2×em) by the AUTHORED
-      // font's design line box (OS/2 win metrics, ECMA-376 §21.1.2.1.1) via
-      // core's intendedSingleLinePx — same floor docx/pptx apply. It returns 0
-      // for every untabled face (Calibri etc. stay on 1.2×em); a substituted
-      // Meiryo (1.596×em) / Sakkal Majalla must measure to its taller design
-      // line. Floor by the tallest of the LATIN and EAST-ASIAN faces (the common
-      // Japanese encoding sets Meiryo only on `<a:ea>` while leaving `<a:latin>`
-      // default, §21.1.2.3.1). `<a:cs>` is parsed (see fontFaceCs) but
-      // deliberately NOT in this line-box floor: per the font-slot rules
+      // When line spacing is omitted, floor the natural single line (Excel's
+      // flat 1.2×em) by the AUTHORED font's design line box (OS/2 win metrics,
+      // ECMA-376 §21.1.2.1.1) via core's intendedSingleLinePx — same floor
+      // docx/pptx apply. An explicit spcPct bypasses this floor per
+      // §21.1.2.2.5 / §21.1.2.2.11. intendedSingleLinePx returns 0 for every
+      // untabled face (Calibri etc. stay on 1.2×em); a substituted Meiryo
+      // (1.596×em) / Sakkal Majalla must measure to its taller design line when
+      // spacing is omitted. Floor by the tallest of the LATIN and EAST-ASIAN
+      // faces (the common Japanese encoding sets Meiryo only on `<a:ea>` while
+      // leaving `<a:latin>` default, §21.1.2.3.1). `<a:cs>` is parsed
+      // (see fontFaceCs) but deliberately NOT in this line-box floor: per the
+      // font-slot rules
       // (§21.1.2.3.1 / §17.3.2.26) the complex-script face renders ONLY
       // complex-script glyphs (Arabic/Hebrew/Thai), so an unconditional
       // line-box floor by cs would over-grow a run whose glyphs are Latin/CJK
@@ -4103,7 +4110,10 @@ export function drawShapeText(
         intendedSingleLinePx(run.fontFace, pxSize),
         intendedSingleLinePx(run.fontFaceEa, pxSize),
       );
-      const singleLinePx = Math.max(pxSize * 1.2, designFloor);
+      const naturalSingle = pxSize * 1.2;
+      const singleLinePx = hasExplicitPct
+        ? naturalSingle
+        : Math.max(naturalSingle, designFloor);
       lineHeight = Math.max(lineHeight, singleLinePx);
       lineAscent = Math.max(lineAscent, measuredAscent(font, pxSize));
       ctx.font = font;
