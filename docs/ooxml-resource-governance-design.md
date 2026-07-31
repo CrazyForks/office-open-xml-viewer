@@ -91,7 +91,14 @@ repeat reads, conflict validation, worker error transport, and poisoned sessions
   do not claim URL range loading in this milestone.
 
 Exit: protocol tests prove bounded in-flight data, backpressure, timeout/abort
-convergence, late-response disposal, and main/worker result and error parity.
+convergence, late-response disposal, and parity across the direct and simulated
+worker transports. Production Worker/WASM parity is established separately as
+each real format pipeline adopts the substrate in M3-M5.
+
+The M2 boundedness claim is deliberately limited to this substrate. Existing
+format bootstrap calls still materialize their historical complete models until
+M3-M5 migrate them; wrapping such a result in one nominal chunk would not make
+it bounded.
 
 ### M3 — XLSX bounded worksheet pipeline
 
@@ -110,6 +117,8 @@ at deterministic limits, and show a measured reduction in transient peak usage.
   retaining slides and their relationships as format-owned units.
 - Make navigation, media leases, cleanup, and resource failures consistent with
   the common session contract.
+- Preserve the pooled-canvas recycling contract from PR #1127: returning a
+  slide canvas to the pool clears its zoom-derived CSS height before reuse.
 
 Exit: multi-slide tests prove on-demand unit ownership, navigation compatibility,
 bounded transient retention, and cleanup on rejection, reload, and destroy.
@@ -326,6 +335,14 @@ requires response-version pinning plus an owned entry reader; it is not a
 prerequisite for bounded inflated-part processing. Agile-encrypted CFB input
 remains on the buffered path until the crypto/container layer is redesigned.
 
+The buffered implementation moves the input `Vec<u8>` into shared ownership
+without copying its backing allocation. The ZIP crate validates the central
+directory and resolves each entry data range; an owned Stored/Deflate decoder
+then survives across pulls, incrementally verifies size and CRC, and never
+restarts inflation from byte zero. This matches the compression methods enabled
+by the repository's existing ZIP dependency. Unsupported or encrypted ZIP-entry
+methods remain ordinary container errors rather than policy violations.
+
 ### Pull protocol
 
 Consumers request work instead of receiving an unbounded push:
@@ -338,11 +355,13 @@ pull next chunk
 complete or abort -> final report + close
 ```
 
-Credit bounds the amount of work and wire data produced for one pull; it is
-backpressure, not a security policy. Resource limits remain independently
-enforced. One indivisible format unit may exceed ordinary credit only when it is
-below its hard unit limit; otherwise it fails deterministically instead of
-deadlocking the stream.
+Credit bounds inflated output and measured wire payload produced for one pull;
+it is backpressure, not a CPU-time or security policy. A Deflate decoder may
+consume more compressed input internally before producing the credited output,
+so worker termination remains the containment mechanism for a decompressor that
+does not yield. Resource limits remain independently enforced. One indivisible
+format unit may exceed ordinary credit only when it is below its hard unit
+limit; otherwise it fails deterministically instead of deadlocking the stream.
 
 At most the internally allowed number of chunks may be in flight. Abort,
 timeout, resource violation, parser trap, and explicit destruction all converge
@@ -353,6 +372,14 @@ as `ImageBitmap`, are disposed rather than merely ignored.
 The protocol uses structured messages internally; it is not exported as a
 Viewer API. Large payloads use transferable buffers where crossing a worker
 boundary is unavoidable.
+
+Every command and response carries separate correlation, session, operation,
+and generation identities. Pull, acknowledgement, retained-lease release,
+cancel, and close are correlated. A final data-bearing chunk is acknowledged
+like every other chunk. Transferred payload ownership and worker-retained
+numeric leases are distinct: acknowledging releases producer staging,
+disposing releases main-side transfer resources, and lease release frees only
+the explicitly retained worker resource.
 
 The outer protocol standardizes correlation, sequencing, cancellation, usage,
 leases, and close behavior. Format payloads and stream names remain opaque to

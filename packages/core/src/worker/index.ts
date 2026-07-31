@@ -30,3 +30,22 @@ export {
   type NormalizedOoxmlResourcePolicy,
 } from './resource-policy.js';
 export { disposeRejectedLoad } from './rejected-load.js';
+export {
+  BoundedPullSession,
+  DEFAULT_PULL_CANCEL_GRACE_MS,
+  PULL_SESSION_PROTOCOL,
+  PullSessionHost,
+  PullSessionHostCoordinator,
+  type PullCancelReason,
+  type PullChunk,
+  type PullRequestOptions,
+  type PullSessionClientOptions,
+  type PullSessionCommand,
+  type PullSessionHostChunk,
+  type PullSessionHostDriver,
+  type PullSessionHostOptions,
+  type PullSessionIdentity,
+  type PullSessionKey,
+  type PullSessionPost,
+  type PullSessionResponse,
+} from './pull-session.js';

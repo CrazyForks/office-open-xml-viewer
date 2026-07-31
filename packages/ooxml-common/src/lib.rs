@@ -15,6 +15,7 @@ pub mod fill;
 pub mod math;
 pub mod mce;
 pub mod ns;
+pub mod package_session;
 pub mod rels;
 pub mod resource;
 pub mod text;

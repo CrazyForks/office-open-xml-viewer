@@ -161,6 +161,24 @@ describe('WorkerBridge', () => {
     expect(w.transfers[0]).toEqual([buf]);
   });
 
+  it('rejects and removes pending state when postMessage throws synchronously', async () => {
+    vi.useFakeTimers();
+    try {
+      const w = new FakeWorker();
+      w.postMessage = vi.fn(() => {
+        throw new DOMException('could not clone', 'DataCloneError');
+      });
+      const bridge = makeBridge(w);
+      const pending = bridge.request((id) => ({ kind: 'parse', id }), undefined, { timeoutMs: 10 });
+      await expect(pending).rejects.toMatchObject({ name: 'DataCloneError' });
+      expect(vi.getTimerCount()).toBe(0);
+      bridge.terminate();
+      expect(w.terminated).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('post() sends a fire-and-forget message without allocating an id', () => {
     const w = new FakeWorker();
     const bridge = makeBridge(w);
@@ -182,6 +200,26 @@ describe('WorkerBridge', () => {
     expect(() => w.respond({ id, kind: 'ok', value: 'dup' })).not.toThrow();
   });
 
+  it('disposes an unknown or late correlated response without affecting requests', async () => {
+    const w = new FakeWorker();
+    const dispose = vi.fn();
+    const bridge = new WorkerBridge<Res>(w, {
+      correlate: (r) => r.id,
+      onOrphanedResponse: dispose,
+    });
+    const p = bridge.request((id) => ({ kind: 'parse', id }));
+    const id = (w.posted[0] as { id: number }).id;
+
+    w.respond({ id: 999, kind: 'ok', value: 'unknown' });
+    w.respond({ id, kind: 'ok', value: 'real' });
+    await p;
+    w.respond({ id, kind: 'ok', value: 'late' });
+
+    expect(dispose).toHaveBeenCalledTimes(2);
+    expect(dispose).toHaveBeenNthCalledWith(1, { id: 999, kind: 'ok', value: 'unknown' });
+    expect(dispose).toHaveBeenNthCalledWith(2, { id, kind: 'ok', value: 'late' });
+  });
+
   describe('timeout', () => {
     beforeEach(() => {
       vi.useFakeTimers();
@@ -200,6 +238,22 @@ describe('WorkerBridge', () => {
       const rejects = expect(p).rejects.toThrow(/timed out after 1000ms/);
       await vi.advanceTimersByTimeAsync(1000);
       await rejects;
+    });
+
+    it('notifies the caller when timeout cancels a correlated request', async () => {
+      const w = new FakeWorker();
+      const bridge = makeBridge(w);
+      const onCancel = vi.fn();
+      const p = bridge.request((id) => ({ kind: 'parse', id }), undefined, {
+        timeoutMs: 10,
+        onCancel,
+      });
+      const id = (w.posted[0] as { id: number }).id;
+      const rejects = expect(p).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(10);
+      await rejects;
+      expect(onCancel).toHaveBeenCalledOnce();
+      expect(onCancel).toHaveBeenCalledWith(id, 'timeout');
     });
 
     it('honours a bridge-level default timeoutMs', async () => {
@@ -266,6 +320,20 @@ describe('WorkerBridge', () => {
       expect(w.posted).toHaveLength(0);
     });
 
+    it('notifies cancellation for an already-aborted request without posting it', async () => {
+      const w = new FakeWorker();
+      const bridge = makeBridge(w);
+      const onCancel = vi.fn();
+      await expect(
+        bridge.request((id) => ({ kind: 'parse', id }), undefined, {
+          signal: AbortSignal.abort(),
+          onCancel,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(onCancel).toHaveBeenCalledWith(1, 'abort');
+      expect(w.posted).toHaveLength(0);
+    });
+
     it('rejects and detaches the listener when the signal aborts mid-flight', async () => {
       const w = new FakeWorker();
       const bridge = makeBridge(w);
@@ -277,6 +345,21 @@ describe('WorkerBridge', () => {
       ctrl.abort();
       await expect(p).rejects.toMatchObject({ name: 'AbortError' });
       expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+    });
+
+    it('notifies the caller when abort cancels a correlated request', async () => {
+      const w = new FakeWorker();
+      const bridge = makeBridge(w);
+      const ctrl = new AbortController();
+      const onCancel = vi.fn();
+      const p = bridge.request((id) => ({ kind: 'parse', id }), undefined, {
+        signal: ctrl.signal,
+        onCancel,
+      });
+      const id = (w.posted[0] as { id: number }).id;
+      ctrl.abort();
+      await expect(p).rejects.toMatchObject({ name: 'AbortError' });
+      expect(onCancel).toHaveBeenCalledWith(id, 'abort');
     });
 
     it('detaches the abort listener when the response arrives before any abort', async () => {

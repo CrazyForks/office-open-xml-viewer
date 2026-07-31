@@ -38,8 +38,20 @@ struct GovernorState {
     // Central-directory identity, not a display path: duplicate ZIP names must
     // not accidentally share accounting state.
     max_actual_by_part: HashMap<usize, u64>,
+    next_operation_id: u64,
+    operations: HashMap<u64, LogicalOperationState>,
     first_error: Option<String>,
 }
+
+struct LogicalOperationState {
+    name: String,
+    inflated_bytes: u64,
+}
+
+/// Opaque identity for a logical operation whose accounting survives multiple
+/// bounded protocol pulls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ResourceOperation(u64);
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,14 +126,23 @@ pub struct ResourceScope {
     previous_operation: String,
     previous_operation_bytes: u64,
     restore_parent_operation: bool,
+    logical_operation_id: Option<u64>,
 }
 
 impl Drop for ResourceScope {
     fn drop(&mut self) {
-        if self.restore_parent_operation {
+        if self.logical_operation_id.is_some() || self.restore_parent_operation {
             let mut state = self.governor.0.borrow_mut();
-            state.operation = std::mem::take(&mut self.previous_operation);
-            state.usage.operation_inflated_bytes = self.previous_operation_bytes;
+            if let Some(id) = self.logical_operation_id {
+                let inflated_bytes = state.usage.operation_inflated_bytes;
+                if let Some(operation) = state.operations.get_mut(&id) {
+                    operation.inflated_bytes = inflated_bytes;
+                }
+            }
+            if self.restore_parent_operation {
+                state.operation = std::mem::take(&mut self.previous_operation);
+                state.usage.operation_inflated_bytes = self.previous_operation_bytes;
+            }
         }
         ACTIVE_GOVERNOR.with(|active| {
             *active.borrow_mut() = self.previous_active.take();
@@ -162,15 +183,52 @@ impl ResourceGovernor {
             operation: "open".to_string(),
             usage: ResourceUsage::default(),
             max_actual_by_part: HashMap::new(),
+            next_operation_id: 1,
+            operations: HashMap::new(),
             first_error: None,
         })))
     }
 
     pub fn scope(&self, operation: impl Into<String>) -> ResourceScope {
+        self.enter_scope(operation.into(), 0, None)
+    }
+
+    pub fn begin_operation(&self, name: impl Into<String>) -> ResourceOperation {
         let mut state = self.0.borrow_mut();
-        let previous_operation = std::mem::replace(&mut state.operation, operation.into());
+        let id = state.next_operation_id;
+        state.next_operation_id = state.next_operation_id.saturating_add(1);
+        state.operations.insert(
+            id,
+            LogicalOperationState {
+                name: name.into(),
+                inflated_bytes: 0,
+            },
+        );
+        ResourceOperation(id)
+    }
+
+    pub fn scope_operation(&self, operation: ResourceOperation) -> Result<ResourceScope, String> {
+        let state = self.0.borrow();
+        let logical = state
+            .operations
+            .get(&operation.0)
+            .ok_or_else(|| "resource operation does not belong to this governor".to_string())?;
+        let name = logical.name.clone();
+        let inflated_bytes = logical.inflated_bytes;
+        drop(state);
+        Ok(self.enter_scope(name, inflated_bytes, Some(operation.0)))
+    }
+
+    fn enter_scope(
+        &self,
+        operation: String,
+        operation_inflated_bytes: u64,
+        logical_operation_id: Option<u64>,
+    ) -> ResourceScope {
+        let mut state = self.0.borrow_mut();
+        let previous_operation = std::mem::replace(&mut state.operation, operation);
         let previous_operation_bytes = state.usage.operation_inflated_bytes;
-        state.usage.operation_inflated_bytes = 0;
+        state.usage.operation_inflated_bytes = operation_inflated_bytes;
         drop(state);
         let previous_active =
             ACTIVE_GOVERNOR.with(|active| active.borrow_mut().replace(self.clone()));
@@ -183,7 +241,26 @@ impl ResourceGovernor {
             previous_operation,
             previous_operation_bytes,
             restore_parent_operation,
+            logical_operation_id,
         }
+    }
+
+    pub fn usage_for_operation(&self, operation: ResourceOperation) -> Option<ResourceUsage> {
+        let state = self.0.borrow();
+        let operation = state.operations.get(&operation.0)?;
+        let mut usage = state.usage;
+        usage.operation_inflated_bytes = operation.inflated_bytes;
+        Some(usage)
+    }
+
+    /// Remove a completed logical operation from the live governor ledger.
+    /// Callers that need a final checkpoint must capture it first.
+    pub fn end_operation(&self, operation: ResourceOperation) {
+        self.0.borrow_mut().operations.remove(&operation.0);
+    }
+
+    pub fn clear_operations(&self) {
+        self.0.borrow_mut().operations.clear();
     }
 
     pub fn first_error(&self) -> Option<String> {
