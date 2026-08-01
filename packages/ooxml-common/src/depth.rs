@@ -40,6 +40,8 @@
 //! the shared OMML grammar behave identically; a document that is "too deep" in
 //! one format is "too deep" in all of them.
 
+use quick_xml::events::Event;
+
 /// Maximum nesting depth accepted by any guarded OOXML recursion (group shapes,
 /// nested tables, OMML math). See the module docs for the rationale.
 pub const MAX_PARSE_DEPTH: u32 = 64;
@@ -230,6 +232,53 @@ pub fn xml_nesting_exceeds(bytes: &[u8], limit: u32) -> bool {
     false
 }
 
+/// Allocation-free lexical preflight for DOM-producing XML complexity.
+///
+/// A byte/depth bound alone is insufficient: millions of tiny siblings,
+/// comments, processing instructions, text nodes, CDATA nodes, or attributes
+/// can make `roxmltree` allocate millions of records while the XML stays shallow.
+/// `quick_xml` borrows every event directly from `xml`; no event buffer or DOM is
+/// allocated. Complexity counts the document node, every element, every
+/// comment/CDATA/PI event, every nonempty text/general-reference event, and every
+/// attribute (including namespace declarations).
+///
+/// The scan continues after `limit + 1` so a later lexical error remains an
+/// ordinary malformed-XML result in the real parser rather than being promoted
+/// to a resource violation. `false` means either within budget or lexically
+/// malformed; only a complete valid lexical scan can return `true`.
+pub fn xml_dom_complexity_exceeds(xml: &str, limit: u64) -> bool {
+    fn add(complexity: &mut u64, amount: u64, limit: u64) {
+        *complexity = complexity
+            .saturating_add(amount)
+            .min(limit.saturating_add(1));
+    }
+
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut complexity = 1u64; // roxmltree's document node
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
+                add(&mut complexity, 1, limit);
+                for attribute in element.attributes() {
+                    if attribute.is_err() {
+                        return false;
+                    }
+                    add(&mut complexity, 1, limit);
+                }
+            }
+            Ok(Event::Text(node)) if !node.is_empty() => add(&mut complexity, 1, limit),
+            Ok(Event::CData(_)) | Ok(Event::Comment(_)) | Ok(Event::PI(_)) => {
+                add(&mut complexity, 1, limit)
+            }
+            Ok(Event::GeneralRef(node)) if !node.is_empty() => add(&mut complexity, 1, limit),
+            Ok(Event::DocType(_)) => return false,
+            Ok(Event::Eof) => return complexity > limit,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+}
+
 /// Advance past the next `>` (returns the index just after it, or `bytes.len()`
 /// if none remains).
 #[inline]
@@ -323,6 +372,31 @@ pub fn parse_guarded(xml: &str) -> Result<roxmltree::Document<'_>, GuardedParseE
         return Err(GuardedParseError::TooDeep);
     }
     roxmltree::Document::parse(xml).map_err(GuardedParseError::Xml)
+}
+
+/// Parse depth-guarded XML with an explicit roxmltree node ceiling.
+///
+/// This is defense in depth for callers that have already performed their own
+/// typed, attributable complexity preflight. It deliberately takes the ceiling
+/// as an argument and is separate from [`parse_guarded`]: applying an uncalibrated
+/// global node cap here would silently change every DOCX/XLSX compatibility path
+/// that intentionally degrades ordinary parse failures.
+#[inline]
+pub fn parse_guarded_with_node_limit(
+    xml: &str,
+    nodes_limit: u32,
+) -> Result<roxmltree::Document<'_>, GuardedParseError> {
+    if xml_too_deep(xml.as_bytes()) {
+        return Err(GuardedParseError::TooDeep);
+    }
+    roxmltree::Document::parse_with_options(
+        xml,
+        roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit,
+        },
+    )
+    .map_err(GuardedParseError::Xml)
 }
 
 #[cfg(test)]
@@ -508,5 +582,57 @@ mod tests {
             .find(|n| n.tag_name().name() == "t")
             .unwrap();
         assert_eq!(t.text(), Some("hello"));
+    }
+
+    #[test]
+    fn explicit_node_limit_does_not_change_shared_parse_guarded_compatibility() {
+        let mut xml = String::from("<r>");
+        for _ in 0..200_000 {
+            xml.push_str("<a/>");
+        }
+        xml.push_str("</r>");
+
+        let document = parse_guarded(&xml)
+            .expect("shared DOCX/XLSX-compatible parser has no implicit node ceiling");
+        assert_eq!(document.descendants().count(), 200_002);
+        assert!(matches!(
+            parse_guarded_with_node_limit(&xml, 200_001),
+            Err(GuardedParseError::Xml(_))
+        ));
+    }
+
+    #[test]
+    fn xml_dom_complexity_counts_nodes_attributes_and_namespaces() {
+        let xml = r#"<?xml version="1.0"?><r xmlns="urn:x" a="1"><!-- c --><![CDATA[d]]><?pi x?><a/>text</r>"#;
+        // document + r + 2 attrs + comment + cdata + PI + a + text = 9
+        assert!(!xml_dom_complexity_exceeds(xml, 9));
+        assert!(xml_dom_complexity_exceeds(xml, 8));
+    }
+
+    #[test]
+    fn xml_dom_complexity_exact_boundary_covers_each_dom_producing_unit() {
+        fn assert_exact(xml: &str, exact: u64) {
+            assert!(
+                !xml_dom_complexity_exceeds(xml, exact),
+                "exact limit must accept {xml}"
+            );
+            assert!(
+                xml_dom_complexity_exceeds(xml, exact - 1),
+                "limit+1 must reject {xml}"
+            );
+        }
+
+        // Each expectation includes roxmltree's document node and root element.
+        assert_exact("<r><a/><b/></r>", 4); // two child elements
+        assert_exact("<r><!--a--><!--b--></r>", 4); // two comments
+        assert_exact("<r><?a x?><?b y?></r>", 4); // two processing instructions
+        assert_exact("<r><![CDATA[a]]><![CDATA[b]]></r>", 4); // two CDATA events
+        assert_exact("<r>a<a/>b</r>", 5); // two text nodes + child element
+        assert_exact(r#"<r xmlns="urn:x" a="1" b="2"/>"#, 5); // three attributes
+    }
+
+    #[test]
+    fn malformed_xml_is_left_to_the_real_parser_even_after_crossing_budget() {
+        assert!(!xml_dom_complexity_exceeds("<r><a/><a/><broken", 1));
     }
 }

@@ -10,7 +10,8 @@ import { layoutDocument } from '../document-layout.js';
 import type { DocRun, DocxDocumentModel } from '../types.js';
 import type { InternalDocxDocumentModel, InternalFieldRun } from '../parser-model.js';
 import type { TextLayoutService } from './text.js';
-import { documentMathOccurrences, mathResourceKey } from './resources.js';
+import { mathResourceKey } from './resources.js';
+import { layoutSourceStore } from '../layout-source-model-adapter.js';
 import { privateResourceLookupOf } from './runtime-state.js';
 import { normalizeInternalDocumentModel } from '../parser-model.js';
 import { canvasFontString } from '@silurus/ooxml-core';
@@ -601,7 +602,7 @@ describe('production layout service integration', () => {
       { type: 'paragraph', runs: [{ type: 'math', nodes: [], display: false, fontSize: 10 }] },
       { type: 'paragraph', runs: [{ type: 'math', nodes: [], display: true, fontSize: 10 }] },
     ] } as unknown as Partial<DocxDocumentModel>);
-    const [availableOccurrence, unavailableOccurrence] = documentMathOccurrences(doc);
+    const [availableOccurrence, unavailableOccurrence] = layoutSourceStore(doc).mathOccurrences;
     const available = { resourceKey: mathResourceKey(availableOccurrence.source, 'inline'), widthEm: 1, ascentEm: 0.8, descentEm: 0.2, diagnostics: [] };
     const unavailable = { resourceKey: mathResourceKey(unavailableOccurrence.source, 'display'), widthEm: 0, ascentEm: 0, descentEm: 0, available: false as const, diagnostics: [] };
     const drawable = {} as CanvasImageSource;

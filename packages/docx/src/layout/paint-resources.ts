@@ -38,7 +38,7 @@ function validateIntrinsicSize(
   assertFiniteNonNegative(size.heightPt, `${path}.heightPt`);
 }
 
-function validateDescriptor(descriptor: PaintResourceDescriptor): void {
+function validateDescriptor(descriptor: DeepReadonly<PaintResourceDescriptor>): void {
   assertNonEmptyString(descriptor.resourceKey, 'resourceKey');
   switch (descriptor.kind) {
     case 'image':
@@ -109,6 +109,29 @@ export function createPaintResourceRegistry(
     .map(snapshotDescriptor)
     .sort((left, right) => left.resourceKey.localeCompare(right.resourceKey));
   const frozenDescriptors = Object.freeze(snapshot);
+  return indexSealedPaintResourceDescriptors(frozenDescriptors);
+}
+
+/** Index descriptors already validated/sealed by their owning source store.
+ * This path intentionally performs no payload clone. */
+export function indexSealedPaintResourceDescriptors(
+  descriptors: readonly DeepReadonly<PaintResourceDescriptor>[],
+): PaintResourceRegistry {
+  if (!Object.isFrozen(descriptors)) {
+    throw new TypeError('Owned paint descriptors must be sealed');
+  }
+  let previousKey: string | null = null;
+  for (const descriptor of descriptors) {
+    validateDescriptor(descriptor);
+    if (!Object.isFrozen(descriptor)) {
+      throw new TypeError(`Owned paint descriptor must be sealed: ${descriptor.resourceKey}`);
+    }
+    if (previousKey !== null && descriptor.resourceKey.localeCompare(previousKey) <= 0) {
+      throw new Error(`Owned paint descriptors must have unique sorted keys: ${descriptor.resourceKey}`);
+    }
+    previousKey = descriptor.resourceKey;
+  }
+  const frozenDescriptors = descriptors;
   const byKey = new Map(frozenDescriptors.map((descriptor) => [descriptor.resourceKey, descriptor]));
   const keys = Object.freeze(frozenDescriptors.map((descriptor) => descriptor.resourceKey));
   return Object.freeze({

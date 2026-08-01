@@ -1,6 +1,15 @@
 // ===== Output JSON model (mirrors Rust types) =====
 
-import type { MathNode, ChartModel, Duotone } from '@silurus/ooxml-core';
+import type {
+  MathNode,
+  ChartModel,
+  Duotone,
+} from '@silurus/ooxml-core';
+import type {
+  NormalizedOoxmlResourcePolicy,
+  PullSessionIdentity,
+  WorkerErrorPayload,
+} from '@silurus/ooxml-core/worker';
 
 export interface DocxDocumentModel {
   section: SectionProps;
@@ -1499,31 +1508,29 @@ export interface CellBorders {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number }
+  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy }
   | { type: 'extractImage'; id: number; path: string }
+  | { type: 'resourceUsage'; id: number }
   // Project the retained archive to GitHub-flavoured markdown (`DocxArchive.to_markdown`,
   // the handle already opened at `parse` — no re-copy of the file). Twin of
   // `extractImage`: the archive stays in the worker, only the string crosses back.
   | { type: 'toMarkdown'; id: number };
 
 export type WorkerResponse =
-  // The model crosses the worker boundary as raw UTF-8 JSON bytes (transferred,
-  // not cloned); the main thread does the single `TextDecoder.decode` +
-  // `JSON.parse` into a `DocxDocumentModel`. See `parse_docx` (Rust) for why.
-  | { type: 'parsed'; id: number; documentJson: ArrayBuffer }
+  | ({ type: 'documentSessionOpened'; id: number } & PullSessionIdentity<number>)
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
+  | { type: 'resourceUsage'; id: number; usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot }
   | { type: 'markdownRendered'; id: number; markdown: string }
-  | {
+  | ({
       type: 'error';
       id: number;
-      message: string;
+    } & WorkerErrorPayload & {
       errorName?: string;
-      code?: string;
       reason?: string;
       outgoingColumnIndex?: number;
       outgoingColumnCount?: number;
       incomingColumnCount?: number;
-    };
+    });
 
 // ===== Public API types =====
 

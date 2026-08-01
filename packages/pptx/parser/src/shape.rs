@@ -17,12 +17,13 @@ use crate::text::{
 use crate::theme::PptxSchemeResolver;
 use crate::types::*;
 use crate::{
-    attr, attr_f64, attr_i64, attr_r, child, find_rel_target_by_type, read_zip_str, resolve_path,
-    table_style_presets, PptxZip, TableStyleDef,
+    attr, attr_f64, attr_i64, attr_r, child, find_rel_target_by_type, read_zip_head, read_zip_str,
+    resolve_path, table_style_presets, PptxZip, TableStyleDef,
 };
 use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect, svg_blip_rid};
-use ooxml_common::depth::{parse_guarded, DepthGuard};
+use ooxml_common::depth::DepthGuard;
 use ooxml_common::ns::{is_diagram_uri, is_pml_ole_uri};
+use ooxml_common::rels::relationship_part_path;
 use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
 
@@ -44,8 +45,8 @@ pub(crate) fn pptx_understands_ns(ns: &str) -> bool {
 /// has no chartStyle relationship or the part cannot be read (the chartEx
 /// title then falls back to its inline size, or the renderer's default).
 fn load_chart_style_xml(zip: &mut PptxZip, chart_path: &str) -> Option<String> {
-    let (dir, file) = chart_path.rsplit_once('/')?;
-    let rels_path = format!("{}/_rels/{}.rels", dir, file);
+    let dir = chart_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let rels_path = relationship_part_path(chart_path);
     let rels_xml = read_zip_str(zip, &rels_path).ok()?;
     let target =
         find_rel_target_by_type(&rels_xml, ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)?;
@@ -202,6 +203,7 @@ pub(crate) fn parse_shape(
     lph: &LayoutPlaceholders,
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
+    source_dir: &str,
     group_fill: Option<&Fill>,
     zip: &mut PptxZip,
 ) -> Option<ShapeElement> {
@@ -460,6 +462,7 @@ pub(crate) fn parse_shape(
             n,
             theme,
             rels,
+            source_dir,
             inherited_font_size,
             inherited_level_font_sizes,
             inherited_level_indents,
@@ -642,7 +645,9 @@ pub(crate) fn resolve_blip_source(
         let r_id = attr_r(&blip, "embed")?;
         let rel_target = rels.get(&r_id)?;
         let path = resolve_path(slide_dir, rel_target);
-        let image_bytes = ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
+        // PNG dimensions live in the first 24 bytes. Do not inflate a potentially
+        // huge image merely to discover its intrinsic size.
+        let image_bytes = read_zip_head(zip, &path, 24).ok()?;
         // Intrinsic PNG size for the ink-fallback centering (None for non-PNG,
         // unchanged from the former png_size_from_data_url semantics).
         let size = png_size_from_bytes(&image_bytes);
@@ -950,7 +955,7 @@ pub(crate) fn parse_table_styles_xml(
     theme: &HashMap<String, String>,
 ) -> HashMap<String, TableStyleDef> {
     let mut map = HashMap::new();
-    let Ok(doc) = parse_guarded(xml) else {
+    let Ok(doc) = crate::parse_preflighted_pptx_xml(xml) else {
         return map;
     };
     let root = doc.root_element();
@@ -1102,6 +1107,7 @@ pub(crate) fn parse_table(
     t: &Transform,
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
+    source_dir: &str,
     zip: &mut PptxZip,
 ) -> Option<TableElement> {
     // Parse tblPr attributes and look up table style
@@ -1159,7 +1165,7 @@ pub(crate) fn parse_table(
     let mut rows: Vec<TableRow> = tbl
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "tr")
-        .map(|tr| parse_table_row(tr, theme, rels, zip))
+        .map(|tr| parse_table_row(tr, theme, rels, source_dir, zip))
         .collect();
 
     let row_count = rows.len();
@@ -1362,13 +1368,14 @@ pub(crate) fn parse_table_row(
     tr: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
+    source_dir: &str,
     zip: &mut PptxZip,
 ) -> TableRow {
     let height = attr_i64(&tr, "h").unwrap_or(0);
     let cells: Vec<TableCell> = tr
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "tc")
-        .map(|tc| parse_table_cell(tc, theme, rels, zip))
+        .map(|tc| parse_table_cell(tc, theme, rels, source_dir, zip))
         .collect();
     TableRow { height, cells }
 }
@@ -1377,6 +1384,7 @@ pub(crate) fn parse_table_cell(
     tc: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
+    source_dir: &str,
     zip: &mut PptxZip,
 ) -> TableCell {
     let tc_pr = child(tc, "tcPr");
@@ -1389,6 +1397,7 @@ pub(crate) fn parse_table_cell(
             n,
             theme,
             rels,
+            source_dir,
             None,
             [None; 9],
             Default::default(), // inherited_level_indents
@@ -1542,7 +1551,7 @@ pub(crate) fn parse_sp_tree_node(
                     if t.cx > 0 && t.cy > 0 {
                         if let Some(target) = rels.get(rid) {
                             let image_path = resolve_path(slide_dir, target);
-                            if let Ok(bytes) = ooxml_common::zip::read_zip_bytes(zip, &image_path) {
+                            if let Ok(bytes) = read_zip_head(zip, &image_path, 24) {
                                 let mime_type = mime_from_ext(&image_path).to_owned();
                                 let (intrinsic_width_px, intrinsic_height_px) =
                                     match png_size_from_bytes(&bytes) {
@@ -1688,7 +1697,7 @@ pub(crate) fn parse_sp_tree_node(
                     }
                 }
             }
-            if let Some(shape) = parse_shape(node, lph, theme, rels, group_fill, zip) {
+            if let Some(shape) = parse_shape(node, lph, theme, rels, slide_dir, group_fill, zip) {
                 out.push(SlideElement::Shape(shape));
             }
         }
@@ -1712,9 +1721,7 @@ pub(crate) fn parse_sp_tree_node(
                         if let Some(rid) = r_id {
                             if let Some(rel_target) = rels.get(&rid) {
                                 let image_path = resolve_path(slide_dir, rel_target);
-                                if let Ok(image_bytes) =
-                                    ooxml_common::zip::read_zip_bytes(zip, &image_path)
-                                {
+                                if let Ok(image_bytes) = read_zip_head(zip, &image_path, 24) {
                                     let mime_type = mime_from_ext(&image_path).to_owned();
                                     let (intrinsic_width_px, intrinsic_height_px) =
                                         match png_size_from_bytes(&image_bytes) {
@@ -1844,7 +1851,7 @@ pub(crate) fn parse_sp_tree_node(
                 .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "tbl");
             if let Some(tbl_node) = tbl_node {
-                if let Some(table) = parse_table(tbl_node, &t, theme, rels, zip) {
+                if let Some(table) = parse_table(tbl_node, &t, theme, rels, slide_dir, zip) {
                     out.push(SlideElement::Table(table));
                 }
                 return;
@@ -2087,7 +2094,7 @@ fn parse_smartart_drawing(
     out: &mut Vec<SlideElement>,
     zip: &mut PptxZip,
 ) {
-    let doc = match parse_guarded(drawing_xml) {
+    let doc = match crate::parse_preflighted_pptx_xml(drawing_xml) {
         Ok(d) => d,
         Err(_) => return,
     };
@@ -2119,7 +2126,7 @@ fn parse_smartart_drawing(
         match node.tag_name().name() {
             "sp" => {
                 if let Some(mut shape) =
-                    parse_shape(node, &empty_lph, theme, &empty_rels, None, zip)
+                    parse_shape(node, &empty_lph, theme, &empty_rels, "", None, zip)
                 {
                     shape.text_rect = parse_tx_xfrm(node);
                     out.push(SlideElement::Shape(shape));
@@ -2169,9 +2176,15 @@ fn parse_smartart_drawing(
                     }
                     match child_node.tag_name().name() {
                         "sp" => {
-                            if let Some(mut shape) =
-                                parse_shape(child_node, &empty_lph, theme, &empty_rels, None, zip)
-                            {
+                            if let Some(mut shape) = parse_shape(
+                                child_node,
+                                &empty_lph,
+                                theme,
+                                &empty_rels,
+                                "",
+                                None,
+                                zip,
+                            ) {
                                 shape.text_rect = parse_tx_xfrm(child_node);
                                 out.push(SlideElement::Shape(shape));
                             }
@@ -2453,7 +2466,7 @@ mod ole_tests {
             }
             w.finish().unwrap();
         }
-        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+        PptxZip::new(Cursor::new(buf)).unwrap()
     }
 
     const OLE_URI: &str = "http://schemas.openxmlformats.org/presentationml/2006/ole";
@@ -2873,7 +2886,7 @@ mod hidden_tests {
                 let w = zip::ZipWriter::new(Cursor::new(&mut buf));
                 w.finish().unwrap();
             }
-            zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+            PptxZip::new(Cursor::new(buf)).unwrap()
         };
         let rels = HashMap::new();
         let mut out = Vec::new();
@@ -3029,7 +3042,7 @@ mod hidden_tests {
         // DepthGuard (the big stack absorbs the recursion). The LOAD-BEARING
         // coverage for the roxmltree-layer trap is the default-stack neutralization
         // test `theme::tests::deeply_nested_theme_xml_is_rejected_not_trapped`
-        // (and the docx/xlsx siblings), which would overflow if `parse_guarded`'s
+        // (and the docx/xlsx siblings), which would overflow if the PPTX guarded
         // pre-check were bypassed. This test's job is the truncation contract.
         let out = run_deep(2_000);
         assert!(out.len() <= 1, "guard should bound the emitted shapes");
@@ -3079,7 +3092,7 @@ mod smartart_hidden_tests {
                 let w = zip::ZipWriter::new(Cursor::new(&mut buf));
                 w.finish().unwrap();
             }
-            zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+            PptxZip::new(Cursor::new(buf)).unwrap()
         };
         parse_smartart_drawing(&xml, &gf_xfrm, &theme, &mut out, &mut zip);
         out
@@ -3189,7 +3202,7 @@ mod strict_namespace_tests {
             }
             w.finish().unwrap();
         }
-        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+        PptxZip::new(Cursor::new(buf)).unwrap()
     }
 
     /// Parse each child of the `<p:spTree>` root, mirroring the real slide

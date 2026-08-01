@@ -62,7 +62,7 @@ export interface PresentOptions {
  */
 export async function createPresentationHandle(
   canvas: HTMLCanvasElement,
-  mediaElements: MediaElement[],
+  mediaElements: readonly Readonly<MediaElement>[],
   opts: PresentOptions,
 ): Promise<PresentationHandle> {
   const ctx = canvas.getContext('2d');
@@ -88,18 +88,6 @@ export async function createPresentationHandle(
     if (opts.onError) opts.onError(error);
     else console.error('[ooxml] PPTX embedded media failed:', error);
   };
-
-  // Media extraction can be noticeably slower than the static slide paint
-  // (large embedded videos are common). Keep the already-painted slide visible
-  // and make the pending state explicit while each Blob is read from the PPTX.
-  if (mediaElements.length > 0) {
-    ctx.save();
-    ctx.setTransform(opts.dpr, 0, 0, opts.dpr, 0, 0);
-    for (const el of mediaElements) {
-      drawMediaStatus(ctx, mediaRect(el, slideScale), 'Loading media…');
-    }
-    ctx.restore();
-  }
 
   for (const el of mediaElements) {
     let blob: Blob;
@@ -194,7 +182,11 @@ export async function createPresentationHandle(
       const media = s.media;
 
       if (s.loadState === 'loading') {
-        drawMediaStatus(ctx, s.posterRect, 'Loading media…');
+        // `drawBase` already painted the poster and play badge. Preserve that
+        // stable frame while the Blob is extracted and the media element loads
+        // metadata. In particular, resize/zoom recreates an interactive handle;
+        // showing a transient status here would make an already-visible slide
+        // flash "Loading media…" on every settled re-render.
         continue;
       }
       if (s.loadState === 'error') {
@@ -352,9 +344,8 @@ export async function createPresentationHandle(
     canvas.style.cursor = 'pointer';
     tick();
   } else if (unavailableRects.length > 0) {
-    // A slide whose every media fetch failed has no RAF-backed state. Replace
-    // the provisional loading badges once so the canvas does not remain stuck
-    // on "Loading media…" after the failure was already reported.
+    // A slide whose every media fetch failed has no RAF-backed state. Paint the
+    // explicit failure status once over the already-rendered poster.
     drawFrame();
   }
 

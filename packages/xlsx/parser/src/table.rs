@@ -1,8 +1,8 @@
+use crate::read_zip_string;
 use crate::types::*;
 use crate::{parse_cell_ref, resolve_zip_path};
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::is_x_ns;
-use ooxml_common::zip::read_zip_string;
 
 /// Parse `xl/tables/tableN.xml` files referenced from the sheet rels and
 /// collect them for the renderer. Each table carries a ref range, style name

@@ -44,7 +44,7 @@ export function canonicalParagraphTextScaleEligible(
     && kashidaLevelOf(paragraph.alignment) === null
     && segments.every((segment) =>
       !('isTab' in segment)
-      && !('mathNodes' in segment)
+      && !('math' in segment)
       && (!('text' in segment) || segment.emphasisMark == null));
 }
 

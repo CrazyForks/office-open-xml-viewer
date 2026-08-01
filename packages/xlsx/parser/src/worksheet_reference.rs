@@ -1,8 +1,6 @@
-use crate::{parse_cell_ref, resolve_implicit_ordinal, resolve_sheet_path};
-use crate::{CellRange, SharedString, SheetMeta, XlsxZip};
-use ooxml_common::depth::parse_guarded;
-use ooxml_common::ns::is_x_ns;
-use ooxml_common::zip::read_zip_string;
+use crate::worksheet_projector::{WorksheetProjectorItem, WorksheetRowProjector};
+use crate::{resolve_sheet_path, Row};
+use crate::{CellRange, CellValue, SharedString, SheetMeta, XlsxZip};
 use std::collections::HashMap;
 
 pub(crate) const MAX_REFERENCE_CELLS: usize = 1_000_000;
@@ -29,9 +27,113 @@ impl ReferencedCellValue {
     }
 }
 
-struct IndexedWorksheet {
+fn referenced_cell_value(
+    value: &CellValue,
+    shared_strings: &[SharedString],
+) -> ReferencedCellValue {
+    match value {
+        CellValue::Text { text, .. } => ReferencedCellValue::Text(text.clone()),
+        CellValue::Shared { si } => shared_strings
+            .get(*si)
+            .map(|string| ReferencedCellValue::Text(string.text.clone()))
+            .unwrap_or(ReferencedCellValue::Empty),
+        CellValue::Number { number } if number.is_finite() => ReferencedCellValue::Number(*number),
+        _ => ReferencedCellValue::Empty,
+    }
+}
+
+pub(crate) struct WorksheetCellLookup {
     cells: HashMap<(u32, u32), ReferencedCellValue>,
     string_bytes: usize,
+}
+
+pub(crate) struct WorksheetCellLookupBuilder {
+    worksheet: WorksheetCellLookup,
+    max_cells: usize,
+    max_string_bytes: usize,
+}
+
+impl WorksheetCellLookupBuilder {
+    pub(crate) fn bounded() -> Self {
+        Self::new(MAX_TOTAL_INDEXED_CELLS, MAX_TOTAL_INDEXED_STRING_BYTES)
+    }
+
+    pub(crate) fn new(max_cells: usize, max_string_bytes: usize) -> Self {
+        Self {
+            worksheet: WorksheetCellLookup {
+                cells: HashMap::new(),
+                string_bytes: 0,
+            },
+            max_cells,
+            max_string_bytes,
+        }
+    }
+
+    fn push_cell(&mut self, row: u32, col: u32, value: ReferencedCellValue) -> Option<()> {
+        if !(1..=MAX_COL).contains(&col) || !(1..=MAX_ROW).contains(&row) {
+            return Some(());
+        }
+        let key = (row, col);
+        if value == ReferencedCellValue::Empty {
+            if let Some(previous) = self.worksheet.cells.remove(&key) {
+                self.worksheet.string_bytes = self
+                    .worksheet
+                    .string_bytes
+                    .checked_sub(previous.string_bytes())?;
+            }
+            return Some(());
+        }
+        let old_string_bytes = self
+            .worksheet
+            .cells
+            .get(&key)
+            .map(ReferencedCellValue::string_bytes)
+            .unwrap_or(0);
+        let next_cell_count =
+            self.worksheet.cells.len() + usize::from(!self.worksheet.cells.contains_key(&key));
+        let next_string_bytes = self
+            .worksheet
+            .string_bytes
+            .checked_sub(old_string_bytes)?
+            .checked_add(value.string_bytes())?;
+        if next_cell_count > self.max_cells || next_string_bytes > self.max_string_bytes {
+            return None;
+        }
+        self.worksheet.cells.insert(key, value);
+        self.worksheet.string_bytes = next_string_bytes;
+        Some(())
+    }
+
+    pub(crate) fn push_row(&mut self, row: &Row, shared_strings: &[SharedString]) -> Option<()> {
+        for cell in &row.cells {
+            if !(1..=MAX_COL).contains(&cell.col) || !(1..=MAX_ROW).contains(&cell.row) {
+                continue;
+            }
+            let value = referenced_cell_value(&cell.value, shared_strings);
+            self.push_cell(cell.row, cell.col, value)?;
+        }
+        Some(())
+    }
+
+    pub(crate) fn finish(self) -> WorksheetCellLookup {
+        self.worksheet
+    }
+}
+
+pub(crate) fn extend_lookup_transactionally(
+    lookup: &mut Option<WorksheetCellLookupBuilder>,
+    rows: &[Row],
+    shared_strings: &[SharedString],
+) {
+    let Some(builder) = lookup.as_mut() else {
+        return;
+    };
+    if rows
+        .iter()
+        .any(|row| builder.push_row(row, shared_strings).is_none())
+    {
+        *lookup = None;
+    }
 }
 
 /// Per-worksheet-parse state shared by charts and sparklines. Source sheets
@@ -39,26 +141,66 @@ struct IndexedWorksheet {
 /// cell and UTF-8 byte budgets bound both those indexes and the dense reference
 /// vectors retained by the resulting model.
 pub(crate) struct WorksheetReferenceSession {
-    sheets: HashMap<String, Option<IndexedWorksheet>>,
+    sheets: HashMap<String, Option<WorksheetCellLookup>>,
+    current_sheet: CurrentSheetLookupEntry,
     remaining_cells: usize,
     remaining_string_bytes: usize,
     remaining_indexed_cells: usize,
     remaining_indexed_string_bytes: usize,
+    remaining_physical_indexed_cells: usize,
+    remaining_physical_indexed_string_bytes: usize,
+}
+
+enum CurrentSheetLookupEntry {
+    Unseeded,
+    PrebuiltUncharged {
+        name: String,
+        lookup: WorksheetCellLookup,
+    },
+    Unavailable {
+        name: String,
+    },
 }
 
 impl Default for WorksheetReferenceSession {
     fn default() -> Self {
         Self {
             sheets: HashMap::new(),
+            current_sheet: CurrentSheetLookupEntry::Unseeded,
             remaining_cells: MAX_TOTAL_REFERENCE_CELLS,
             remaining_string_bytes: MAX_TOTAL_REFERENCE_STRING_BYTES,
             remaining_indexed_cells: MAX_TOTAL_INDEXED_CELLS,
             remaining_indexed_string_bytes: MAX_TOTAL_INDEXED_STRING_BYTES,
+            remaining_physical_indexed_cells: MAX_TOTAL_INDEXED_CELLS,
+            remaining_physical_indexed_string_bytes: MAX_TOTAL_INDEXED_STRING_BYTES,
         }
     }
 }
 
 impl WorksheetReferenceSession {
+    pub(crate) fn seed_current_sheet(
+        &mut self,
+        sheet_name: &str,
+        worksheet: Option<WorksheetCellLookup>,
+    ) {
+        self.current_sheet = match worksheet {
+            Some(lookup)
+                if lookup.cells.len() <= self.remaining_physical_indexed_cells
+                    && lookup.string_bytes <= self.remaining_physical_indexed_string_bytes =>
+            {
+                self.remaining_physical_indexed_cells -= lookup.cells.len();
+                self.remaining_physical_indexed_string_bytes -= lookup.string_bytes;
+                CurrentSheetLookupEntry::PrebuiltUncharged {
+                    name: sheet_name.to_string(),
+                    lookup,
+                }
+            }
+            _ => CurrentSheetLookupEntry::Unavailable {
+                name: sheet_name.to_string(),
+            },
+        };
+    }
+
     fn reservable_cell_count(&self, range: &CellRange) -> Option<usize> {
         let total = reference_cell_count(range)?;
         if total > MAX_REFERENCE_CELLS || total > self.remaining_cells {
@@ -72,10 +214,106 @@ impl WorksheetReferenceSession {
         self.remaining_string_bytes -= string_bytes;
     }
 
-    fn consume_index(&mut self, worksheet: &IndexedWorksheet) {
+    fn consume_new_index(&mut self, worksheet: &WorksheetCellLookup) {
         self.remaining_indexed_cells -= worksheet.cells.len();
         self.remaining_indexed_string_bytes -= worksheet.string_bytes;
+        self.remaining_physical_indexed_cells -= worksheet.cells.len();
+        self.remaining_physical_indexed_string_bytes -= worksheet.string_bytes;
     }
+
+    fn index_materialized_rows(
+        &self,
+        rows: &[Row],
+        shared_strings: &[SharedString],
+    ) -> LookupBuildResult {
+        let mut builder = WorksheetCellLookupBuilder::new(
+            self.remaining_indexed_cells
+                .min(self.remaining_physical_indexed_cells),
+            self.remaining_indexed_string_bytes
+                .min(self.remaining_physical_indexed_string_bytes),
+        );
+        for row in rows {
+            for cell in &row.cells {
+                let value = referenced_cell_value(&cell.value, shared_strings);
+                if builder.push_cell(cell.row, cell.col, value).is_none() {
+                    return LookupBuildResult::LimitExceeded;
+                }
+            }
+        }
+        LookupBuildResult::Built(builder.finish())
+    }
+
+    fn resolve_current_sheet(
+        &mut self,
+        sheet_name: &str,
+        rows: Option<&[Row]>,
+        shared_strings: &[SharedString],
+    ) {
+        if self.sheets.contains_key(sheet_name) {
+            return;
+        }
+        let state = std::mem::replace(&mut self.current_sheet, CurrentSheetLookupEntry::Unseeded);
+        let lookup = match state {
+            CurrentSheetLookupEntry::PrebuiltUncharged { name, lookup } if name == sheet_name => {
+                if lookup.cells.len() <= self.remaining_indexed_cells
+                    && lookup.string_bytes <= self.remaining_indexed_string_bytes
+                {
+                    self.remaining_indexed_cells -= lookup.cells.len();
+                    self.remaining_indexed_string_bytes -= lookup.string_bytes;
+                    Some(lookup)
+                } else {
+                    self.remaining_physical_indexed_cells += lookup.cells.len();
+                    self.remaining_physical_indexed_string_bytes += lookup.string_bytes;
+                    None
+                }
+            }
+            CurrentSheetLookupEntry::Unavailable { name } if name == sheet_name => None,
+            other => {
+                self.current_sheet = other;
+                match rows.map(|rows| self.index_materialized_rows(rows, shared_strings)) {
+                    Some(LookupBuildResult::Built(lookup)) => {
+                        self.consume_new_index(&lookup);
+                        Some(lookup)
+                    }
+                    _ => None,
+                }
+            }
+        };
+        self.sheets.insert(sheet_name.to_string(), lookup);
+    }
+
+    fn take_unreferenced_prebuilt(&mut self) -> Option<(String, WorksheetCellLookup)> {
+        let state = std::mem::replace(&mut self.current_sheet, CurrentSheetLookupEntry::Unseeded);
+        match state {
+            CurrentSheetLookupEntry::PrebuiltUncharged { name, lookup } => {
+                self.remaining_physical_indexed_cells += lookup.cells.len();
+                self.remaining_physical_indexed_string_bytes += lookup.string_bytes;
+                Some((name, lookup))
+            }
+            other => {
+                self.current_sheet = other;
+                None
+            }
+        }
+    }
+
+    fn restore_unreferenced_prebuilt(&mut self, name: String, lookup: WorksheetCellLookup) {
+        self.remaining_physical_indexed_cells = self
+            .remaining_physical_indexed_cells
+            .checked_sub(lookup.cells.len())
+            .expect("restored prebuilt cells were previously refunded");
+        self.remaining_physical_indexed_string_bytes = self
+            .remaining_physical_indexed_string_bytes
+            .checked_sub(lookup.string_bytes)
+            .expect("restored prebuilt strings were previously refunded");
+        self.current_sheet = CurrentSheetLookupEntry::PrebuiltUncharged { name, lookup };
+    }
+}
+
+enum LookupBuildResult {
+    Built(WorksheetCellLookup),
+    LimitExceeded,
+    Unavailable,
 }
 
 pub(crate) fn split_sheet_ref(formula: &str) -> Option<(Option<String>, String)> {
@@ -151,131 +389,55 @@ pub(crate) fn parse_a1_range(reference: &str) -> Option<CellRange> {
     })
 }
 
-fn inline_string_text(cell: roxmltree::Node<'_, '_>) -> String {
-    let Some(inline) = cell.children().find(|node| {
-        node.is_element() && node.tag_name().name() == "is" && is_x_ns(node.tag_name().namespace())
-    }) else {
-        return String::new();
-    };
-    let mut text = String::new();
-    for child in inline.children().filter(|node| node.is_element()) {
-        match child.tag_name().name() {
-            "t" if is_x_ns(child.tag_name().namespace()) => {
-                text.push_str(child.text().unwrap_or(""));
-            }
-            "r" if is_x_ns(child.tag_name().namespace()) => {
-                for run_text in child.children().filter(|node| {
-                    node.is_element()
-                        && node.tag_name().name() == "t"
-                        && is_x_ns(node.tag_name().namespace())
-                }) {
-                    text.push_str(run_text.text().unwrap_or(""));
-                }
-            }
-            // `<rPh>` is phonetic guidance for the base text, not part of the
-            // cell's displayed value (ECMA-376 §18.4.6).
-            _ => {}
-        }
-    }
-    text
-}
-
-fn cell_value(
-    cell: roxmltree::Node<'_, '_>,
-    shared_strings: &[SharedString],
-) -> ReferencedCellValue {
-    let cell_type = cell.attribute("t").unwrap_or("");
-    if cell_type == "inlineStr" {
-        return ReferencedCellValue::Text(inline_string_text(cell));
-    }
-    let value = cell
-        .children()
-        .find(|node| {
-            node.is_element()
-                && node.tag_name().name() == "v"
-                && is_x_ns(node.tag_name().namespace())
-        })
-        .and_then(|node| node.text())
-        .unwrap_or("");
-
-    match cell_type {
-        "s" => value
-            .parse::<usize>()
-            .ok()
-            .and_then(|index| shared_strings.get(index))
-            .map(|string| ReferencedCellValue::Text(string.text.clone()))
-            .unwrap_or(ReferencedCellValue::Empty),
-        "str" => ReferencedCellValue::Text(value.to_string()),
-        "" | "n" => value
-            .parse::<f64>()
-            .ok()
-            .filter(|number| number.is_finite())
-            .map(ReferencedCellValue::Number)
-            .unwrap_or(ReferencedCellValue::Empty),
-        _ => ReferencedCellValue::Empty,
-    }
-}
-
+#[cfg(test)]
 fn parse_worksheet_cells(
     sheet_xml: &str,
     shared_strings: &[SharedString],
     max_cells: usize,
     max_string_bytes: usize,
-) -> Option<IndexedWorksheet> {
-    let document = parse_guarded(sheet_xml).ok()?;
-    let mut values = HashMap::new();
-    let mut string_bytes = 0usize;
-    let mut previous_row = 0;
-    for row_node in document.descendants().filter(|node| {
-        node.is_element() && node.tag_name().name() == "row" && is_x_ns(node.tag_name().namespace())
-    }) {
-        let row = resolve_implicit_ordinal(
-            row_node
-                .attribute("r")
-                .and_then(|value| value.parse::<u32>().ok()),
-            &mut previous_row,
-        );
-        let mut previous_col = 0;
-        for cell in row_node.children().filter(|node| {
-            node.is_element()
-                && node.tag_name().name() == "c"
-                && is_x_ns(node.tag_name().namespace())
-        }) {
-            let (col, cell_row) = match cell.attribute("r") {
-                Some(reference) => {
-                    let (col, row) = parse_cell_ref(reference);
-                    previous_col = col;
-                    (col, row)
+) -> Option<WorksheetCellLookup> {
+    let mut builder = WorksheetCellLookupBuilder::new(max_cells, max_string_bytes);
+    crate::stream_worksheet_rows(sheet_xml, shared_strings, &[], |row| {
+        builder
+            .push_row(&row, shared_strings)
+            .ok_or_else(|| "worksheet reference index resource limit".to_string())
+    })
+    .ok()?;
+    Some(builder.finish())
+}
+
+fn parse_package_worksheet_cells(
+    archive: &mut XlsxZip,
+    part: &str,
+    shared_strings: &[SharedString],
+    max_cells: usize,
+    max_string_bytes: usize,
+) -> LookupBuildResult {
+    let Ok(operation) = archive.operation() else {
+        return LookupBuildResult::Unavailable;
+    };
+    let Ok(entry) = operation.open_entry(part) else {
+        return LookupBuildResult::Unavailable;
+    };
+    let Ok(mut projector) =
+        WorksheetRowProjector::from_package_entry(entry, shared_strings, &[] as &[String])
+    else {
+        return LookupBuildResult::Unavailable;
+    };
+    let mut builder = WorksheetCellLookupBuilder::new(max_cells, max_string_bytes);
+    loop {
+        match projector.next_item() {
+            Ok(WorksheetProjectorItem::Row(row)) => {
+                if builder.push_row(&row.row, shared_strings).is_none() {
+                    return LookupBuildResult::LimitExceeded;
                 }
-                None => (resolve_implicit_ordinal(None, &mut previous_col), row),
-            };
-            if !(1..=MAX_COL).contains(&col) || !(1..=MAX_ROW).contains(&cell_row) {
-                continue;
             }
-            let value = cell_value(cell, shared_strings);
-            if value == ReferencedCellValue::Empty {
-                continue;
+            Ok(WorksheetProjectorItem::Finished(_)) => {
+                return LookupBuildResult::Built(builder.finish());
             }
-            let key = (cell_row, col);
-            let old_string_bytes = values
-                .get(&key)
-                .map(ReferencedCellValue::string_bytes)
-                .unwrap_or(0);
-            let next_cell_count = values.len() + usize::from(!values.contains_key(&key));
-            let next_string_bytes = string_bytes
-                .checked_sub(old_string_bytes)?
-                .checked_add(value.string_bytes())?;
-            if next_cell_count > max_cells || next_string_bytes > max_string_bytes {
-                return None;
-            }
-            values.insert(key, value);
-            string_bytes = next_string_bytes;
+            Err(_) => return LookupBuildResult::Unavailable,
         }
     }
-    Some(IndexedWorksheet {
-        cells: values,
-        string_bytes,
-    })
 }
 
 fn reference_cell_count(range: &CellRange) -> Option<usize> {
@@ -340,7 +502,7 @@ pub(crate) fn extract_reference_cells(
 pub(crate) fn resolve_worksheet_reference(
     archive: &mut XlsxZip,
     formula: &str,
-    current_sheet_xml: &str,
+    current_rows: Option<&[Row]>,
     current_sheet_name: &str,
     sheets: &[SheetMeta],
     workbook_rels: &roxmltree::Document<'_>,
@@ -352,32 +514,64 @@ pub(crate) fn resolve_worksheet_reference(
     let cell_count = session.reservable_cell_count(&range)?;
     let sheet_name = source_sheet.as_deref().unwrap_or(current_sheet_name);
     if !session.sheets.contains_key(sheet_name) {
-        let worksheet = if sheet_name == current_sheet_name {
-            parse_worksheet_cells(
-                current_sheet_xml,
-                shared_strings,
-                session.remaining_indexed_cells,
-                session.remaining_indexed_string_bytes,
-            )
+        if sheet_name == current_sheet_name {
+            session.resolve_current_sheet(sheet_name, current_rows, shared_strings);
         } else {
-            sheets
+            let part = sheets
                 .iter()
                 .find(|sheet| sheet.name == sheet_name)
                 .and_then(|sheet| resolve_sheet_path(workbook_rels, &sheet.r_id))
-                .and_then(|path| read_zip_string(archive, &format!("xl/{path}")).ok())
-                .and_then(|xml| {
-                    parse_worksheet_cells(
-                        &xml,
+                .map(|path| format!("xl/{path}"));
+            let mut build = part
+                .as_deref()
+                .map_or(LookupBuildResult::Unavailable, |part| {
+                    parse_package_worksheet_cells(
+                        archive,
+                        part,
                         shared_strings,
-                        session.remaining_indexed_cells,
-                        session.remaining_indexed_string_bytes,
+                        session
+                            .remaining_indexed_cells
+                            .min(session.remaining_physical_indexed_cells),
+                        session
+                            .remaining_indexed_string_bytes
+                            .min(session.remaining_physical_indexed_string_bytes),
                     )
-                })
-        };
-        if let Some(worksheet) = worksheet.as_ref() {
-            session.consume_index(worksheet);
+                });
+            if matches!(build, LookupBuildResult::LimitExceeded) {
+                if let Some((current_name, prebuilt)) = session.take_unreferenced_prebuilt() {
+                    let retried = part
+                        .as_deref()
+                        .map_or(LookupBuildResult::Unavailable, |part| {
+                            parse_package_worksheet_cells(
+                                archive,
+                                part,
+                                shared_strings,
+                                session
+                                    .remaining_indexed_cells
+                                    .min(session.remaining_physical_indexed_cells),
+                                session
+                                    .remaining_indexed_string_bytes
+                                    .min(session.remaining_physical_indexed_string_bytes),
+                            )
+                        });
+                    if matches!(retried, LookupBuildResult::Built(_)) {
+                        session.current_sheet =
+                            CurrentSheetLookupEntry::Unavailable { name: current_name };
+                    } else {
+                        session.restore_unreferenced_prebuilt(current_name, prebuilt);
+                    }
+                    build = retried;
+                }
+            }
+            let worksheet = match build {
+                LookupBuildResult::Built(worksheet) => {
+                    session.consume_new_index(&worksheet);
+                    Some(worksheet)
+                }
+                _ => None,
+            };
+            session.sheets.insert(sheet_name.to_string(), worksheet);
         }
-        session.sheets.insert(sheet_name.to_string(), worksheet);
     }
     session.sheets.get(sheet_name).and_then(Option::as_ref)?;
     // Only successful source resolution consumes the cumulative dense-output
@@ -398,7 +592,83 @@ pub(crate) fn resolve_worksheet_reference(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CellRange, SharedString};
+    use crate::{parse_worksheet, CellRange, SharedString, SheetVisibility};
+    use std::{fmt::Write as _, io::Write as _};
+    use zip::write::SimpleFileOptions;
+
+    fn reduced_session(index_cells: usize, string_bytes: usize) -> WorksheetReferenceSession {
+        WorksheetReferenceSession {
+            remaining_indexed_cells: index_cells,
+            remaining_indexed_string_bytes: string_bytes,
+            remaining_physical_indexed_cells: index_cells,
+            remaining_physical_indexed_string_bytes: string_bytes,
+            ..Default::default()
+        }
+    }
+
+    fn one_sheet_reference_archive(
+        values: &[f64],
+    ) -> (XlsxZip, roxmltree::Document<'static>, Vec<SheetMeta>) {
+        let cells = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                format!(
+                    r#"<c r="{}1"><v>{value}</v></c>"#,
+                    (b'A' + index as u8) as char
+                )
+            })
+            .collect::<String>();
+        let xml = format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">{cells}</row></sheetData></worksheet>"#
+        );
+        let cursor = {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            writer
+                .start_file("xl/worksheets/source.xml", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(xml.as_bytes()).unwrap();
+            writer.finish().unwrap()
+        };
+        let rels = ooxml_common::depth::parse_guarded(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSource" Target="worksheets/source.xml"/></Relationships>"#,
+        ).unwrap();
+        let sheets = vec![SheetMeta {
+            name: "Source".into(),
+            sheet_id: 2,
+            r_id: "rSource".into(),
+            tab_color: None,
+            visibility: SheetVisibility::Visible,
+        }];
+        (XlsxZip::new(cursor).unwrap(), rels, sheets)
+    }
+
+    fn one_sheet_text_reference_archive(
+        text: &str,
+    ) -> (XlsxZip, roxmltree::Document<'static>, Vec<SheetMeta>) {
+        let xml = format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{text}</t></is></c></row></sheetData></worksheet>"#
+        );
+        let cursor = {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            writer
+                .start_file("xl/worksheets/source.xml", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(xml.as_bytes()).unwrap();
+            writer.finish().unwrap()
+        };
+        let rels = ooxml_common::depth::parse_guarded(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSource" Target="worksheets/source.xml"/></Relationships>"#,
+        ).unwrap();
+        let sheets = vec![SheetMeta {
+            name: "Source".into(),
+            sheet_id: 2,
+            r_id: "rSource".into(),
+            tab_color: None,
+            visibility: SheetVisibility::Visible,
+        }];
+        (XlsxZip::new(cursor).unwrap(), rels, sheets)
+    }
 
     #[test]
     fn quoted_unicode_sheet_reference_is_split_and_unescaped() {
@@ -445,6 +715,80 @@ mod tests {
                 ReferencedCellValue::Text("X".into()),
                 ReferencedCellValue::Number(42.0),
             ],
+        );
+    }
+
+    #[test]
+    fn parsed_worksheet_lazy_index_matches_streamed_projection_without_reparsing() {
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+          <row r="2"><c r="A2" t="inlineStr"><is><t>Inline</t><rPh sb="0" eb="1"><t>reading</t></rPh></is></c><c r="B2" t="s"><v>0</v></c><c r="C2"><v>42</v></c><c r="D2" t="b"><v>1</v></c></row>
+          <row><c t="str"><v>cached</v></c><c t="e"><v>#N/A</v></c></row>
+        </sheetData></worksheet>"#;
+        let shared = vec![SharedString {
+            text: "Shared".into(),
+            runs: None,
+            phonetic_runs: Vec::new(),
+            phonetic_pr: None,
+        }];
+        let (worksheet, _) =
+            parse_worksheet(xml, &shared, &[], "Sheet1").expect("worksheet parses");
+        let expected = parse_worksheet_cells(
+            xml,
+            &shared,
+            MAX_TOTAL_INDEXED_CELLS,
+            MAX_TOTAL_INDEXED_STRING_BYTES,
+        )
+        .expect("streamed index parses");
+
+        let session = WorksheetReferenceSession::default();
+        assert!(session.sheets.is_empty(), "no eager index is retained");
+        let LookupBuildResult::Built(actual) =
+            session.index_materialized_rows(&worksheet.rows, &shared)
+        else {
+            panic!("parsed worksheet index fits");
+        };
+        assert!(
+            session.sheets.is_empty(),
+            "building an index does not cache it before a formula needs it"
+        );
+
+        assert_eq!(actual.cells, expected.cells);
+        assert_eq!(actual.string_bytes, expected.string_bytes);
+
+        let zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()))
+            .finish()
+            .expect("empty zip finishes");
+        let mut archive = XlsxZip::new(zip).expect("empty zip opens");
+        let rels = ooxml_common::depth::parse_guarded(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#,
+        )
+        .expect("empty workbook relationships parse");
+        let mut lazy_session = WorksheetReferenceSession::default();
+        assert!(lazy_session.sheets.is_empty());
+        lazy_session.seed_current_sheet("Sheet1", Some(actual));
+        let values = resolve_worksheet_reference(
+            &mut archive,
+            "A2:C2",
+            Some(&worksheet.rows),
+            "Sheet1",
+            &[],
+            &rels,
+            &shared,
+            &mut lazy_session,
+        )
+        .expect("current-sheet reference resolves from parsed worksheet");
+        assert_eq!(
+            values,
+            vec![
+                ReferencedCellValue::Text("Inline".into()),
+                ReferencedCellValue::Text("Shared".into()),
+                ReferencedCellValue::Number(42.0),
+            ]
+        );
+        assert_eq!(
+            lazy_session.sheets.len(),
+            1,
+            "the index appears only after a formula is resolved"
         );
     }
 
@@ -497,6 +841,280 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_coordinate_empty_removes_previous_value_and_budget() {
+        let mut builder = WorksheetCellLookupBuilder::new(1, 5);
+        builder
+            .push_cell(1, 1, ReferencedCellValue::Text("alpha".into()))
+            .unwrap();
+        builder.push_cell(1, 1, ReferencedCellValue::Empty).unwrap();
+        let lookup = builder.finish();
+        assert!(lookup.cells.is_empty());
+        assert_eq!(lookup.string_bytes, 0);
+    }
+
+    #[test]
+    fn duplicate_coordinate_nonempty_replaces_value_and_budget() {
+        let mut builder = WorksheetCellLookupBuilder::new(1, 4);
+        builder
+            .push_cell(1, 1, ReferencedCellValue::Text("long".into()))
+            .unwrap();
+        builder
+            .push_cell(1, 1, ReferencedCellValue::Text("x".into()))
+            .unwrap();
+        let lookup = builder.finish();
+        assert_eq!(
+            lookup.cells.get(&(1, 1)),
+            Some(&ReferencedCellValue::Text("x".into()))
+        );
+        assert_eq!(lookup.string_bytes, 1);
+    }
+
+    #[test]
+    fn lookup_cap_discards_the_partial_transaction() {
+        let rows = vec![Row {
+            index: 1,
+            height: None,
+            cells: vec![
+                crate::Cell {
+                    col: 1,
+                    row: 1,
+                    value: CellValue::Number { number: 1.0 },
+                    ..Default::default()
+                },
+                crate::Cell {
+                    col: 2,
+                    row: 1,
+                    value: CellValue::Number { number: 2.0 },
+                    ..Default::default()
+                },
+            ],
+            outline_level: 0,
+            collapsed: false,
+            hidden: false,
+        }];
+        let mut lookup = Some(WorksheetCellLookupBuilder::new(1, 100));
+        extend_lookup_transactionally(&mut lookup, &rows, &[]);
+        assert!(lookup.is_none());
+    }
+
+    #[test]
+    fn uncharged_prebuilt_current_lookup_does_not_starve_cross_sheet_only_formula() {
+        let (mut archive, rels, sheets) = one_sheet_reference_archive(&[7.0]);
+        let mut prebuilt = WorksheetCellLookupBuilder::new(1, 8);
+        prebuilt
+            .push_cell(1, 1, ReferencedCellValue::Number(1.0))
+            .unwrap();
+        let mut session = reduced_session(1, 8);
+        session.seed_current_sheet("Dashboard", Some(prebuilt.finish()));
+        let values = resolve_worksheet_reference(
+            &mut archive,
+            "Source!A1",
+            None,
+            "Dashboard",
+            &sheets,
+            &rels,
+            &[],
+            &mut session,
+        )
+        .expect("exclusive cross-sheet reference gets the physical budget");
+        assert_eq!(values, vec![ReferencedCellValue::Number(7.0)]);
+        assert!(matches!(
+            session.current_sheet,
+            CurrentSheetLookupEntry::Unavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn mixed_current_cross_order_is_deterministic_under_combined_physical_cap() {
+        let make_prebuilt = || {
+            let mut builder = WorksheetCellLookupBuilder::new(1, 8);
+            builder
+                .push_cell(1, 1, ReferencedCellValue::Number(1.0))
+                .unwrap();
+            builder.finish()
+        };
+
+        let (mut cross_first_archive, rels, sheets) = one_sheet_reference_archive(&[7.0, 8.0]);
+        let mut cross_first = reduced_session(2, 8);
+        cross_first.seed_current_sheet("Dashboard", Some(make_prebuilt()));
+        assert!(resolve_worksheet_reference(
+            &mut cross_first_archive,
+            "Source!A1:B1",
+            None,
+            "Dashboard",
+            &sheets,
+            &rels,
+            &[],
+            &mut cross_first,
+        )
+        .is_some());
+        assert!(resolve_worksheet_reference(
+            &mut cross_first_archive,
+            "Dashboard!A1",
+            None,
+            "Dashboard",
+            &sheets,
+            &rels,
+            &[],
+            &mut cross_first,
+        )
+        .is_none());
+
+        let (mut current_first_archive, rels, sheets) = one_sheet_reference_archive(&[7.0, 8.0]);
+        let mut current_first = reduced_session(2, 8);
+        current_first.seed_current_sheet("Dashboard", Some(make_prebuilt()));
+        assert!(resolve_worksheet_reference(
+            &mut current_first_archive,
+            "Dashboard!A1",
+            None,
+            "Dashboard",
+            &sheets,
+            &rels,
+            &[],
+            &mut current_first,
+        )
+        .is_some());
+        assert!(resolve_worksheet_reference(
+            &mut current_first_archive,
+            "Source!A1:B1",
+            None,
+            "Dashboard",
+            &sheets,
+            &rels,
+            &[],
+            &mut current_first,
+        )
+        .is_none());
+        assert_eq!(current_first.remaining_physical_indexed_cells, 1);
+    }
+
+    #[test]
+    fn failed_cross_cell_retry_restores_prebuilt_current_and_exact_budgets() {
+        let (mut archive, rels, sheets) = one_sheet_reference_archive(&[7.0, 8.0]);
+        let mut current = WorksheetCellLookupBuilder::new(1, 8);
+        current
+            .push_cell(1, 1, ReferencedCellValue::Number(1.0))
+            .unwrap();
+        let mut prior = WorksheetCellLookupBuilder::new(9, 8);
+        for col in 1..=9 {
+            prior
+                .push_cell(1, col, ReferencedCellValue::Number(col.into()))
+                .unwrap();
+        }
+
+        let mut session = reduced_session(10, 8);
+        session.seed_current_sheet("Dashboard", Some(current.finish()));
+        let prior = prior.finish();
+        session.consume_new_index(&prior);
+        session.sheets.insert("Prior".into(), Some(prior));
+        let before = (
+            session.remaining_indexed_cells,
+            session.remaining_indexed_string_bytes,
+            session.remaining_physical_indexed_cells,
+            session.remaining_physical_indexed_string_bytes,
+        );
+
+        assert!(resolve_worksheet_reference(
+            &mut archive,
+            "Source!A1:B1",
+            None,
+            "Dashboard",
+            &sheets,
+            &rels,
+            &[],
+            &mut session,
+        )
+        .is_none());
+        assert_eq!(
+            (
+                session.remaining_indexed_cells,
+                session.remaining_indexed_string_bytes,
+                session.remaining_physical_indexed_cells,
+                session.remaining_physical_indexed_string_bytes,
+            ),
+            before,
+            "a failed retry must restore both logical and physical accounting exactly"
+        );
+        assert_eq!(
+            resolve_worksheet_reference(
+                &mut archive,
+                "Dashboard!A1",
+                None,
+                "Dashboard",
+                &sheets,
+                &rels,
+                &[],
+                &mut session,
+            ),
+            Some(vec![ReferencedCellValue::Number(1.0)])
+        );
+        assert_eq!(session.remaining_indexed_cells, 0);
+        assert_eq!(session.remaining_physical_indexed_cells, 0);
+    }
+
+    #[test]
+    fn failed_cross_string_retry_restores_prebuilt_current_and_exact_budgets() {
+        let (mut archive, rels, sheets) = one_sheet_text_reference_archive("yz");
+        let mut current = WorksheetCellLookupBuilder::new(1, 1);
+        current
+            .push_cell(1, 1, ReferencedCellValue::Text("x".into()))
+            .unwrap();
+        let mut prior = WorksheetCellLookupBuilder::new(1, 9);
+        prior
+            .push_cell(1, 1, ReferencedCellValue::Text("123456789".into()))
+            .unwrap();
+
+        let mut session = reduced_session(10, 10);
+        session.seed_current_sheet("Dashboard", Some(current.finish()));
+        let prior = prior.finish();
+        session.consume_new_index(&prior);
+        session.sheets.insert("Prior".into(), Some(prior));
+        let before = (
+            session.remaining_indexed_cells,
+            session.remaining_indexed_string_bytes,
+            session.remaining_physical_indexed_cells,
+            session.remaining_physical_indexed_string_bytes,
+        );
+
+        assert!(resolve_worksheet_reference(
+            &mut archive,
+            "Source!A1",
+            None,
+            "Dashboard",
+            &sheets,
+            &rels,
+            &[],
+            &mut session,
+        )
+        .is_none());
+        assert_eq!(
+            (
+                session.remaining_indexed_cells,
+                session.remaining_indexed_string_bytes,
+                session.remaining_physical_indexed_cells,
+                session.remaining_physical_indexed_string_bytes,
+            ),
+            before,
+            "string-byte retry failure must not double-charge or underflow"
+        );
+        assert_eq!(
+            resolve_worksheet_reference(
+                &mut archive,
+                "Dashboard!A1",
+                None,
+                "Dashboard",
+                &sheets,
+                &rels,
+                &[],
+                &mut session,
+            ),
+            Some(vec![ReferencedCellValue::Text("x".into())])
+        );
+        assert_eq!(session.remaining_indexed_string_bytes, 0);
+        assert_eq!(session.remaining_physical_indexed_string_bytes, 0);
+    }
+
+    #[test]
     fn inline_string_excludes_phonetic_guidance() {
         let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>漢字</t><rPh sb="0" eb="2"><t>かんじ</t></rPh></is></c></row></sheetData></worksheet>"#;
         let range = CellRange {
@@ -510,5 +1128,118 @@ mod tests {
             extract_reference_cells(xml, &range, &[]),
             vec![ReferencedCellValue::Text("漢字".into())]
         );
+    }
+
+    #[test]
+    fn streamed_projection_matches_primary_mce_row_selection() {
+        let xml = r#"
+          <x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:future="urn:not-understood">
+            <x:sheetData>
+              <mc:AlternateContent>
+                <mc:Choice Requires="future">
+                  <x:row r="1"><x:c r="A1"><x:v>999</x:v></x:c></x:row>
+                </mc:Choice>
+                <mc:Fallback>
+                  <x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t>fallback</x:t></x:is></x:c></x:row>
+                </mc:Fallback>
+              </mc:AlternateContent>
+              <x:row><x:c t="str"><x:v>implicit</x:v></x:c></x:row>
+            </x:sheetData>
+          </x:worksheet>
+        "#;
+        let (worksheet, _) =
+            parse_worksheet(xml, &[], &[], "Sheet1").expect("primary worksheet parses MCE");
+        let session = WorksheetReferenceSession::default();
+        let LookupBuildResult::Built(expected) =
+            session.index_materialized_rows(&worksheet.rows, &[])
+        else {
+            panic!("primary model index fits");
+        };
+        let actual = parse_worksheet_cells(
+            xml,
+            &[],
+            MAX_TOTAL_INDEXED_CELLS,
+            MAX_TOTAL_INDEXED_STRING_BYTES,
+        )
+        .expect("streamed reference projection parses MCE");
+
+        assert_eq!(actual.cells, expected.cells);
+        assert_eq!(actual.string_bytes, expected.string_bytes);
+        assert_eq!(
+            actual.cells.get(&(1, 1)),
+            Some(&ReferencedCellValue::Text("fallback".into()))
+        );
+        assert_eq!(
+            actual.cells.get(&(2, 1)),
+            Some(&ReferencedCellValue::Text("implicit".into()))
+        );
+    }
+
+    #[test]
+    fn cross_sheet_dense_reference_uses_bounded_streamed_projection() {
+        const ROWS: usize = 4_000;
+        const COLS: usize = 39;
+        let mut source = String::with_capacity(ROWS * COLS * 18);
+        source.push_str(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>"#,
+        );
+        for row in 0..ROWS {
+            write!(source, r#"<row r="{}">"#, row + 1).unwrap();
+            for col in 0..COLS {
+                write!(source, "<c><v>{}</v></c>", row * COLS + col).unwrap();
+            }
+            source.push_str("</row>");
+        }
+        source.push_str("</sheetData></worksheet>");
+
+        let cursor = {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            writer
+                .start_file("xl/worksheets/source.xml", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(source.as_bytes()).unwrap();
+            writer.finish().unwrap()
+        };
+        let mut archive = XlsxZip::new(cursor).expect("synthetic archive opens");
+        let rels = ooxml_common::depth::parse_guarded(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSource" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/source.xml"/></Relationships>"#,
+        )
+        .expect("workbook relationships parse");
+        let sheets = vec![SheetMeta {
+            name: "Source".into(),
+            sheet_id: 2,
+            r_id: "rSource".into(),
+            tab_color: None,
+            visibility: SheetVisibility::Visible,
+        }];
+        let mut session = WorksheetReferenceSession::default();
+
+        let values = resolve_worksheet_reference(
+            &mut archive,
+            "'Source'!A1:AM4000",
+            None,
+            "Dashboard",
+            &sheets,
+            &rels,
+            &[],
+            &mut session,
+        )
+        .expect("dense cross-sheet range resolves");
+
+        assert_eq!(values.len(), ROWS * COLS);
+        assert_eq!(values.first(), Some(&ReferencedCellValue::Number(0.0)));
+        assert_eq!(
+            values.last(),
+            Some(&ReferencedCellValue::Number((ROWS * COLS - 1) as f64))
+        );
+        let indexed = session
+            .sheets
+            .get("Source")
+            .and_then(Option::as_ref)
+            .expect("source index is cached");
+        assert_eq!(indexed.cells.len(), ROWS * COLS);
     }
 }

@@ -1,20 +1,26 @@
 import type { DocxDocumentModel, BodyElement } from './types';
 import type { HyperlinkTarget, LayoutServices, MathRenderer } from './layout/types.js';
-import { bodyMathOccurrences, documentMathOccurrences } from './layout/resources.js';
+import { bodyMathOccurrences } from './layout/resources.js';
 import { paintResourceRegistryOf, privateResourceLookupOf } from './layout/runtime-state.js';
 import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
 import { textRunsForPage } from './text-run-projection.js';
 import { dropBrowserImageCache } from './paint/browser-images.js';
 import { canvasPageScale, renderSelectedDocumentPage } from './paint/canvas-document.js';
 import { ensureDocumentLayoutVariants } from './layout/document.js';
-import { productionDocumentInput } from './layout/resources.js';
 import { prepareBrowserMathResources } from './paint/browser-math.js';
 import { createLayoutServices } from './layout-runtime.js';
+import {
+  type LayoutSourceStore,
+} from './layout/layout-source-store.js';
+import { layoutSourceStore } from './layout-source-model-adapter.js';
+import { layoutSourceStoreOf } from './layout/runtime-state.js';
 
 /** True if any currently representable document story contains OMML. The body
  * array form remains supported for existing callers. */
 export function documentHasMath(input: BodyElement[] | DocxDocumentModel): boolean {
-  return (Array.isArray(input) ? bodyMathOccurrences(input) : documentMathOccurrences(input)).length > 0;
+  return (Array.isArray(input)
+    ? bodyMathOccurrences(input)
+    : layoutSourceStore(input).mathOccurrences).length > 0;
 }
 
 /** Convert equations before layout. Math resources use only normalized,
@@ -26,7 +32,7 @@ export async function prepareMathRuns(
   if (Array.isArray(input)) {
     throw new TypeError('prepareMathRuns requires a document model so every story has an explicit structural source');
   }
-  return prepareBrowserMathResources(productionDocumentInput(input).mathOccurrences, math);
+  return prepareBrowserMathResources(layoutSourceStore(input).mathOccurrences, math);
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -112,31 +118,29 @@ export function dropColorReplacedCache(
 }
 
 function normalizeRenderOptions(
-  doc: DocxDocumentModel,
+  source: LayoutSourceStore,
   canvas: HTMLCanvasElement | OffscreenCanvas,
   pageIndex: number,
   options: RenderDocumentOptions,
 ) {
   const services = options.layoutServices ?? createLayoutServices(
-    doc,
-    doc.parseError == null ? {
+    source,
+    source.fatalParse === null ? {
       measureContext: canvas.getContext('2d') as
         | CanvasRenderingContext2D
         | OffscreenCanvasRenderingContext2D
         | null,
     } : {},
   );
+  const retainedSource = layoutSourceStoreOf(services);
+  if (retainedSource && retainedSource !== source) {
+    throw new Error('Layout services belong to a different document source');
+  }
   const defaultCurrentDateMs = options.defaultCurrentDateMs ?? Date.now();
   ensureDocumentLayoutVariants(
     services,
     defaultCurrentDateMs,
-    () => {
-      const productionInput = productionDocumentInput(doc);
-      return {
-        model: productionInput.document,
-        input: productionInput.bodyLayoutInput,
-      };
-    },
+    () => source,
   );
   const selection = selectDocumentLayoutPage(services, {
     currentDate: options.currentDate,
@@ -151,7 +155,7 @@ function normalizeRenderOptions(
       defaultTextColor: options.defaultTextColor,
       showTrackChanges: options.showTrackChanges,
       fetchImage: options.fetchImage,
-      parseError: doc.parseError != null,
+      parseError: source.fatalParse !== null,
       registry: paintResourceRegistryOf(services),
       privateResources: privateResourceLookupOf<CanvasImageSource>(services),
       textRuns: options.onTextRun
@@ -162,17 +166,27 @@ function normalizeRenderOptions(
   };
 }
 
-export async function renderDocumentToCanvas(
-  doc: DocxDocumentModel,
+/** Internal production entry: paint from the same sealed source used by layout. */
+export async function renderLayoutSourceToCanvas(
+  source: LayoutSourceStore,
   canvas: HTMLCanvasElement | OffscreenCanvas,
   pageIndex: number,
   opts: RenderDocumentOptions = {},
 ): Promise<void> {
-  const normalized = normalizeRenderOptions(doc, canvas, pageIndex, opts);
+  const normalized = normalizeRenderOptions(source, canvas, pageIndex, opts);
   return renderSelectedDocumentPage(
     normalized.selection.layout,
     normalized.selection.page,
     canvas,
     normalized.paintOptions,
   );
+}
+
+export async function renderDocumentToCanvas(
+  doc: DocxDocumentModel,
+  canvas: HTMLCanvasElement | OffscreenCanvas,
+  pageIndex: number,
+  opts: RenderDocumentOptions = {},
+): Promise<void> {
+  return renderLayoutSourceToCanvas(layoutSourceStore(doc), canvas, pageIndex, opts);
 }

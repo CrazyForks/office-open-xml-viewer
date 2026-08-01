@@ -1,6 +1,16 @@
 import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
-import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
+import {
+  decodeDataUrl,
+  WasmParserHost,
+} from '@silurus/ooxml-core';
+import {
+  decodeOoxmlResourceUsage,
+  resourcePolicyForWasm,
+  serializeWorkerError,
+  type PullSessionCommand,
+} from '@silurus/ooxml-core/worker';
 import type { WorkerRequest, WorkerResponse } from './types.js';
+import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
 
 // RB6: a `panic = "abort"` build traps (not unwinds) on a Rust panic / OOM /
 // stack overflow, poisoning this worker's single WASM instance so every LATER
@@ -24,9 +34,25 @@ const host = new WasmParserHost<XlsxArchive>(init, {
   // wasm-bindgen singleton). `reinit` forces fresh linear memory after a trap.
   reinit,
 });
+const worksheetPull = new WorksheetPullWorker(
+  () => host.archive,
+  undefined,
+  (operation) => {
+    const archive = host.archive;
+    if (!archive) throw new Error('Workbook not loaded');
+    return host.run(() => operation(archive));
+  },
+);
 
-self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
+self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<number>>) => {
   const req = e.data;
+
+  if (isWorksheetPullCommand(req)) {
+    await worksheetPull.dispatchSafely(req, (response, transfer) =>
+      (self.postMessage as (message: unknown, transfer?: Transferable[]) => void)(response, transfer),
+    );
+    return;
+  }
 
   if (req.type === 'init') {
     host.setWasmUrl(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
@@ -36,13 +62,38 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   // Every non-init request carries a correlation id that must be echoed back so
   // the client can route the response to the right pending promise.
   const id = req.id;
+  if (req.type === 'openSheetSession') worksheetPull.reserveOpen(req);
   try {
+    if (req.type === 'openSheetSession') {
+      await host.ensureReady();
+      if (host.archive) host.run(() => host.archive?.assert_healthy());
+      await worksheetPull.open(req.sheetIndex, req.sheetName, req);
+      await worksheetPull.postOpenedSafely(
+        req,
+        () => self.postMessage({
+          type: 'sheetSessionOpened',
+          id,
+          sessionId: req.sessionId,
+          operationId: req.operationId,
+          generation: req.generation,
+        } satisfies WorkerResponse),
+        (error) => self.postMessage({
+          type: 'error',
+          id,
+          ...serializeWorkerError(error),
+        } satisfies WorkerResponse),
+      );
+      return;
+    }
+    if (req.type === 'parse') await worksheetPull.reset();
+    await worksheetPull.run(async () => {
     await host.ensureReady();
+    if (req.type !== 'parse' && host.archive) {
+      const retained = host.archive;
+      host.run(() => retained.assert_healthy());
+    }
     if (req.type === 'parse') {
-      const max =
-        typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
-          ? BigInt(req.maxZipEntryBytes)
-          : undefined;
+      const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
       const bytes = new Uint8Array(req.data);
       // Both the construction and `parse()` run under `host.run` so a trap in
       // EITHER poisons + recycles the instance (and frees the archive). Adopting
@@ -52,12 +103,15 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       // buffer, so forward it to main as a transferable — no clone, no decode
       // here. The single decode + JSON.parse happens on main.
       const json = host.run(() => {
-        const archive = new XlsxArchive(bytes, max);
+        const archive = new XlsxArchive(bytes, maxEntry, maxTotal);
         host.setArchive(archive);
         return archive.parse();
       });
       const workbookJson = json.buffer as ArrayBuffer;
-      const res: WorkerResponse = { type: 'parsed', id, workbookJson };
+      const usage = host.run(() => decodeOoxmlResourceUsage(
+        host.archive!.resource_usage(),
+      ));
+      const res: WorkerResponse = { type: 'parsed', id, workbookJson, usage };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [
         workbookJson,
       ]);
@@ -110,8 +164,15 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       self.postMessage(res);
       return;
     }
+    });
   } catch (err) {
-    const res: WorkerResponse = { type: 'error', id, message: String(err) };
-    self.postMessage(res);
+    if (req.type === 'openSheetSession') worksheetPull.abandonOpen(req.sessionId);
+    const res: WorkerResponse = { type: 'error', id, ...serializeWorkerError(err) };
+    try {
+      self.postMessage(res);
+    } catch {
+      // A parser/operation error was preserved in `res`, but the response
+      // channel itself is unavailable. Never reject the async event handler.
+    }
   }
 };

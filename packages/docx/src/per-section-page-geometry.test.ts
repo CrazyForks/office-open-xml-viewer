@@ -9,6 +9,7 @@ import { attachDocumentLayoutRuntime, documentLayoutRuntimeOf } from './layout/r
 import { attachDocumentLayoutVariants } from './layout/document-layout-variants.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
+import { layoutSourceStore } from './layout-source-model-adapter.js';
 
 // ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — page geometry is
 // PER-SECTION. A mid-body SectionBreak carries its ending section's `geom`; the
@@ -468,7 +469,7 @@ describe('page-size fact (§17.6.13/§17.6.11) — canonical page geometry', () 
         const services = createLayoutServices(model);
         runtime.services = services;
         attachDocumentLayoutVariants({
-          model,
+          source: layoutSourceStore(model),
           services,
           defaultCurrentDateMs: runtime.defaultCurrentDateMs,
           buildLayout: (options) => layoutDocument(model, services, options),

@@ -1,5 +1,5 @@
 import type { BodyLayoutInput } from './body-layout-input.js';
-import type { DocxDocumentModel } from '../types.js';
+import type { LayoutSourceStore } from './layout-source-store.js';
 import { paginateBody } from './body-paginator.js';
 import {
   attachDocumentLayoutVariants,
@@ -19,17 +19,14 @@ export function layoutDocumentInput(
 export function ensureDocumentLayoutVariants(
   services: LayoutServices,
   defaultCurrentDateMs: number,
-  resolveSource: () => Readonly<{
-    model: DocxDocumentModel;
-    input: BodyLayoutInput;
-  }>,
+  resolveSource: () => LayoutSourceStore,
 ): void {
   if (layoutVariantStoreOf(services)) return;
-  const { model, input } = resolveSource();
+  const source = resolveSource();
   attachDocumentLayoutVariants({
-    model,
+    source,
     services,
     defaultCurrentDateMs,
-    buildLayout: (options) => layoutDocumentInput(input, services, options),
+    buildLayout: (options) => layoutDocumentInput(source.bodyLayoutInput, services, options),
   });
 }

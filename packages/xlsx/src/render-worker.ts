@@ -18,12 +18,29 @@ import {
   dropDuotoneBitmapCache,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
+import {
+  decodeOoxmlResourceUsage,
+  resourcePolicyForWasm,
+  serializeWorkerError,
+  type PullSessionCommand,
+  type PullSessionResponse,
+} from '@silurus/ooxml-core/worker';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
-import { resolveSharedStrings } from './shared-strings.js';
+import { resolveSharedStringRows, resolveSharedStrings } from './shared-strings.js';
+import {
+  addWorksheetCacheUsage,
+  assertWorksheetCacheUsage,
+  assertWorksheetJsonBytes,
+  assertWorksheetModelUsage,
+  measureWorksheet,
+  type WorksheetCacheUsage,
+  type WorksheetModelUsage,
+} from './worksheet-resource-limits.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
 import { applySizeOverrides } from './worker-protocol.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
+import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
 
 // RB6: self-poison + auto-respawn. A trap during parse / per-sheet parse / image
 // read recycles the instance so the next workbook renders on clean linear
@@ -44,6 +61,8 @@ let workbook: ParsedWorkbook | null = null;
  *  release — only the sequencing (fonts landed before first paint) matters. */
 let fontsLoaded: Promise<unknown> = Promise.resolve();
 const sheetCache = new Map<number, Worksheet>();
+const sheetCacheUsage = new Map<number, WorksheetModelUsage>();
+let retainedSheetUsage: WorksheetCacheUsage = { rows: 0, cells: 0 };
 // Synchronous-lookup map for the draw pass, keyed by imageCacheKey(path, duotone).
 // A pure lookup layer — the decoded bitmaps are owned by the shared, per-`getImage`
 // core caches; this is refreshed each frame by prefetchImages and dropped (along
@@ -54,8 +73,43 @@ const imageCache = new Map<string, CanvasImageSource | null>();
 // above. Cleared on re-parse so a reused worker never serves a stale file's
 // image.
 const imageBlobCache = new Map<string, Promise<Blob>>();
+const worksheetPull = new WorksheetPullWorker(
+  () => host.archive,
+  (sheetIndex, worksheet, resourceUsage) => {
+    const previous = sheetCache.get(sheetIndex);
+    const previousUsage = sheetCacheUsage.get(sheetIndex);
+    const measured = measureWorksheet(worksheet);
+    const nextUsage = addWorksheetCacheUsage(retainedSheetUsage, measured, previousUsage);
+    assertWorksheetCacheUsage(
+      nextUsage,
+      'get-worksheet-worker',
+      undefined,
+      resourceUsage,
+    );
+    sheetCache.set(sheetIndex, worksheet);
+    return {
+      commit: () => {
+        retainedSheetUsage = nextUsage;
+        sheetCacheUsage.set(sheetIndex, measured);
+      },
+      rollback: () => {
+        if (sheetCache.get(sheetIndex) !== worksheet) return;
+        if (previous) sheetCache.set(sheetIndex, previous);
+        else sheetCache.delete(sheetIndex);
+      },
+    };
+  },
+  (operation) => {
+    const archive = host.archive;
+    if (!archive) throw new Error('Workbook not loaded');
+    return host.run(() => operation(archive));
+  },
+  (rows) => {
+    if (workbook) resolveSharedStringRows(rows, workbook.sharedStrings);
+  },
+);
 
-const post = (msg: RenderWorkerResponse, transfer?: Transferable[]) =>
+const post = (msg: RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>, transfer?: Transferable[]) =>
   (self.postMessage as (m: unknown, t?: Transferable[]) => void)(msg, transfer);
 
 /** In-worker image-byte loader (twin of the docx render-worker `getImage`). The
@@ -96,19 +150,57 @@ function parseSheetLocally(sheetIndex: number): Worksheet {
   // table so the renderer only ever sees fully-materialized text (worker-mode
   // twin of workbook.ts getWorksheet).
   resolveSharedStrings(ws, workbook.sharedStrings);
+  const measured = measureWorksheet(ws);
+  assertWorksheetModelUsage(measured, 'parse-sheet', undefined);
+  assertWorksheetJsonBytes(measured.jsonBytes, 'parse-sheet', undefined);
+  const nextUsage = addWorksheetCacheUsage(retainedSheetUsage, measured);
+  assertWorksheetCacheUsage(nextUsage, 'parse-sheet', undefined);
   sheetCache.set(sheetIndex, ws);
+  sheetCacheUsage.set(sheetIndex, measured);
+  retainedSheetUsage = nextUsage;
   return ws;
 }
 
-self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
+self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand<number>>) => {
   const req = e.data;
+  if (isWorksheetPullCommand(req)) {
+    await worksheetPull.dispatchSafely(req, post);
+    return;
+  }
   if (req.type === 'init') {
     host.setWasmUrl(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
     return;
   }
   const id = req.id;
+  if (req.type === 'openSheetSession') worksheetPull.reserveOpen(req);
   try {
+    if (req.type === 'openSheetSession') {
+      await host.ensureReady();
+      if (host.archive) {
+        const retained = host.archive;
+        host.run(() => retained.assert_healthy());
+      }
+      await worksheetPull.open(req.sheetIndex, req.sheetName, req);
+      await worksheetPull.postOpenedSafely(
+        req,
+        () => post({
+          type: 'sheetSessionOpened',
+          id,
+          sessionId: req.sessionId,
+          operationId: req.operationId,
+          generation: req.generation,
+        }),
+        (error) => post({ type: 'error', id, ...serializeWorkerError(error) }),
+      );
+      return;
+    }
+    if (req.type === 'parse') await worksheetPull.reset();
+    await worksheetPull.run(async () => {
     await host.ensureReady();
+    if (req.type !== 'parse' && host.archive) {
+      const retained = host.archive;
+      host.run(() => retained.assert_healthy());
+    }
     if (req.type === 'parse') {
       // A re-parse starts a fresh document: drop any cached sheets / images so
       // we never serve stale data from a previous load. `imageCache` is now a
@@ -120,22 +212,25 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // zip path. Symmetric with XlsxWorkbook.destroy() and the docx/pptx render
       // workers (issue #781).
       sheetCache.clear();
+      sheetCacheUsage.clear();
+      retainedSheetUsage = { rows: 0, cells: 0 };
       imageCache.clear();
       dropBitmapCacheByPath(getImage);
       dropDuotoneBitmapCache(getImage);
       dropSvgImageCache(getImage);
       imageBlobCache.clear();
-      const max =
-        typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
-          ? BigInt(req.maxZipEntryBytes)
-          : undefined;
+      const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
       // Construction + `parse()` run under `host.run` so a trap in EITHER poisons
       // + recycles the instance (and frees the archive). `setArchive` frees any
       // prior handle first — the re-parse dispose. `parse()` returns UTF-8 JSON
       // bytes (Result<Vec<u8>, JsValue>); decode + parse the workbook index here
       // (consumed in-worker, then a light copy is sent to the proxy as an object).
       workbook = host.run(() => {
-        const archive = new XlsxArchive(new Uint8Array(req.data), max);
+        const archive = new XlsxArchive(
+          new Uint8Array(req.data),
+          maxEntry,
+          maxTotal,
+        );
         host.setArchive(archive);
         return JSON.parse(new TextDecoder().decode(archive.parse())) as ParsedWorkbook;
       });
@@ -146,7 +241,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         // and await it in the renderViewport handler.
         fontsLoaded = preloadGoogleFonts(xlsxFontPreloadNames(workbook), XLSX_GOOGLE_FONTS);
       }
-      post({ type: 'parsed', id, workbook });
+      const usage = host.run(() => decodeOoxmlResourceUsage(
+        host.archive!.resource_usage(),
+      ));
+      post({ type: 'parsed', id, workbook, usage });
       return;
     }
     if (req.type === 'parseSheet') {
@@ -163,7 +261,8 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
     if (req.type === 'renderViewport') {
       if (!workbook) throw new Error('Workbook not loaded');
       await fontsLoaded;
-      const ws = parseSheetLocally(req.sheetIndex);
+      const ws = sheetCache.get(req.sheetIndex);
+      if (!ws) throw new Error('Worksheet is not loaded through its pull session');
       // Converge this worker-local sheet to the main-thread model before
       // drawing: view-only size mutations (outline collapse/expand, drag
       // resize #567) happen on the main thread's Worksheet copy and would
@@ -207,7 +306,14 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       post({ type: 'markdownRendered', id, markdown });
       return;
     }
+    });
   } catch (err) {
-    post({ type: 'error', id, message: err instanceof Error ? err.message : String(err) });
+    if (req.type === 'openSheetSession') worksheetPull.abandonOpen(req.sessionId);
+    try {
+      post({ type: 'error', id, ...serializeWorkerError(err) });
+    } catch {
+      // Preserve cleanup and avoid an unhandled async worker rejection when
+      // even the plain fallback response cannot be delivered.
+    }
   }
 };

@@ -25,6 +25,24 @@ export default defineConfig({
         '@silurus/ooxml-pptx': pkgSrc('pptx'),
         '@silurus/ooxml-xlsx': pkgSrc('xlsx'),
         '@silurus/ooxml-docx': pkgSrc('docx'),
+        // Keep core subpaths ahead of the package-root prefix alias; otherwise
+        // Vite appends them to the root entry file (for example,
+        // `src/index.ts/internal/resource-measurement`).
+        '@silurus/ooxml-core/internal/resource-measurement': fileURLToPath(
+          new URL('../packages/core/src/internal/resource-measurement.ts', import.meta.url),
+        ),
+        '@silurus/ooxml-core/internal/bounded-async-lru-cache': fileURLToPath(
+          new URL('../packages/core/src/internal/bounded-async-lru-cache.ts', import.meta.url),
+        ),
+        '@silurus/ooxml-core/internal/bounded-raw-part-cache': fileURLToPath(
+          new URL('../packages/core/src/internal/bounded-raw-part-cache.ts', import.meta.url),
+        ),
+        '@silurus/ooxml-core/internal/script-preload-accumulator': fileURLToPath(
+          new URL('../packages/core/src/internal/script-preload-accumulator.ts', import.meta.url),
+        ),
+        '@silurus/ooxml-core/worker': fileURLToPath(
+          new URL('../packages/core/src/worker/index.ts', import.meta.url),
+        ),
         '@silurus/ooxml-core': pkgSrc('core'),
       },
     },

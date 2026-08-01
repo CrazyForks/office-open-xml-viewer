@@ -1,8 +1,8 @@
+use crate::read_zip_string;
 use crate::types::*;
 use crate::{parse_color, resolve_zip_path};
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{is_x_ns, is_xdr_ns};
-use ooxml_common::zip::read_zip_string;
 use std::collections::HashMap;
 
 // ─── Slicer loading ─────────────────────────────────────────────────────────
@@ -36,8 +36,9 @@ pub(crate) struct PivotCacheFields {
 /// typically have one pivotCache but the loop keeps the code general.
 pub(crate) fn load_all_pivot_cache_fields(archive: &mut crate::XlsxZip) -> PivotCacheFields {
     let mut out = PivotCacheFields::default();
-    let names: Vec<String> = (0..archive.len())
-        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
+    let names: Vec<String> = archive
+        .entry_paths()
+        .into_iter()
         .filter(|n| n.starts_with("xl/pivotCache/pivotCacheDefinition") && n.ends_with(".xml"))
         .collect();
     for name in names {
@@ -85,8 +86,9 @@ pub(crate) fn load_all_slicer_caches(
     archive: &mut crate::XlsxZip,
 ) -> HashMap<String, SlicerCacheInfo> {
     let mut out: HashMap<String, SlicerCacheInfo> = HashMap::new();
-    let names: Vec<String> = (0..archive.len())
-        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
+    let names: Vec<String> = archive
+        .entry_paths()
+        .into_iter()
         .filter(|n| n.starts_with("xl/slicerCaches/slicerCache") && n.ends_with(".xml"))
         .collect();
     for path in names {

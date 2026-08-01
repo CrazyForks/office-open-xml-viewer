@@ -1,23 +1,18 @@
 import { canvasFontString } from '@silurus/ooxml-core';
 import type { ResolvedLocalFontMetric } from '@silurus/ooxml-core';
-import type { DocxDocumentModel } from '../types.js';
-import { docxRenderedFontFamilies } from '../document-content.js';
-import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from '../google-fonts.js';
-import { getDefaultFontSize, normalizeFontFamilyUncached } from '../line-layout.js';
-import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
+import { DOCX_GOOGLE_FONTS } from '../google-fonts.js';
+import { normalizeFontFamilyUncached } from '../line-layout.js';
+import type { LayoutSourceStore } from './layout-source-store.js';
 import { createFontResolver, type FontInventoryFace } from './font-service.js';
 import type {
   MeasurementTextContext,
   VerticalGlyphMeasurementService,
 } from './measurement-capabilities.js';
-import { createDocumentPaintResourceRegistry } from './production-paint-resources.js';
 import {
   createImageMetadataService,
   createMathMetadataService,
-  documentImageMetadataRecords,
   mathResourceKey,
   type MathLayoutResource,
-  type MathOccurrence,
 } from './resources.js';
 import {
   attachPaintResourceRegistry,
@@ -48,18 +43,15 @@ export interface ProductionLayoutServiceOptions {
   readonly verticalGlyphMeasurement: VerticalGlyphMeasurementService;
   readonly embeddedFaces?: readonly LoadedFontFaceRecord[];
   readonly googleFaces?: readonly LoadedFontFaceRecord[];
-  readonly fontFamilyCharsets: Readonly<Record<string, string>>;
-  readonly mathOccurrences: readonly MathOccurrence[];
-  readonly acquisitionInputs: BodyAcquisitionInputProjections;
 }
 
 export function createProductionLayoutServices(
-  doc: DocxDocumentModel,
+  source: LayoutSourceStore,
   options: ProductionLayoutServiceOptions,
 ): LayoutServices {
   const localMetrics = snapshotLocalMetrics(options.localMetrics);
   const fontFamilyCharsets = Object.freeze(Object.fromEntries(
-    Object.entries(options.fontFamilyCharsets)
+    Object.entries(source.fontFamilyCharsets)
       .map(([family, charset]) => [family.trim().toLowerCase(), charset]),
   ));
   const displayFaceFamily = (family: string): string => family
@@ -93,7 +85,7 @@ export function createProductionLayoutServices(
   const successfulEmbedded = new Map(loadedFaces(options.embeddedFaces ?? []).map((loaded) => [
     `${loaded.family}:${loaded.weight}:${loaded.style}`, loaded,
   ]));
-  const inventory: FontInventoryFace[] = (doc.embeddedFonts ?? []).flatMap((font) => {
+  const inventory: FontInventoryFace[] = source.fonts.embeddedFonts.flatMap((font) => {
     const weight = font.style === 'bold' || font.style === 'boldItalic' ? 700 : 400;
     const style = font.style === 'italic' || font.style === 'boldItalic' ? 'italic' as const : 'normal' as const;
     const loaded = successfulEmbedded.get(`${normalizedFaceFamily(font.fontName)}:${weight}:${style}`);
@@ -117,7 +109,7 @@ export function createProductionLayoutServices(
   if (options.useGoogleFonts) {
     const successfulGoogle = loadedFaces(options.googleFaces ?? []);
     const seen = new Set<string>();
-    for (const name of docxFontPreloadNames(doc)) {
+    for (const name of source.fonts.preloadNames) {
       if (!name) continue;
       const key = name.toLocaleLowerCase('en-US');
       if (seen.has(key)) continue;
@@ -141,11 +133,11 @@ export function createProductionLayoutServices(
   }
   const context = options.measureContext;
   const routedFontFamilies = [...new Set([
-    ...Object.keys(doc.fontFamilyClasses ?? {}),
-    ...Object.keys(doc.fontFamilyPitches ?? {}),
-    ...docxRenderedFontFamilies(doc),
-    ...(doc.majorFont ? [doc.majorFont] : []),
-    ...(doc.minorFont ? [doc.minorFont] : []),
+    ...Object.keys(source.fonts.familyClasses),
+    ...Object.keys(source.fonts.familyPitches),
+    ...source.fonts.renderedFamilies,
+    ...(source.fonts.majorFamily ? [source.fonts.majorFamily] : []),
+    ...(source.fonts.minorFamily ? [source.fonts.minorFamily] : []),
   ])];
   const text = createTextLayoutService({
     fonts: createFontResolver(inventory, {
@@ -153,8 +145,8 @@ export function createProductionLayoutServices(
         family,
         normalizeFontFamilyUncached(
           family,
-          doc.fontFamilyClasses ?? {},
-          doc.fontFamilyPitches ?? {},
+          source.fonts.familyClasses,
+          source.fonts.familyPitches,
         ),
       ])),
     }),
@@ -162,7 +154,7 @@ export function createProductionLayoutServices(
     eastAsiaFontCharsets: fontFamilyCharsets,
     genericFamilies: Object.fromEntries(routedFontFamilies.map((family) => [
       family,
-      classifyDocxFontGeneric(family, doc.fontFamilyClasses, doc.fontFamilyPitches),
+      classifyDocxFontGeneric(family, source.fonts.familyClasses, source.fonts.familyPitches),
     ])),
     measurer: {
       // Vertical OpenType capability is consulted only by vertical acquisition.
@@ -221,8 +213,8 @@ export function createProductionLayoutServices(
       },
     },
   });
-  const mathResources = options.mathResources ?? options.mathOccurrences.map(({ display, source }) => ({
-    resourceKey: mathResourceKey(source, display ? 'display' : 'inline'),
+  const mathResources = options.mathResources ?? source.mathOccurrences.map(({ display, source: occurrenceSource }) => ({
+    resourceKey: mathResourceKey(occurrenceSource, display ? 'display' : 'inline'),
     widthEm: 0,
     ascentEm: 0,
     descentEm: 0,
@@ -233,26 +225,15 @@ export function createProductionLayoutServices(
       message: 'The optional DOM math engine is unavailable; using the worker-safe text fallback',
     }],
   }));
-  const imageMetadata = documentImageMetadataRecords(doc, (paragraph) => {
-    const numbering = paragraph.numbering;
-    if (!numbering) throw new Error('Picture-bullet metadata requires numbering');
-    const marker = options.acquisitionInputs.numberingMarkerShapeInput(
-      numbering,
-      getDefaultFontSize(paragraph),
-    );
-    return {
-      widthPt: numbering.picBulletWidthPt ?? marker.fontSizePt,
-      heightPt: numbering.picBulletHeightPt ?? marker.fontSizePt,
-    };
-  }, options.acquisitionInputs);
+  const imageMetadata = source.imageMetadata;
   const services: LayoutServices = Object.freeze({
     text,
     images: createImageMetadataService(imageMetadata),
     math: createMathMetadataService(mathResources),
     verticalGlyphFingerprint: options.verticalGlyphMeasurement.fingerprint,
   });
-  const occurrenceKeys = options.mathOccurrences.map(({ source, display }) =>
-    mathResourceKey(source, display ? 'display' : 'inline'));
+  const occurrenceKeys = source.mathOccurrences.map(({ source: occurrenceSource, display }) =>
+    mathResourceKey(occurrenceSource, display ? 'display' : 'inline'));
   const metadataKeys = mathResources.map((resource) => resource.resourceKey);
   const missingMetadata = occurrenceKeys.filter((key) => !metadataKeys.includes(key));
   const extraMetadata = metadataKeys.filter((key) => !occurrenceKeys.includes(key));
@@ -269,7 +250,7 @@ export function createProductionLayoutServices(
   );
   attachPaintResourceRegistry(
     services,
-    createDocumentPaintResourceRegistry(doc, imageMetadata, options.acquisitionInputs),
+    source.paintResources,
   );
   attachVerticalGlyphMeasurementService(services, options.verticalGlyphMeasurement);
   return services;

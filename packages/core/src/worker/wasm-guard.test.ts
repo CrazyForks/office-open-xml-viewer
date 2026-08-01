@@ -40,6 +40,16 @@ describe('isWasmTrap', () => {
     expect(isWasmTrap(link)).toBe(true);
   });
 
+  it('flags implementation-defined stack-overflow and OOM error names', () => {
+    const internal = new Error('too much recursion');
+    internal.name = 'InternalError';
+    expect(isWasmTrap(internal)).toBe(true);
+
+    const oom = new Error('allocation failed');
+    oom.name = 'OOMError';
+    expect(isWasmTrap(oom)).toBe(true);
+  });
+
   it('does NOT flag a graceful parser error (Result::Err surfaced as a string)', () => {
     expect(isWasmTrap('pptx-parser error: not a zip archive')).toBe(false);
     expect(isWasmTrap(new Error('pptx-parser error: bad central directory'))).toBe(false);
@@ -50,8 +60,8 @@ describe('isWasmTrap', () => {
     // A lenient degradation surfaced as `new Error('...out of memory...')` is a
     // GRACEFUL error (name === 'Error'), not a trap. Classifying it as a trap
     // would needlessly recycle a healthy instance and drop its archive. Only a
-    // trap-shaped TYPE / NAME (RuntimeError / RangeError / CompileError / LinkError)
-    // is a trap — never a substring on a plain Error.
+    // recognised trap-shaped TYPE / NAME is poisoned — never a substring on a
+    // plain Error, which remains indistinguishable from graceful parser errors.
     expect(isWasmTrap(new Error('xlsx-parser: sharedStrings too large, out of memory'))).toBe(
       false,
     );

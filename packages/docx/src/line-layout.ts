@@ -15,10 +15,10 @@
 // is documented inline (as before the move) — see packages/docx/CLAUDE.md.
 
 import type {
-  DocParagraph, DocRun, DocxTextRun, ImageRun, FieldRun,
+  DocParagraph, DocRun, DocxTextRun, FieldRun,
   LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark,
 } from './types';
-import type { CanvasFontRoute, MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import type { CanvasFontRoute, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import {
   classifyCjkFont,
   cjkFallbackChain,
@@ -57,6 +57,7 @@ import {
   wordMinLineStartPx,
   type PreparedFloatWrap,
 } from './float-layout.js';
+import { mathFallbackText } from './layout/math-fallback-text.js';
 import {
   cloneSegmentsForLinePass,
   convergeLineWrap,
@@ -67,9 +68,10 @@ import type {
   VerticalGlyphMeasurementService,
 } from './layout/measurement-capabilities.js';
 import type {
-  ParagraphMathRun,
   ParagraphAcquisitionRun,
   ParagraphAcquisitionInput,
+  ParagraphLayoutSource,
+  ParagraphLayoutRun,
   ParagraphTextBearingRun,
   GlyphInkBounds,
   TextLayoutService,
@@ -422,7 +424,8 @@ export interface LayoutImageSeg extends LayoutSegSource {
    *  box by anchor acquisition. `imagePath`/`mimeType` are
    *  empty sentinels for a chart seg — no blip is fetched (the bitmap-prefetch
    *  walk keys off `run.type === 'image'` and never sees a chart run). */
-  chart?: ChartModel;
+  chart?: true;
+  chartResourceKey?: string;
   /** Parser-private retained placeholder for a recognized payload whose
    * package part is unavailable. It participates in line/anchor geometry but
    * never enters the paint resource registry. */
@@ -432,7 +435,7 @@ export interface LayoutImageSeg extends LayoutSegSource {
 
 /** An inline OMML equation. Measured + drawn via the core math engine. */
 export interface LayoutMathSeg extends LayoutSegSource {
-  mathNodes: import('@silurus/ooxml-core').MathNode[];
+  math: true;
   mathResourceKey: string;
   mathMetadata?: MathLayoutResource;
   display: boolean;
@@ -931,7 +934,7 @@ export function segmentEastAsiaFloorSingleLinePx(
   );
 }
 
-export function getDefaultFontSize(para: DocParagraph | ParagraphAcquisitionInput): number {
+export function getDefaultFontSize(para: ParagraphLayoutSource): number {
   for (const run of para.runs) {
     if (run.type === 'text') {
       return (run as unknown as DocxTextRun).fontSize;
@@ -950,7 +953,7 @@ export function getDefaultFontSize(para: DocParagraph | ParagraphAcquisitionInpu
  *  default font so e.g. an empty Meiryo cell that forms a résumé "bar" reserves
  *  Meiryo's tall line box rather than the generic fallback's. */
 export function getDefaultFontFamily(
-  para: DocParagraph | ParagraphAcquisitionInput,
+  para: ParagraphLayoutSource,
   eastAsian = false,
 ): string | null {
   for (const run of para.runs) {
@@ -964,7 +967,7 @@ export function getDefaultFontFamily(
 /** Intended single-line height (px) for an empty paragraph, from its default
  *  font's win line-height ratio. 0 when the font is not in the metrics table. */
 export function emptyIntendedSinglePx(
-  para: DocParagraph | ParagraphAcquisitionInput,
+  para: ParagraphLayoutSource,
   scale: number,
 ): number {
   return intendedSingleLinePx(getDefaultFontFamily(para), getDefaultFontSize(para) * scale);
@@ -973,7 +976,7 @@ export function emptyIntendedSinglePx(
 /** Intended single-line height (px) for an empty paragraph in the script axis
  *  used to draw its paragraph mark. */
 function emptyIntendedSingleForScriptPx(
-  para: DocParagraph | ParagraphAcquisitionInput,
+  para: ParagraphLayoutSource,
   scale: number,
   eastAsian: boolean,
 ): number {
@@ -1520,7 +1523,7 @@ export interface MarkLineMetrics {
 }
 
 export function paragraphMarkLineMetrics(
-  para: DocParagraph | ParagraphAcquisitionInput,
+  para: ParagraphLayoutSource,
   scale: number,
   grid: DocGridCtx | undefined,
   paraHasRuby: boolean,
@@ -1644,7 +1647,7 @@ export function paragraphMarkLineMetrics(
 }
 
 export function paragraphMarkLineHeight(
-  para: DocParagraph | ParagraphAcquisitionInput,
+  para: ParagraphLayoutSource,
   scale: number,
   grid: DocGridCtx | undefined,
   paraHasRuby: boolean,
@@ -1687,7 +1690,7 @@ export function lineBelowBaselinePx(advancePx: number, ascentPx: number, descent
 }
 
 export function paragraphMarkBelowBaselinePt(
-  para: DocParagraph | ParagraphAcquisitionInput,
+  para: ParagraphLayoutSource,
   grid: DocGridCtx | undefined,
   paraHasRuby: boolean,
   eastAsian: boolean,
@@ -1750,7 +1753,7 @@ export function splitSmallCapsCase(text: string): { text: string; reduced: boole
 }
 
 export function findNearbyFontSize(
-  runs: readonly (DocRun | ParagraphAcquisitionRun)[],
+  runs: readonly ParagraphLayoutRun[],
   idx: number,
 ): number {
   // Look backwards then forwards for a text or field run to get font size
@@ -1807,55 +1810,7 @@ export function resolveFieldText(f: FieldRun, environment: LineLayoutEnvironment
   return f.fallbackText;
 }
 
-const MATH_SPACED_OPERATORS = new Set(['+', '-', '−', '=', '±', '×', '÷']);
-
-function mathRunPlainText(text: string): string {
-  return MATH_SPACED_OPERATORS.has(text) ? ` ${text} ` : text;
-}
-
-export function mathPlainText(nodes: MathNode[]): string {
-  const renderNode = (node: MathNode): string => {
-    switch (node.kind) {
-      case 'run':
-        return mathRunPlainText(node.text);
-      case 'fraction':
-        return `${mathPlainText(node.num)}/${mathPlainText(node.den)}`;
-      case 'sup':
-        return `${mathPlainText(node.base)}^${mathPlainText(node.sup ?? [])}`;
-      case 'sub':
-        return `${mathPlainText(node.base)}_${mathPlainText(node.sub ?? [])}`;
-      case 'subSup':
-        return `${mathPlainText(node.base)}_${mathPlainText(node.sub ?? [])}^${mathPlainText(node.sup ?? [])}`;
-      case 'nary':
-        return `${node.op}${mathPlainText(node.sub ?? [])}${mathPlainText(node.sup ?? [])}${mathPlainText(node.body)}`;
-      case 'delimiter':
-        return `${node.begChar}${node.items.map(mathPlainText).join(',')}${node.endChar}`;
-      case 'radical':
-        return `${node.index && node.index.length > 0 ? mathPlainText(node.index) : ''}√${mathPlainText(node.radicand)}`;
-      case 'limit':
-        return `${mathPlainText(node.base)}${mathPlainText(node.lower ?? [])}${mathPlainText(node.upper ?? [])}`;
-      case 'array':
-        return node.rows.map((row) => row.map(mathPlainText).join(' ')).join(' ');
-      case 'groupChr':
-        return `${node.char}${mathPlainText(node.base)}`;
-      case 'bar':
-      case 'box':
-      case 'borderBox':
-        return mathPlainText(node.base);
-      case 'accent':
-        return `${node.char}${mathPlainText(node.base)}`;
-      case 'func':
-        return `${mathPlainText(node.name)}(${mathPlainText(node.arg)})`;
-      case 'group':
-        return mathPlainText(node.items);
-      case 'phant':
-        return node.show ? mathPlainText(node.base) : '';
-      case 'sPre':
-        return `${mathPlainText(node.sub)}${mathPlainText(node.sup)}${mathPlainText(node.base)}`;
-    }
-  };
-  return nodes.map(renderNode).join('').replace(/[ \t]{2,}/g, ' ');
-}
+export const mathPlainText = mathFallbackText;
 
 /** Returns true when any code point of `text` permits a line break between
  *  adjacent characters (CJK / ideographic). The canonical ranges live in core's
@@ -2453,7 +2408,7 @@ function resolveFitTextSegments(
 }
 
 export function buildSegments(
-  runs: readonly (DocRun | ParagraphAcquisitionRun)[],
+  runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
 ): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
@@ -2512,7 +2467,7 @@ export function buildSegments(
   });
   const pushTextPiece = (
     text: string,
-    base: DocxTextRun | FieldRun,
+    base: Extract<ParagraphLayoutSource['runs'][number], { type: 'text' | 'field' }>,
     vertAlign: 'super' | 'sub' | null,
     sourceRunIndex: number,
     sourceFragmentIndex?: number,
@@ -2588,7 +2543,7 @@ export function buildSegments(
     // `word-rtl-complex-script-european-digits-an`: use the bidi language's
     // primary subtag when present, otherwise fall back to an rtl-marked run.
     const digitsAsAN =
-      (forceCs || r.rtl === true) && isRtlBidiLang(r.langBidi, r.rtl === true);
+      (forceCs || Boolean(r.rtl)) && isRtlBidiLang(r.langBidi, Boolean(r.rtl));
 
     let firstSeg = true;
     // True while the next emitted segment should be GLUED to the previous one
@@ -2999,7 +2954,7 @@ export function buildSegments(
         }
       }
     } else if (run.type === 'image') {
-      const img = run as unknown as ImageRun & { type: 'image' };
+      const img = run;
       segs.push({
         imagePath: img.imagePath,
         mimeType: img.mimeType,
@@ -3023,14 +2978,14 @@ export function buildSegments(
       // ECMA-376 §21.2 chart. Flow it as a picture box of the `<wp:extent>`
       // natural size: the same LayoutImageSeg shape (empty `imagePath`/
       // `mimeType` sentinels so `'imagePath' in seg` routes it through the image
-      // measurement/split path) but carrying the ChartModel, which the draw site
-      // paints with the shared `renderChart`.
+      // measurement/split path) with only a chart resource marker; the model
+      // payload remains owned by the paint resource registry.
       //
       // A `<wp:anchor>` (floating) chart (§20.4.2.3) carries `anchor: true` and
       // its parsed page-offset fields, exactly like an anchor ImageRun: the
       // measure pass zeroes an anchor seg's width (it is not part of the inline
       // flow) and anchor acquisition retains it at the resolved absolute box.
-      const chartRun = run as unknown as import('./types').ChartRun & { type: 'chart' };
+      const chartRun = run;
       segs.push({
         imagePath: '',
         mimeType: '',
@@ -3041,7 +2996,8 @@ export function buildSegments(
         anchorYPt: chartRun.anchorYPt ?? 0,
         anchorXFromMargin: chartRun.anchorXFromMargin ?? false,
         anchorYFromPara: chartRun.anchorYFromPara ?? false,
-        chart: chartRun.chart,
+        chart: true,
+        chartResourceKey: (chartRun as Partial<import('./layout/text.js').ParagraphChartRun>).resourceKey,
         measuredWidth: 0,
       });
     } else if (run.type === 'unavailableDrawing') {
@@ -3076,7 +3032,7 @@ export function buildSegments(
       // The parser resolves the paragraph font size; fall back to a nearby run only
       // if it is somehow absent.
       const fontSize = run.fontSize || findNearbyFontSize(runs, runs.indexOf(run));
-      const resourceKey = (run as Partial<ParagraphMathRun>).resourceKey;
+      const resourceKey = 'resourceKey' in run ? run.resourceKey : undefined;
       if (environment.layoutServices && !resourceKey) {
         throw new Error('Service-backed math layout requires a normalized structural resource key');
       }
@@ -3084,13 +3040,13 @@ export function buildSegments(
         ? environment.layoutServices?.math.resolve(resourceKey)
         : undefined;
       segs.push({
-        mathNodes: run.nodes,
+        math: true,
         mathResourceKey: resourceKey ?? '',
         mathMetadata,
         display: run.display,
         fontSize,
         color: null,
-        fallbackText: mathPlainText(run.nodes),
+        fallbackText: 'fallbackText' in run ? run.fallbackText : mathFallbackText(run.nodes),
         measuredWidth: 0,
         mathAscent: 0,
         mathDescent: 0,
@@ -3678,7 +3634,7 @@ export function layoutLines(
     // 1.3em fallback; an image/math object counts its measured box. The line's
     // value is the max.
     let segGridCount = 0;
-    if (!('isTab' in s) && !('imagePath' in s) && !('mathNodes' in s)) {
+    if (!('isTab' in s) && !('imagePath' in s) && !('math' in s)) {
       const ts = s as LayoutTextSeg;
       if (ts.ruby) lineHasRuby = true;
       if (ts.seaBreaks !== undefined && isDictionarySeaText(ts.text)) lineHasSea = true;
@@ -3946,7 +3902,7 @@ export function layoutLines(
   const tabFollowWidth = (q: LayoutSeg): number => {
     if ('isTab' in q) return q.measuredWidth || 0;
     if ('imagePath' in q) return q.widthPt * scale;
-    if ('mathNodes' in q) return q.measuredWidth || 0;
+    if ('math' in q) return q.measuredWidth || 0;
     if ('lineBreak' in q) return 0;
     return segAdvance(q);
   };
@@ -4059,7 +4015,7 @@ export function layoutLines(
               const w = q.widthPt * scale;
               q.measuredWidth = w;
               addToLine(q, w, q.heightPt, q.heightPt * scale, 0);
-            } else if ('mathNodes' in q) {
+            } else if ('math' in q) {
               addToLine(q, q.measuredWidth || 0, q.fontSize, q.mathAscent || 0, q.mathDescent || 0);
             } else {
               const m = measureText(q);
@@ -4115,7 +4071,7 @@ export function layoutLines(
             const w = q.widthPt * scale;
             q.measuredWidth = w;
             addToLine(q, w, q.heightPt, q.heightPt * scale, 0);
-          } else if ('mathNodes' in q) {
+          } else if ('math' in q) {
             addToLine(q, q.measuredWidth || 0, q.fontSize, q.mathAscent || 0, q.mathDescent || 0);
           } else {
             const m = measureText(q);
@@ -4166,7 +4122,7 @@ export function layoutLines(
     }
 
     // ── Math segment ─────────────────────────────────────
-    if ('mathNodes' in seg) {
+    if ('math' in seg) {
       const render = seg.mathMetadata;
       if (!render || render.available === false) {
         const emPx = seg.fontSize * scale;

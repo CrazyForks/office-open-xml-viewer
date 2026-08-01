@@ -1,3 +1,4 @@
+use crate::read_zip_string;
 use crate::types::*;
 use crate::worksheet_reference::{
     resolve_worksheet_reference, ReferencedCellValue, WorksheetReferenceSession,
@@ -5,10 +6,9 @@ use crate::worksheet_reference::{
 use crate::{find_rel_target_by_type, parse_rels_map, resolve_fill_color, resolve_zip_path};
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{is_c_ns, is_r_ns, is_xdr_ns};
-use ooxml_common::zip::read_zip_string;
 
 pub(crate) struct ChartReferenceContext<'a, 'input, 'session> {
-    pub(crate) sheet_xml: &'a str,
+    pub(crate) materialized_rows: Option<&'a [Row]>,
     pub(crate) sheet_name: &'a str,
     pub(crate) sheets: &'a [SheetMeta],
     pub(crate) workbook_rels: &'a roxmltree::Document<'input>,
@@ -18,7 +18,7 @@ pub(crate) struct ChartReferenceContext<'a, 'input, 'session> {
 
 struct XlsxChartReferenceResolver<'archive, 'data, 'input, 'session> {
     archive: &'archive mut crate::XlsxZip,
-    sheet_xml: &'data str,
+    materialized_rows: Option<&'data [Row]>,
     sheet_name: &'data str,
     sheets: &'data [SheetMeta],
     workbook_rels: &'data roxmltree::Document<'input>,
@@ -31,7 +31,7 @@ impl ooxml_common::chart::ChartReferenceResolver for XlsxChartReferenceResolver<
         resolve_worksheet_reference(
             self.archive,
             formula,
-            self.sheet_xml,
+            self.materialized_rows,
             self.sheet_name,
             self.sheets,
             self.workbook_rels,
@@ -54,7 +54,7 @@ impl ooxml_common::chart::ChartReferenceResolver for XlsxChartReferenceResolver<
         resolve_worksheet_reference(
             self.archive,
             formula,
-            self.sheet_xml,
+            self.materialized_rows,
             self.sheet_name,
             self.sheets,
             self.workbook_rels,
@@ -322,7 +322,7 @@ pub(crate) fn load_sheet_charts(
             } else if let Some(context) = reference_context.as_mut() {
                 let mut references = XlsxChartReferenceResolver {
                     archive,
-                    sheet_xml: context.sheet_xml,
+                    materialized_rows: context.materialized_rows,
                     sheet_name: context.sheet_name,
                     sheets: context.sheets,
                     workbook_rels: context.workbook_rels,
@@ -647,7 +647,7 @@ mod hidden_tests {
 
             zw.finish().unwrap();
         }
-        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+        crate::XlsxZip::new(Cursor::new(buf)).unwrap()
     }
 
     #[test]
@@ -687,7 +687,6 @@ mod worksheet_reference_tests {
     use std::io::{Cursor, Write};
     use zip::write::SimpleFileOptions;
 
-    const DASHBOARD_XML: &str = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#;
     const DATA_XML: &str = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="C1" t="inlineStr"><is><t>المبيعات</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>أحمد</t></is></c><c r="C2"><v>5000</v></c><c r="D2"><v>10</v></c><c r="E2"><v>3</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>سارة</t></is></c><c r="C3"><v>6200</v></c><c r="D3"><v>20</v></c><c r="E3"><v>5</v></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>خالد</t></is></c><c r="C4"><v>7500</v></c><c r="D4"><v>30</v></c><c r="E4"><v>7</v></c></row></sheetData></worksheet>"#;
 
     fn chart_xml(with_cache: bool) -> String {
@@ -740,7 +739,7 @@ mod worksheet_reference_tests {
             writer.write_all(DATA_XML.as_bytes()).unwrap();
             writer.finish().unwrap();
         }
-        zip::ZipArchive::new(Cursor::new(bytes)).unwrap()
+        crate::XlsxZip::new(Cursor::new(bytes)).unwrap()
     }
 
     fn sheets() -> Vec<SheetMeta> {
@@ -772,11 +771,12 @@ mod worksheet_reference_tests {
         let sheet_metas = sheets();
         let theme = vec!["#4472C4".into(); 12];
         let mut session = WorksheetReferenceSession::default();
+        session.seed_current_sheet("Dashboard", None);
         let charts = load_sheet_charts(
             &mut archive,
             "worksheets/sheet1.xml",
             Some(ChartReferenceContext {
-                sheet_xml: DASHBOARD_XML,
+                materialized_rows: None,
                 sheet_name: "Dashboard",
                 sheets: &sheet_metas,
                 workbook_rels: &rels,
@@ -942,7 +942,7 @@ mod chartex_tests {
 
             zw.finish().unwrap();
         }
-        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+        crate::XlsxZip::new(Cursor::new(buf)).unwrap()
     }
 
     #[test]

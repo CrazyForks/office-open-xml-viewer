@@ -12,13 +12,36 @@ import {
   toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
+  OoxmlResourceLimitError,
 } from '@silurus/ooxml-core';
+import {
+  deserializeWorkerError,
+  BoundedPullSession,
+  disposeRejectedLoad,
+  normalizeLoadResourceOptions,
+  OoxmlResourceMetricsSession,
+  normalizeResourcePolicy,
+  type NormalizedOoxmlResourcePolicy,
+  PULL_SESSION_PROTOCOL,
+  type PullSessionResponse,
+} from '@silurus/ooxml-core/worker';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
-import { resolveSharedStrings } from './shared-strings.js';
+import { resolveSharedStringRows } from './shared-strings.js';
+import {
+  addWorksheetUsage,
+  addWorksheetCacheUsage,
+  assertWorksheetCacheUsage,
+  assertWorksheetJsonBytes,
+  assertWorksheetModelUsage,
+  measureRows,
+  measureWorksheet,
+  type WorksheetCacheUsage,
+  type WorksheetModelUsage,
+} from './worksheet-resource-limits.js';
 import {
   parseListFormula,
   resolveListValues,
@@ -29,10 +52,11 @@ import type {
   RenderWorkerResponse,
   WireRenderViewportOptions,
 } from './worker-protocol.js';
+import { XLSX_WORKSHEET_PULL_BYTES } from './worksheet-pull-worker.js';
 
 /** Options for {@link XlsxWorkbook.load}. Extends the shared load-options type
- *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`, `math`)
- *  with the worker-rendering mode. */
+ *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, the
+ *  deprecated `maxZipEntryBytes` alias, and `math`) with worker rendering. */
 export interface LoadOptions extends CoreLoadOptions {
   /**
    * 'main' (default): parse in a worker, render on the main thread (current
@@ -44,11 +68,23 @@ export interface LoadOptions extends CoreLoadOptions {
   mode?: 'main' | 'worker';
 }
 
+function isWorksheetPullResponse(
+  response: WorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>,
+): response is PullSessionResponse<ArrayBuffer, number> {
+  return 'protocol' in response && response.protocol === PULL_SESSION_PROTOCOL;
+}
+
 export class XlsxWorkbook {
   private worker: Worker;
-  private bridge: WorkerBridge<WorkerResponse | RenderWorkerResponse>;
+  private bridge: WorkerBridge<
+    WorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>
+  >;
   private parsedWorkbook: ParsedWorkbook | null = null;
   private sheetCache = new Map<number, Worksheet>();
+  /** One materialization per sheet at a time. This becomes the ownership seam
+   * for the bounded worksheet cursor: concurrent callers share one cursor and
+   * one eventual mutable compatibility object instead of doubling peak work. */
+  private sheetLoads = new Map<number, Promise<Worksheet>>();
   /** Cache of decoded image sources keyed by their zip `imagePath`. Shared
    *  across sheets. */
   private imageCache = new Map<string, CanvasImageSource | null>();
@@ -57,14 +93,17 @@ export class XlsxWorkbook {
    *  `_imageCache`; kept separate from {@link XlsxWorkbook.imageCache} (decoded
    *  sources) so each layer dedupes independently. */
   private imageBlobCache = new Map<string, Promise<Blob>>();
+  /** Public archive-queue reservations. Kept separate so an active render does
+   * not await a same-path load that is queued behind that render. */
+  private queuedImageLoads = new Map<string, Promise<Blob>>();
   /** One stable closure per instance: core's path-keyed SVG cache namespaces on
    *  this identity, so two open workbooks never swap a shared zip path (e.g.
    *  xl/media/image1.svg). Reusing one reference also lets the SVG cache hit
    *  across viewport renders. */
   private readonly _fetchImage = (path: string, mime: string): Promise<Blob> =>
-    this.getImage(path, mime);
+    this.getImageWithinArchiveOperation(path, mime);
   private rawData: ArrayBuffer | null = null;
-  private maxZipEntryBytes: number | undefined;
+  private resourcePolicy: NormalizedOoxmlResourcePolicy | null = null;
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
    *  `renderViewport` call reuses it — equations in shapes render when present,
    *  and are skipped (engine tree-shaken) when omitted. */
@@ -76,13 +115,34 @@ export class XlsxWorkbook {
    *  so a web font shared with another open workbook survives until both go). */
   private googleFontFaces: FontFace[] = [];
   private _mode: 'main' | 'worker' = 'main';
+  private generation = 0;
+  private nextSheetSessionId = 1;
+  private archiveOperationTail: Promise<void> = Promise.resolve();
+  private sheetSessions = new Set<BoundedPullSession<ArrayBuffer, number>>();
+  private workerTimeoutMs: number | undefined;
+  private retainedSheetUsage: WorksheetCacheUsage = { rows: 0, cells: 0 };
+  /** First fatal model/package violation. Compatibility materialization happens
+   * on main, so this latch is the document-level poison boundary for every
+   * later public operation on the same workbook instance. */
+  private resourceFailure: OoxmlResourceLimitError | null = null;
 
   private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
     this.worker = worker;
     this._mode = mode;
-    this.bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this.worker, {
-      correlate: (res) => res.id,
-      toError: (res) => (res.type === 'error' ? res.message : undefined),
+    this.bridge = new WorkerBridge<
+      WorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>
+    >(this.worker, {
+      correlate: (res) =>
+        'protocol' in res && res.protocol === PULL_SESSION_PROTOCOL
+          ? res.requestId
+          : 'id' in res
+            ? res.id
+            : undefined,
+      // Pull `kind:error` is a correlated protocol value consumed by
+      // BoundedPullSession. Ordinary `type:error` retains WorkerBridge's
+      // historical rejection behavior.
+      toError: (res) =>
+        'type' in res && res.type === 'error' ? deserializeWorkerError(res) : undefined,
     });
     // Default: the parser WASM emitted next to this bundle, resolved relative to
     // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
@@ -93,7 +153,17 @@ export class XlsxWorkbook {
 
   /** Parse an XLSX from a URL or ArrayBuffer. */
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<XlsxWorkbook> {
+    const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
+    const metrics = new OoxmlResourceMetricsSession({
+      enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
+      format: 'xlsx',
+      mode,
+      policy: resourceOptions.policy,
+      onMetrics: resourceOptions.onResourceMetrics,
+      emitToConsole: resourceOptions.debug,
+    });
+    try {
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
       throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
     }
@@ -113,24 +183,58 @@ export class XlsxWorkbook {
       buffer = source;
     }
     buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
+    metrics.setSourceBytes(buffer.byteLength);
+    metrics.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so
     // main-mode bundles never pull in its (renderer-bearing) chunk.
     const worker =
       mode === 'worker'
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
-    const wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
-    await wb._load(buffer, opts);
-    return wb;
+    let wb: XlsxWorkbook | undefined;
+    try {
+      wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
+      await wb._load(
+        buffer,
+        opts,
+        resourceOptions.policy,
+        (usage) => metrics.observeUsage(usage),
+      );
+      metrics.checkpoint('workbook index ready');
+      metrics.succeed({ sheets: wb.sheetCount });
+      return wb;
+    } catch (error) {
+      const rejectedWorkbook = wb;
+      disposeRejectedLoad(worker, rejectedWorkbook ? () => rejectedWorkbook.destroy() : undefined);
+      throw error;
+    }
+    } catch (error) {
+      metrics.fail(error);
+      throw error;
+    }
   }
 
   // `load()` always resolves a URL/string source to an ArrayBuffer (via
   // resolveOoxmlContainer, so decryption sees the container before the render
   // worker is constructed) before calling `_load`, so this only ever receives
   // an ArrayBuffer — no separate string-source fetch branch is needed here.
-  private async _load(data: ArrayBuffer, opts: LoadOptions = {}): Promise<void> {
+  private async _load(
+    data: ArrayBuffer,
+    opts: LoadOptions = {},
+    resourcePolicy: NormalizedOoxmlResourcePolicy = normalizeResourcePolicy(opts),
+    onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
+  ): Promise<void> {
+    this.resourceFailure = null;
+    this.retainedSheetUsage = { rows: 0, cells: 0 };
+    this.sheetCache.clear();
+    for (const session of this.sheetSessions ?? []) {
+      await session.cancel('closed').catch(() => undefined);
+    }
+    this.sheetSessions?.clear();
+    this.generation = (this.generation ?? 0) + 1;
     this.rawData = data;
-    this.maxZipEntryBytes = opts.maxZipEntryBytes;
+    this.resourcePolicy = resourcePolicy;
+    this.workerTimeoutMs = opts.workerTimeoutMs;
     this.math = opts.math;
     if (opts.math && this._mode === 'worker') {
       console.warn(
@@ -147,14 +251,14 @@ export class XlsxWorkbook {
               type: 'parse',
               id,
               data: data.slice(0),
-              maxZipEntryBytes: this.maxZipEntryBytes,
+              resourcePolicy,
               useGoogleFonts: !!opts.useGoogleFonts,
             } satisfies RenderWorkerRequest)
           : ({
               type: 'parse',
               id,
               data: data.slice(0),
-              maxZipEntryBytes: this.maxZipEntryBytes,
+              resourcePolicy,
             } satisfies WorkerRequest),
       undefined,
       { timeoutMs: opts.workerTimeoutMs },
@@ -163,9 +267,12 @@ export class XlsxWorkbook {
     // sheetNames / tabColors / resolveValidationList keep working. In parse mode
     // it arrives as transferred UTF-8 JSON bytes — decode + parse once here.
     if (this._mode === 'worker') {
-      this.parsedWorkbook = (parsed as Extract<RenderWorkerResponse, { type: 'parsed' }>).workbook;
+      const response = parsed as Extract<RenderWorkerResponse, { type: 'parsed' }>;
+      this.parsedWorkbook = response.workbook;
+      if (response.usage) onUsage?.(response.usage);
     } else {
-      const { workbookJson } = parsed as Extract<WorkerResponse, { type: 'parsed' }>;
+      const { workbookJson, usage } = parsed as Extract<WorkerResponse, { type: 'parsed' }>;
+      if (usage) onUsage?.(usage);
       this.parsedWorkbook = JSON.parse(
         new TextDecoder().decode(new Uint8Array(workbookJson)),
       ) as ParsedWorkbook;
@@ -224,8 +331,21 @@ export class XlsxWorkbook {
   }
 
   async getWorksheet(sheetIndex: number): Promise<Worksheet> {
+    this.assertResourceHealthy();
     const cached = this.sheetCache.get(sheetIndex);
     if (cached) return cached;
+    const active = this.sheetLoads.get(sheetIndex);
+    if (active) return active;
+    const load = this.loadWorksheet(sheetIndex);
+    this.sheetLoads.set(sheetIndex, load);
+    try {
+      return await load;
+    } finally {
+      if (this.sheetLoads.get(sheetIndex) === load) this.sheetLoads.delete(sheetIndex);
+    }
+  }
+
+  private async loadWorksheet(sheetIndex: number): Promise<Worksheet> {
     // `!this.rawData` guards that `parse` has run: the worker retained the
     // whole-workbook buffer at parse time, and `parseSheet` reuses it. We no
     // longer re-send the buffer here (it previously structured-cloned the entire
@@ -237,29 +357,104 @@ export class XlsxWorkbook {
     const sheetMeta = this.parsedWorkbook.workbook.sheets[sheetIndex];
     if (!sheetMeta) throw new Error(`Sheet index ${sheetIndex} out of range`);
 
-    const res = await this.bridge.request((id) => ({
-      type: 'parseSheet',
-      id,
-      sheetIndex,
-      sheetName: sheetMeta.name,
-      maxZipEntryBytes: this.maxZipEntryBytes,
-    }));
-    // Parse mode: the worker forwards the sheet as transferred UTF-8 JSON bytes
-    // — decode + parse once here. Worker (render) mode: the worker already
-    // decoded it and sends the object back as a structured clone.
-    let ws: Worksheet;
-    if (this._mode === 'worker') {
-      ws = (res as Extract<RenderWorkerResponse, { type: 'parsedSheet' }>).worksheet;
-    } else {
-      const { worksheetJson } = res as Extract<WorkerResponse, { type: 'parsedSheet' }>;
-      ws = JSON.parse(new TextDecoder().decode(new Uint8Array(worksheetJson))) as Worksheet;
+    return this.runArchiveOperation(() => this.loadWorksheetStream(sheetIndex, sheetMeta.name));
+  }
+
+  private async loadWorksheetStream(sheetIndex: number, sheetName: string): Promise<Worksheet> {
+    const sessionId = this.nextSheetSessionId ?? 1;
+    this.nextSheetSessionId = sessionId + 1;
+    const identity = { sessionId, operationId: sessionId, generation: this.generation ?? 1 };
+    const session = new BoundedPullSession(
+      this.bridge.transport(isWorksheetPullResponse),
+      { ...identity, maxByteCredit: XLSX_WORKSHEET_PULL_BYTES, timeoutMs: this.workerTimeoutMs },
+    );
+    this.sheetSessions ??= new Set();
+    this.sheetSessions.add(session);
+    const rows: Worksheet['rows'] = [];
+    let modelUsage: WorksheetModelUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0 };
+    // The compatibility adapter knows the workbook sheet index/name but not
+    // the resolved OPC relationship target. Omit `part` rather than fabricate
+    // a package address; Rust-originated violations carry the real xl/... path.
+    const part = undefined;
+    try {
+      await this.bridge.request(
+        (id) => ({ type: 'openSheetSession', id, sheetIndex, sheetName, ...identity }),
+        undefined,
+        { timeoutMs: this.workerTimeoutMs },
+      );
+      for (;;) {
+        const chunk = await session.pull(XLSX_WORKSHEET_PULL_BYTES);
+        const decoded = JSON.parse(
+          new TextDecoder().decode(new Uint8Array(chunk.payload)),
+        ) as { kind: 'rows'; rows: Worksheet['rows'] } | { kind: 'finished'; worksheet: Worksheet };
+        if (decoded.kind === 'rows') {
+          resolveSharedStringRows(decoded.rows, this.parsedWorkbook?.sharedStrings ?? []);
+          const nextUsage = addWorksheetUsage(modelUsage, measureRows(decoded.rows));
+          assertWorksheetModelUsage(
+            nextUsage,
+            'get-worksheet',
+            part,
+            chunk.usage ?? session.usageCheckpoint,
+          );
+          rows.push(...decoded.rows);
+          modelUsage = nextUsage;
+          await chunk.ack();
+          continue;
+        }
+        const worksheet = decoded.worksheet;
+        worksheet.rows = rows;
+        // Terminal metadata contains no rows, but measure the final public model
+        // to cover exact monolithic JSON before its cache admission.
+        const measured = measureWorksheet(worksheet);
+        assertWorksheetModelUsage(
+          measured,
+          'get-worksheet',
+          part,
+          chunk.usage ?? session.usageCheckpoint,
+        );
+        assertWorksheetJsonBytes(
+          measured.jsonBytes,
+          'get-worksheet',
+          part,
+          chunk.usage ?? session.usageCheckpoint,
+        );
+        const retainedUsage = this.retainedSheetUsage ?? { rows: 0, cells: 0 };
+        const nextCache = addWorksheetCacheUsage(retainedUsage, measured);
+        assertWorksheetCacheUsage(
+          nextCache,
+          'get-worksheet',
+          part,
+          chunk.usage ?? session.usageCheckpoint,
+        );
+        // Decoding and assembly above is the consumer's acceptance point. The
+        // terminal ACK may now commit the prepared Rust operation.
+        await chunk.ack();
+        this.retainedSheetUsage = nextCache;
+        this.sheetCache.set(sheetIndex, worksheet);
+        return worksheet;
+      }
+    } catch (error) {
+      await session.cancel('request-error').catch(() => undefined);
+      if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
+      throw error;
+    } finally {
+      this.sheetSessions.delete(session);
     }
-    // Resolve shared-string references (`{ type: 'shared', si }`) against the
-    // workbook's dedup'd sharedStrings table so no consumer downstream ever
-    // sees an unresolved cell. Covers BOTH decode paths above.
-    resolveSharedStrings(ws, this.parsedWorkbook.sharedStrings);
-    this.sheetCache.set(sheetIndex, ws);
-    return ws;
+  }
+
+  private runArchiveOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const run = async (): Promise<T> => {
+      this.assertResourceHealthy();
+      try {
+        return await operation();
+      } catch (error) {
+        if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
+        throw error;
+      }
+    };
+    const result = (this.archiveOperationTail ?? Promise.resolve()).then(run, run);
+    this.archiveOperationTail = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   /**
@@ -275,16 +470,39 @@ export class XlsxWorkbook {
    * route-through-worker decision).
    */
   async getImage(imagePath: string, mimeType: string): Promise<Blob> {
+    this.assertResourceHealthy();
     const hit = this.imageBlobCache.get(imagePath);
     if (hit) return hit;
-    const p = this.bridge
+    const queued = this.queuedImageLoads?.get(imagePath);
+    if (queued) return queued;
+    const p = this.runArchiveOperation(() =>
+      this.getImageWithinArchiveOperation(imagePath, mimeType));
+    this.queuedImageLoads ??= new Map();
+    this.queuedImageLoads.set(imagePath, p);
+    void p.finally(() => {
+      if (this.queuedImageLoads.get(imagePath) === p) this.queuedImageLoads.delete(imagePath);
+    }).catch(() => undefined);
+    return p;
+  }
+
+  private getImageWithinArchiveOperation(imagePath: string, mimeType: string): Promise<Blob> {
+    const hit = this.imageBlobCache.get(imagePath);
+    if (hit) return hit;
+    const request = this.requestImage(imagePath, mimeType);
+    this.imageBlobCache.set(imagePath, request);
+    void request.catch(() => {
+      if (this.imageBlobCache.get(imagePath) === request) this.imageBlobCache.delete(imagePath);
+    });
+    return request;
+  }
+
+  private requestImage(imagePath: string, mimeType: string): Promise<Blob> {
+    return this.bridge
       .request((id) => ({ type: 'extractImage', id, path: imagePath }) satisfies WorkerRequest)
       .then((res) => {
         const bytes = (res as Extract<WorkerResponse, { type: 'imageExtracted' }>).bytes;
         return new Blob([bytes], { type: mimeType });
       });
-    this.imageBlobCache.set(imagePath, p);
-    return p;
   }
 
   /**
@@ -303,9 +521,10 @@ export class XlsxWorkbook {
    * const md = await wb.toMarkdown();
    */
   async toMarkdown(): Promise<string> {
-    const res = await this.bridge.request(
+    this.assertResourceHealthy();
+    const res = await this.runArchiveOperation(() => this.bridge.request(
       (id) => ({ type: 'toMarkdown', id }) satisfies WorkerRequest,
-    );
+    ));
     return (res as Extract<WorkerResponse, { type: 'markdownRendered' }>).markdown;
   }
 
@@ -328,6 +547,7 @@ export class XlsxWorkbook {
     sheetIndex: number,
     formula1: string | undefined,
   ): Promise<ResolvedList> {
+    this.assertResourceHealthy();
     if (!this.parsedWorkbook) throw new Error('Workbook not loaded');
     const parsed = parseListFormula(formula1);
     if (parsed.kind !== 'range') {
@@ -393,30 +613,23 @@ export class XlsxWorkbook {
     viewport: ViewportRange,
     opts: RenderViewportOptions = {},
   ): Promise<void> {
+    this.assertResourceHealthy();
     if (this._mode === 'worker') {
       throw new Error(
         "renderViewport(canvas) is unavailable in mode: 'worker'; use renderViewportToBitmap() and paint it via an ImageBitmapRenderingContext",
       );
     }
     if (!this.parsedWorkbook) throw new Error('Workbook not loaded');
-    // Hot path: during scroll the worksheet is already cached. Skip the await
-    // to keep the whole render in a single synchronous task so the browser
-    // doesn't paint between the canvas clear and the draw.
-    const ws = this.sheetCache.get(sheetIndex) ?? await this.getWorksheet(sheetIndex);
-    return renderWorksheetViewport(
-      { ws, styles: this.parsedWorkbook.styles, imageCache: this.imageCache, math: this.math },
-      target,
-      viewport,
-      // Always render with THIS instance's stable `_fetchImage` closure (placed
-      // after the spread so it wins over a caller-supplied one, matching
-      // docx/pptx). The closure's identity is the namespace key for the shared
-      // per-document caches AND the render-pass lease counter, and destroy()
-      // drops exactly `_fetchImage`'s namespaces — a per-call closure would
-      // split the cache/lease namespace every render and leave its bitmaps
-      // undropped at destroy(). Callers who need a custom byte source use the
-      // orchestrator's renderWorksheetViewport directly.
-      { ...opts, fetchImage: this._fetchImage },
-    );
+    const styles = this.parsedWorkbook.styles;
+    return this.withWorksheetArchiveOperation(sheetIndex, (ws) =>
+      renderWorksheetViewport(
+        { ws, styles, imageCache: this.imageCache, math: this.math },
+        target,
+        viewport,
+        // The stable closure uses the archive operation already reserved by
+        // withWorksheetArchiveOperation, avoiding a nested FIFO acquisition.
+        { ...opts, fetchImage: this._fetchImage },
+      ));
   }
 
   /**
@@ -435,14 +648,16 @@ export class XlsxWorkbook {
     viewport: ViewportRange,
     opts: WireRenderViewportOptions & { width: number; height: number },
   ): Promise<ImageBitmap> {
+    this.assertResourceHealthy();
     const wireOpts = { ...opts, dpr: opts.dpr ?? defaultDpr() };
     if (this._mode === 'worker') {
       if (!Number.isInteger(sheetIndex) || sheetIndex < 0 || sheetIndex >= this.sheetCount) {
         throw new Error(`Sheet index ${sheetIndex} out of range (count: ${this.sheetCount})`);
       }
-      const res = await this.bridge.request(
-        (id) => ({ type: 'renderViewport', id, sheetIndex, viewport, opts: wireOpts }) satisfies RenderWorkerRequest,
-      );
+      const res = await this.withWorksheetArchiveOperation(sheetIndex, () =>
+        this.bridge.request(
+          (id) => ({ type: 'renderViewport', id, sheetIndex, viewport, opts: wireOpts }) satisfies RenderWorkerRequest,
+        ));
       return (res as Extract<RenderWorkerResponse, { type: 'viewportRendered' }>).bitmap;
     }
     const off = new OffscreenCanvas(1, 1);
@@ -450,10 +665,56 @@ export class XlsxWorkbook {
     return off.transferToImageBitmap();
   }
 
+  private withWorksheetArchiveOperation<T>(
+    sheetIndex: number,
+    operation: (worksheet: Worksheet) => Promise<T>,
+  ): Promise<T> {
+    const cached = this.sheetCache.get(sheetIndex);
+    if (cached) return this.runArchiveOperation(() => operation(cached));
+    const active = this.sheetLoads.get(sheetIndex);
+    if (active) {
+      return this.runArchiveOperation(async () => operation(await active));
+    }
+    if (!this.parsedWorkbook || !this.rawData) {
+      return Promise.reject(new Error('Workbook not loaded'));
+    }
+    const sheetMeta = this.parsedWorkbook.workbook.sheets[sheetIndex];
+    if (!sheetMeta) return Promise.reject(new Error(`Sheet index ${sheetIndex} out of range`));
+
+    let resolveLoad!: (worksheet: Worksheet) => void;
+    let rejectLoad!: (error: unknown) => void;
+    const load = new Promise<Worksheet>((resolve, reject) => {
+      resolveLoad = resolve;
+      rejectLoad = reject;
+    });
+    // The composite render promise is the primary caller. A concurrent
+    // getWorksheet may also observe `load`, but a lone failed render must not
+    // leave this coordination promise as an unhandled rejection.
+    void load.catch(() => undefined);
+    this.sheetLoads.set(sheetIndex, load);
+    const combined = this.runArchiveOperation(async () => {
+      try {
+        const worksheet = await this.loadWorksheetStream(sheetIndex, sheetMeta.name);
+        resolveLoad(worksheet);
+        return await operation(worksheet);
+      } catch (error) {
+        rejectLoad(error);
+        throw error;
+      } finally {
+        if (this.sheetLoads.get(sheetIndex) === load) this.sheetLoads.delete(sheetIndex);
+      }
+    });
+    return combined;
+  }
+
   destroy(): void {
+    this.generation = (this.generation ?? 1) + 1;
+    for (const session of this.sheetSessions ?? []) void session.cancel('closed').catch(() => undefined);
+    this.sheetSessions?.clear();
     this.bridge.terminate();
     this.parsedWorkbook = null;
     this.sheetCache.clear();
+    this.sheetLoads.clear();
     // Release the Google-Fonts substitutes this workbook preloaded into the
     // shared FontFaceSet (main mode). Refcounted in core: a web font also used by
     // another open workbook stays until that one is destroyed too. Without this,
@@ -476,6 +737,11 @@ export class XlsxWorkbook {
     dropDuotoneBitmapCache(this._fetchImage);
     dropSvgImageCache(this._fetchImage);
     this.imageBlobCache.clear();
+    this.queuedImageLoads?.clear();
     this.rawData = null;
+  }
+
+  private assertResourceHealthy(): void {
+    if (this.resourceFailure) throw this.resourceFailure;
   }
 }

@@ -43,10 +43,10 @@
 //! spec defines no text colour for a diagram without its drawing part). See
 //! `packages/pptx/src/smartart-fallback-contrast.ts`.
 
+use crate::parse_preflighted_pptx_xml;
 use crate::text::{empty_level_bullets, parse_text_body, ShapeKind};
 use crate::types::*;
 use crate::{attr, child, read_zip_str, resolve_path, PptxZip};
-use ooxml_common::depth::parse_guarded;
 use std::collections::HashMap;
 
 /// Classify a `<dgm:pt>` `type` (ST_PtType, ECMA-376 §21.4.7.51) as one that
@@ -143,7 +143,7 @@ pub(crate) fn emit_smartart_fallback(
     let Ok(data_xml) = read_zip_str(zip, &data_path) else {
         return false;
     };
-    let Ok(doc) = parse_guarded(&data_xml) else {
+    let Ok(doc) = parse_preflighted_pptx_xml(&data_xml) else {
         return false;
     };
     let root = doc.root_element();
@@ -304,6 +304,7 @@ fn append_point_paragraphs(
         t_node,
         theme,
         &empty_rels,
+        "",
         None,
         Default::default(),
         Default::default(),
@@ -581,7 +582,7 @@ mod tests {
             }
             w.finish().unwrap();
         }
-        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+        PptxZip::new(Cursor::new(buf)).unwrap()
     }
 
     const DGM_NS: &str = concat!(

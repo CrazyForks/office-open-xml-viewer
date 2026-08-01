@@ -1,4 +1,4 @@
-import type { BodyElement, DocParagraph, FramePr } from '../types.js';
+import type { BodyElement, FramePr } from '../types.js';
 import type { ParagraphLayoutContext } from '../layout-context.js';
 import type {
   ParagraphMeasurementEnvironment,
@@ -11,14 +11,16 @@ import {
   resolveParagraphBorderEdges,
   type ParagraphBorderEdges,
 } from './paragraph-border-adjacency.js';
+import type { LayoutParagraphBlock, LayoutStoryBlock } from './layout-source-store.js';
+import type { ParagraphLayoutSource } from './text.js';
 
 /** Parser-private effective CT_FramePr state required for grouping, not API. */
 type EffectiveFramePr = FramePr & Readonly<{ __anchorLock?: boolean }>;
 
-export interface BodyFrameGroup {
+export interface BodyFrameGroup<Paragraph extends ParagraphLayoutSource = ParagraphLayoutSource> {
   readonly id: string;
-  readonly owner: DocParagraph;
-  readonly members: readonly DocParagraph[];
+  readonly owner: Paragraph;
+  readonly members: readonly Paragraph[];
   readonly sourceIndices: readonly number[];
   readonly framePr: FramePr;
 }
@@ -35,7 +37,7 @@ export interface BodyFrameGroup {
  * as final line geometry.
  */
 export function measureParagraphIntrinsicWidth(
-  paragraph: DocParagraph,
+  paragraph: ParagraphLayoutSource,
   context: ParagraphLayoutContext,
   maximumWidthPt: number,
   measurer: TextMeasurer,
@@ -71,9 +73,9 @@ export function effectiveFrameIdentity(framePr: FramePr): string {
 
 /** Build the body-local adjacency groups once, before pagination mutates pages. */
 export function collectBodyFrameGroups(
-  body: readonly BodyElement[],
-): WeakMap<DocParagraph, BodyFrameGroup> {
-  const result = new WeakMap<DocParagraph, BodyFrameGroup>();
+  body: readonly (BodyElement | LayoutStoryBlock)[],
+): WeakMap<ParagraphLayoutSource, BodyFrameGroup> {
+  const result = new WeakMap<ParagraphLayoutSource, BodyFrameGroup>();
   for (let index = 0; index < body.length;) {
     const element = body[index];
     if (element?.type !== 'paragraph' || !element.framePr) {
@@ -81,7 +83,7 @@ export function collectBodyFrameGroups(
       continue;
     }
     const identity = effectiveFrameIdentity(element.framePr);
-    const members: DocParagraph[] = [element];
+    const members: ParagraphLayoutSource[] = [element];
     const sourceIndices: number[] = [index];
     let next = index + 1;
     while (next < body.length) {
@@ -108,11 +110,11 @@ export function collectBodyFrameGroups(
   return result;
 }
 
-const bodyFrameGroups = new WeakMap<DocParagraph, BodyFrameGroup>();
-const bodyParagraphBorderEdges = new WeakMap<DocParagraph, ParagraphBorderEdges>();
+const bodyFrameGroups = new WeakMap<ParagraphLayoutSource, BodyFrameGroup>();
+const bodyParagraphBorderEdges = new WeakMap<ParagraphLayoutSource, ParagraphBorderEdges>();
 
 /** Prepare body identity/adjacency metadata independently of layout services. */
-export function prepareBodyFrameMetadata(body: readonly BodyElement[]): void {
+export function prepareBodyFrameMetadata(body: readonly (BodyElement | LayoutStoryBlock)[]): void {
   const groups = collectBodyFrameGroups(body);
   for (let index = 0; index < body.length; index += 1) {
     const element = body[index]!;
@@ -134,9 +136,11 @@ export function prepareBodyFrameMetadata(body: readonly BodyElement[]): void {
   }
 }
 
-export const bodyFrameGroupFor = (paragraph: DocParagraph): BodyFrameGroup | undefined =>
-  bodyFrameGroups.get(paragraph);
+export const bodyFrameGroupFor = (
+  paragraph: LayoutParagraphBlock,
+): BodyFrameGroup<LayoutParagraphBlock> | undefined =>
+  bodyFrameGroups.get(paragraph) as BodyFrameGroup<LayoutParagraphBlock> | undefined;
 
 export const bodyParagraphBorderEdgesFor = (
-  paragraph: DocParagraph,
+  paragraph: ParagraphLayoutSource,
 ): ParagraphBorderEdges | undefined => bodyParagraphBorderEdges.get(paragraph);

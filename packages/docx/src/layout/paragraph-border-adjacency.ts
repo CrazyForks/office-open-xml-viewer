@@ -1,4 +1,5 @@
-import type { DocParagraph, ParagraphBorders, ParaBorderEdge } from '../types.js';
+import type { ParagraphBorders, ParaBorderEdge } from '../types.js';
+import type { ParagraphLayoutSource } from './text.js';
 
 export type ParagraphBorderEdges = Readonly<{
   top: 'top' | 'between' | 'none';
@@ -67,8 +68,8 @@ export function hasVisibleParagraphBorder(
 
 /** Pure §17.3.1.7 matching predicate; callers supply actual flow adjacency. */
 export function paragraphsShareBorderBox(
-  previous: DocParagraph | null,
-  current: DocParagraph | null,
+  previous: ParagraphLayoutSource | null,
+  current: ParagraphLayoutSource | null,
 ): boolean {
   if (!previous || !current || previous.framePr || current.framePr) return false;
   return hasVisibleParagraphBorder(previous.borders)
@@ -78,12 +79,12 @@ export function paragraphsShareBorderBox(
 
 /** Resolves edge ownership once for any retained paragraph flow container. */
 export function resolveParagraphBorderEdges(
-  previous: DocParagraph | null,
-  current: DocParagraph,
-  next: DocParagraph | null,
+  previous: ParagraphLayoutSource | null,
+  current: ParagraphLayoutSource,
+  next: ParagraphLayoutSource | null,
   groupedFrameFlow = false,
 ): ParagraphBorderEdges {
-  const shares = (left: DocParagraph | null, right: DocParagraph | null): boolean =>
+  const shares = (left: ParagraphLayoutSource | null, right: ParagraphLayoutSource | null): boolean =>
     groupedFrameFlow
       ? !!left && !!right
         && !!left.framePr && !!right.framePr

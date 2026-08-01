@@ -1353,7 +1353,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       runs: [{ type: 'math', nodes: [], display: true, fontSize: 10, resourceKey: 'math:display' }],
     } as unknown as DocParagraph;
     const math = {
-      mathNodes: [], mathResourceKey: 'math:display', display: true,
+      math: true, mathResourceKey: 'math:display', display: true,
       fallbackText: 'x', measuredWidth: 10, mathAscent: 8, mathDescent: 2,
       fontSize: 10,
     } as unknown as LayoutMathSeg;
@@ -1619,7 +1619,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
         measuredWidth: 6, widthPt: 6, heightPt: 6,
       } as unknown as LayoutImageSeg,
       {
-        mathNodes: [], mathResourceKey: 'math:occurrence', sourceRunIndex: 3,
+        math: true, mathResourceKey: 'math:occurrence', sourceRunIndex: 3,
         display: false, fallbackText: 'xy', measuredWidth: 10,
         mathAscent: 8, mathDescent: 2, fontSize: 10,
       } as unknown as LayoutMathSeg,

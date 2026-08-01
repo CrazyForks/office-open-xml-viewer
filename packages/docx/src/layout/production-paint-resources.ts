@@ -8,10 +8,9 @@ import type {
   ImageRun,
   ShapeRun,
 } from '../types.js';
-import { stableFingerprint } from './fingerprint.js';
-import { documentImageMetadataRecords, documentMathOccurrences } from './resources.js';
-import type { ImageMetadataRecord } from './resources.js';
-import { imageResourceKey } from './source-key.js';
+import type { ImageMetadataRecord, MathOccurrence, PictureBulletSizeResolver } from './resources.js';
+import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
+import { chartResourceKey, imageResourceKey } from './source-key.js';
 import {
   createPaintResourceRegistry,
 } from './paint-resources.js';
@@ -20,10 +19,9 @@ import type {
   PaintResourceDescriptor,
   PaintResourceRegistry,
 } from './types.js';
-import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
 
 export function chartPaintResourceKey(source: import('./types.js').SourceRef): string {
-  return stableFingerprint('chart-resource', source);
+  return chartResourceKey(source);
 }
 
 type ImageDescriptorCandidate = Omit<ImagePaintResourceDescriptor, 'intrinsicSize' | 'mimeType'>;
@@ -51,16 +49,29 @@ function imageCandidate(
 
 function collectDescriptorCandidates(
   doc: DocxDocumentModel,
-  retainedImageMetadata?: readonly ImageMetadataRecord[],
-  acquisitionInputs?: BodyAcquisitionInputProjections,
-): PaintResourceDescriptor[] {
+  acquisitionInputs: BodyAcquisitionInputProjections | undefined,
+  mathOccurrences: readonly MathOccurrence[],
+  resolvePictureBulletSize?: PictureBulletSizeResolver,
+): Readonly<{ imageMetadata: ImageMetadataRecord[]; descriptors: PaintResourceDescriptor[] }> {
   const imageCandidates: ImageDescriptorCandidate[] = [];
+  const imageMetadata: ImageMetadataRecord[] = [];
   const descriptors: PaintResourceDescriptor[] = [];
+  const addImage = (
+    kind: 'image' | 'picture-bullet',
+    source: import('./types.js').SourceRef,
+    partPath: string,
+    mimeType: string,
+    widthPt: number,
+    heightPt: number,
+    run: Partial<ImageRun> = {},
+  ): void => {
+    const resourceKey = imageResourceKey(source, partPath);
+    imageCandidates.push(imageCandidate(kind, resourceKey, partPath, run));
+    imageMetadata.push({ resourceKey, mimeType, widthPt, heightPt });
+  };
   const visitRun = (run: DocRun, source: import('./types.js').SourceRef): void => {
     if (run.type === 'image') {
-      imageCandidates.push(imageCandidate(
-        'image', imageResourceKey(source, run.imagePath), run.imagePath, run,
-      ));
+      addImage('image', source, run.imagePath, run.mimeType, run.widthPt, run.heightPt, run);
       return;
     }
     if (run.type === 'chart') {
@@ -73,9 +84,17 @@ function collectDescriptorCandidates(
       return;
     }
     if (run.type !== 'shape') return;
+    const shape = run as ShapeRun & Readonly<{ textBoxContent?: BodyElement[] }>;
     const storyInstance = `${source.story}:${source.storyInstance}:${source.path.join('.')}`;
-    (run as ShapeRun).textBlocks?.forEach((block, blockIndex) => {
+    if (shape.textBoxContent !== undefined) {
+      visitBody(shape.textBoxContent, 'textbox', storyInstance);
+      return;
+    }
+    shape.textBlocks?.forEach((block, blockIndex) => {
       if (!block.imagePath) return;
+      if (!block.mimeType || block.imageWidthPt == null || block.imageHeightPt == null) {
+        throw new Error('Text-box compatibility image requires complete metadata');
+      }
       const textBoxSource = {
         story: 'textbox' as const,
         storyInstance,
@@ -83,10 +102,11 @@ function collectDescriptorCandidates(
         // paragraph and its optional image to run 0.
         path: [blockIndex, 0],
       };
-      imageCandidates.push(imageCandidate(
-        'image', imageResourceKey(textBoxSource, block.imagePath), block.imagePath,
+      addImage(
+        'image', textBoxSource, block.imagePath, block.mimeType,
+        block.imageWidthPt, block.imageHeightPt,
         { svgImagePath: block.svgImagePath },
-      ));
+      );
     });
   };
   const visitTable = (
@@ -121,18 +141,25 @@ function collectDescriptorCandidates(
   ): void => {
     const numbering = paragraph.numbering;
     if (numbering?.picBulletImagePath) {
-      imageCandidates.push(imageCandidate(
-        'picture-bullet',
-        imageResourceKey(source, numbering.picBulletImagePath),
-        numbering.picBulletImagePath,
-      ));
+      const size = resolvePictureBulletSize?.(paragraph);
+      const widthPt = numbering.picBulletWidthPt ?? size?.widthPt;
+      const heightPt = numbering.picBulletHeightPt ?? size?.heightPt;
+      if (!numbering.picBulletMimeType || widthPt == null || heightPt == null) {
+        throw new Error('Picture bullet requires complete metadata');
+      }
+      addImage(
+        'picture-bullet', source, numbering.picBulletImagePath,
+        numbering.picBulletMimeType, widthPt, heightPt,
+      );
     }
-    const authoredRuns = acquisitionInputs
-      ?.paragraphAcquisitionInput(paragraph, source).runs
+    const acquiredRuns = acquisitionInputs?.paragraphAcquisitionInput(paragraph, source).runs
       ?? paragraph.runs;
-    authoredRuns.forEach((run, runIndex) => {
-      if (run.type === 'image' || run.type === 'chart' || run.type === 'shape') {
-        visitRun(run, { ...source, path: [...source.path, runIndex] });
+    let publicRunIndex = 0;
+    acquiredRuns.forEach((acquiredRun, authoredRunIndex) => {
+      if (acquiredRun.type === 'unavailableDrawing') return;
+      const run = paragraph.runs[publicRunIndex++];
+      if (run && (run.type === 'image' || run.type === 'chart' || run.type === 'shape')) {
+        visitRun(run, { ...source, path: [...source.path, authoredRunIndex] });
       }
     });
   };
@@ -161,15 +188,8 @@ function collectDescriptorCandidates(
   for (const note of doc.footnotes ?? []) visitBody(note.content, 'footnote', note.id);
   for (const note of doc.endnotes ?? []) visitBody(note.content, 'endnote', note.id);
 
-  const metadata = retainedImageMetadata
-    ?? documentImageMetadataRecords(doc, undefined, acquisitionInputs);
-  const metadataByKey = new Map(metadata.map((record) => [record.resourceKey, record]));
-  const candidateKeys = imageCandidates.map((candidate) => candidate.resourceKey).sort();
-  const metadataKeys = metadata.map((record) => record.resourceKey).sort();
-  if (candidateKeys.length !== metadataKeys.length
-    || candidateKeys.some((key, index) => key !== metadataKeys[index])) {
-    throw new Error('Paint image descriptor membership differs from layout image metadata');
-  }
+  const metadataByKey = new Map(imageMetadata.map((record) => [record.resourceKey, record]));
+  if (metadataByKey.size !== imageMetadata.length) throw new Error('Duplicate image resource key');
   for (const [documentOrder, candidate] of imageCandidates.entries()) {
     const record = metadataByKey.get(candidate.resourceKey);
     if (!record) throw new Error(`Missing layout image metadata: ${candidate.resourceKey}`);
@@ -180,18 +200,30 @@ function collectDescriptorCandidates(
       intrinsicSize: { widthPt: record.widthPt, heightPt: record.heightPt },
     });
   }
-  for (const occurrence of documentMathOccurrences(doc)) {
+  for (const occurrence of mathOccurrences) {
     descriptors.push({ kind: 'math', resourceKey: occurrence.resourceKey });
   }
-  return descriptors;
+  return { imageMetadata, descriptors };
 }
 
-export function createDocumentPaintResourceRegistry(
+export interface DocumentSnapshotResourceProjection {
+  readonly imageMetadata: readonly ImageMetadataRecord[];
+  readonly paintResources: PaintResourceRegistry;
+}
+
+/** One exact source-keyed traversal owns both layout metadata and paint
+ * descriptors, including complete rich text-box stories. */
+export function projectDocumentSnapshotResources(
   doc: DocxDocumentModel,
-  retainedImageMetadata?: readonly ImageMetadataRecord[],
-  acquisitionInputs?: BodyAcquisitionInputProjections,
-): PaintResourceRegistry {
-  return createPaintResourceRegistry(
-    collectDescriptorCandidates(doc, retainedImageMetadata, acquisitionInputs),
+  acquisitionInputs: BodyAcquisitionInputProjections | undefined,
+  mathOccurrences: readonly MathOccurrence[],
+  resolvePictureBulletSize?: PictureBulletSizeResolver,
+): DocumentSnapshotResourceProjection {
+  const projected = collectDescriptorCandidates(
+    doc, acquisitionInputs, mathOccurrences, resolvePictureBulletSize,
   );
+  return Object.freeze({
+    imageMetadata: Object.freeze(projected.imageMetadata.map((record) => Object.freeze({ ...record }))),
+    paintResources: createPaintResourceRegistry(projected.descriptors),
+  });
 }

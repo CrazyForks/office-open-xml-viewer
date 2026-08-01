@@ -1,4 +1,5 @@
 import type { SourceRef } from './types.js';
+import { stableFingerprint } from './fingerprint.js';
 
 export function sourceKey(source: SourceRef): string {
   return `${source.story}:${encodeURIComponent(source.storyInstance)}:${source.path.join('.')}`;
@@ -26,6 +27,10 @@ export function imageResourceKey(source: SourceRef, partPath: string): string {
 
 export function mathResourceKey(source: SourceRef, localName: string): string {
   return `math:${sourceKey(source)}:${encodeURIComponent(localName)}`;
+}
+
+export function chartResourceKey(source: SourceRef): string {
+  return stableFingerprint('chart-resource', source);
 }
 
 export function anchorOccurrenceKey(source: SourceRef, parserLocalId: string): string {

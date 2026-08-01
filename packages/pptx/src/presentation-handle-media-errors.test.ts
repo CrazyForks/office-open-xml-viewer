@@ -247,7 +247,7 @@ describe('presentation media failure reporting', () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
-  it('draws a loading affordance while a large media extraction is pending', async () => {
+  it('keeps the rendered poster visible while media extraction is pending', async () => {
     installDom();
     const pending = deferred<Blob>();
     const canvasContext = makeContext();
@@ -258,7 +258,7 @@ describe('presentation media failure reporting', () => {
     );
     await Promise.resolve();
 
-    expect(canvasContext.fillText).toHaveBeenCalledWith(
+    expect(canvasContext.fillText).not.toHaveBeenCalledWith(
       expect.stringContaining('Loading'),
       expect.any(Number),
       expect.any(Number),

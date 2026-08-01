@@ -4,6 +4,27 @@ import { textBoxAcquisitionInput } from '../parser-model.js';
 import type { ShapeRun } from '../types.js';
 
 describe('normalizeTextBoxInput', () => {
+  it('projects complete text-box acquisition by count without traversing its subtree', () => {
+    const content = new Proxy([] as unknown[], {
+      get(target, property, receiver) {
+        if (property === 'length') return 5000;
+        throw new Error(`text-box subtree was traversed through ${String(property)}`);
+      },
+    });
+    const acquisition = textBoxAcquisitionInput({
+      type: 'shape',
+      textBoxContent: content,
+    } as unknown as ShapeRun, {
+      story: 'textbox', storyInstance: 'large', path: [],
+    });
+
+    expect(acquisition).toEqual({
+      kind: 'complete',
+      source: { story: 'textbox', storyInstance: 'large', path: [] },
+      blockCount: 5000,
+    });
+  });
+
   it('converts public textBlocks to parser-independent paragraph inputs in source order', () => {
     const shape = {
       type: 'shape',
@@ -179,15 +200,10 @@ describe('normalizeTextBoxInput', () => {
 
     expect(acquisition.kind).toBe('complete');
     if (acquisition.kind !== 'complete') throw new Error('expected complete parser input');
-    expect(acquisition.blocks.map((block) => block.type)).toEqual([
-      'paragraph', 'table', 'unsupportedTextBoxBlock',
-    ]);
-    expect(acquisition.blocks[0]).toMatchObject({
-      runs: [{ type: 'text', text: 'rich paragraph' }],
-    });
+    expect(acquisition.blockCount).toBe(3);
     expect(acquisition).not.toHaveProperty('paragraphs');
+    expect(acquisition).not.toHaveProperty('blocks');
     expect(Object.isFrozen(acquisition)).toBe(true);
-    expect(Object.isFrozen(acquisition.blocks)).toBe(true);
     expect(structuredClone(acquisition)).toEqual(acquisition);
   });
 });

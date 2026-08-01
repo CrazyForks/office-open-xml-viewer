@@ -602,25 +602,3 @@ export interface PictureElement {
    *  rendered in Phase A. */
   sp3d?: Sp3d;
 }
-
-// ===== Worker message protocol =====
-
-export type WorkerRequest =
-  | { kind: 'init'; wasmUrl: string }
-  | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number }
-  | { kind: 'extractMedia'; id: number; path: string }
-  | { kind: 'extractImage'; id: number; path: string }
-  // Project the retained archive to GitHub-flavoured markdown (`PptxArchive.to_markdown`,
-  // the handle already opened at `parse` — no re-copy of the file). Twin of
-  // `extractImage`: the archive stays in the worker, only the string crosses back.
-  | { kind: 'toMarkdown'; id: number };
-
-export type WorkerResponse =
-  // The model crosses the worker boundary as raw UTF-8 JSON bytes (transferred,
-  // not cloned); the main thread does the single `TextDecoder.decode` +
-  // `JSON.parse` into a `Presentation`. See `parse_pptx` (Rust) for why.
-  | { kind: 'parsed'; id: number; presentationJson: ArrayBuffer }
-  | { kind: 'mediaExtracted'; id: number; bytes: ArrayBuffer }
-  | { kind: 'imageExtracted'; id: number; bytes: ArrayBuffer }
-  | { kind: 'markdownRendered'; id: number; markdown: string }
-  | { kind: 'error'; id: number; message: string };

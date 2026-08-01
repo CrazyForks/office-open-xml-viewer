@@ -7,15 +7,20 @@
 //! consuming crate.
 
 pub mod blip;
+#[doc(hidden)]
+pub mod bounded_xml;
 pub mod chart;
 pub mod color;
 pub mod depth;
 pub mod drawing;
 pub mod fill;
+pub mod json_measurement;
 pub mod math;
 pub mod mce;
 pub mod ns;
+pub mod package_session;
 pub mod rels;
+pub mod resource;
 pub mod text;
 pub mod theme;
 pub mod units;

@@ -21,6 +21,10 @@ import { XlsxWorkbook } from './workbook.js';
  */
 
 class SilentWorker implements WorkerLike {
+  static instances: SilentWorker[] = [];
+  constructor() {
+    SilentWorker.instances.push(this);
+  }
   postMessage(): void {}
   addEventListener(): void {}
   removeEventListener(): void {}
@@ -39,12 +43,23 @@ interface DestroyProbe {
 
 // ── Fake FontFaceSet so destroy()'s Google-Fonts release is observable ───────
 const G = globalThis as Record<string, unknown>;
-const ORIG_FONTS = { document: G.document, self: G.self, fetch: G.fetch, FontFace: G.FontFace };
+const ORIG_FONTS = {
+  document: G.document,
+  self: G.self,
+  fetch: G.fetch,
+  FontFace: G.FontFace,
+  Worker: G.Worker,
+  location: G.location,
+};
 afterEach(() => {
   G.document = ORIG_FONTS.document;
   G.self = ORIG_FONTS.self;
   G.fetch = ORIG_FONTS.fetch;
   G.FontFace = ORIG_FONTS.FontFace;
+  G.Worker = ORIG_FONTS.Worker;
+  G.location = ORIG_FONTS.location;
+  SilentWorker.instances = [];
+  vi.restoreAllMocks();
 });
 
 const CSS = `@font-face { font-family: 'Carlito'; font-style: normal; font-weight: 400; src: url(https://fonts.gstatic.com/s/carlito/y.woff2) format('woff2'); }`;
@@ -81,6 +96,7 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     instance.bridge = bridge;
     // Fields destroy() clears after terminate(); undefined would throw.
     instance.sheetCache = new Map();
+    instance.sheetLoads = new Map();
     instance.imageCache = new Map();
     instance.imageBlobCache = new Map();
     instance.googleFontFaces = [];
@@ -100,6 +116,67 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     const { wb } = makeWorkbook();
     wb.destroy();
     expect(() => wb.destroy()).not.toThrow();
+  });
+
+  it('terminates the owned worker when a partially initialized load rejects', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    const failure = new Error('injected load failure');
+    vi.spyOn(
+      XlsxWorkbook.prototype as unknown as {
+        _load(buffer: ArrayBuffer, opts: object): Promise<void>;
+      },
+      '_load',
+    ).mockRejectedValueOnce(failure);
+
+    await expect(XlsxWorkbook.load(new ArrayBuffer(0))).rejects.toBe(failure);
+    expect(SilentWorker.instances).toHaveLength(1);
+    expect(SilentWorker.instances[0].terminated).toBe(true);
+  });
+
+  it('preserves the load error and terminates directly when destroy throws', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    const failure = new Error('injected load failure');
+    vi.spyOn(
+      XlsxWorkbook.prototype as unknown as {
+        _load(buffer: ArrayBuffer, opts: object): Promise<void>;
+      },
+      '_load',
+    ).mockRejectedValueOnce(failure);
+    vi.spyOn(XlsxWorkbook.prototype, 'destroy').mockImplementationOnce(() => {
+      throw new Error('cleanup failure');
+    });
+
+    await expect(XlsxWorkbook.load(new ArrayBuffer(0))).rejects.toBe(failure);
+    expect(SilentWorker.instances).toHaveLength(1);
+    expect(SilentWorker.instances[0].terminated).toBe(true);
+  });
+
+  it('terminates directly when construction fails before the factory owns an instance', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'not a valid base URL' };
+
+    await expect(
+      XlsxWorkbook.load(new ArrayBuffer(0), { wasmUrl: 'relative.wasm' }),
+    ).rejects.toThrow();
+    expect(SilentWorker.instances).toHaveLength(1);
+    expect(SilentWorker.instances[0].terminated).toBe(true);
+  });
+
+  it('rejects invalid resource options before fetch or worker creation', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    const fetch = vi.fn();
+    G.fetch = fetch;
+
+    await expect(
+      XlsxWorkbook.load('/workbook.xlsx', {
+        resourceLimits: { maxTotalInflatedBytes: Number.POSITIVE_INFINITY },
+      }),
+    ).rejects.toThrow(/resourceLimits\.maxTotalInflatedBytes/);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(SilentWorker.instances).toHaveLength(0);
   });
 
   // Wiring guard: destroy() must actually release the Google-Fonts substitutes
@@ -139,6 +216,7 @@ describe('XlsxWorkbook.destroy() — drops the shared image caches (GPU-leak gua
     const instance = Object.create(XlsxWorkbook.prototype) as Record<string, unknown>;
     instance.bridge = bridge;
     instance.sheetCache = new Map();
+    instance.sheetLoads = new Map();
     instance.imageCache = new Map();
     instance.imageBlobCache = new Map();
     instance.googleFontFaces = [];

@@ -7,8 +7,8 @@
 //! `ooxml_common::chart`.
 
 use crate::parse_color_node;
+use crate::parse_preflighted_pptx_xml;
 use crate::types::*;
-use ooxml_common::depth::parse_guarded;
 use std::collections::HashMap;
 
 /// `ooxml_common::chart::ColorResolver` implementation backed by pptx's
@@ -47,7 +47,7 @@ pub(crate) fn parse_legacy_chart(
     xml: &str,
     theme: &HashMap<String, String>,
 ) -> Option<ChartElement> {
-    let doc = parse_guarded(xml).ok()?;
+    let doc = parse_preflighted_pptx_xml(xml).ok()?;
     let root = doc.root_element();
     let resolver = PptxColorResolver { theme };
     let chart = ooxml_common::chart::parse_chart_part(root, &resolver)?;
@@ -76,9 +76,13 @@ pub(crate) fn parse_chartex(
     style_xml: Option<&str>,
     theme: &HashMap<String, String>,
 ) -> Option<ChartElement> {
-    let doc = parse_guarded(xml).ok()?;
+    let doc = parse_preflighted_pptx_xml(xml).ok()?;
     let root = doc.root_element();
     let resolver = PptxColorResolver { theme };
+    // The shared chart grammar reparses the optional style XML. Admit it
+    // through the PPTX-local node ceiling first so the second parse only ever
+    // sees an already bounded document.
+    let style_xml = style_xml.filter(|style| parse_preflighted_pptx_xml(style).is_ok());
     // chartEx (waterfall/boxWhisker/…) reads its title font size from the
     // associated chartStyle part when the `<cx:title>` itself carries none.
     let chart = ooxml_common::chart::parse_chartex_part(root, &resolver, style_xml)?;

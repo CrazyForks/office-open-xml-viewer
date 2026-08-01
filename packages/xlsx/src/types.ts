@@ -1,4 +1,14 @@
-import type { ChartModel, MathNode, SpaceLine } from '@silurus/ooxml-core';
+import type {
+  OoxmlResourceUsageSnapshot,
+  ChartModel,
+  MathNode,
+  SpaceLine,
+} from '@silurus/ooxml-core';
+import type {
+  NormalizedOoxmlResourcePolicy,
+  PullSessionIdentity,
+  WorkerErrorPayload,
+} from '@silurus/ooxml-core/worker';
 
 export interface Workbook {
   sheets: SheetMeta[];
@@ -1064,7 +1074,12 @@ export interface RenderViewportOptions {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number }
+  | {
+      type: 'parse';
+      id: number;
+      data: ArrayBuffer;
+      resourcePolicy: NormalizedOoxmlResourcePolicy;
+    }
   /** Parse one sheet lazily. Deliberately carries NO `data`: the worker already
    *  retained the whole-workbook buffer on the preceding `parse`, so re-sending
    *  it here would structured-clone the entire file per sheet switch for no
@@ -1075,8 +1090,9 @@ export type WorkerRequest =
       id: number;
       sheetIndex: number;
       sheetName: string;
-      maxZipEntryBytes?: number;
     }
+  | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } &
+      PullSessionIdentity<number>)
   /** Pull one embedded image's raw bytes by zip path from the buffer the worker
    *  retained at parse time. Twin of pptx/docx `extractImage`; xlsx uses the
    *  `type` discriminant. */
@@ -1092,8 +1108,14 @@ export type WorkerResponse =
   // bytes (transferred, not cloned); the main thread does the single
   // `TextDecoder.decode` + `JSON.parse` into a `ParsedWorkbook` / `Worksheet`.
   // See `parse_xlsx` (Rust) for why.
-  | { type: 'parsed'; id: number; workbookJson: ArrayBuffer }
+  | {
+      type: 'parsed';
+      id: number;
+      workbookJson: ArrayBuffer;
+      usage?: OoxmlResourceUsageSnapshot;
+    }
   | { type: 'parsedSheet'; id: number; worksheetJson: ArrayBuffer }
+  | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>)
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'markdownRendered'; id: number; markdown: string }
-  | { type: 'error'; id: number; message: string };
+  | ({ type: 'error'; id: number } & WorkerErrorPayload);

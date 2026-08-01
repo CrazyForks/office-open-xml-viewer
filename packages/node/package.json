@@ -30,6 +30,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json"
   },
   "dependencies": {
+    "@silurus/ooxml-core": "workspace:*",
     "@silurus/ooxml-pptx": "workspace:*",
     "@silurus/ooxml-docx": "workspace:*",
     "@silurus/ooxml-xlsx": "workspace:*"

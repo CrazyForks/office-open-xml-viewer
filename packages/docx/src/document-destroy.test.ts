@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   WorkerBridge,
   loadLocalFontMetrics,
@@ -23,6 +23,12 @@ import { attachDocumentLayoutRuntime } from './layout/runtime-state.js';
 /** In-memory Worker stand-in that never answers, so requests stay pending until
  *  the bridge is terminated. */
 class SilentWorker implements WorkerLike {
+  static instances: SilentWorker[] = [];
+
+  constructor() {
+    SilentWorker.instances.push(this);
+  }
+
   postMessage(): void {}
   addEventListener(): void {}
   removeEventListener(): void {}
@@ -41,6 +47,8 @@ const ORIG_FONTS = {
   fetch: G.fetch,
   FontFace: G.FontFace,
   OffscreenCanvas: G.OffscreenCanvas,
+  Worker: G.Worker,
+  location: G.location,
 };
 afterEach(() => {
   G.document = ORIG_FONTS.document;
@@ -48,6 +56,10 @@ afterEach(() => {
   G.fetch = ORIG_FONTS.fetch;
   G.FontFace = ORIG_FONTS.FontFace;
   G.OffscreenCanvas = ORIG_FONTS.OffscreenCanvas;
+  G.Worker = ORIG_FONTS.Worker;
+  G.location = ORIG_FONTS.location;
+  SilentWorker.instances = [];
+  vi.restoreAllMocks();
 });
 
 interface FakeFace { family: string }
@@ -180,6 +192,77 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     const { doc } = makeDocument();
     doc.destroy();
     expect(() => doc.destroy()).not.toThrow();
+  });
+
+  it('terminates the owned worker when a partially initialized load rejects', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    const failure = new Error('injected load failure');
+    vi.spyOn(
+      DocxDocument.prototype as unknown as {
+        _parse(
+          buffer: ArrayBuffer,
+          resourcePolicy: object,
+          useGoogleFonts?: boolean,
+          timeoutMs?: number,
+        ): Promise<void>;
+      },
+      '_parse',
+    ).mockRejectedValueOnce(failure);
+
+    await expect(DocxDocument.load(new ArrayBuffer(0))).rejects.toBe(failure);
+    expect(SilentWorker.instances).toHaveLength(1);
+    expect(SilentWorker.instances[0].terminated).toBe(true);
+  });
+
+  it('preserves the load error and terminates directly when destroy throws', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    const failure = new Error('injected load failure');
+    vi.spyOn(
+      DocxDocument.prototype as unknown as {
+        _parse(
+          buffer: ArrayBuffer,
+          resourcePolicy: object,
+          useGoogleFonts?: boolean,
+          timeoutMs?: number,
+        ): Promise<void>;
+      },
+      '_parse',
+    ).mockRejectedValueOnce(failure);
+    vi.spyOn(DocxDocument.prototype, 'destroy').mockImplementationOnce(() => {
+      throw new Error('cleanup failure');
+    });
+
+    await expect(DocxDocument.load(new ArrayBuffer(0))).rejects.toBe(failure);
+    expect(SilentWorker.instances).toHaveLength(1);
+    expect(SilentWorker.instances[0].terminated).toBe(true);
+  });
+
+  it('terminates directly when construction fails before the factory owns an instance', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'not a valid base URL' };
+
+    await expect(
+      DocxDocument.load(new ArrayBuffer(0), { wasmUrl: 'relative.wasm' }),
+    ).rejects.toThrow();
+    expect(SilentWorker.instances).toHaveLength(1);
+    expect(SilentWorker.instances[0].terminated).toBe(true);
+  });
+
+  it('rejects invalid resource options before fetch or worker creation', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    const fetch = vi.fn();
+    G.fetch = fetch;
+
+    await expect(
+      DocxDocument.load('/document.docx', {
+        resourceLimits: { maxArchiveEntryBytes: 0 },
+      }),
+    ).rejects.toThrow(/resourceLimits\.maxArchiveEntryBytes/);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(SilentWorker.instances).toHaveLength(0);
   });
 
   it('returns no bookmark before load or after destroy without poisoning loaded lookup', () => {

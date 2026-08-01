@@ -21,6 +21,7 @@ import type {
   TabStop,
 } from '../types.js';
 import type {
+  DeepReadonly,
   NumberingMarkerShapeInput,
   SourceRef,
   VmlTextPathAcquisitionInput,
@@ -124,7 +125,7 @@ export function shapeRunToDocRun(
 
 /** Plain parser-boundary snapshot used by retained line acquisition. Private
  * parser extensions are copied into named immutable fields exactly once. */
-export type ParagraphTextBearingRun = (DocxTextRun | (FieldRun & Partial<DocxTextRun>)) & Readonly<{
+type ParagraphTextFacts = Readonly<{
   fontFamilyHighAnsi?: string | null;
   fontFamilyEastAsia?: string | null;
   fontHint?: 'default' | 'eastAsia' | 'cs';
@@ -143,18 +144,33 @@ export type ParagraphTextBearingRun = (DocxTextRun | (FieldRun & Partial<DocxTex
   }>;
 }>;
 
-export type ParagraphMathRun = Extract<DocRun, { type: 'math' }> & Readonly<{
+export type ParagraphTextBearingRun =
+  | (DeepReadonly<Extract<DocRun, { type: 'text' }>> & ParagraphTextFacts)
+  | (DeepReadonly<Extract<DocRun, { type: 'field' }>> &
+    DeepReadonly<Partial<DocxTextRun>> & ParagraphTextFacts);
+
+export type ParagraphMathRun = Readonly<{
+  type: 'math';
+  display: boolean;
+  fontSize: number;
+  jc?: string;
   source: SourceRef;
   resourceKey: string;
+  fallbackText: string;
 }>;
 
-export type ParagraphShapeRun = Extract<DocRun, { type: 'shape' }> & Readonly<{
+export type ParagraphShapeRun = DeepReadonly<Extract<DocRun, { type: 'shape' }>> & Readonly<{
   vmlTextPathInput?: VmlTextPathAcquisitionInput;
   textBoxInput?: TextBoxAcquisitionInput;
   anchorAcquisitionInput?: AnchorAcquisitionInput;
 }>;
 
-type ParagraphAnchorPayloadRun = Extract<DocRun, { type: 'image' | 'chart' }> & Readonly<{
+export type ParagraphImageRun = DeepReadonly<Extract<DocRun, { type: 'image' }>> & Readonly<{
+  anchorAcquisitionInput?: AnchorAcquisitionInput;
+}>;
+
+export type ParagraphChartRun = DeepReadonly<Omit<Extract<DocRun, { type: 'chart' }>, 'chart'>> & Readonly<{
+  resourceKey: string;
   anchorAcquisitionInput?: AnchorAcquisitionInput;
 }>;
 
@@ -170,15 +186,15 @@ export interface UnavailableDrawingAcquisitionRun {
   readonly anchorAcquisitionInput?: AnchorAcquisitionInput;
 }
 
-type ParagraphAnchorHostRun = Extract<DocRun, { type: 'anchorHost' }> & Readonly<{
+type ParagraphAnchorHostRun = DeepReadonly<Extract<DocRun, { type: 'anchorHost' }>> & Readonly<{
   anchorOccurrenceId?: string;
 }>;
 
 export type ParagraphAcquisitionRun =
-  | (Extract<DocRun, { type: 'text' }> & ParagraphTextBearingRun)
-  | (Extract<DocRun, { type: 'field' }> & ParagraphTextBearingRun)
-  | Exclude<DocRun, { type: 'text' } | { type: 'field' } | { type: 'math' } | { type: 'shape' } | { type: 'image' } | { type: 'chart' } | { type: 'anchorHost' } | { type: 'unavailableDrawing' }>
-  | ParagraphAnchorPayloadRun
+  | ParagraphTextBearingRun
+  | DeepReadonly<Exclude<DocRun, { type: 'text' } | { type: 'field' } | { type: 'math' } | { type: 'shape' } | { type: 'image' } | { type: 'chart' } | { type: 'anchorHost' } | { type: 'unavailableDrawing' }>>
+  | ParagraphImageRun
+  | ParagraphChartRun
   | ParagraphAnchorHostRun
   | ParagraphShapeRun
   | ParagraphMathRun
@@ -197,12 +213,24 @@ export interface ComplexFieldBoundaryInput {
   readonly hyperlinkAnchor?: string;
 }
 
-export type ParagraphAcquisitionInput = Omit<DocParagraph, 'runs'> & Readonly<{
-  runs: ParagraphAcquisitionRun[];
+export type ParagraphAcquisitionInput = DeepReadonly<Omit<DocParagraph, 'runs'>> & Readonly<{
+  runs: readonly ParagraphAcquisitionRun[];
   complexFieldBoundaries?: readonly ComplexFieldBoundaryInput[];
   numberingMarkerShapeInput?: NumberingMarkerShapeInput;
   paragraphMarkShapeInput?: NumberingMarkerShapeInput;
 }>;
+
+/** Read-only paragraph shape accepted by layout-only policy helpers. Public
+ * hand-built paragraphs and canonical acquisition paragraphs both satisfy this
+ * structural contract; production always supplies the canonical arm. */
+export type ParagraphLayoutSource = DeepReadonly<Omit<DocParagraph, 'runs'>> & Readonly<{
+  runs: readonly (DeepReadonly<DocRun> | ParagraphAcquisitionRun)[];
+  complexFieldBoundaries?: readonly ComplexFieldBoundaryInput[];
+  numberingMarkerShapeInput?: NumberingMarkerShapeInput;
+  paragraphMarkShapeInput?: NumberingMarkerShapeInput;
+}>;
+
+export type ParagraphLayoutRun = ParagraphLayoutSource['runs'][number];
 
 export type FontScriptSlot = 'ascii' | 'highAnsi' | 'eastAsia' | 'complexScript';
 

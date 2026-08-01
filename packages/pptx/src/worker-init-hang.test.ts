@@ -13,11 +13,31 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
  */
 
 const initMock = vi.fn();
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
+const resourcePolicy = {
+  maxArchiveEntryBytes: null,
+  maxTotalInflatedBytes: null,
+} as const;
 class FakePptxArchive {
   constructor(_bytes: Uint8Array, _max?: bigint) {}
-  parse(): Uint8Array {
-    return new TextEncoder().encode('{"slides":[],"slideWidth":0,"slideHeight":0}');
+  presentation_bootstrap(): Uint8Array {
+    return new TextEncoder().encode(JSON.stringify({
+      slideCount: 0,
+      slideWidth: 914400,
+      slideHeight: 914400,
+      defaultTextColor: null,
+      majorFont: null,
+      minorFont: null,
+      hlinkColor: null,
+      folHlinkColor: null,
+      slides: [],
+    }));
   }
+  close_presentation_session(): void {}
   extract_media(_p: string): Uint8Array {
     return new Uint8Array([1, 2, 3]);
   }
@@ -80,7 +100,9 @@ describe('pptx worker.ts — init failure never hangs a request (AR4)', () => {
     const fake = await loadWorker();
 
     fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
-    fake.onmessage?.({ data: { kind: 'parse', id: 7, buffer: new ArrayBuffer(4) } } as MessageEvent);
+    fake.onmessage?.({
+      data: { kind: 'parse', id: 7, buffer: new ArrayBuffer(4), resourcePolicy },
+    } as MessageEvent);
     // Let the awaited (rejected) initPromise settle and the handler run its catch.
     await vi.waitFor(() => {
       expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'error')).toBe(true);
@@ -96,22 +118,72 @@ describe('pptx worker.ts — init failure never hangs a request (AR4)', () => {
     // Crucially: the request settled — no pending promise is left hanging.
   });
 
-  it('a parse after a SUCCESSFUL init responds with a parsed model', async () => {
+  it('a parse after a SUCCESSFUL init responds with a compact bootstrap', async () => {
     initMock.mockResolvedValue(undefined);
     const fake = await loadWorker();
 
     fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
-    fake.onmessage?.({ data: { kind: 'parse', id: 3, buffer: new ArrayBuffer(4) } } as MessageEvent);
+    fake.onmessage?.({
+      data: { kind: 'parse', id: 3, buffer: new ArrayBuffer(4), resourcePolicy },
+    } as MessageEvent);
     await vi.waitFor(() => {
-      expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'parsed')).toBe(true);
+      expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'presentationOpened')).toBe(true);
     });
 
-    const parsed = fake.posted.find((m) => (m as { kind?: string }).kind === 'parsed') as {
+    const parsed = fake.posted.find((m) => (m as { kind?: string }).kind === 'presentationOpened') as {
       kind: string;
       id: number;
     };
     expect(parsed.id).toBe(3);
     // No `ready` handshake is emitted anymore (initPromise pattern replaces it).
     expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'ready')).toBe(false);
+  });
+
+  it('rejects a second parse reserved while the first parse is still opening', async () => {
+    const init = deferred<void>();
+    initMock.mockReturnValue(init.promise);
+    const fake = await loadWorker();
+
+    fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
+    fake.onmessage?.({
+      data: { kind: 'parse', id: 10, buffer: new ArrayBuffer(4), resourcePolicy },
+    } as MessageEvent);
+    fake.onmessage?.({
+      data: { kind: 'parse', id: 11, buffer: new ArrayBuffer(4), resourcePolicy },
+    } as MessageEvent);
+
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'error',
+      id: 11,
+      code: 'ooxml-pptx-parse-already-started',
+    })));
+    init.resolve();
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'presentationOpened',
+      id: 10,
+    })));
+  });
+
+  it('correlates a synchronous slide-open reservation failure instead of hanging', async () => {
+    initMock.mockResolvedValue(undefined);
+    const fake = await loadWorker();
+
+    fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
+    fake.onmessage?.({
+      data: {
+        kind: 'openSlideSession',
+        id: 20,
+        slideIndex: 0,
+        sessionId: 0,
+        operationId: 1,
+        generation: 1,
+      },
+    } as MessageEvent);
+
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'error',
+      id: 20,
+      message: expect.stringContaining('session id'),
+    })));
   });
 });

@@ -1,20 +1,14 @@
-/**
- * Render-capable worker entry: a superset of `worker.ts` that keeps the parsed
- * Presentation worker-side and renders slides into an OffscreenCanvas,
- * replying with transferable ImageBitmaps. Used by
- * `PptxPresentation.load(src, { mode: 'worker' })`; the slim parse-only
- * `worker.ts` stays untouched so main-mode users pay no bundle growth.
- *
- * Single-document contract: the proxy issues one `parse` and then renders.
- * A re-parse while a render is suspended mid-await would let that render
- * resume against the new model — callers must not interleave them.
- */
-import type { MediaElement, Presentation } from './types';
 import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 import { renderSlide, type PptxTextRunInfo } from './renderer';
-import { selectNotes } from './notes';
-import { findMimeTypeForPath } from './media-mime';
-import { PPTX_GOOGLE_FONTS, pptxFontPreloadNames } from './google-fonts';
+import { PPTX_GOOGLE_FONTS } from './google-fonts';
+import {
+  findPreflightMimeType,
+  PresentationPreflightBuilder,
+  type PresentationPreflight,
+} from './presentation-preflight';
+import { PptxSlideRepository } from './slide-repository';
+import { loadPptxSlideFromCursor } from './slide-cursor-operation';
+import { SlidePullWorker } from './slide-pull-worker';
 import {
   preloadGoogleFonts,
   decodeDataUrl,
@@ -23,218 +17,267 @@ import {
   dropDuotoneBitmapCache,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
-import type { RenderWorkerRequest, RenderWorkerResponse, PresentationMeta } from './worker-protocol';
+import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
+import {
+  HARD_MAX_PPTX_CACHED_SLIDES,
+  HARD_MAX_PPTX_CACHED_SLIDE_PROJECTION_BYTES,
+  HARD_MAX_PPTX_RAW_PART_CACHE_BYTES,
+  HARD_MAX_PPTX_RAW_PART_CACHE_ENTRIES,
+  resourcePolicyForWasm,
+  serializeWorkerError,
+} from '@silurus/ooxml-core/worker';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
+import type {
+  PresentationBootstrap,
+  RenderWorkerRequest,
+  RenderWorkerResponse,
+} from './worker-protocol';
 
-// RB6: same self-poison + auto-respawn as the parse-only worker. A trap during
-// parse (or an in-worker media/image read) recycles the instance so the next
-// document renders on clean linear memory instead of a corrupted heap. The host
-// owns the `PptxArchive` handle (`host.archive`): copies the file into WASM ONCE
-// and opens it ONCE; the in-worker `getMedia` / `getImage` closures then read
-// bytes by zip path straight from the retained archive. Freed + replaced on a
-// re-parse, freed + nulled by the host on a trap.
 const host = new WasmParserHost<PptxArchive>(init, {
-  freeArchive: (a) => a.free(),
-  // RB6 recovery must re-instantiate, not re-`init` (a no-op against the
-  // wasm-bindgen singleton). `reinit` forces fresh linear memory after a trap.
+  freeArchive: (archive) => archive.free(),
   reinit,
 });
-let pres: Presentation | null = null;
-/** Settled before any render when `useGoogleFonts` was requested. The resolved
- *  value (the preloaded FontFace[]) is unused here: the worker owns its own
- *  FontFaceSet (`self.fonts`) and terminates with it, so there is nothing to
- *  release — only the sequencing (fonts landed before first paint) matters. */
-let fontsLoaded: Promise<unknown> = Promise.resolve();
-const mediaCache = new Map<string, Promise<Blob>>();
-const imageCache = new Map<string, Promise<Blob>>();
 
-const post = (msg: RenderWorkerResponse, transfer?: Transferable[]) =>
-  (self.postMessage as (m: unknown, t?: Transferable[]) => void)(msg, transfer);
+const executeArchive = <T>(operation: (archive: PptxArchive) => T): T => {
+  const archive = host.archive;
+  if (!archive) throw new Error('Presentation not loaded');
+  return host.run(() => operation(archive));
+};
+
+const slidePull = new SlidePullWorker(
+  () => host.archive,
+  undefined,
+  (operation) => executeArchive(operation),
+);
+
+let preflight: PresentationPreflight | null = null;
+let preflightBuilder: PresentationPreflightBuilder | null = null;
+let slides: PptxSlideRepository | null = null;
+let generation = 0;
+let nextOperationId = 1;
+type PresentationLifecycleState = 'empty' | 'opening' | 'ready' | 'failed';
+let presentationState: PresentationLifecycleState = 'empty';
+let fontsLoaded: Promise<unknown> = Promise.resolve();
+let resourceUsage: OoxmlResourceUsageSnapshot | undefined;
+const rawParts = new BoundedRawPartCache({
+  maxEntries: HARD_MAX_PPTX_RAW_PART_CACHE_ENTRIES,
+  maxBytes: HARD_MAX_PPTX_RAW_PART_CACHE_BYTES,
+});
+
+function reservePresentationParse(): void {
+  if (presentationState !== 'empty') {
+    const error = new Error('this PPTX render worker already owns a presentation parse');
+    error.name = 'PptxWorkerStateError';
+    throw Object.assign(error, { code: 'ooxml-pptx-parse-already-started' });
+  }
+  presentationState = 'opening';
+}
+
+const post = (message: RenderWorkerResponse, transfer?: Transferable[]) =>
+  (self.postMessage as (value: unknown, transfer?: Transferable[]) => void)(message, transfer);
+
+function requirePreflight(): PresentationPreflight {
+  if (!preflight) throw new Error('No pptx loaded');
+  return preflight;
+}
+
+function requireSlides(): PptxSlideRepository {
+  if (!slides) throw new Error('No pptx loaded');
+  return slides;
+}
+
+function loadSlide(slideIndex: number) {
+  const operationId = nextOperationId++;
+  const currentGeneration = generation;
+  return slidePull.run(() => loadPptxSlideFromCursor(
+    (operation) => executeArchive(operation),
+    slideIndex,
+    { operationId, generation: currentGeneration },
+    preflightBuilder
+      ? (index, slide, usage) => {
+        resourceUsage = usage;
+        return preflightBuilder?.prepareSlide(slide, usage);
+      }
+      : undefined,
+  ));
+}
 
 function getMedia(path: string): Promise<Blob> {
-  const hit = mediaCache.get(path);
-  if (hit) return hit;
-  const p = (async () => {
-    const loaded = host.archive;
-    if (!loaded || !pres) throw new Error('No pptx loaded');
-    const bytes = host.run(() => loaded.extract_media(path));
-    return new Blob([new Uint8Array(bytes).slice()], { type: findMimeTypeForPath(pres, path) });
-  })();
-  mediaCache.set(path, p);
-  return p;
+  const mimeType = findPreflightMimeType(requirePreflight(), path);
+  return rawParts.get(path, mimeType, () => slidePull.run(() => {
+    const bytes = executeArchive((archive) => archive.extract_media(path));
+    return new Blob(
+      [new Uint8Array(bytes).slice().buffer],
+      { type: mimeType },
+    );
+  }));
 }
 
-/** In-worker image-byte loader (twin of {@link getMedia}). The renderer's
- *  `fetchImage` routes here in worker mode, so image bytes are decoded straight
- *  from the retained archive with no main-thread round-trip. Mime travels on the
- *  element, so the caller supplies it. */
 function getImage(path: string, mimeType: string): Promise<Blob> {
-  const hit = imageCache.get(path);
-  if (hit) return hit;
-  const p = (async () => {
-    const loaded = host.archive;
-    if (!loaded) throw new Error('No pptx loaded');
-    const bytes = host.run(() => loaded.extract_image(path));
-    return new Blob([new Uint8Array(bytes).slice()], { type: mimeType });
-  })();
-  imageCache.set(path, p);
-  return p;
+  return rawParts.get(path, mimeType, () => slidePull.run(() => {
+    const bytes = executeArchive((archive) => archive.extract_image(path));
+    return new Blob([new Uint8Array(bytes).slice().buffer], { type: mimeType });
+  }));
 }
 
-self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
-  const req = e.data;
+async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'parse' }>) {
+  await slidePull.reset();
+  slides?.clear();
+  slides = null;
+  preflight = null;
+  preflightBuilder = null;
+  generation += 1;
+  nextOperationId = 1;
+  rawParts.clear();
+  dropBitmapCacheByPath(getImage);
+  dropDuotoneBitmapCache(getImage);
+  dropSvgImageCache(getImage);
+  fontsLoaded = Promise.resolve();
+  resourceUsage = undefined;
 
-  if (req.kind === 'init') {
-    // Retain the init lifecycle in the host (docx/xlsx pattern) rather than a
-    // `ready` flag + handshake. Every request below `await`s `ensureReady()`, so
-    // a REJECTED init rejects the request (the outer catch posts an `error`
-    // response the bridge turns into a rejected `load()` / render), never a
-    // silent hang on a main-side wait. After a trap, `ensureReady()` respawns.
-    host.setWasmUrl(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
+  const [maxEntry, maxTotal] = resourcePolicyForWasm(request.resourcePolicy);
+  const bootstrap = await slidePull.run(() => executeArchiveFromNew(
+    request.buffer,
+    maxEntry,
+    maxTotal,
+  ));
+  preflightBuilder = new PresentationPreflightBuilder(bootstrap);
+  slides = new PptxSlideRepository({
+    slideCount: bootstrap.slideCount,
+    maxCachedSlides: HARD_MAX_PPTX_CACHED_SLIDES,
+    maxCachedStructuralBytes: HARD_MAX_PPTX_CACHED_SLIDE_PROJECTION_BYTES,
+    loadSlide,
+  });
+  for (let index = 0; index < bootstrap.slideCount; index += 1) {
+    await slides.withSlide(index, () => undefined);
+  }
+  preflight = preflightBuilder.finish();
+  preflightBuilder = null;
+  if (request.useGoogleFonts) {
+    fontsLoaded = preloadGoogleFonts(preflight.fontPreloadNames, PPTX_GOOGLE_FONTS);
+  }
+  return preflight;
+}
+
+function executeArchiveFromNew(
+  buffer: ArrayBuffer,
+  maxEntry: bigint | null | undefined,
+  maxTotal: bigint | null | undefined,
+): PresentationBootstrap {
+  return host.run(() => {
+    const archive = new PptxArchive(new Uint8Array(buffer), maxEntry, maxTotal);
+    host.setArchive(archive);
+    return JSON.parse(
+      new TextDecoder().decode(archive.presentation_bootstrap()),
+    ) as PresentationBootstrap;
+  });
+}
+
+self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
+  const request = event.data;
+  if (request.kind === 'init') {
+    host.setWasmUrl(decodeDataUrl(request.wasmUrl) ?? request.wasmUrl);
     return;
   }
 
+  let ownsParseReservation = false;
   try {
+    if (request.kind === 'parse') {
+      reservePresentationParse();
+      ownsParseReservation = true;
+    }
     await host.ensureReady();
-    if (req.kind === 'parse') {
-      // Cached blobs belong to the previous document; serving them after a
-      // re-parse would silently return the wrong file's media/image.
-      mediaCache.clear();
-      imageCache.clear();
-      // A re-parse starts a fresh document: also drop the shared, per-`getImage`
-      // decoded caches (base raster, a:duotone recolour, SVG object URLs),
-      // symmetric with PptxPresentation.destroy(). The worker's `getImage` closure
-      // is a stable module-level identity, so without this a new deck sharing a
-      // zip path (e.g. ppt/media/image1.png) would be served the previous file's
-      // decoded bitmap, and the GPU/URL handles would linger past the LRU cap.
-      // Symmetric across docx/pptx/xlsx render workers (issue #781).
-      dropBitmapCacheByPath(getImage);
-      dropDuotoneBitmapCache(getImage);
-      dropSvgImageCache(getImage);
-      const max =
-        typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
-          ? BigInt(req.maxZipEntryBytes)
-          : undefined;
-      const bytes = new Uint8Array(req.buffer);
-      // Construction + `parse()` run under `host.run` so a trap in EITHER poisons
-      // + recycles the instance (and frees the archive). `setArchive` frees any
-      // prior handle first — the re-parse dispose. `parse()` returns UTF-8 JSON
-      // bytes (Result<Vec<u8>, JsValue>). Render mode consumes the model
-      // in-worker, so decode + parse here (one decode, no passthrough).
-      pres = host.run(() => {
-        const archive = new PptxArchive(bytes, max);
-        host.setArchive(archive);
-        return JSON.parse(new TextDecoder().decode(archive.parse())) as Presentation;
+
+    if (request.kind === 'parse') {
+      const compact = await openPresentation(request);
+      post({
+        kind: 'presentationReady',
+        id: request.id,
+        preflight: compact,
+        usage: resourceUsage,
       });
-      if (req.useGoogleFonts) {
-        // Kick the preload now so it overlaps with main-thread work; renders
-        // await `fontsLoaded` so text never rasterizes with fallback metrics.
-        fontsLoaded = preloadGoogleFonts(
-          pptxFontPreloadNames(pres),
-          PPTX_GOOGLE_FONTS,
-        );
-      }
-      const meta: PresentationMeta = {
-        slideCount: pres.slides.length,
-        slideWidth: pres.slideWidth,
-        slideHeight: pres.slideHeight,
-        majorFont: pres.majorFont ?? null,
-        minorFont: pres.minorFont ?? null,
-        notes: pres.slides.map((_, i) => selectNotes(pres!.slides, i)),
-        mediaElements: pres.slides.map((s) =>
-          s.elements.filter((el): el is MediaElement => el.type === 'media')),
-        hidden: pres.slides.map((s) => s.hidden ?? false),
-        partNames: pres.slides.map((s) => s.partName),
-      };
-      post({ kind: 'parsedMeta', id: req.id, meta });
+      presentationState = 'ready';
       return;
     }
 
-    if (req.kind === 'renderSlide') {
-      if (!pres) throw new Error('No pptx loaded');
-      const slide = pres.slides[req.slideIndex];
-      if (!slide) throw new Error(`Slide index ${req.slideIndex} out of range (count: ${pres.slides.length})`);
-      await fontsLoaded;
-      const canvas = new OffscreenCanvas(1, 1); // renderSlide resizes it
-      // IX6 — collect the run geometry the same render emits so the main thread
-      // can build its selection / find overlay without a second render. The
-      // callback runs worker-side; only the resulting plain array crosses back.
-      const runs: PptxTextRunInfo[] = [];
-      await renderSlide(canvas, slide, pres.slideWidth, pres.slideHeight, {
-        width: req.width,
-        dpr: req.dpr,
-        defaultTextColor: pres.defaultTextColor,
-        majorFont: pres.majorFont,
-        minorFont: pres.minorFont,
-        hlinkColor: pres.hlinkColor ?? null,
-        fetchMedia: getMedia,
-        fetchImage: getImage,
-        skipMediaControls: req.skipMediaControls,
-        dim: req.dim,
-        // math intentionally omitted: MathJax needs a DOM <script>; worker
-        // mode skips equations (documented in the design spec).
-      }, (r) => runs.push(r));
-      const bitmap = canvas.transferToImageBitmap();
-      post({ kind: 'slideRendered', id: req.id, bitmap, runs }, [bitmap]);
-      return;
-    }
-    if (req.kind === 'collectRuns') {
-      // IX6 — render a slide purely to harvest its text-run geometry (find scans
-      // every slide). The bitmap is discarded worker-side; only `runs` crosses
-      // the wire. Same renderer / width as the main-mode `_collectSlideRuns`, so
-      // the geometry is identical to what a `renderSlide` of the same slide draws
-      // (no dpr / dim needed: run geometry is in CSS px, independent of dpr, and
-      // dimming does not move glyphs — matching main-mode `_collectSlideRuns`).
-      if (!pres) throw new Error('No pptx loaded');
-      const slide = pres.slides[req.slideIndex];
-      if (!slide) throw new Error(`Slide index ${req.slideIndex} out of range (count: ${pres.slides.length})`);
-      await fontsLoaded;
-      const canvas = new OffscreenCanvas(1, 1);
-      const runs: PptxTextRunInfo[] = [];
-      await renderSlide(canvas, slide, pres.slideWidth, pres.slideHeight, {
-        width: req.width,
-        defaultTextColor: pres.defaultTextColor,
-        majorFont: pres.majorFont,
-        minorFont: pres.minorFont,
-        hlinkColor: pres.hlinkColor ?? null,
-        fetchMedia: getMedia,
-        fetchImage: getImage,
-      }, (r) => runs.push(r));
-      post({ kind: 'runsCollected', id: req.id, runs });
+    const compact = requirePreflight();
+    await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
+
+    if (request.kind === 'renderSlide') {
+      const { bitmap, runs } = await requireSlides().withSlide(request.slideIndex, async (slide) => {
+        await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
+        await fontsLoaded;
+        const canvas = new OffscreenCanvas(1, 1);
+        const runs: PptxTextRunInfo[] = [];
+        await renderSlide(canvas, slide, compact.slideWidth, compact.slideHeight, {
+          width: request.width,
+          dpr: request.dpr,
+          defaultTextColor: compact.defaultTextColor,
+          majorFont: compact.majorFont,
+          minorFont: compact.minorFont,
+          hlinkColor: compact.hlinkColor,
+          fetchMedia: getMedia,
+          fetchImage: getImage,
+          skipMediaControls: request.skipMediaControls,
+          dim: request.dim,
+        }, (run) => runs.push(run));
+        return { bitmap: canvas.transferToImageBitmap(), runs };
+      });
+      post({ kind: 'slideRendered', id: request.id, bitmap, runs }, [bitmap]);
       return;
     }
 
-    if (req.kind === 'extractMedia') {
-      const blob = await getMedia(req.path);
-      const bytes = await blob.arrayBuffer();
-      post({ kind: 'mediaExtracted', id: req.id, bytes }, [bytes]);
+    if (request.kind === 'collectRuns') {
+      const runs = await requireSlides().withSlide(request.slideIndex, async (slide) => {
+        await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
+        await fontsLoaded;
+        const canvas = new OffscreenCanvas(1, 1);
+        const runs: PptxTextRunInfo[] = [];
+        await renderSlide(canvas, slide, compact.slideWidth, compact.slideHeight, {
+          width: request.width,
+          defaultTextColor: compact.defaultTextColor,
+          majorFont: compact.majorFont,
+          minorFont: compact.minorFont,
+          hlinkColor: compact.hlinkColor,
+          fetchMedia: getMedia,
+          fetchImage: getImage,
+        }, (run) => runs.push(run));
+        return runs;
+      });
+      post({ kind: 'runsCollected', id: request.id, runs });
       return;
     }
 
-    if (req.kind === 'extractImage') {
-      // Worker render mode decodes images in-worker via the getImage closure;
-      // this message arm exists only for protocol parity with worker.ts. Raw
-      // bytes are read straight from the retained archive (no mime needed for a
-      // byte transfer).
-      const archive = host.archive;
-      if (!archive) throw new Error('No pptx loaded');
-      const raw = host.run(() => archive.extract_image(req.path));
-      const bytes = new Uint8Array(raw).slice().buffer;
-      post({ kind: 'imageExtracted', id: req.id, bytes }, [bytes]);
+    if (request.kind === 'extractMedia') {
+      const bytes = await (await getMedia(request.path)).arrayBuffer();
+      post({ kind: 'mediaExtracted', id: request.id, bytes }, [bytes]);
       return;
     }
 
-    if (req.kind === 'toMarkdown') {
-      // Project the retained archive to markdown, straight from the handle the
-      // worker already holds (same source as worker.ts's parse-mode arm).
-      const archive = host.archive;
-      if (!archive) throw new Error('No pptx loaded');
-      const markdown = host.run(() => archive.to_markdown());
-      post({ kind: 'markdownRendered', id: req.id, markdown });
+    if (request.kind === 'extractImage') {
+      const mimeType = findPreflightMimeType(compact, request.path);
+      const bytes = await (await getImage(request.path, mimeType)).arrayBuffer();
+      post({ kind: 'imageExtracted', id: request.id, bytes }, [bytes]);
       return;
     }
-  } catch (err) {
-    if ('id' in req) {
-      post({ kind: 'error', id: req.id, message: err instanceof Error ? err.message : String(err) });
+
+    if (request.kind === 'toMarkdown') {
+      const markdown = await slidePull.run(() =>
+        executeArchive((archive) => archive.to_markdown()));
+      post({ kind: 'markdownRendered', id: request.id, markdown });
+    }
+  } catch (error) {
+    if (ownsParseReservation) presentationState = 'failed';
+    if (request.kind === 'parse') {
+      slides?.clear();
+      slides = null;
+      preflight = null;
+      preflightBuilder = null;
+    }
+    try {
+      post({ kind: 'error', id: request.id, ...serializeWorkerError(error) });
+    } catch {
+      // The worker response channel is unavailable; local cleanup already ran.
     }
   }
 };

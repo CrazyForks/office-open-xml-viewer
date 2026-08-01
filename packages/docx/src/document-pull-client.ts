@@ -1,0 +1,203 @@
+import type { OoxmlResourceUsageSnapshot, WorkerBridgeTransport } from '@silurus/ooxml-core';
+import {
+  BoundedPullSession,
+  HARD_MAX_DOCX_BODY_CHUNK_JSON_BYTES,
+  HARD_MAX_DOCX_BOOTSTRAP_JSON_BYTES,
+  PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
+  PULL_SESSION_PROTOCOL,
+  type PullSessionIdentity,
+  type PullSessionResponse,
+} from '@silurus/ooxml-core/worker';
+import type { BodyElement, DocxDocumentModel } from './types.js';
+import {
+  layoutSourceModelAdapterFromOwnedModel,
+  type LayoutSourceModelAdapter,
+} from './layout-source-model-adapter.js';
+
+export const DOCX_INITIAL_BODY_PULL_BYTES = 1024 * 1024;
+const MAX_DOCUMENT_UNIT_BYTES = Math.max(
+  HARD_MAX_DOCX_BODY_CHUNK_JSON_BYTES,
+  HARD_MAX_DOCX_BOOTSTRAP_JSON_BYTES,
+);
+
+type DocumentUnit =
+  | { readonly kind: 'body'; readonly body: BodyElement[] }
+  | { readonly kind: 'complete'; readonly document: DocxDocumentModel };
+
+export interface MaterializeDocumentPullOptions {
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+  readonly onUsage?: (usage: OoxmlResourceUsageSnapshot) => void;
+}
+
+interface DocumentPullAccumulator<TResult> {
+  acceptBody(body: BodyElement[]): void;
+  complete(document: DocxDocumentModel): TResult;
+}
+
+/** Drain one sequential DOCX operation into the backward-compatible public
+ * model. Each transferred JSON unit is decoded, accepted, and ACKed before the
+ * worker may produce another; no monolithic document JSON crosses realms. */
+export async function materializeDocumentPullSession(
+  transport: WorkerBridgeTransport<PullSessionResponse<ArrayBuffer, number>>,
+  identity: PullSessionIdentity<number>,
+  options: MaterializeDocumentPullOptions = {},
+): Promise<DocxDocumentModel> {
+  const body: BodyElement[] = [];
+  return drainDocumentPullSession(transport, identity, options, {
+    acceptBody: (unitBody) => { body.push(...unitBody); },
+    complete: (document) => {
+      document.body = body;
+      return document;
+    },
+  });
+}
+
+/** Drain a sequential DOCX operation directly into its two required ownership
+ * graphs: the mutable public compatibility model and the immutable layout
+ * source. The second graph is detached while each bounded body unit is live,
+ * avoiding a full-document clone after the complete public body accumulates. */
+export async function materializeDocumentPullAdapterSession(
+  transport: WorkerBridgeTransport<PullSessionResponse<ArrayBuffer, number>>,
+  identity: PullSessionIdentity<number>,
+  options: MaterializeDocumentPullOptions = {},
+): Promise<LayoutSourceModelAdapter> {
+  const models = await materializeDocumentPullOwnedModelsSession(transport, identity, options);
+  return layoutSourceModelAdapterFromOwnedModel(models.document, models.ownedLayoutDocument);
+}
+
+export interface MaterializedDocumentPullOwnedModels {
+  /** Parser-shaped model retained for public compatibility or worker fallback. */
+  readonly document: DocxDocumentModel;
+  /** Disjoint, builder-owned graph that may be consumed only by the adapter. */
+  readonly ownedLayoutDocument: DocxDocumentModel;
+}
+
+/** Lower-level acquisition boundary for render workers that must inspect the
+ * parser-shaped compatibility graph before deciding whether Window fallback is
+ * required. Callers must either consume `ownedLayoutDocument` with
+ * `layoutSourceModelAdapterFromOwnedModel` or release it. */
+export async function materializeDocumentPullOwnedModelsSession(
+  transport: WorkerBridgeTransport<PullSessionResponse<ArrayBuffer, number>>,
+  identity: PullSessionIdentity<number>,
+  options: MaterializeDocumentPullOptions = {},
+): Promise<MaterializedDocumentPullOwnedModels> {
+  const publicBody: BodyElement[] = [];
+  const ownedLayoutBody: BodyElement[] = [];
+  return drainDocumentPullSession(transport, identity, options, {
+    acceptBody: (body) => {
+      // Clone only the current credit-bounded unit. The parsed instances become
+      // the public model; their detached counterparts become the builder-owned
+      // layout graph and are never exposed to callers.
+      const layoutUnit = structuredClone(body);
+      for (const element of body) publicBody.push(element);
+      for (const element of layoutUnit) ownedLayoutBody.push(element);
+    },
+    complete: (document) => {
+      // The terminal envelope has its own hard byte cap and carries no body.
+      // Detach it before attaching either accumulated graph.
+      const ownedLayoutDocument = structuredClone(document);
+      document.body = publicBody;
+      ownedLayoutDocument.body = ownedLayoutBody;
+      return Object.freeze({ document, ownedLayoutDocument });
+    },
+  });
+}
+
+/** The sole DOCX pull-protocol state machine. Ownership policy is injected by
+ * the accumulator so ACK, validation, usage, cancellation, and transfer cleanup
+ * cannot drift between compatibility and layout-aware materialization paths. */
+async function drainDocumentPullSession<TResult>(
+  transport: WorkerBridgeTransport<PullSessionResponse<ArrayBuffer, number>>,
+  identity: PullSessionIdentity<number>,
+  options: MaterializeDocumentPullOptions,
+  accumulator: DocumentPullAccumulator<TResult>,
+): Promise<TResult> {
+  const session = new BoundedPullSession(transport, {
+    ...identity,
+    maxByteCredit: MAX_DOCUMENT_UNIT_BYTES,
+    timeoutMs: options.timeoutMs,
+  });
+  try {
+    for (;;) {
+      const chunk = await pullWithCreditRetry(session, options.signal);
+      try {
+        const usage = chunk.usage ?? session.usageCheckpoint;
+        if (usage) options.onUsage?.(usage);
+        const unit = parseDocumentUnit(chunk.payload);
+        if (chunk.done !== (unit.kind === 'complete')) {
+          throw new TypeError('DOCX document unit terminal flag does not match its payload');
+        }
+        if (unit.kind === 'body') {
+          accumulator.acceptBody(unit.body);
+          await chunk.ack({ signal: options.signal });
+          continue;
+        }
+        if (!Array.isArray(unit.document.body) || unit.document.body.length !== 0) {
+          throw new TypeError('DOCX terminal document must not duplicate streamed body blocks');
+        }
+        const result = accumulator.complete(unit.document);
+        await chunk.ack({ signal: options.signal });
+        return result;
+      } finally {
+        chunk.disposeTransferred();
+      }
+    }
+  } catch (error) {
+    await session.cancel('request-error').catch(() => undefined);
+    throw error;
+  }
+}
+
+export function isDocumentPullResponse(
+  value: unknown,
+): value is PullSessionResponse<ArrayBuffer, number> {
+  return !!value && typeof value === 'object'
+    && (value as { protocol?: unknown }).protocol === PULL_SESSION_PROTOCOL;
+}
+
+function parseDocumentUnit(payload: ArrayBuffer): DocumentUnit {
+  const value = JSON.parse(new TextDecoder().decode(new Uint8Array(payload))) as unknown;
+  if (!value || typeof value !== 'object') throw new TypeError('DOCX document unit must be an object');
+  const record = value as Record<string, unknown>;
+  if (record.kind === 'body' && Array.isArray(record.body)) {
+    return record as unknown as Extract<DocumentUnit, { kind: 'body' }>;
+  }
+  if (record.kind === 'complete' && record.document && typeof record.document === 'object') {
+    return record as unknown as Extract<DocumentUnit, { kind: 'complete' }>;
+  }
+  throw new TypeError('DOCX document unit has an unknown shape');
+}
+
+async function pullWithCreditRetry(
+  session: BoundedPullSession<ArrayBuffer, number>,
+  signal?: AbortSignal,
+) {
+  try {
+    return await session.pull(DOCX_INITIAL_BODY_PULL_BYTES, { signal });
+  } catch (error) {
+    const required = requiredCredit(error);
+    if (required === undefined) throw error;
+    return session.pull(required, { signal });
+  }
+}
+
+const REQUIRED_CREDIT = /^document unit requires ([0-9]+) bytes but credit is ([0-9]+)$/u;
+
+function requiredCredit(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object'
+    || (error as { code?: unknown }).code !== PULL_SESSION_INSUFFICIENT_CREDIT_CODE) {
+    return undefined;
+  }
+  const match = REQUIRED_CREDIT.exec(error instanceof Error ? error.message : String(error));
+  if (!match) return undefined;
+  const required = Number(match[1]);
+  const offered = Number(match[2]);
+  if (
+    !Number.isSafeInteger(required) || required <= offered
+    || required > MAX_DOCUMENT_UNIT_BYTES
+    || offered !== DOCX_INITIAL_BODY_PULL_BYTES
+    || String(required) !== match[1] || String(offered) !== match[2]
+  ) return undefined;
+  return required;
+}

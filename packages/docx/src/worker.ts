@@ -1,6 +1,18 @@
 import init, { DocxArchive, reinit } from './wasm/docx_parser.js';
-import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
+import {
+  decodeDataUrl,
+  WasmParserHost,
+} from '@silurus/ooxml-core';
+import {
+  decodeOoxmlResourceUsage,
+  PULL_SESSION_PROTOCOL,
+  resourcePolicyForWasm,
+  serializeWorkerError,
+  type PullSessionCommand,
+  type PullSessionResponse,
+} from '@silurus/ooxml-core/worker';
 import type { WorkerRequest, WorkerResponse } from './types';
+import { DocumentPullWorker, isDocumentPullCommand } from './document-pull-worker.js';
 
 // RB6: a `panic = "abort"` build traps (not unwinds) on a Rust panic / OOM /
 // stack overflow, poisoning this worker's single WASM instance so every LATER
@@ -22,9 +34,40 @@ const host = new WasmParserHost<DocxArchive>(init, {
   // wasm-bindgen singleton). `reinit` forces fresh linear memory after a trap.
   reinit,
 });
+const documentPull = new DocumentPullWorker(
+  () => host.archive,
+  (operation) => host.run(() => {
+    const archive = host.archive;
+    if (!archive) throw new Error('No docx loaded');
+    return operation(archive);
+  }),
+);
+let documentGeneration = 0;
 
-self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
+const post = (
+  message: WorkerResponse | PullSessionResponse<ArrayBuffer, number>,
+  transfer?: Transferable[],
+) => (self.postMessage as (message: unknown, transfer?: Transferable[]) => void)(message, transfer);
+
+self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<number>>) => {
   const req = e.data;
+
+  if (isDocumentPullCommand(req)) {
+    try {
+      await documentPull.dispatch(req, post);
+    } catch (error) {
+      post({
+        protocol: PULL_SESSION_PROTOCOL,
+        kind: 'error',
+        sessionId: req.sessionId,
+        operationId: req.operationId,
+        generation: req.generation,
+        requestId: req.requestId,
+        error: serializeWorkerError(error),
+      });
+    }
+    return;
+  }
 
   if (req.type === 'init') {
     host.setWasmUrl(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
@@ -36,31 +79,30 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const id = req.id;
   try {
     await host.ensureReady();
+    if (req.type !== 'parse' && host.archive) {
+      const retained = host.archive;
+      host.run(() => retained.assert_healthy());
+    }
     if (req.type === 'parse') {
-      const max =
-        typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
-          ? BigInt(req.maxZipEntryBytes)
-          : undefined;
+      await documentPull.reset();
+      const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
       const bytes = new Uint8Array(req.data);
-      // Both the construction and `parse()` run under `host.run` so a trap in
-      // EITHER poisons + recycles the instance (and frees the archive). Adopting
-      // via `setArchive` frees any prior handle first — the re-parse dispose.
-      // `parse()` returns the model as UTF-8 JSON bytes on success and throws a
-      // JS Error on parse/serialize failure (Result<Vec<u8>, JsValue>). The throw
-      // is caught by the outer try/catch below. wasm-bindgen hands back a fresh
-      // Uint8Array (a copy of the Rust Vec), so its buffer is exclusively ours:
-      // forward it to the main thread as a transferable — no clone, no decode
-      // here. The single decode + JSON.parse happens once, on the main thread.
-      const json = host.run(() => {
-        const archive = new DocxArchive(bytes, max);
+      // Construction and every later cursor call run under `host.run`, so a
+      // trap poisons and recycles the instance. The parse response opens a
+      // correlated pull session; complete body units, never a monolithic model
+      // JSON value, cross to Window and require consumer ACK.
+      host.run(() => {
+        const archive = new DocxArchive(bytes, maxEntry, maxTotal);
         host.setArchive(archive);
-        return archive.parse();
       });
-      const documentJson = json.buffer as ArrayBuffer;
-      const res: WorkerResponse = { type: 'parsed', id, documentJson };
-      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [
-        documentJson,
-      ]);
+      documentGeneration += 1;
+      const identity = {
+        sessionId: documentGeneration,
+        operationId: documentGeneration,
+        generation: documentGeneration,
+      };
+      documentPull.open(identity);
+      post({ type: 'documentSessionOpened', id, ...identity });
       return;
     }
 
@@ -78,6 +120,12 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [out]);
       return;
     }
+    if (req.type === 'resourceUsage') {
+      if (!archive) throw new Error('No docx loaded');
+      const usage = decodeOoxmlResourceUsage(host.run(() => archive.resource_usage()));
+      post({ type: 'resourceUsage', id, usage });
+      return;
+    }
     if (req.type === 'toMarkdown') {
       if (!archive) throw new Error('No docx loaded');
       // Project the already-opened handle to markdown (no re-copy of the file,
@@ -85,11 +133,11 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       // backing, so it is posted by structured clone like any other value.
       const markdown = host.run(() => archive.to_markdown());
       const res: WorkerResponse = { type: 'markdownRendered', id, markdown };
-      self.postMessage(res);
+      post(res);
       return;
     }
   } catch (err) {
-    const res: WorkerResponse = { type: 'error', id, message: String(err) };
-    self.postMessage(res);
+    const res: WorkerResponse = { type: 'error', id, ...serializeWorkerError(err) };
+    post(res);
   }
 };

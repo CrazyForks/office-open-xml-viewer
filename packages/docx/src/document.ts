@@ -14,8 +14,16 @@ import {
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
+import {
+  deserializeWorkerError,
+  disposeRejectedLoad,
+  normalizeLoadResourceOptions,
+  OoxmlResourceMetricsSession,
+  PULL_SESSION_PROTOCOL,
+  type NormalizedOoxmlResourcePolicy,
+} from '@silurus/ooxml-core/worker';
 import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
-import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
+import { renderLayoutSourceToCanvas, documentHasMath, prepareMathRuns, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
@@ -26,6 +34,9 @@ import {
   documentLayoutRuntimeOf,
   layoutVariantStoreOf,
 } from './layout/runtime-state.js';
+import {
+  type LayoutSourceStore,
+} from './layout/layout-source-store.js';
 import type { DeepReadonly, DocumentLayout } from './layout/types.js';
 import type {
   DocumentMeta,
@@ -33,13 +44,16 @@ import type {
   RenderWorkerResponse,
   WireRenderPageOptions,
 } from './worker-protocol';
-import { normalizeInternalDocumentModel } from './parser-model.js';
 import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
+import {
+  isDocumentPullResponse,
+  materializeDocumentPullAdapterSession,
+} from './document-pull-client.js';
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
- *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`) with the
- *  opt-in math engine. */
+ *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, and the
+ *  deprecated `maxZipEntryBytes` alias) with the opt-in math engine. */
 export interface LoadOptions extends CoreLoadOptions {
   /**
    * Opt-in OMML equation engine. Import it from the separate `@silurus/ooxml/math`
@@ -68,8 +82,14 @@ export type RenderPageToBitmapOptions = WireRenderPageOptions & {
   onTextRun?: (run: DocxTextRunInfo) => void;
 };
 
+/** A diagnostic-only round trip must never inherit the load API's unlimited
+ * worker wait. The archive counter getter is synchronous once the worker is
+ * responsive, so one second is ample while still bounding a silent worker. */
+const DEFAULT_RESOURCE_USAGE_PROBE_TIMEOUT_MS = 1_000;
+
 export class DocxDocument {
   private _document: DocxDocumentModel | null = null;
+  private _source: LayoutSourceStore | null = null;
   private _meta: DocumentMeta | null = null;
   /** Lazily-built `bookmarkName → 0-based page index` map for internal hyperlink
    *  anchors (IX-nav). Built on first {@link getBookmarkPage} from the paginated
@@ -111,9 +131,15 @@ export class DocxDocument {
     this._mode = mode;
     attachDocumentLayoutRuntime(this, defaultCurrentDateMs);
     this._bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this._worker, {
-      correlate: (res) => res.id,
+      correlate: (res) =>
+        'protocol' in res && res.protocol === PULL_SESSION_PROTOCOL
+          ? res.requestId
+          : 'id' in res
+            ? res.id
+            : undefined,
       toError: (res) => {
-        if (res.type !== 'error') return undefined;
+        if ('protocol' in res || res.type !== 'error') return undefined;
+        if (res.code === 'ooxml-resource-limit') return deserializeWorkerError(res);
         return Object.assign(new Error(res.message), {
           name: res.errorName ?? 'Error',
           ...(res.code !== undefined ? { code: res.code } : {}),
@@ -138,8 +164,18 @@ export class DocxDocument {
   }
 
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<DocxDocument> {
+    const resourceOptions = normalizeLoadResourceOptions(opts);
     const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
+    const metrics = new OoxmlResourceMetricsSession({
+      enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
+      format: 'docx',
+      mode,
+      policy: resourceOptions.policy,
+      onMetrics: resourceOptions.onResourceMetrics,
+      emitToConsole: resourceOptions.debug,
+    });
+    try {
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
       throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
     }
@@ -155,24 +191,29 @@ export class DocxDocument {
     // Container errors remain typed OoxmlError instances here; `instanceof`
     // would not survive the worker boundary.
     buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
+    metrics.setSourceBytes(buffer.byteLength);
+    metrics.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so
     // main-mode bundles never pull in its (renderer-bearing) chunk.
     const worker =
       mode === 'worker'
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
-    const doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
+    let doc: DocxDocument | undefined;
     try {
+      doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
       // In worker mode the worker preloads fonts before paginating (pagination
       // measures text), so the flag is forwarded; in main mode fonts are loaded
       // here after parse, before the lazy first pagination.
       await doc._parse(
         buffer,
-        opts.maxZipEntryBytes,
+        resourceOptions.policy,
         mode === 'worker' ? !!opts.useGoogleFonts : false,
         opts.workerTimeoutMs,
+        (usage) => metrics.observeUsage(usage),
       );
       if (mode === 'worker' && doc._mode === 'main') {
+        metrics.setMode('main');
         console.warn(
           "[ooxml] mode: 'worker' fell back to main-thread rendering because this document requires DOM OpenType vertical glyph selection.",
         );
@@ -193,7 +234,11 @@ export class DocxDocument {
       // text measures/draws with the authored typeface. Worker mode does this
       // inside the worker (before it paginates); here it runs on the main thread.
       if (doc._mode === 'main' && doc._document?.embeddedFonts?.length) {
-        doc._embeddedFontFaces = await loadEmbeddedFonts(doc._document, (p) => doc.getFontBytes(p));
+        const loadingDocument = doc;
+        doc._embeddedFontFaces = await loadEmbeddedFonts(
+          doc._document,
+          (p) => loadingDocument.getFontBytes(p),
+        );
       }
       let localMetrics: Awaited<ReturnType<typeof loadDocxLocalFontMetrics>> | undefined;
       if (doc._mode === 'main' && doc._document) {
@@ -208,9 +253,9 @@ export class DocxDocument {
       if (doc._mode === 'main' && opts.math && doc._document && documentHasMath(doc._document)) {
         preparedMath = await prepareMathRuns(doc._document, opts.math);
       }
-      if (doc._mode === 'main' && doc._document) {
+      if (doc._mode === 'main' && doc._document && doc._source) {
         const runtime = documentLayoutRuntimeOf(doc);
-        runtime.services = createLayoutServices(doc._document, {
+        runtime.services = createLayoutServices(doc._source, {
           localMetrics: localMetrics?.metrics,
           useGoogleFonts: !!opts.useGoogleFonts,
           embeddedFaces: doc._embeddedFontFaces,
@@ -220,7 +265,7 @@ export class DocxDocument {
         });
         const services = runtime.services;
         const retained = retainRenderWorkerDocumentLayout(
-          doc._document,
+          doc._source,
           services,
           runtime.defaultCurrentDateMs,
         );
@@ -228,52 +273,81 @@ export class DocxDocument {
         // the same work here so layout failures reject load() in both modes.
         retained.layoutVariants.defaultLayout;
       }
+      if (resourceOptions.debug || resourceOptions.onResourceMetrics) {
+        // This final snapshot includes eager embedded-font extraction performed
+        // after the parse response. Telemetry is strictly best-effort: a worker
+        // failure or a silent worker may omit the newest counters, but must not
+        // turn an otherwise successful load into a rejection or an endless wait.
+        await doc._resourceUsage(
+          opts.workerTimeoutMs ?? DEFAULT_RESOURCE_USAGE_PROBE_TIMEOUT_MS,
+        ).then(
+          (usage) => metrics.observeUsage(usage),
+          () => undefined,
+        );
+      }
+      metrics.checkpoint('model and layout ready');
+      metrics.succeed({ pages: doc.pageCount });
       return doc;
     } catch (error) {
-      doc.destroy();
+      const rejectedDocument = doc;
+      disposeRejectedLoad(worker, rejectedDocument ? () => rejectedDocument.destroy() : undefined);
+      throw error;
+    }
+    } catch (error) {
+      metrics.fail(error);
       throw error;
     }
   }
 
   private async _parse(
     buffer: ArrayBuffer,
-    maxZipEntryBytes?: number,
+    resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts = false,
     timeoutMs?: number,
+    onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
   ): Promise<void> {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, maxZipEntryBytes, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs } satisfies RenderWorkerRequest)
-          : ({ type: 'parse', id, data: buffer, maxZipEntryBytes } satisfies WorkerRequest),
+          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs } satisfies RenderWorkerRequest)
+          : ({ type: 'parse', id, data: buffer, resourcePolicy } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
     );
+    if ('protocol' in res) {
+      throw new Error('DOCX parse open returned a pull-protocol response');
+    }
     if (this._mode === 'worker') {
+      if ('usage' in res && res.usage) onUsage?.(res.usage);
       if (res.type === 'mainThreadVerticalFallback') {
-        const parsed = JSON.parse(
-          new TextDecoder().decode(new Uint8Array(res.documentJson)),
-        ) as DocxDocumentModel;
-        this._document = normalizeInternalDocumentModel(parsed).document;
+        const adapted = await materializeDocumentPullAdapterSession(
+          this._bridge.transport(isDocumentPullResponse),
+          res,
+          { timeoutMs, onUsage },
+        );
+        this._source = adapted.source;
+        this._document = adapted.document;
         this._meta = null;
         this._mode = 'main';
       } else {
         this._meta = (res as Extract<RenderWorkerResponse, { type: 'parsedMeta' }>).meta;
       }
     } else {
-      // The model arrives as transferred UTF-8 JSON bytes; decode + parse once
-      // here (the only serialization on the parse-mode path).
-      const { documentJson } = res as Extract<WorkerResponse, { type: 'parsed' }>;
-      const parsed = JSON.parse(
-        new TextDecoder().decode(new Uint8Array(documentJson)),
-      ) as DocxDocumentModel;
-      this._document = normalizeInternalDocumentModel(parsed).document;
+      const identity = res as Extract<WorkerResponse, { type: 'documentSessionOpened' }>;
+      const adapted = await materializeDocumentPullAdapterSession(
+        this._bridge.transport(isDocumentPullResponse),
+        identity,
+        { timeoutMs, onUsage },
+      );
+      this._source = adapted.source;
+      this._document = adapted.document;
     }
   }
 
   destroy(): void {
     this._bridge.terminate();
     this._document = null;
+    this._source = null;
     this._meta = null;
     documentLayoutRuntimeOf(this).services = null;
     this._bookmarkPages = null;
@@ -344,6 +418,17 @@ export class DocxDocument {
     );
     const bytes = (res as Extract<WorkerResponse, { type: 'imageExtracted' }>).bytes;
     return new Uint8Array(bytes);
+  }
+
+  private async _resourceUsage(
+    timeoutMs: number,
+  ): Promise<import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot> {
+    const res = await this._bridge.request(
+      (id) => ({ type: 'resourceUsage', id }) satisfies WorkerRequest,
+      undefined,
+      { timeoutMs },
+    );
+    return (res as Extract<WorkerResponse, { type: 'resourceUsage' }>).usage;
   }
 
   /**
@@ -508,8 +593,8 @@ export class DocxDocument {
         "renderPage(canvas) is unavailable in mode: 'worker'; use renderPageToBitmap() and paint it via an ImageBitmapRenderingContext",
       );
     }
-    if (!this._document) throw new Error('Document not loaded');
-    return renderDocumentToCanvas(this._document, target, pageIndex, {
+    if (!this._source) throw new Error('Document not loaded');
+    return renderLayoutSourceToCanvas(this._source, target, pageIndex, {
       ...opts,
       // Lazy image bytes: the renderer fetches each embedded blip on demand by
       // zip path (decoded only when drawn) instead of reading inlined base64.

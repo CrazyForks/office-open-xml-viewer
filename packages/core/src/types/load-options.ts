@@ -1,4 +1,16 @@
 import type { MathRenderer } from '../math/mathjax';
+import type { OoxmlResourceMetrics } from './resource-metrics.js';
+
+/** A positive safe-integer byte count, or `null` to disable one public limit. */
+export type OoxmlResourceLimit = number | null;
+
+/** Admission limits for the inflated contents of one OOXML package session. */
+export interface OoxmlResourceLimits {
+  /** Maximum actual inflated bytes for any one archive entry, including media. */
+  maxArchiveEntryBytes?: OoxmlResourceLimit;
+  /** Maximum actual inflated bytes across distinct entries in the session. */
+  maxTotalInflatedBytes?: OoxmlResourceLimit;
+}
 
 /**
  * Common load-time options shared by the docx / pptx / xlsx
@@ -66,12 +78,41 @@ export interface LoadOptions {
    */
   wasmUrl?: string | URL;
   /**
-   * Override the per-entry ZIP decompression cap (bytes) used by the zip-bomb
-   * guard in the Rust parser. Defaults to 512 MiB. Raise it to load documents
-   * with very large embedded media, or lower it to tighten the budget for
-   * untrusted input. Zero / negative values fall back to the default.
+   * @deprecated Use `resourceLimits.maxArchiveEntryBytes`.
+   *
+   * Existing positive safe-integer values remain an all-entry inflated-byte
+   * limit. Zero, negative, and NaN values retain their historical fallback
+   * behavior; other invalid positive values reject during `load()`.
    */
   maxZipEntryBytes?: number;
+  /**
+   * Inflated archive admission limits for one document session. Omitted fields
+   * use the library defaults. A positive safe integer overrides a default;
+   * `null` disables that configurable limit only. Limits are admission policy,
+   * not guarantees of exact browser-process memory use.
+   */
+  resourceLimits?: OoxmlResourceLimits;
+  /**
+   * Emit one content-free resource-usage card after load succeeds or fails.
+   * Includes observed archive counters and configured limits, but never source
+   * URLs, part names, document text, passwords, or error messages.
+   */
+  debug?: boolean;
+  /**
+   * Receive the same content-free, machine-readable report that powers the debug
+   * card, without enabling console output. After resource options validate, the
+   * callback runs once when the current load settles, including failed loads for
+   * which no renderer instance is returned. The callback is not awaited;
+   * synchronous exceptions and rejected promises are ignored and never change
+   * load results.
+   *
+   * A browser report covers the underlying document/workbook/presentation
+   * factory. It does not wait for a Viewer's first canvas paint; that paint and
+   * later lazy worksheet, slide, image, or media access may increase counters or
+   * surface a separate render error. Successfully opened packages include the
+   * declared package total and source byte size in the report.
+   */
+  onResourceMetrics?: (metrics: OoxmlResourceMetrics) => void;
   /**
    * Reject the parse request if the parser worker does not answer within this
    * many milliseconds. Opt-in safety net for a wedged or crashed worker that

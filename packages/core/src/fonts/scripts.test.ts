@@ -8,6 +8,7 @@ import {
   NON_CJK_SERIF_FALLBACKS,
   SCRIPT_GOOGLE_FONTS,
   SCRIPT_PRELOAD_NAMES,
+  ScriptPreloadAccumulator,
   scriptPreloadNamesForText,
 } from './scripts.js';
 
@@ -324,6 +325,50 @@ describe('scriptPreloadNamesForText — script-aware preload set from document t
   it('every returned name is resolvable in SCRIPT_GOOGLE_FONTS (CJK + Cyrillic + scripts)', () => {
     const out = scriptPreloadNamesForText(['漢字 Привет สวัสดी नमस्ते שלום'], null);
     assertResolvable(out);
+  });
+});
+
+describe('ScriptPreloadAccumulator — incremental script facts', () => {
+  it('is exactly equivalent to one-shot collection across incremental feeds', () => {
+    const chunks = ['漢字', '한국어', 'ひらがな', ' العربية', ' Привет'];
+    const accumulator = new ScriptPreloadAccumulator('sc');
+    for (const chunk of chunks) accumulator.addText([chunk]);
+    expect(accumulator.names()).toEqual(scriptPreloadNamesForText(chunks, 'sc'));
+  });
+
+  it('preserves document-wide Han/Kana/Hangul interaction', () => {
+    const accumulator = new ScriptPreloadAccumulator('sc');
+    accumulator.addText(['漢']);
+    expect(accumulator.names()).toEqual(['Noto Sans SC', 'Noto Serif SC']);
+    accumulator.addText(['한']);
+    expect(accumulator.names()).toEqual(['Noto Sans KR', 'Noto Serif KR']);
+    accumulator.addText(['か']);
+    expect(accumulator.names()).toEqual([
+      'Noto Sans KR', 'Noto Serif KR', 'Noto Sans JP', 'Noto Serif JP',
+    ]);
+  });
+
+  it('handles empty feeds and split chunks deterministically', () => {
+    const accumulator = new ScriptPreloadAccumulator(null);
+    accumulator.addText([]);
+    accumulator.addText(['']);
+    accumulator.addText(['\uD840']);
+    accumulator.addText(['\uDC89']);
+    // A surrogate pair split across chunks is not a code point in either chunk;
+    // callers feed rendered strings, so chunk boundaries are semantically real.
+    expect(accumulator.names()).toEqual([]);
+    accumulator.addText(['\uD840\uDC89']);
+    expect(accumulator.names()).toEqual(['Noto Sans JP', 'Noto Serif JP']);
+    expect(accumulator.names()).toEqual(accumulator.names());
+  });
+
+  it('clones script state without coupling later incremental feeds', () => {
+    const original = new ScriptPreloadAccumulator('sc');
+    original.addText(['漢']);
+    const candidate = original.clone();
+    candidate.addText(['한']);
+    expect(original.names()).toEqual(['Noto Sans SC', 'Noto Serif SC']);
+    expect(candidate.names()).toEqual(['Noto Sans KR', 'Noto Serif KR']);
   });
 });
 

@@ -5,15 +5,17 @@ use ooxml_common::blip::{
 use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::drawing::{parse_xsd_bool, DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use ooxml_common::ns::{attr_ns, is_w_ns, is_wp_ns, math, relationships, wordprocessingml};
-use ooxml_common::zip::read_zip_string;
+use ooxml_common::package_session::{PackageEntryStream, PackageOperation, PackageSessionHandle};
+use ooxml_common::resource::ResourceUsage;
 // Production parses go through `ooxml_common::depth::parse_guarded` (depth-guarded
 // before roxmltree's recursive tree builder). The `XmlDoc` alias survives only for
 // the in-module unit tests, which parse trusted, hand-written fixtures directly.
 #[cfg(test)]
 use roxmltree::Document as XmlDoc;
 use std::collections::{BTreeMap, HashMap};
-use zip::ZipArchive;
+use std::io::BufReader;
 
+use crate::document_projector::{DocumentBodyPlan, DocumentBodyProjector};
 use crate::drawing_compatibility::apply_word_direct_group_rect;
 use crate::numbering::{LevelDef, NumberingMap};
 use crate::styles::{
@@ -25,13 +27,120 @@ use crate::xml_util::*;
 
 const DEFAULT_FONT_SIZE: f64 = 10.0; // pt fallback
 
-/// The parser's ZIP archive type. Owns its backing bytes (`Cursor<Vec<u8>>`)
-/// rather than borrowing them, so a `DocxArchive` handle can keep a single
-/// opened archive alive across `parse` / `extract_image` / `to_markdown` calls —
-/// the central directory is scanned once and the bytes are copied into WASM once.
-/// `ZipArchive<Cursor<Vec<u8>>>` is fully self-contained (no borrow into the
-/// input), which is what lets the `#[wasm_bindgen]` handle store it as a field.
-pub(crate) type Zip = ZipArchive<std::io::Cursor<Vec<u8>>>;
+/// DOCX-local adapter over one owned, validated package session. Every public
+/// call owns one explicit operation. Focused parser tests lazily receive a
+/// compatibility operation while using the same bounded decoder path.
+pub(crate) struct Zip {
+    session: PackageSessionHandle,
+    operation: Option<PackageOperation>,
+}
+
+impl Zip {
+    #[cfg(test)]
+    pub(crate) fn new(source: std::io::Cursor<Vec<u8>>) -> Result<Self, String> {
+        open_zip(source.into_inner())
+    }
+
+    pub(crate) fn begin_operation(&mut self, name: &str) -> Result<(), String> {
+        if self.operation.is_some() {
+            return Err("docx package operation is already active".to_string());
+        }
+        self.operation = Some(self.session.begin_operation(name)?);
+        Ok(())
+    }
+
+    pub(crate) fn operation(&mut self) -> Result<&PackageOperation, String> {
+        if self.operation.is_none() {
+            #[cfg(test)]
+            {
+                self.operation = Some(self.session.begin_operation("docx-parser-compat")?);
+            }
+            #[cfg(not(test))]
+            {
+                return Err("docx package read requires an active operation".to_string());
+            }
+        }
+        Ok(self
+            .operation
+            .as_ref()
+            .expect("operation initialized above"))
+    }
+
+    pub(crate) fn operation_usage(&self) -> Option<ResourceUsage> {
+        self.operation.as_ref().and_then(PackageOperation::usage)
+    }
+
+    pub(crate) fn usage(&self) -> ResourceUsage {
+        self.session.usage()
+    }
+
+    pub(crate) fn finish_operation(&mut self) -> Result<(), String> {
+        let Some(mut operation) = self.operation.take() else {
+            return Ok(());
+        };
+        operation.finish()
+    }
+
+    pub(crate) fn cancel_operation(&mut self) {
+        if let Some(mut operation) = self.operation.take() {
+            let _ = operation.cancel();
+        }
+    }
+
+    pub(crate) fn run_operation<T>(
+        &mut self,
+        name: &str,
+        run: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.begin_operation(name)?;
+        let result = run(self);
+        if let Err(resource_error) = self.assert_healthy() {
+            self.cancel_operation();
+            return Err(resource_error);
+        }
+        match result {
+            Ok(value) => match self.finish_operation() {
+                Ok(()) => Ok(value),
+                Err(error) => {
+                    self.cancel_operation();
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                self.cancel_operation();
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn assert_healthy(&self) -> Result<(), String> {
+        self.session.assert_healthy()
+    }
+
+    fn index_for_name(&self, path: &str) -> Option<()> {
+        self.session.contains_entry(path).then_some(())
+    }
+}
+
+fn read_zip_string(zip: &mut Zip, path: &str) -> Result<String, String> {
+    zip.operation()?.read_string(path)
+}
+
+fn open_document_body_projector(
+    zip: &mut Zip,
+) -> Result<DocumentBodyProjector<BufReader<PackageEntryStream>>, String> {
+    let operation = zip.operation()?;
+    let reporter = operation.limit_reporter()?;
+    let stream = operation.open_entry(DOCUMENT_PART)?;
+    Ok(DocumentBodyProjector::new(
+        BufReader::new(stream),
+        Some(reporter),
+    ))
+}
+
+pub(crate) fn read_zip_bytes(zip: &mut Zip, path: &str) -> Result<Vec<u8>, String> {
+    zip.operation()?.read_bytes(path)
+}
 
 /// Section-level header/footer references collected from sectPr.
 /// Maps reference type ("default" | "first" | "even") to the target xml path (e.g. "header1.xml").
@@ -568,8 +677,27 @@ fn resolve_section_refs(
 /// indication that the CONTAINER (not some inner part) is the problem. Naming the
 /// failure lets the caller build a `degraded_document` tagged with the container,
 /// symmetric with how a corrupt `word/document.xml` is tagged inside [`parse`].
+#[cfg(test)]
 pub(crate) fn open_zip(data: Vec<u8>) -> Result<Zip, String> {
-    ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| format!("(zip container): {e}"))
+    open_zip_with_limits(data, None, None)
+}
+
+pub(crate) fn open_zip_with_limits(
+    data: Vec<u8>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+) -> Result<Zip, String> {
+    PackageSessionHandle::open(
+        data,
+        ooxml_common::resource::OoxmlFormat::Docx,
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+    )
+    .map(|session| Zip {
+        session,
+        operation: None,
+    })
+    .map_err(ooxml_common::zip::tag_container_error)
 }
 
 /// A placeholder [`Document`] for a docx whose ZIP CONTAINER could not be opened
@@ -589,15 +717,66 @@ pub(crate) fn degraded_container_document(parse_error: String) -> Document {
 /// RB7 (MAJOR): a corrupt / truncated CONTAINER degrades to a placeholder
 /// (`degraded_container_document`) rather than erroring, consistent with a corrupt
 /// inner part — the viewer shows a "could not display" page instead of nothing.
+#[cfg(any(test, not(target_arch = "wasm32")))]
 pub fn parse_from_bytes(data: &[u8]) -> Result<Document, String> {
-    let mut zip = match open_zip(data.to_vec()) {
-        Ok(zip) => zip,
-        Err(e) => return Ok(degraded_container_document(e)),
-    };
-    parse(&mut zip)
+    parse_from_bytes_with_limits(data, None, None, "parse")
 }
 
-pub fn parse(zip: &mut Zip) -> Result<Document, String> {
+pub(crate) fn parse_from_bytes_with_limits(
+    data: &[u8],
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+    operation: &str,
+) -> Result<Document, String> {
+    let mut zip = match open_zip_with_limits(
+        data.to_vec(),
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+    ) {
+        Ok(zip) => zip,
+        Err(e) if e.starts_with("OOXML_RESOURCE_LIMIT:") => return Err(e),
+        Err(e) => return Ok(degraded_container_document(e)),
+    };
+    zip.run_operation(operation, parse)
+}
+
+pub(crate) fn parse_from_bytes_streamed_with_limits(
+    data: &[u8],
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+    operation: &str,
+) -> Result<Document, String> {
+    let mut zip = match open_zip_with_limits(
+        data.to_vec(),
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+    ) {
+        Ok(zip) => zip,
+        Err(error) if error.starts_with("OOXML_RESOURCE_LIMIT:") => return Err(error),
+        Err(error) => return Ok(degraded_container_document(error)),
+    };
+    zip.run_operation(operation, parse_streamed_compatible)
+}
+
+struct DocumentParseEnvironment {
+    rels_xml: String,
+    rel_map: HashMap<String, String>,
+    style_map: StyleMap,
+    num_map: NumberingMap,
+    theme: ThemeColors,
+    media_map: HashMap<String, String>,
+    chart_map: HashMap<String, ooxml_common::chart::ChartModel>,
+    document_settings: Option<crate::types::DocumentSettings>,
+    page_layout_settings: Option<crate::types::PageLayoutSettingsWire>,
+    note_layout_settings: Option<crate::types::NoteLayoutSettingsWire>,
+    even_and_odd_headers: bool,
+}
+
+/// Load document-wide package dependencies once. Both the compatibility
+/// materializer and the bounded body cursor consume this exact environment, so
+/// styles, numbering, theme, relationships, and settings cannot drift between
+/// the two acquisition paths.
+fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
     let rels_xml = read_zip_string(zip, "word/_rels/document.xml.rels").unwrap_or_default();
     let rel_map = parse_rels(&rels_xml);
 
@@ -645,7 +824,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         let rel_map = parse_rels(&rels_xml);
         load_media_map(zip, &rel_map, &format!("{}/", dir))
     };
-    let mut num_map = read_zip_string(zip, &numbering_path)
+    let num_map = read_zip_string(zip, &numbering_path)
         .map(|s| NumberingMap::parse(&s, &numbering_media_map))
         .unwrap_or_default();
     // §17.9.23 — fold each `<w:lvl><w:pStyle>` backlink into its style's
@@ -714,6 +893,140 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     // threaded through the run walk) and looked up by rId during drawing parse.
     let chart_map = load_chart_map(zip, &rel_map, &theme);
 
+    DocumentParseEnvironment {
+        rels_xml,
+        rel_map,
+        style_map,
+        num_map,
+        theme,
+        media_map,
+        chart_map,
+        document_settings,
+        page_layout_settings,
+        note_layout_settings,
+        even_and_odd_headers,
+    }
+}
+
+#[derive(Clone)]
+struct StreamedSectionFact {
+    refs: SectionRefs,
+    title_page: bool,
+}
+
+struct DocumentBodyPreflight {
+    plan: DocumentBodyPlan,
+    table_sequences: Vec<Option<LogicalTableSequenceContext>>,
+    sections: Vec<StreamedSectionFact>,
+    final_body_block_ordinal: Option<usize>,
+    section: SectionProps,
+}
+
+/// First pass over `word/document.xml`. Only cross-block facts survive this
+/// pass; every temporary `roxmltree` arena is scoped to one logical body block.
+/// This preserves WordprocessingML's story-order semantics without retaining a
+/// DOM proportional to the complete uncompressed part.
+fn preflight_document_body(
+    zip: &mut Zip,
+    environment: &DocumentParseEnvironment,
+) -> Result<DocumentBodyPreflight, String> {
+    let mut projector = open_document_body_projector(zip)?;
+    let mut sequence_facts = Vec::new();
+    let mut sections = Vec::new();
+    let mut running_refs = SectionRefs::default();
+    let mut final_candidate: Option<(usize, SectionProps, SectionPlacementWire)> = None;
+    let mut emitted_section_break_candidates = 0usize;
+
+    while let Some(block) = projector.next_block()? {
+        let xml = std::str::from_utf8(&block.xml)
+            .map_err(|error| format!("{DOCUMENT_PART}: projected block is not UTF-8: {error}"))?;
+        let document = parse_guarded(xml)
+            .map_err(|error| format!("{DOCUMENT_PART}: projected block: {error}"))?;
+        let root = document.root_element();
+        if (block.local_name == "p"
+            && child_w(root, "pPr")
+                .and_then(|properties| child_w(properties, "sectPr"))
+                .is_some())
+            || block.local_name == "sectPr"
+        {
+            emitted_section_break_candidates = emitted_section_break_candidates.saturating_add(1);
+        }
+
+        sequence_facts.push(match block.local_name.as_str() {
+            "p" => LogicalBodySequenceFact::Paragraph,
+            "tbl" => {
+                let tbl_pr = child_w(root, "tblPr");
+                LogicalBodySequenceFact::Table(LogicalTableSequenceFact {
+                    source_offset: block.source_offset,
+                    effective_style_id: effective_table_style_id(root, &environment.style_map),
+                    row_count: table_row_count(root),
+                    first_row_flag: tbl_look_flag(tbl_pr, "firstRow", 0x0020),
+                    ordinary_flow: table_is_ordinary_flow(
+                        tbl_pr.and_then(|properties| child_w(properties, "tblpPr")),
+                        TablePositioningContext::Normal,
+                    ),
+                })
+            }
+            "sectPr" => LogicalBodySequenceFact::Section,
+            _ => LogicalBodySequenceFact::Transparent,
+        });
+
+        for sect_pr in root.descendants().filter(|node| {
+            node.is_element()
+                && is_w_ns(node.tag_name().namespace())
+                && node.tag_name().name() == "sectPr"
+        }) {
+            merge_section_refs(sect_pr, &environment.rel_map, &mut running_refs);
+            sections.push(StreamedSectionFact {
+                refs: running_refs.clone(),
+                title_page: child_w(sect_pr, "titlePg").is_some(),
+            });
+        }
+
+        final_candidate = (block.local_name == "sectPr").then(|| {
+            let (section, _) = parse_section(Some(root), &environment.rel_map);
+            let placement = section_placement_wire(Some(root), String::new());
+            (block.ordinal, section, placement)
+        });
+    }
+
+    let plan = projector.plan()?;
+    if sequence_facts.len() != plan.cover_break_after.len() {
+        return Err("document body projection produced inconsistent block facts".to_string());
+    }
+    let table_sequences =
+        resolve_logical_table_sequence_facts(&sequence_facts, &plan.cover_break_after);
+    let final_body_block_ordinal = final_candidate.as_ref().map(|(ordinal, _, _)| *ordinal);
+    let (mut section, mut placement) = final_candidate
+        .map(|(_, section, placement)| (section, placement))
+        .unwrap_or_else(|| {
+            let (section, _) = parse_section(None, &environment.rel_map);
+            (section, section_placement_wire(None, String::new()))
+        });
+    let final_section_ordinal = emitted_section_break_candidates
+        .saturating_sub(usize::from(final_body_block_ordinal.is_some()));
+    placement.section_id = format!("section:{final_section_ordinal}");
+    section.section_placement = Some(Box::new(placement));
+
+    Ok(DocumentBodyPreflight {
+        plan,
+        table_sequences,
+        sections,
+        final_body_block_ordinal,
+        section,
+    })
+}
+
+pub fn parse(zip: &mut Zip) -> Result<Document, String> {
+    let mut environment = load_document_parse_environment(zip);
+    let rel_map = &environment.rel_map;
+    let style_map = &environment.style_map;
+    let num_map = &mut environment.num_map;
+    let theme = &environment.theme;
+    let media_map = &environment.media_map;
+    let chart_map = &environment.chart_map;
+    let even_and_odd_headers = environment.even_and_odd_headers;
+
     // RB7 partial degradation: `word/document.xml` is the body part. When it
     // can't be read (missing / zip error) or parsed (malformed / a `<w:body>`
     // that isn't there), don't fail the whole `parse()` with an opaque error —
@@ -724,7 +1037,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     // is byte-for-byte unchanged (`parse_error` stays `None`).
     let doc_xml = match read_zip_string(zip, "word/document.xml") {
         Ok(xml) => xml,
-        Err(e) => return Ok(degraded_document(&theme, format!("word/document.xml: {e}"))),
+        Err(e) => return Ok(degraded_document(theme, format!("word/document.xml: {e}"))),
     };
     // `parse_guarded` runs the allocation-free depth pre-check BEFORE roxmltree's
     // tree builder (which recurses per element-nesting level and would overflow
@@ -732,7 +1045,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     // `word/document.xml`). Every attacker-controllable part is parsed this way.
     let xml_doc = match parse_guarded(&doc_xml) {
         Ok(doc) => doc,
-        Err(e) => return Ok(degraded_document(&theme, format!("word/document.xml: {e}"))),
+        Err(e) => return Ok(degraded_document(theme, format!("word/document.xml: {e}"))),
     };
 
     let body_node = match xml_doc
@@ -743,7 +1056,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         Some(n) => n,
         None => {
             return Ok(degraded_document(
-                &theme,
+                theme,
                 "word/document.xml: no <w:body> element".to_string(),
             ))
         }
@@ -754,7 +1067,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         .rfind(|n| n.is_element())
         .filter(|n| n.tag_name().name() == "sectPr");
 
-    let (mut section, _body_refs) = parse_section(sect_pr, &rel_map);
+    let (mut section, _body_refs) = parse_section(sect_pr, rel_map);
     // §17.10.1 — the even/odd-headers toggle lives in settings.xml,
     // not the sectPr; apply the document-wide flag captured above.
     section.even_and_odd_headers = even_and_odd_headers;
@@ -769,7 +1082,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     // the active section's header/footer per page. (The previous single global
     // accumulation collapsed all sections into one set, dropping section 0's
     // first-page footer — e.g. sample-13's "DOI: …" line — and its titlePg flag.)
-    let section_snapshots = resolve_section_refs(body_node, &rel_map);
+    let section_snapshots = resolve_section_refs(body_node, rel_map);
     let body_level_sect_id = sect_pr.map(|n| n.id());
 
     // Load each section's snapshot into a per-node resolved set. The body-level
@@ -778,10 +1091,8 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     let mut body_headers = HeadersFooters::default();
     let mut body_footers = HeadersFooters::default();
     for (node_id, refs, title_page) in &section_snapshots {
-        let headers =
-            load_header_footer_set(zip, &refs.headers, "hdr", &style_map, &mut num_map, &theme);
-        let footers =
-            load_header_footer_set(zip, &refs.footers, "ftr", &style_map, &mut num_map, &theme);
+        let headers = load_header_footer_set(zip, &refs.headers, "hdr", style_map, num_map, theme);
+        let footers = load_header_footer_set(zip, &refs.footers, "ftr", style_map, num_map, theme);
         if Some(*node_id) == body_level_sect_id {
             body_headers = headers;
             body_footers = footers;
@@ -799,12 +1110,12 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
 
     let (body, diagnostics) = parse_body_elements_with_diagnostics(
         body_node,
-        &style_map,
-        &mut num_map,
-        &media_map,
-        &chart_map,
-        &rel_map,
-        &theme,
+        style_map,
+        num_map,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
         &section_hf,
     );
     let final_section_ordinal = body
@@ -816,21 +1127,365 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         format!("section:{final_section_ordinal}"),
     )));
 
-    let headers = body_headers;
-    let footers = body_footers;
+    // Track-changes events live inline in the body XML; do a second pass to
+    // surface them as a flat list with author/date metadata. The body parse
+    // above already merged the run text transparently — this gives consumers
+    // (MCP / agents) the revision metadata without disturbing rendering.
+    let revisions = collect_revisions(body_node);
 
-    let major_font = theme.theme_font("major", "latin");
-    let minor_font = theme.theme_font("minor", "latin");
+    finish_document(
+        zip,
+        environment,
+        section,
+        body,
+        body_headers,
+        body_footers,
+        revisions,
+        diagnostics,
+    )
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(crate) enum StreamedDocumentUnit {
+    Body { body: Vec<BodyElement> },
+    Complete { document: Box<Document> },
+}
+
+/// Persistent semantic cursor for the second document pass. It owns exactly
+/// one temporary projected-block arena, the compact preflight facts, and the
+/// cross-block field/section state. Completed body units can therefore cross a
+/// pull boundary without a whole `Document` or monolithic JSON value existing.
+pub(crate) struct DocxBodyCursor {
+    environment: Option<DocumentParseEnvironment>,
+    plan: DocumentBodyPlan,
+    table_sequences: Vec<Option<LogicalTableSequenceContext>>,
+    final_body_block_ordinal: Option<usize>,
+    final_section: Option<SectionProps>,
+    resolved_sections: Vec<Option<ResolvedSectionHf>>,
+    body_headers: HeadersFooters,
+    body_footers: HeadersFooters,
+    projector: DocumentBodyProjector<BufReader<PackageEntryStream>>,
+    semantic: BodyParseCursor,
+    diagnostics: Vec<ParseDiagnostic>,
+    revisions: Vec<crate::types::DocxRevision>,
+    section_cursor: usize,
+    emitted_body_len: usize,
+    pending_cover_break: bool,
+    body_finished: bool,
+    terminal_emitted: bool,
+    degraded_theme: ThemeColors,
+}
+
+pub(crate) struct DocumentCursorFailure {
+    error: String,
+    theme: Box<ThemeColors>,
+}
+
+impl DocumentCursorFailure {
+    #[cfg(test)]
+    pub(crate) fn into_error(self) -> String {
+        self.error
+    }
+
+    pub(crate) fn into_degraded_document(self) -> Document {
+        let tagged = if self.error.starts_with("word/document.xml:") {
+            self.error
+        } else {
+            format!("word/document.xml: {}", self.error)
+        };
+        degraded_document(&self.theme, tagged)
+    }
+}
+
+impl DocxBodyCursor {
+    pub(crate) fn start(zip: &mut Zip) -> Result<Self, DocumentCursorFailure> {
+        let mut environment = load_document_parse_environment(zip);
+        let preflight =
+            preflight_document_body(zip, &environment).map_err(|error| DocumentCursorFailure {
+                error,
+                theme: Box::new(environment.theme.clone()),
+            })?;
+        let degraded_theme = environment.theme.clone();
+
+        let final_section_fact = preflight
+            .final_body_block_ordinal
+            .and_then(|_| preflight.sections.len().checked_sub(1));
+        let mut resolved_sections = Vec::with_capacity(preflight.sections.len());
+        let mut body_headers = HeadersFooters::default();
+        let mut body_footers = HeadersFooters::default();
+        for (index, fact) in preflight.sections.iter().enumerate() {
+            let headers = load_header_footer_set(
+                zip,
+                &fact.refs.headers,
+                "hdr",
+                &environment.style_map,
+                &mut environment.num_map,
+                &environment.theme,
+            );
+            let footers = load_header_footer_set(
+                zip,
+                &fact.refs.footers,
+                "ftr",
+                &environment.style_map,
+                &mut environment.num_map,
+                &environment.theme,
+            );
+            if Some(index) == final_section_fact {
+                body_headers = headers;
+                body_footers = footers;
+                resolved_sections.push(None);
+            } else {
+                resolved_sections.push(Some(ResolvedSectionHf {
+                    headers,
+                    footers,
+                    title_page: fact.title_page,
+                }));
+            }
+        }
+
+        let projector =
+            open_document_body_projector(zip).map_err(|error| DocumentCursorFailure {
+                error,
+                theme: Box::new(degraded_theme.clone()),
+            })?;
+        Ok(Self {
+            environment: Some(environment),
+            plan: preflight.plan,
+            table_sequences: preflight.table_sequences,
+            final_body_block_ordinal: preflight.final_body_block_ordinal,
+            final_section: Some(preflight.section),
+            resolved_sections,
+            body_headers,
+            body_footers,
+            projector,
+            semantic: BodyParseCursor::default(),
+            diagnostics: Vec::new(),
+            revisions: Vec::new(),
+            section_cursor: 0,
+            emitted_body_len: 0,
+            pending_cover_break: false,
+            body_finished: false,
+            terminal_emitted: false,
+            degraded_theme,
+        })
+    }
+
+    fn failure(&self, error: String) -> DocumentCursorFailure {
+        DocumentCursorFailure {
+            error,
+            theme: Box::new(self.degraded_theme.clone()),
+        }
+    }
+
+    pub(crate) fn next_unit(&mut self, zip: &mut Zip) -> Result<StreamedDocumentUnit, String> {
+        if self.terminal_emitted {
+            return Err("document body cursor is complete".to_string());
+        }
+
+        loop {
+            if self.body_finished {
+                self.terminal_emitted = true;
+                let environment = self
+                    .environment
+                    .take()
+                    .ok_or_else(|| "document body cursor environment is unavailable".to_string())?;
+                let mut section = self
+                    .final_section
+                    .take()
+                    .ok_or_else(|| "document body cursor section is unavailable".to_string())?;
+                section.even_and_odd_headers = environment.even_and_odd_headers;
+                let document = finish_document(
+                    zip,
+                    environment,
+                    section,
+                    Vec::new(),
+                    std::mem::take(&mut self.body_headers),
+                    std::mem::take(&mut self.body_footers),
+                    std::mem::take(&mut self.revisions),
+                    std::mem::take(&mut self.diagnostics),
+                )?;
+                return Ok(StreamedDocumentUnit::Complete {
+                    document: Box::new(document),
+                });
+            }
+
+            let Some(block) = self.projector.next_block()? else {
+                if self.projector.plan()? != self.plan {
+                    return Err("document body changed between bounded passes".to_string());
+                }
+                if self.section_cursor != self.resolved_sections.len() {
+                    return Err(
+                        "document body section facts changed between bounded passes".to_string()
+                    );
+                }
+                self.body_finished = true;
+                if self.pending_cover_break {
+                    self.pending_cover_break = false;
+                    self.emitted_body_len = self.emitted_body_len.saturating_add(1);
+                    return Ok(StreamedDocumentUnit::Body {
+                        body: vec![BodyElement::PageBreak {
+                            parity: None,
+                            same_paragraph_as_previous: None,
+                        }],
+                    });
+                }
+                continue;
+            };
+            if block.ordinal >= self.table_sequences.len() {
+                return Err("document body changed between bounded passes".to_string());
+            }
+            let xml = std::str::from_utf8(&block.xml).map_err(|error| {
+                format!("{DOCUMENT_PART}: projected block is not UTF-8: {error}")
+            })?;
+            let document = parse_guarded(xml)
+                .map_err(|error| format!("{DOCUMENT_PART}: projected block: {error}"))?;
+            let root = document.root_element();
+            let is_final_body_sect_pr = self.final_body_block_ordinal == Some(block.ordinal)
+                && block.local_name == "sectPr";
+
+            let mut section_hf = HashMap::new();
+            for sect_pr in root.descendants().filter(|node| {
+                node.is_element()
+                    && is_w_ns(node.tag_name().namespace())
+                    && node.tag_name().name() == "sectPr"
+            }) {
+                let resolved =
+                    self.resolved_sections
+                        .get(self.section_cursor)
+                        .ok_or_else(|| {
+                            "document body section facts changed between bounded passes".to_string()
+                        })?;
+                if let Some(resolved) = resolved {
+                    section_hf.insert(sect_pr.id(), resolved.clone());
+                }
+                self.section_cursor = self.section_cursor.saturating_add(1);
+            }
+
+            let diagnostics_start = self.diagnostics.len();
+            let environment = self
+                .environment
+                .as_mut()
+                .ok_or_else(|| "document body cursor environment is unavailable".to_string())?;
+            let mut body = self.semantic.parse_block(
+                root,
+                is_final_body_sect_pr,
+                &environment.style_map,
+                &mut environment.num_map,
+                &environment.media_map,
+                &environment.chart_map,
+                &environment.rel_map,
+                &environment.theme,
+                &section_hf,
+                TablePositioningContext::Normal,
+                self.table_sequences[block.ordinal],
+                self.emitted_body_len,
+                Some(&mut self.diagnostics),
+            );
+            self.revisions.extend(collect_revisions(root));
+
+            if self.pending_cover_break && !body.is_empty() {
+                self.pending_cover_break = false;
+                if !matches!(
+                    body.first(),
+                    Some(BodyElement::PageBreak { .. } | BodyElement::SectionBreak { .. })
+                ) {
+                    body.insert(
+                        0,
+                        BodyElement::PageBreak {
+                            parity: None,
+                            same_paragraph_as_previous: None,
+                        },
+                    );
+                    for diagnostic in &mut self.diagnostics[diagnostics_start..] {
+                        if let Some(index) = diagnostic.path.first_mut() {
+                            *index = index.saturating_add(1);
+                        }
+                    }
+                }
+            }
+
+            if self
+                .plan
+                .cover_break_after
+                .get(block.ordinal)
+                .copied()
+                .unwrap_or(false)
+                && !matches!(body.last(), Some(BodyElement::PageBreak { .. }))
+            {
+                self.pending_cover_break = true;
+            }
+            if body.is_empty() {
+                continue;
+            }
+            self.emitted_body_len = self.emitted_body_len.saturating_add(body.len());
+            return Ok(StreamedDocumentUnit::Body { body });
+        }
+    }
+}
+
+/// Compatibility materializer over the canonical bounded cursor. It is allowed
+/// to retain the complete public body, but it no longer has a separate parser or
+/// whole-part XML path.
+#[cfg(test)]
+pub(crate) fn parse_streamed(zip: &mut Zip) -> Result<Document, String> {
+    parse_streamed_with_diagnostic(zip).map_err(DocumentCursorFailure::into_error)
+}
+
+fn parse_streamed_with_diagnostic(zip: &mut Zip) -> Result<Document, DocumentCursorFailure> {
+    let mut cursor = DocxBodyCursor::start(zip)?;
+    let mut body = Vec::new();
+    loop {
+        let unit = cursor
+            .next_unit(zip)
+            .map_err(|error| cursor.failure(error))?;
+        match unit {
+            StreamedDocumentUnit::Body { body: elements } => body.extend(elements),
+            StreamedDocumentUnit::Complete { mut document } => {
+                document.body = body;
+                return Ok(*document);
+            }
+        }
+    }
+}
+
+/// Materializing compatibility facade over the bounded cursor. A required-part
+/// failure is fatal to the transaction (no provisional body survives) but keeps
+/// the historical `parseError` document route. A poisoned resource session
+/// always wins and remains a typed rejection.
+pub(crate) fn parse_streamed_compatible(zip: &mut Zip) -> Result<Document, String> {
+    match parse_streamed_with_diagnostic(zip) {
+        Ok(document) => Ok(document),
+        Err(failure) => match zip.assert_healthy() {
+            Err(resource_error) => Err(resource_error),
+            Ok(()) => Ok(failure.into_degraded_document()),
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_document(
+    zip: &mut Zip,
+    mut environment: DocumentParseEnvironment,
+    section: SectionProps,
+    body: Vec<BodyElement>,
+    headers: HeadersFooters,
+    footers: HeadersFooters,
+    revisions: Vec<crate::types::DocxRevision>,
+    diagnostics: Vec<ParseDiagnostic>,
+) -> Result<Document, String> {
+    let major_font = environment.theme.theme_font("major", "latin");
+    let minor_font = environment.theme.theme_font("minor", "latin");
 
     // ECMA-376 §17.8.3.10: font family classification from fontTable.xml.
     // Resolve via relationship (Type ending in "/fontTable"); fall back to
     // "word/fontTable.xml" for documents that omit the relationship.
-    let font_table_path = find_rel_target(&rels_xml, "fontTable")
-        .map(|t| {
-            if t.starts_with('/') {
-                t.trim_start_matches('/').to_string()
+    let font_table_path = find_rel_target(&environment.rels_xml, "fontTable")
+        .map(|target| {
+            if target.starts_with('/') {
+                target.trim_start_matches('/').to_string()
             } else {
-                format!("word/{}", t)
+                format!("word/{target}")
             }
         })
         .unwrap_or_else(|| "word/fontTable.xml".to_string());
@@ -838,9 +1493,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     let (font_family_classes, font_family_pitches, font_family_charsets) =
         parse_font_table(&font_table_xml);
     // ECMA-376 §17.8.3.3-.6 — embedded fonts. The `<w:embed*>` r:ids resolve
-    // through the fontTable part's OWN relationships (`word/_rels/fontTable.xml.rels`
-    // when the part is `word/fontTable.xml`): insert `_rels/` before the filename
-    // and append `.rels`. Missing rels ⇒ no embedded fonts (graceful).
+    // through the fontTable part's OWN relationships.
     let embedded_fonts = {
         let stem = font_table_path
             .rsplit('/')
@@ -848,50 +1501,62 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
             .unwrap_or(&font_table_path);
         let dir = font_table_path
             .rsplit_once('/')
-            .map(|(d, _)| d)
+            .map(|(directory, _)| directory)
             .unwrap_or("word");
-        let font_rels_path = format!("{}/_rels/{}.rels", dir, stem);
+        let font_rels_path = format!("{dir}/_rels/{stem}.rels");
         let font_rels_xml = read_zip_string(zip, &font_rels_path).unwrap_or_default();
         let font_rels = parse_rels(&font_rels_xml);
-        parse_embedded_fonts(&font_table_xml, &font_rels, &format!("{}/", dir))
+        parse_embedded_fonts(&font_table_xml, &font_rels, &format!("{dir}/"))
     };
 
-    // Track-changes events live inline in the body XML; do a second pass to
-    // surface them as a flat list with author/date metadata. The body parse
-    // above already merged the run text transparently — this gives consumers
-    // (MCP / agents) the revision metadata without disturbing rendering.
-    let revisions = collect_revisions(body_node);
-
-    let comments = find_rel_target(&rels_xml, "comments")
-        .map(|t| {
-            if t.starts_with('/') {
-                t.trim_start_matches('/').to_string()
+    let comments = find_rel_target(&environment.rels_xml, "comments")
+        .map(|target| {
+            if target.starts_with('/') {
+                target.trim_start_matches('/').to_string()
             } else {
-                format!("word/{}", t)
+                format!("word/{target}")
             }
         })
         .and_then(|p| read_zip_string(zip, &p).ok())
         .map(|xml| parse_comments(&xml))
         .unwrap_or_default();
-    let footnotes_path = find_rel_target(&rels_xml, "footnotes").map(|t| {
-        if t.starts_with('/') {
-            t.trim_start_matches('/').to_string()
+    let footnotes_path = find_rel_target(&environment.rels_xml, "footnotes").map(|target| {
+        if target.starts_with('/') {
+            target.trim_start_matches('/').to_string()
         } else {
-            format!("word/{}", t)
+            format!("word/{target}")
         }
     });
     let footnotes = footnotes_path
-        .map(|p| parse_notes(zip, &p, "footnote", &style_map, &mut num_map, &theme))
+        .map(|path| {
+            parse_notes(
+                zip,
+                &path,
+                "footnote",
+                &environment.style_map,
+                &mut environment.num_map,
+                &environment.theme,
+            )
+        })
         .unwrap_or_default();
-    let endnotes_path = find_rel_target(&rels_xml, "endnotes").map(|t| {
-        if t.starts_with('/') {
-            t.trim_start_matches('/').to_string()
+    let endnotes_path = find_rel_target(&environment.rels_xml, "endnotes").map(|target| {
+        if target.starts_with('/') {
+            target.trim_start_matches('/').to_string()
         } else {
-            format!("word/{}", t)
+            format!("word/{target}")
         }
     });
     let endnotes = endnotes_path
-        .map(|p| parse_notes(zip, &p, "endnote", &style_map, &mut num_map, &theme))
+        .map(|path| {
+            parse_notes(
+                zip,
+                &path,
+                "endnote",
+                &environment.style_map,
+                &mut environment.num_map,
+                &environment.theme,
+            )
+        })
         .unwrap_or_default();
 
     Ok(Document {
@@ -909,9 +1574,9 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         comments,
         footnotes,
         endnotes,
-        settings: document_settings,
-        page_layout_settings,
-        note_layout_settings,
+        settings: environment.document_settings,
+        page_layout_settings: environment.page_layout_settings,
+        note_layout_settings: environment.note_layout_settings,
         diagnostics,
         // Healthy document: no degradation (RB7). Only `degraded_document` sets this.
         parse_error: None,
@@ -1957,6 +2622,94 @@ impl LogicalTableSequenceContext {
     }
 }
 
+#[derive(Clone)]
+struct LogicalTableSequenceFact {
+    source_offset: usize,
+    effective_style_id: Option<String>,
+    row_count: usize,
+    first_row_flag: bool,
+    ordinary_flow: bool,
+}
+
+enum LogicalBodySequenceFact {
+    Paragraph,
+    Table(LogicalTableSequenceFact),
+    Section,
+    Transparent,
+}
+
+/// Resolve §17.4.37 adjacency from parser-independent facts. Both the full DOM
+/// adapter and the bounded two-pass cursor use this function, so streaming does
+/// not invent a second table-grouping interpretation.
+fn resolve_logical_table_sequence_facts(
+    facts: &[LogicalBodySequenceFact],
+    cover_break_after: &[bool],
+) -> Vec<Option<LogicalTableSequenceContext>> {
+    let mut contexts = vec![None; facts.len()];
+    let mut group: Vec<(usize, &LogicalTableSequenceFact)> = Vec::new();
+    let flush_group = |group: &mut Vec<(usize, &LogicalTableSequenceFact)>,
+                       contexts: &mut [Option<LogicalTableSequenceContext>]| {
+        let total_rows = group
+            .iter()
+            .map(|(_, fact)| fact.row_count)
+            .fold(0usize, usize::saturating_add);
+        let sequence_id = group.first().map_or(0, |(_, fact)| fact.source_offset);
+        let sequence_first_row_flag = group.first().is_some_and(|(_, fact)| fact.first_row_flag);
+        let mut row_offset = 0usize;
+        for (index, fact) in group.drain(..) {
+            contexts[index] = Some(LogicalTableSequenceContext {
+                sequence_id,
+                row_offset,
+                total_rows,
+                sequence_first_row_flag,
+            });
+            row_offset = row_offset.saturating_add(fact.row_count);
+        }
+    };
+
+    for (index, fact) in facts.iter().enumerate() {
+        match fact {
+            LogicalBodySequenceFact::Paragraph | LogicalBodySequenceFact::Section => {
+                flush_group(&mut group, &mut contexts)
+            }
+            LogicalBodySequenceFact::Table(fact) => {
+                if fact.ordinary_flow {
+                    if let Some(effective_style_id) = fact.effective_style_id.as_ref() {
+                        if group.first().is_some_and(|(_, first)| {
+                            first.effective_style_id.as_ref() != Some(effective_style_id)
+                        }) {
+                            flush_group(&mut group, &mut contexts);
+                        }
+                        group.push((index, fact));
+                    } else {
+                        flush_group(&mut group, &mut contexts);
+                        contexts[index] = Some(LogicalTableSequenceContext {
+                            sequence_id: fact.source_offset,
+                            row_offset: 0,
+                            total_rows: fact.row_count,
+                            sequence_first_row_flag: fact.first_row_flag,
+                        });
+                    }
+                } else {
+                    flush_group(&mut group, &mut contexts);
+                    contexts[index] = Some(LogicalTableSequenceContext {
+                        sequence_id: fact.source_offset,
+                        row_offset: 0,
+                        total_rows: fact.row_count,
+                        sequence_first_row_flag: fact.first_row_flag,
+                    });
+                }
+            }
+            LogicalBodySequenceFact::Transparent => {}
+        }
+        if cover_break_after.get(index).copied().unwrap_or(false) {
+            flush_group(&mut group, &mut contexts);
+        }
+    }
+    flush_group(&mut group, &mut contexts);
+    contexts
+}
+
 /// Resolve ECMA-376 Part 1 §17.4.37 logical-table membership before parsing
 /// individual source tables. Conditional table formatting is defined over the
 /// resulting logical row sequence, but authored table/row identity remains
@@ -1967,96 +2720,169 @@ fn logical_table_sequence_contexts(
     style_map: &StyleMap,
     positioning_context: TablePositioningContext,
 ) -> HashMap<roxmltree::NodeId, LogicalTableSequenceContext> {
-    struct TableSequenceFact {
-        node_id: roxmltree::NodeId,
-        source_offset: usize,
-        effective_style_id: String,
-        row_count: usize,
-        first_row_flag: bool,
-    }
-
-    let mut contexts = HashMap::new();
-    let mut group: Vec<TableSequenceFact> = Vec::new();
-    let flush_group =
-        |group: &mut Vec<TableSequenceFact>,
-         contexts: &mut HashMap<roxmltree::NodeId, LogicalTableSequenceContext>| {
-            let total_rows = group
-                .iter()
-                .map(|fact| fact.row_count)
-                .fold(0usize, usize::saturating_add);
-            let sequence_id = group.first().map_or(0, |fact| fact.source_offset);
-            // §17.7.6.7: the band parity origin belongs to the logical table's
-            // first member, so every member shares that member's firstRow flag.
-            let sequence_first_row_flag = group.first().is_some_and(|fact| fact.first_row_flag);
-            let mut row_offset = 0usize;
-            for fact in group.drain(..) {
-                contexts.insert(
-                    fact.node_id,
-                    LogicalTableSequenceContext {
-                        sequence_id,
-                        row_offset,
-                        total_rows,
-                        sequence_first_row_flag,
-                    },
-                );
-                row_offset = row_offset.saturating_add(fact.row_count);
-            }
-        };
-
-    for (node, cover_break_after) in children {
-        match node.tag_name().name() {
-            // §17.4.37 names an intervening paragraph as the separator. Range
-            // markup and other non-paragraph wrapper facts are transparent. A
-            // hidden/vanished paragraph is still a paragraph and still breaks
-            // adjacency.
-            "p" => flush_group(&mut group, &mut contexts),
+    let facts = children
+        .iter()
+        .map(|(node, _)| match node.tag_name().name() {
+            "p" => LogicalBodySequenceFact::Paragraph,
             "tbl" => {
                 let tbl_pr = child_w(*node, "tblPr");
-                let ordinary_flow = table_is_ordinary_flow(
-                    tbl_pr.and_then(|properties| child_w(properties, "tblpPr")),
-                    positioning_context,
+                LogicalBodySequenceFact::Table(LogicalTableSequenceFact {
+                    source_offset: node.range().start,
+                    effective_style_id: effective_table_style_id(*node, style_map),
+                    row_count: table_row_count(*node),
+                    first_row_flag: tbl_look_flag(tbl_pr, "firstRow", 0x0020),
+                    ordinary_flow: table_is_ordinary_flow(
+                        tbl_pr.and_then(|properties| child_w(properties, "tblpPr")),
+                        positioning_context,
+                    ),
+                })
+            }
+            "sectPr" => LogicalBodySequenceFact::Section,
+            _ => LogicalBodySequenceFact::Transparent,
+        })
+        .collect::<Vec<_>>();
+    resolve_logical_table_sequence_facts(
+        &facts,
+        &children
+            .iter()
+            .map(|(_, cover_break_after)| *cover_break_after)
+            .collect::<Vec<_>>(),
+    )
+    .into_iter()
+    .enumerate()
+    .filter_map(|(index, context)| context.map(|context| (children[index].0.id(), context)))
+    .collect()
+}
+
+/// Cross-block semantic state for one WordprocessingML story. Complex fields
+/// can span paragraphs (§17.16.18), and section ordinals are assigned in story
+/// order, so neither belongs to a temporary per-block DOM arena.
+#[derive(Default)]
+struct BodyParseCursor {
+    field: FieldState,
+    section_ordinal: usize,
+}
+
+impl BodyParseCursor {
+    #[allow(clippy::too_many_arguments)]
+    fn parse_block(
+        &mut self,
+        child: roxmltree::Node,
+        is_final_body_sect_pr: bool,
+        style_map: &StyleMap,
+        num_map: &mut NumberingMap,
+        media_map: &HashMap<String, String>,
+        chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+        rel_map: &HashMap<String, String>,
+        theme: &ThemeColors,
+        section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
+        table_positioning_context: TablePositioningContext,
+        table_sequence: Option<LogicalTableSequenceContext>,
+        source_body_index: usize,
+        diagnostics: Option<&mut Vec<ParseDiagnostic>>,
+    ) -> Vec<BodyElement> {
+        let mut output = Vec::new();
+        let mut child_diagnostics = Vec::new();
+        match child.tag_name().name() {
+            "p" => {
+                let result = parse_paragraph_with_diagnostics(
+                    child,
+                    style_map,
+                    num_map,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    None,
+                    &mut self.field,
+                    &mut child_diagnostics,
                 );
-                // A table joins a logical sequence only with a valid effective
-                // table-style identity while it participates in ordinary flow;
-                // an effective float or an unresolved/non-table style is a
-                // standalone §17.4.37 barrier.
-                match effective_table_style_id(*node, style_map) {
-                    Some(effective_style_id) if ordinary_flow => {
-                        if group
-                            .first()
-                            .is_some_and(|first| first.effective_style_id != effective_style_id)
-                        {
-                            flush_group(&mut group, &mut contexts);
-                        }
-                        group.push(TableSequenceFact {
-                            node_id: node.id(),
-                            source_offset: node.range().start,
-                            effective_style_id,
-                            row_count: table_row_count(*node),
-                            first_row_flag: tbl_look_flag(tbl_pr, "firstRow", 0x0020),
-                        });
+                let lone_break = if result.runs.len() == 1 {
+                    match &result.runs[0] {
+                        DocRun::Break {
+                            break_type: BreakType::Page,
+                        } => Some(BreakType::Page),
+                        DocRun::Break {
+                            break_type: BreakType::Column,
+                        } => Some(BreakType::Column),
+                        _ => None,
                     }
+                } else {
+                    None
+                };
+                match lone_break {
+                    Some(BreakType::Page) => output.push(BodyElement::PageBreak {
+                        parity: None,
+                        same_paragraph_as_previous: None,
+                    }),
+                    Some(BreakType::Column) => output.push(BodyElement::ColumnBreak),
                     _ => {
-                        flush_group(&mut group, &mut contexts);
-                        contexts.insert(node.id(), LogicalTableSequenceContext::standalone(*node));
+                        for piece in split_para_on_page_breaks(result) {
+                            match piece {
+                                ParaPiece::Para(paragraph) => {
+                                    output.push(BodyElement::Paragraph(Box::new(paragraph)))
+                                }
+                                ParaPiece::PageBreak {
+                                    same_paragraph_as_previous,
+                                } => output.push(BodyElement::PageBreak {
+                                    parity: None,
+                                    same_paragraph_as_previous: same_paragraph_as_previous
+                                        .then_some(true),
+                                }),
+                                ParaPiece::ColumnBreak => output.push(BodyElement::ColumnBreak),
+                            }
+                        }
+                        if let Some(sect_pr) =
+                            child_w(child, "pPr").and_then(|ppr| child_w(ppr, "sectPr"))
+                        {
+                            output.push(section_break_element(
+                                sect_pr,
+                                section_hf,
+                                format!("section:{}", self.section_ordinal),
+                            ));
+                            self.section_ordinal += 1;
+                        }
                     }
                 }
             }
-            // A body-level or mid-body `<w:sectPr>` is a §17.6.1 section
-            // boundary; two tables cannot be one logical table across it.
-            "sectPr" => flush_group(&mut group, &mut contexts),
+            "tbl" => {
+                let table = parse_table_with_diagnostics(
+                    child,
+                    style_map,
+                    num_map,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    DepthGuard::root(),
+                    table_positioning_context,
+                    table_sequence
+                        .unwrap_or_else(|| LogicalTableSequenceContext::standalone(child)),
+                    &mut child_diagnostics,
+                );
+                output.push(BodyElement::Table(Box::new(table)));
+            }
+            "sectPr" if !is_final_body_sect_pr => {
+                output.push(section_break_element(
+                    child,
+                    section_hf,
+                    format!("section:{}", self.section_ordinal),
+                ));
+                self.section_ordinal += 1;
+            }
             _ => {}
         }
-
-        // The cover-building-block pass emits a real page break at this
-        // boundary, so conditional table geometry cannot span across it.
-        if *cover_break_after {
-            flush_group(&mut group, &mut contexts);
+        if !output.is_empty() {
+            if let Some(diagnostics) = diagnostics {
+                commit_pending_parse_diagnostics(
+                    child_diagnostics,
+                    &[source_body_index],
+                    diagnostics,
+                );
+            }
         }
+        output
     }
-    flush_group(&mut group, &mut contexts);
-
-    contexts
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2073,7 +2899,7 @@ fn parse_body_elements_in_story(
     mut diagnostics: Option<&mut Vec<ParseDiagnostic>>,
 ) -> Vec<BodyElement> {
     let mut body: Vec<BodyElement> = Vec::new();
-    let mut section_ordinal = 0usize;
+    let mut cursor = BodyParseCursor::default();
     // The body-level sectPr (the last element) defines the final section and
     // is not a page break. Mid-body sectPrs (nested in pPr) DO imply a page break.
     // The walk also flags the end of any "Cover Pages" building block so the
@@ -2086,11 +2912,6 @@ fn parse_body_elements_in_story(
         .filter(|n| n.tag_name().name() == "sectPr");
     let body_level_sect_id = body_level_sect_pr.map(|n| n.id());
 
-    // Complex fields (e.g. a TOC, §17.16.5.69) are delimited by fldChars and may
-    // span many paragraphs — one per TOC entry. Own the field state here so it
-    // persists across the body's paragraph walk rather than resetting per `<w:p>`.
-    let mut field = FieldState::default();
-
     // Positions in `body` of the synthetic page breaks emitted for Cover Pages
     // building blocks (§17.5.2), so a redundant one can be dropped post-pass (see
     // below) when the cover is already followed by a page-advancing construct.
@@ -2101,134 +2922,21 @@ fn parse_body_elements_in_story(
 
     for (child, cover_break_after) in body_children {
         let source_body_index = body.len();
-        let mut child_diagnostics = Vec::new();
-        match child.tag_name().name() {
-            "p" => {
-                let result = parse_paragraph_with_diagnostics(
-                    child,
-                    style_map,
-                    num_map,
-                    media_map,
-                    chart_map,
-                    rel_map,
-                    theme,
-                    None,
-                    &mut field,
-                    &mut child_diagnostics,
-                );
-                let lone_break = if result.runs.len() == 1 {
-                    match &result.runs[0] {
-                        DocRun::Break {
-                            break_type: BreakType::Page,
-                        } => Some(BreakType::Page),
-                        DocRun::Break {
-                            break_type: BreakType::Column,
-                        } => Some(BreakType::Column),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-                // A lone page/column break paragraph collapses to the break marker.
-                // (Use a fall-through `match` rather than an early `continue` so the
-                // `cover_break_after` push at the loop tail is still reached when a
-                // cover's last child is itself a lone break. A final column break
-                // still needs the synthetic page break; a final hard page break is
-                // deduplicated by apply_cover_page_breaks.)
-                match lone_break {
-                    Some(BreakType::Page) => body.push(BodyElement::PageBreak {
-                        parity: None,
-                        same_paragraph_as_previous: None,
-                    }),
-                    Some(BreakType::Column) => body.push(BodyElement::ColumnBreak),
-                    _ => {
-                        // Mid-paragraph page / column breaks come from
-                        // `<w:br w:type="page"/>` / `<w:br w:type="column"/>` (and the
-                        // ignored `<w:lastRenderedPageBreak/>`). Split the paragraph
-                        // around them and emit BodyElement::PageBreak / ColumnBreak
-                        // between the pieces — each piece keeps the same pPr so layout
-                        // continues correctly after the break.
-                        for piece in split_para_on_page_breaks(result) {
-                            match piece {
-                                ParaPiece::Para(p) => {
-                                    body.push(BodyElement::Paragraph(Box::new(p)))
-                                }
-                                ParaPiece::PageBreak {
-                                    same_paragraph_as_previous,
-                                } => body.push(BodyElement::PageBreak {
-                                    parity: None,
-                                    same_paragraph_as_previous: same_paragraph_as_previous
-                                        .then_some(true),
-                                }),
-                                ParaPiece::ColumnBreak => body.push(BodyElement::ColumnBreak),
-                            }
-                        }
-                        // ECMA-376 §17.6.1: a section break inside pPr defines the
-                        // section that ENDS at this paragraph. Emit a SectionBreak
-                        // marker carrying that section's <w:cols> (§17.6.4) AND its
-                        // break kind (ST_SectionMark, §17.18.79) so the renderer can
-                        // switch the active column geometry per section — even for a
-                        // "continuous" break, which produces no page break but may
-                        // still change the column count. (Previously a "continuous"
-                        // break emitted nothing and the others emitted a column-less
-                        // PageBreak, so every section inherited the body-level
-                        // section's columns — the bug this fixes.)
-                        if let Some(sect_pr) =
-                            child_w(child, "pPr").and_then(|ppr| child_w(ppr, "sectPr"))
-                        {
-                            body.push(section_break_element(
-                                sect_pr,
-                                section_hf,
-                                format!("section:{section_ordinal}"),
-                            ));
-                            section_ordinal += 1;
-                        }
-                    }
-                }
-            }
-            "tbl" => {
-                let tbl = parse_table_with_diagnostics(
-                    child,
-                    style_map,
-                    num_map,
-                    media_map,
-                    chart_map,
-                    rel_map,
-                    theme,
-                    DepthGuard::root(),
-                    table_positioning_context,
-                    logical_table_sequences
-                        .get(&child.id())
-                        .copied()
-                        .unwrap_or_else(|| LogicalTableSequenceContext::standalone(child)),
-                    &mut child_diagnostics,
-                );
-                body.push(BodyElement::Table(Box::new(tbl)));
-            }
-            // Mid-body loose sectPr (rare) defines the section that ENDS here.
-            // Emit a SectionBreak carrying its columns + break kind (see the
-            // pPr-nested case above). The final body-level sectPr only defines
-            // section settings (surfaced on Document.section) — skip it.
-            "sectPr" if Some(child.id()) != body_level_sect_id => {
-                body.push(section_break_element(
-                    child,
-                    section_hf,
-                    format!("section:{section_ordinal}"),
-                ));
-                section_ordinal += 1;
-            }
-            _ => {}
-        }
-        // Source paths are owned by the same cursor that built the serialized
-        // body, not raw XML sibling ordinals. Paragraph splitting, unwrapped
-        // content controls, loose section markers, and zero-yield children can
-        // all change that cursor. Pending facts were emitted only by the real
-        // paragraph/table parse paths after their visibility and MCE gates.
-        if body.len() > source_body_index {
-            if let Some(out) = diagnostics.as_deref_mut() {
-                commit_pending_parse_diagnostics(child_diagnostics, &[source_body_index], out);
-            }
-        }
+        body.extend(cursor.parse_block(
+            child,
+            Some(child.id()) == body_level_sect_id,
+            style_map,
+            num_map,
+            media_map,
+            chart_map,
+            rel_map,
+            theme,
+            section_hf,
+            table_positioning_context,
+            logical_table_sequences.get(&child.id()).copied(),
+            source_body_index,
+            diagnostics.as_deref_mut(),
+        ));
         // ECMA-376 §17.5.2: a "Cover Pages" building block occupies its own page
         // in Word — the following content (even a "continuous" section) starts on
         // the next page. Emit the page break after the cover's content.
@@ -5856,7 +6564,7 @@ fn group_member_hidden(node: roxmltree::Node) -> bool {
 /// a `<mc:Choice Requires="wpc">` must NOT be selected — the Fallback (Word
 /// writes a rendered picture / legacy VML twin) is the only branch we can draw.
 /// Add it here only together with an actual canvas handler.
-fn docx_understands_drawing_ns(ns: &str) -> bool {
+pub(crate) fn docx_understands_drawing_ns(ns: &str) -> bool {
     matches!(
         ns,
         // Microsoft 2014 chartEx (waterfall / boxWhisker / treemap / sunburst …).
@@ -16658,7 +17366,7 @@ mod svg_blip_tests {
             put("word/media/footnote.png", PNG_1X1);
             zw.finish().unwrap();
         }
-        let mut zip: Zip = ZipArchive::new(Cursor::new(buf)).unwrap();
+        let mut zip = Zip::new(Cursor::new(buf)).unwrap();
 
         // A part at word/charts/chart1.xml references the media one directory up.
         let mut rel_map: HashMap<String, String> = HashMap::new();
@@ -24765,6 +25473,83 @@ mod embedded_font_tests {
             1,
             "the container tag must not be doubled; got {garbage_err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod streamed_body_equivalence_tests {
+    use std::io::{Cursor, Write};
+
+    use super::*;
+    use zip::write::SimpleFileOptions;
+
+    fn build_docx(document_xml: &str) -> Vec<u8> {
+        let relationships = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+          <Relationship Id="rFooter" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+        </Relationships>"#;
+        let header = r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>"#;
+        let footer = r#"<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Footer</w:t></w:r></w:p></w:ftr>"#;
+        let mut bytes = Vec::new();
+        {
+            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = SimpleFileOptions::default();
+            for (path, content) in [
+                ("word/document.xml", document_xml),
+                ("word/_rels/document.xml.rels", relationships),
+                ("word/header1.xml", header),
+                ("word/footer1.xml", footer),
+            ] {
+                archive.start_file(path, options).unwrap();
+                archive.write_all(content.as_bytes()).unwrap();
+            }
+            archive.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn parse_with(data: &[u8], parser: fn(&mut Zip) -> Result<Document, String>) -> Document {
+        let mut zip = open_zip(data.to_vec()).expect("test package opens");
+        zip.run_operation("equivalence", parser)
+            .expect("test document parses")
+    }
+
+    #[test]
+    fn two_pass_body_matches_compatibility_model_for_cross_block_state() {
+        let w = wordprocessingml::TRANSITIONAL;
+        let r = relationships::TRANSITIONAL;
+        let document = format!(
+            r#"<w:document xmlns:w="{w}" xmlns:r="{r}"><w:body>
+              <w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Cover Pages"/></w:docPartObj></w:sdtPr>
+                <w:sdtContent><w:p><w:r><w:t>Cover</w:t></w:r></w:p></w:sdtContent>
+              </w:sdt>
+              <w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText> PAGE </w:instrText></w:r></w:p>
+              <w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rHeader"/><w:titlePg/></w:sectPr></w:pPr>
+                <w:r><w:t>1</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>
+              <w:tbl><w:tblPr/><w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+              <w:tbl><w:tblPr/><w:tr><w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+              <w:sectPr><w:footerReference w:type="default" r:id="rFooter"/></w:sectPr>
+            </w:body></w:document>"#,
+        );
+        let data = build_docx(&document);
+        let compatibility = parse_with(&data, parse);
+        let streamed = parse_with(&data, parse_streamed);
+        assert_eq!(
+            serde_json::to_value(streamed).unwrap(),
+            serde_json::to_value(compatibility).unwrap()
+        );
+    }
+
+    #[test]
+    fn streamed_required_document_part_fails_deterministically() {
+        let data = build_docx(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>"#,
+        );
+        let mut zip = open_zip(data).unwrap();
+        let error = zip
+            .run_operation("streamed-malformed", parse_streamed)
+            .unwrap_err();
+        assert!(error.contains("word/document.xml"), "{error}");
     }
 }
 

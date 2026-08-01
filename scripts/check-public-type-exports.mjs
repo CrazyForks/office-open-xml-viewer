@@ -37,12 +37,15 @@ const moduleExports = (file) => {
 };
 
 const rootExports = moduleExports(files[0]);
+const formatExports = [];
 for (const [index, format] of formats.entries()) {
   let namespace = rootExports.get(format);
   assert.ok(namespace, `Root declaration does not export the ${format} namespace.`);
   if (namespace.flags & ts.SymbolFlags.Alias) namespace = checker.getAliasedSymbol(namespace);
   const namespaceNames = checker.getExportsOfModule(namespace).map((entry) => entry.name).sort();
-  const directNames = [...moduleExports(files[index + 1]).keys()].sort();
+  const directExports = moduleExports(files[index + 1]);
+  formatExports.push(directExports);
+  const directNames = [...directExports.keys()].sort();
   assert.deepEqual(
     namespaceNames,
     directNames,
@@ -50,4 +53,40 @@ for (const [index, format] of formats.entries()) {
   );
 }
 
-process.stdout.write('Published declaration entries compile and root namespace exports match.\n');
+const sharedOoxmlTypes = [
+  'LoadOptions',
+  'OoxmlError',
+  'OoxmlErrorStage',
+  'OoxmlFormat',
+  'OoxmlResourceLimit',
+  'OoxmlResourceLimits',
+  'OoxmlResourceMetric',
+  'OoxmlResourceName',
+  'OoxmlResourceLimitError',
+  'OoxmlResourceLimitErrorDetails',
+  'OoxmlResourceUsageSnapshot',
+  'OoxmlResourceViolation',
+];
+
+function declaredType(exports, name, format) {
+  let symbol = exports.get(name);
+  assert.ok(symbol, `${format} does not export shared OOXML type ${name}.`);
+  if (symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
+  return checker.getDeclaredTypeOfSymbol(symbol);
+}
+
+for (const name of sharedOoxmlTypes) {
+  const canonical = declaredType(formatExports[0], name, formats[0]);
+  for (let index = 1; index < formatExports.length; index += 1) {
+    const candidate = declaredType(formatExports[index], name, formats[index]);
+    assert.ok(
+      checker.isTypeAssignableTo(canonical, candidate)
+        && checker.isTypeAssignableTo(candidate, canonical),
+      `${name} differs between ${formats[0]} and ${formats[index]}.`,
+    );
+  }
+}
+
+process.stdout.write(
+  'Published declaration entries compile; root namespace exports and shared OOXML contracts match.\n',
+);

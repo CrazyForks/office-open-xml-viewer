@@ -1,6 +1,6 @@
+use crate::read_zip_string;
 use crate::types::*;
 use crate::{parse_rels_map, resolve_zip_path};
-use ooxml_common::zip::read_zip_string;
 // Shared DrawingML blip helpers (ECMA-376 §20.1.8.13 + Microsoft 2016 SVG
 // extension, MS-ODRAWXML). `mime_from_ext` is the single source of truth for
 // `.svg ⇒ image/svg+xml`; `svg_blip_rid` resolves the vector original nested in
@@ -3138,7 +3138,7 @@ mod blip_svg_tests {
         let xml = drawing_xml(blip_inner);
         let data = build_media_zip(PNG_1X1, SVG);
         let cursor = Cursor::new(data.clone());
-        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        let mut archive = crate::XlsxZip::new(cursor).unwrap();
         let anchors = parse_drawing_anchors(&xml, rels, "xl/drawings", &mut archive, &[]);
         assert_eq!(anchors.len(), 1, "exactly one picture anchor expected");
         anchors.into_iter().next().unwrap()
@@ -3171,7 +3171,7 @@ mod blip_svg_tests {
 </xdr:wsDr>"#,
                 hidden = hidden_attr,
             );
-            let mut archive = zip::ZipArchive::new(Cursor::new(data.clone())).unwrap();
+            let mut archive = crate::XlsxZip::new(Cursor::new(data.clone())).unwrap();
             let anchors = parse_drawing_anchors(&xml, &rels, "xl/drawings", &mut archive, &[]);
             assert_eq!(anchors.len(), expect_len, "hidden={hidden_attr}");
         }
@@ -3524,7 +3524,7 @@ mod ole_object_tests {
             }
             zw.finish().unwrap();
         }
-        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+        crate::XlsxZip::new(Cursor::new(buf)).unwrap()
     }
 
     const OLE_NS: &str = concat!(
@@ -4135,7 +4135,7 @@ mod strict_namespace_tests {
         rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
 
         let data = build_media_zip(PNG_1X1);
-        let mut archive = zip::ZipArchive::new(Cursor::new(data)).unwrap();
+        let mut archive = crate::XlsxZip::new(Cursor::new(data)).unwrap();
         let anchors = parse_drawing_anchors(&xml, &rels, "xl/drawings", &mut archive, &[]);
 
         assert_eq!(

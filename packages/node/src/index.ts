@@ -1,10 +1,28 @@
 export {
   parsePptx,
+  openPptxPresentation,
   extractMedia as extractPptxMedia,
   extractImage as extractPptxImage,
+  type OpenPptxPresentationOptions,
+  type PptxPresentationSession,
 } from './pptx';
-export { parseDocx } from './docx';
-export { parseXlsx, parseSheet as parseXlsxSheet, parseXlsxAllSheets } from './xlsx';
+export {
+  openDocxDocument,
+  parseDocx,
+  type DocxDocumentSession,
+  type DocxPageRenderOptions,
+  type DocxRenderedPage,
+  type OpenDocxDocumentOptions,
+} from './docx';
+export {
+  openXlsxWorkbook,
+  parseXlsx,
+  parseSheet as parseXlsxSheet,
+  parseXlsxAllSheets,
+  type OpenXlsxWorkbookOptions,
+  type XlsxWorkbookSession,
+  type XlsxWorksheetRowChunk,
+} from './xlsx';
 export {
   renderSlideNode,
   makeSourceBufferFetchImage,
@@ -14,3 +32,9 @@ export {
   type NodeCanvasFactory,
   type NodeImageLike,
 } from './render';
+export type { OoxmlNodeSessionOptions } from './session-options';
+export type {
+  OoxmlResourceMetrics,
+  OoxmlResourceMetricsCheckpoint,
+  OoxmlResourcePolicySnapshot,
+} from '@silurus/ooxml-core';

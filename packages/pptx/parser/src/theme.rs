@@ -4,8 +4,8 @@
 //! theme-slot hexes. Extracted verbatim from `lib.rs`. Shared XML helpers
 //! (`child`, `attr`) stay in `lib.rs` and are imported here.
 
+use crate::parse_preflighted_pptx_xml;
 use crate::{attr, child};
-use ooxml_common::depth::parse_guarded;
 use std::collections::HashMap;
 
 /// Parse the color scheme from a theme XML file.
@@ -21,6 +21,12 @@ use std::collections::HashMap;
 /// default-filling `parse_ln_style_widths`, and the latter is pptx-specific.
 pub(crate) fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
+    // Enforce the PPTX-local defense-in-depth node ceiling before any shared
+    // theme adapter reparses this already lexically-preflighted input.
+    let doc = match parse_preflighted_pptx_xml(xml) {
+        Ok(d) => d,
+        Err(_) => return map,
+    };
 
     // Color slots: shared parse, kept RAW (pptx applies no case-folding, unlike
     // docx/xlsx). prstClr is now resolved via the shared preset table.
@@ -38,10 +44,6 @@ pub(crate) fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
         }
     }
 
-    let doc = match parse_guarded(xml) {
-        Ok(d) => d,
-        Err(_) => return map,
-    };
     let root = doc.root_element();
 
     // Parse fmtScheme > lnStyleLst so lnRef idx="N" can resolve to the theme's
@@ -204,7 +206,7 @@ pub(crate) fn bake_clr_map(theme: &mut HashMap<String, String>, master_xml: Opti
     // Find the master's <p:clrMap> element (direct child of <p:sldMaster>) and
     // resolve its 12 logical→slot attrs, then apply.
     let clr_map = master_xml.and_then(|xml| {
-        let doc = parse_guarded(xml).ok()?;
+        let doc = parse_preflighted_pptx_xml(xml).ok()?;
         let node = child(doc.root_element(), "clrMap")?;
         Some(parse_clr_map_node(node))
     });
@@ -225,7 +227,7 @@ pub(crate) fn parse_clr_map_ovr(xml: &str) -> Option<HashMap<String, String>> {
     if !xml.contains("clrMapOvr") {
         return None;
     }
-    let doc = parse_guarded(xml).ok()?;
+    let doc = parse_preflighted_pptx_xml(xml).ok()?;
     // <p:clrMapOvr> is a direct child of <p:sld> / <p:sldLayout> (right after
     // <p:cSld>); the choice inside is masterClrMapping XOR overrideClrMapping.
     let ovr = child(doc.root_element(), "clrMapOvr")?;
@@ -287,7 +289,7 @@ mod tests {
 
     #[test]
     fn shallow_theme_xml_parses_colors() {
-        // A normal theme parses through `parse_guarded` unchanged (sanity: the
+        // A normal theme parses through the PPTX preflighted parser unchanged (sanity: the
         // guard does not reject legitimate parts).
         let xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
             <a:themeElements><a:clrScheme name="Office">
@@ -300,7 +302,7 @@ mod tests {
     }
 
     // ── RB2 neutralization (roxmltree layer): a pathologically deep theme/part
-    //    XML is rejected by the depth pre-check in `parse_guarded` BEFORE
+    //    XML is rejected by the depth pre-check in the PPTX parser BEFORE
     //    roxmltree's recursive tree builder runs, so `parse_theme_colors` returns
     //    gracefully instead of trapping. This runs on the DEFAULT (small)
     //    test-thread stack ON PURPOSE: handing 5 000-deep XML straight to

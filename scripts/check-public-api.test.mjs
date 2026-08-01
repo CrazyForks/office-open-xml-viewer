@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-const script = fileURLToPath(new URL('./check-docx-public-api.mjs', import.meta.url));
+const script = fileURLToPath(new URL('./check-public-api.mjs', import.meta.url));
 
 function git(root, ...args) {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
@@ -56,6 +56,36 @@ test('writes a deterministic baseline containing every reachable local declarati
   assert.match(baseline, /file: detail\.d\.ts/);
   assert.doesNotMatch(baseline, /private\/sample-1/);
   assert.equal(run(root, '--base-ref', base).status, 0);
+});
+
+test('checks a format-specific entry, baseline, and diagnostic label', () => {
+  const { root, base } = fixture();
+  writeFileSync(
+    path.join(root, 'dist/types/xlsx.d.ts'),
+    "export interface WorkbookApi { sheetCount: number; }\n",
+  );
+  const args = [
+    '--base-ref', base,
+    '--entry', 'xlsx.d.ts',
+    '--baseline', 'packages/xlsx/api/public-api-baseline.d.ts',
+    '--label', 'XLSX',
+  ];
+  const written = run(root, ...args, '--write-baseline');
+  assert.equal(written.status, 0, written.stderr);
+  const baseline = readFileSync(
+    path.join(root, 'packages/xlsx/api/public-api-baseline.d.ts'),
+    'utf8',
+  );
+  assert.match(baseline, /XLSX public entry/);
+  assert.match(baseline, /WorkbookApi/);
+
+  writeFileSync(
+    path.join(root, 'dist/types/xlsx.d.ts'),
+    "export interface WorkbookApi { sheetCount: string; }\n",
+  );
+  const changed = run(root, ...args);
+  assert.notEqual(changed.status, 0);
+  assert.match(changed.stderr, /XLSX public API declaration baseline differs/);
 });
 
 test('fails when a transitively reachable declaration changes', () => {
@@ -298,6 +328,21 @@ test('fails when the generated entry declaration is missing', () => {
   const result = run(root, '--base-ref', base, '--write-baseline', '--entry', 'missing.d.ts');
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /build.*published package/i);
+});
+
+test('rejects declaration and baseline paths outside their owned roots', () => {
+  const { root, base } = fixture();
+  const escapedEntry = run(root, '--base-ref', base, '--entry', '../package.json');
+  assert.notEqual(escapedEntry.status, 0);
+  assert.match(escapedEntry.stderr, /inside dist\/types/i);
+
+  const escapedBaseline = run(
+    root,
+    '--base-ref', base,
+    '--baseline', '../outside/public-api.d.ts',
+  );
+  assert.notEqual(escapedBaseline.status, 0);
+  assert.match(escapedBaseline.stderr, /inside the repository/i);
 });
 
 test('refuses to rewrite the baseline after it exists at the merge base', () => {

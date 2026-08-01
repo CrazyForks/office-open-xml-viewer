@@ -1,4 +1,3 @@
-import type { ChartRun, ImageRun, ShapeRun } from '../types.js';
 import { wordPageLevelAnchorY } from './anchor-compatibility.js';
 import { isWrapFloat } from './float-wrap.js';
 
@@ -11,10 +10,14 @@ export function isPageLevelAnchorY(
   return wordPageLevelAnchorY(relativeFrom, fromParagraph);
 }
 
-export function isPageLevelWrapFloat(run: ImageRun | ChartRun | ShapeRun): boolean {
+export function isPageLevelWrapFloat(
+  run: DeepReadonly<ImageRun | Omit<ChartRun, 'chart'> | ShapeRun>,
+): boolean {
   return isWrapFloat(run.wrapMode)
     && isPageLevelAnchorY(
       run.anchorYRelativeFrom ?? null,
       run.anchorYFromPara ?? false,
     );
 }
+import type { ChartRun, ImageRun, ShapeRun } from '../types.js';
+import type { DeepReadonly } from './types.js';

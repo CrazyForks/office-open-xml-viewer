@@ -1,5 +1,12 @@
 import type { DocComment, DocNote, RenderPageOptions, WorkerResponse } from './types';
 import type { DocxTextRunInfo } from './renderer';
+import type {
+  NormalizedOoxmlResourcePolicy,
+  PullSessionCommand,
+  PullSessionIdentity,
+  PullSessionResponse,
+} from '@silurus/ooxml-core/worker';
+import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 
 /** Lightweight summary returned by the render worker's `parse` — everything
  *  the main-thread proxy needs for its synchronous getters. The full model
@@ -31,23 +38,38 @@ export type WireRenderPageOptions = Omit<RenderPageOptions, 'onTextRun'>;
 // `init` arm is copied verbatim from `WorkerRequest`.
 export type RenderWorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number; useGoogleFonts?: boolean; defaultCurrentDateMs: number }
+  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; useGoogleFonts?: boolean; defaultCurrentDateMs: number }
   | { type: 'renderPage'; id: number; pageIndex: number; opts: WireRenderPageOptions }
   // IX6 — collect a page's text-run geometry WITHOUT transferring a bitmap. The
   // find controller scans every page for its runs; a bitmap per page would be
   // wasted work + transfer for pages the user never looks at.
   | { type: 'collectRuns'; id: number; pageIndex: number; opts: WireRenderPageOptions }
   | { type: 'extractImage'; id: number; path: string }
+  | { type: 'resourceUsage'; id: number }
   | { type: 'toMarkdown'; id: number };
 
+export type RenderWorkerWireRequest =
+  | RenderWorkerRequest
+  | PullSessionCommand<number>;
+
 export type RenderWorkerResponse =
-  | Exclude<WorkerResponse, { type: 'parsed' }>
-  | { type: 'parsedMeta'; id: number; meta: DocumentMeta }
+  | Exclude<WorkerResponse, { type: 'documentSessionOpened' }>
+  | PullSessionResponse<ArrayBuffer, number>
+  | {
+      type: 'parsedMeta';
+      id: number;
+      meta: DocumentMeta;
+      usage?: OoxmlResourceUsageSnapshot;
+    }
   // OffscreenCanvas cannot select/probe the OpenType `vert` feature. A render
-  // worker that parses vertical East-Asian content returns the normalized model
+  // worker that parses vertical East-Asian content opens a bounded model stream
   // so the proxy can continue through main-thread rendering instead of silently
-  // painting horizontal glyph forms.
-  | { type: 'mainThreadVerticalFallback'; id: number; documentJson: ArrayBuffer }
+  // painting horizontal glyph forms or receiving one monolithic JSON value.
+  | ({
+      type: 'mainThreadVerticalFallback';
+      id: number;
+      usage?: OoxmlResourceUsageSnapshot;
+    } & PullSessionIdentity<number>)
   // The worker projects structured-clone-safe run geometry from the same
   // retained layout variant it paints and ships it beside the bitmap.
   | { type: 'pageRendered'; id: number; bitmap: ImageBitmap; runs: DocxTextRunInfo[] }

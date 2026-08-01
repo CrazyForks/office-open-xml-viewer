@@ -8,6 +8,7 @@ import { layoutOptionsKey } from './layout/options.js';
 import { layoutVariantStoreOf } from './layout/runtime-state.js';
 import type { DocumentLayout, LayoutServices } from './layout/types.js';
 import { ensureDocumentLayoutVariants } from './layout/document.js';
+import { layoutSourceStore } from './layout-source-model-adapter.js';
 
 describe('document canonical layout variants', () => {
   it('keeps default metadata isolated and validates the selected keyed variant', () => {
@@ -22,7 +23,7 @@ describe('document canonical layout variants', () => {
       diagnostics: [],
     });
     const variants = attachDocumentLayoutVariants({
-      model, services, defaultCurrentDateMs: 10,
+      source: layoutSourceStore(model), services, defaultCurrentDateMs: 10,
       buildLayout: (options) => layout(options.currentDateMs === 10 ? 2 : 1),
     });
 
@@ -44,7 +45,7 @@ describe('document canonical layout variants', () => {
       diagnostics: [],
     });
     attachDocumentLayoutVariants({
-      model, services, defaultCurrentDateMs: 10,
+      source: layoutSourceStore(model), services, defaultCurrentDateMs: 10,
       buildLayout: (options) => layout(options.currentDateMs),
     });
 
@@ -68,7 +69,7 @@ describe('document canonical layout variants', () => {
       body: [], section: { pageWidth: 100, pageHeight: 200 },
     } as unknown as DocxDocumentModel;
     attachDocumentLayoutVariants({
-      model,
+      source: layoutSourceStore(model),
       services,
       defaultCurrentDateMs: 10,
       buildLayout: () => ({ pages: [{ pageIndex: 0 } as never], diagnostics: [] }),

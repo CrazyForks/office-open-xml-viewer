@@ -322,106 +322,137 @@ export const SCRIPT_PRELOAD_NAMES: string[] = [
  * The result is a deduplicated, deterministically-ordered array, so the
  * main-thread `load()` and the render worker — given the same parsed model —
  * derive an IDENTICAL preload set (required for worker/main pixel equivalence).
+ *
+ * Incremental collection is exposed internally through
+ * {@link ScriptPreloadAccumulator}. Format-owned pull pipelines use it to
+ * discard each parsed unit after contributing its script facts, while
+ * {@link scriptPreloadNamesForText} preserves the one-shot contract.
+ *
+ * Kept off the package root API.
  */
+export class ScriptPreloadAccumulator {
+  private hasHan = false;
+  private hasHangul = false;
+  private hasKana = false;
+  private hasArabic = false;
+  private hasThai = false;
+  private hasHebrew = false;
+  private hasDevanagari = false;
+  private hasCyrGreek = false;
+
+  constructor(private readonly cjkLang: CjkLang | null) {}
+
+  clone(): ScriptPreloadAccumulator {
+    const copy = new ScriptPreloadAccumulator(this.cjkLang);
+    copy.hasHan = this.hasHan;
+    copy.hasHangul = this.hasHangul;
+    copy.hasKana = this.hasKana;
+    copy.hasArabic = this.hasArabic;
+    copy.hasThai = this.hasThai;
+    copy.hasHebrew = this.hasHebrew;
+    copy.hasDevanagari = this.hasDevanagari;
+    copy.hasCyrGreek = this.hasCyrGreek;
+    return copy;
+  }
+
+  addText(text: Iterable<string>): void {
+    const allFound = (): boolean =>
+      (this.hasHan && this.hasHangul && this.hasKana) &&
+      this.hasArabic &&
+      this.hasThai &&
+      this.hasHebrew &&
+      this.hasDevanagari &&
+      this.hasCyrGreek;
+
+    outer: for (const chunk of text) {
+      if (!chunk) continue;
+      for (const ch of chunk) {
+        const cp = ch.codePointAt(0);
+        if (cp === undefined) continue;
+
+        // Fast path: ASCII / Latin-1 / Latin Extended need no script font.
+        if (cp <= 0x024f) continue;
+
+        if (
+          (cp >= 0x1100 && cp <= 0x11ff) ||
+          (cp >= 0x3130 && cp <= 0x318f) ||
+          (cp >= 0xac00 && cp <= 0xd7af)
+        ) {
+          this.hasHangul = true;
+        } else if (cp >= 0x3040 && cp <= 0x30ff) {
+          this.hasKana = true;
+        } else if (
+          (cp >= 0x3400 && cp <= 0x4dbf) ||
+          (cp >= 0x4e00 && cp <= 0x9fff) ||
+          (cp >= 0xf900 && cp <= 0xfaff) ||
+          (cp >= 0x20000 && cp <= 0x2fa1f)
+        ) {
+          this.hasHan = true;
+        } else if (
+          (cp >= 0x0600 && cp <= 0x06ff) ||
+          (cp >= 0x0750 && cp <= 0x077f) ||
+          (cp >= 0x08a0 && cp <= 0x08ff) ||
+          (cp >= 0xfb50 && cp <= 0xfdff) ||
+          (cp >= 0xfe70 && cp <= 0xfeff)
+        ) {
+          this.hasArabic = true;
+        } else if (cp >= 0x0e00 && cp <= 0x0e7f) {
+          this.hasThai = true;
+        } else if (
+          (cp >= 0x0590 && cp <= 0x05ff) ||
+          (cp >= 0xfb1d && cp <= 0xfb4f)
+        ) {
+          this.hasHebrew = true;
+        } else if (cp >= 0x0900 && cp <= 0x097f) {
+          this.hasDevanagari = true;
+        } else if (
+          (cp >= 0x0400 && cp <= 0x04ff) ||
+          (cp >= 0x0370 && cp <= 0x03ff)
+        ) {
+          this.hasCyrGreek = true;
+        }
+
+        if (allFound()) break outer;
+      }
+    }
+  }
+
+  names(): string[] {
+    const names: string[] = [];
+
+    // CJK: each detected language contributes its Sans+Serif pair. Hangul → 'kr',
+    // Kana → 'jp', shared Han → the language hint (or 'jp' default) UNLESS Hangul
+    // or Kana already pinned a CJK language, in which case Han resolves to one of
+    // those faces and needs no extra family.
+    const cjkLangs = new Set<CjkLang>();
+    if (this.hasHangul) cjkLangs.add('kr');
+    if (this.hasKana) cjkLangs.add('jp');
+    if (this.hasHan && cjkLangs.size === 0) {
+      cjkLangs.add(this.cjkLang ?? 'jp');
+    }
+    // Stable order: kr, sc, tc, jp.
+    for (const lang of ['kr', 'sc', 'tc', 'jp'] as const) {
+      if (cjkLangs.has(lang)) {
+        const suffix = { kr: 'KR', sc: 'SC', tc: 'TC', jp: 'JP' }[lang];
+        names.push(`Noto Sans ${suffix}`, `Noto Serif ${suffix}`);
+      }
+    }
+
+    if (this.hasCyrGreek) names.push('Noto Sans', 'Noto Serif');
+    if (this.hasArabic) names.push('Noto Naskh Arabic', 'Noto Sans Arabic');
+    if (this.hasThai) names.push('Noto Sans Thai');
+    if (this.hasHebrew) names.push('Noto Sans Hebrew', 'Noto Serif Hebrew');
+    if (this.hasDevanagari) names.push('Noto Sans Devanagari');
+
+    return names;
+  }
+}
+
 export function scriptPreloadNamesForText(
   text: Iterable<string>,
   cjkLang: CjkLang | null,
 ): string[] {
-  let hasHan = false;
-  let hasHangul = false;
-  let hasKana = false;
-  let hasArabic = false;
-  let hasThai = false;
-  let hasHebrew = false;
-  let hasDevanagari = false;
-  let hasCyrGreek = false;
-
-  // Every script category found → can stop scanning further codepoints.
-  const allFound = (): boolean =>
-    (hasHan && hasHangul && hasKana) &&
-    hasArabic &&
-    hasThai &&
-    hasHebrew &&
-    hasDevanagari &&
-    hasCyrGreek;
-
-  outer: for (const chunk of text) {
-    if (!chunk) continue;
-    for (const ch of chunk) {
-      const cp = ch.codePointAt(0);
-      if (cp === undefined) continue;
-
-      // Fast path: ASCII / Latin-1 / Latin Extended need no script font.
-      if (cp <= 0x024f) continue;
-
-      if (
-        (cp >= 0x1100 && cp <= 0x11ff) ||
-        (cp >= 0x3130 && cp <= 0x318f) ||
-        (cp >= 0xac00 && cp <= 0xd7af)
-      ) {
-        hasHangul = true;
-      } else if (cp >= 0x3040 && cp <= 0x30ff) {
-        hasKana = true;
-      } else if (
-        (cp >= 0x3400 && cp <= 0x4dbf) ||
-        (cp >= 0x4e00 && cp <= 0x9fff) ||
-        (cp >= 0xf900 && cp <= 0xfaff) ||
-        (cp >= 0x20000 && cp <= 0x2fa1f)
-      ) {
-        hasHan = true;
-      } else if (
-        (cp >= 0x0600 && cp <= 0x06ff) ||
-        (cp >= 0x0750 && cp <= 0x077f) ||
-        (cp >= 0x08a0 && cp <= 0x08ff) ||
-        (cp >= 0xfb50 && cp <= 0xfdff) ||
-        (cp >= 0xfe70 && cp <= 0xfeff)
-      ) {
-        hasArabic = true;
-      } else if (cp >= 0x0e00 && cp <= 0x0e7f) {
-        hasThai = true;
-      } else if (
-        (cp >= 0x0590 && cp <= 0x05ff) ||
-        (cp >= 0xfb1d && cp <= 0xfb4f)
-      ) {
-        hasHebrew = true;
-      } else if (cp >= 0x0900 && cp <= 0x097f) {
-        hasDevanagari = true;
-      } else if (
-        (cp >= 0x0400 && cp <= 0x04ff) ||
-        (cp >= 0x0370 && cp <= 0x03ff)
-      ) {
-        hasCyrGreek = true;
-      }
-
-      if (allFound()) break outer;
-    }
-  }
-
-  const names: string[] = [];
-
-  // CJK: each detected language contributes its Sans+Serif pair. Hangul → 'kr',
-  // Kana → 'jp', shared Han → the language hint (or 'jp' default) UNLESS Hangul
-  // or Kana already pinned a CJK language, in which case Han resolves to one of
-  // those faces and needs no extra family.
-  const cjkLangs = new Set<CjkLang>();
-  if (hasHangul) cjkLangs.add('kr');
-  if (hasKana) cjkLangs.add('jp');
-  if (hasHan && cjkLangs.size === 0) {
-    cjkLangs.add(cjkLang ?? 'jp');
-  }
-  // Stable order: kr, sc, tc, jp.
-  for (const lang of ['kr', 'sc', 'tc', 'jp'] as const) {
-    if (cjkLangs.has(lang)) {
-      const suffix = { kr: 'KR', sc: 'SC', tc: 'TC', jp: 'JP' }[lang];
-      names.push(`Noto Sans ${suffix}`, `Noto Serif ${suffix}`);
-    }
-  }
-
-  if (hasCyrGreek) names.push('Noto Sans', 'Noto Serif');
-  if (hasArabic) names.push('Noto Naskh Arabic', 'Noto Sans Arabic');
-  if (hasThai) names.push('Noto Sans Thai');
-  if (hasHebrew) names.push('Noto Sans Hebrew', 'Noto Serif Hebrew');
-  if (hasDevanagari) names.push('Noto Sans Devanagari');
-
-  return names;
+  const accumulator = new ScriptPreloadAccumulator(cjkLang);
+  accumulator.addText(text);
+  return accumulator.names();
 }

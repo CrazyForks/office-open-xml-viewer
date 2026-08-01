@@ -13,6 +13,13 @@ import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
 import { formatA1, parseA1 } from './a1.js';
 import { drawStackedVerticalChar } from './vertical-text.js';
+import {
+  addCoordinateIndexEntry,
+  assertCoordinateRangeArea,
+  buildCellCoordinateIndex,
+  setCoordinateIndexValue,
+  type CoordinateIndexIdentity,
+} from './renderer-coordinate-index.js';
 
 /** Cache key for a decoded image in the shared `loadedImages` map. A plain
  *  picture is keyed by its zip `imagePath`; a picture carrying a `<a:duotone>`
@@ -1724,8 +1731,12 @@ export interface TableCellStyle {
   stripeDxf?: number;
 }
 
-function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
+export function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
   const map = new Map<string, TableCellStyle>();
+  const identity = coordinateIndexIdentity(
+    'worksheet-table-style-index',
+    'expand-styled-table-coordinates',
+  );
   for (const t of worksheet.tables ?? []) {
     // ECMA-376 §18.5.1.4: empty styleName means the table has "None" style —
     // no visual table formatting overlay should be applied. Cell xf borders
@@ -1733,6 +1744,7 @@ function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
     // table-style overlay (banded fills, separator rules, etc.) is skipped.
     if (!t.styleName) continue;
     const { top, bottom, left, right } = t.range;
+    assertCoordinateRangeArea(t.range, identity);
     const accent = t.accentColor || '#808080';
     const isCustom = !!t.isCustom;
     const hdr = Math.max(0, t.headerRowCount ?? 1);
@@ -1751,7 +1763,7 @@ function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
         ? (dataIdx % 2 === 1 ? t.band1HorizontalDxf : t.band2HorizontalDxf)
         : undefined;
       for (let c = left; c <= right; c++) {
-        map.set(`${r}:${c}`, {
+        setCoordinateIndexValue(map, `${r}:${c}`, {
           accent,
           isCustom,
           isHeader,
@@ -1767,7 +1779,7 @@ function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
           firstColumnDxf: t.firstColumnDxf,
           lastColumnDxf: t.lastColumnDxf,
           stripeDxf,
-        });
+        }, identity);
       }
     }
   }
@@ -1844,6 +1856,10 @@ export function tableOverlayBorder(
  *  `renderSparkline` without further work. */
 function buildSparklineMap(worksheet: Worksheet): Map<string, SparklineModel> {
   const map = new Map<string, SparklineModel>();
+  const identity = coordinateIndexIdentity(
+    'worksheet-sparkline-index',
+    'index-sparkline-coordinates',
+  );
   for (const g of worksheet.sparklineGroups ?? []) {
     // Group-wide min/max if needed.
     let groupMin = Infinity, groupMax = -Infinity;
@@ -1870,7 +1886,7 @@ function buildSparklineMap(worksheet: Worksheet): Map<string, SparklineModel> {
       const max = g.maxAxisType === 'custom' && typeof g.manualMax === 'number'
         ? g.manualMax
         : g.maxAxisType === 'group' ? groupMax : indMax;
-      map.set(`${sl.row}:${sl.col}`, {
+      setCoordinateIndexValue(map, `${sl.row}:${sl.col}`, {
         kind: g.kind,
         values: sl.values,
         min,
@@ -1894,7 +1910,7 @@ function buildSparklineMap(worksheet: Worksheet): Map<string, SparklineModel> {
         colorLast: g.colorLast,
         colorHigh: g.colorHigh,
         colorLow: g.colorLow,
-      });
+      }, identity);
     }
   }
   return map;
@@ -2923,25 +2939,33 @@ interface SheetRenderCache {
 }
 const sheetRenderCache = new WeakMap<Worksheet, SheetRenderCache>();
 
-function getSheetRenderCache(worksheet: Worksheet): SheetRenderCache {
+function coordinateIndexIdentity(
+  resource: string,
+  operation: string,
+): CoordinateIndexIdentity {
+  return { resource, operation };
+}
+
+export function getSheetRenderCache(worksheet: Worksheet): SheetRenderCache {
   const cached = sheetRenderCache.get(worksheet);
   if (cached) return cached;
 
-  const cellMap = new Map<string, Cell>();
-  for (const row of worksheet.rows) {
-    for (const cell of row.cells) {
-      cellMap.set(`${cell.row}:${cell.col}`, cell);
-    }
-  }
+  const cellIdentity = coordinateIndexIdentity('worksheet-cell-index', 'index-worksheet-cells');
+  const cellMap = buildCellCoordinateIndex(worksheet.rows, cellIdentity);
 
   // Merge skip-set is pure topology (no scaled sizes) so it is cacheable; the
   // anchor map's pixel sizes depend on cellScale and stay per-frame.
   const mergeSkipSet = new Set<string>();
+  const mergeIdentity = coordinateIndexIdentity(
+    'worksheet-merge-skip-index',
+    'expand-merged-cell-coordinates',
+  );
   for (const mc of worksheet.mergeCells ?? []) {
+    assertCoordinateRangeArea(mc, mergeIdentity, 1);
     for (let r = mc.top; r <= mc.bottom; r++) {
       for (let c = mc.left; c <= mc.right; c++) {
         if (r === mc.top && c === mc.left) continue;
-        mergeSkipSet.add(`${r}:${c}`);
+        addCoordinateIndexEntry(mergeSkipSet, `${r}:${c}`, mergeIdentity);
       }
     }
   }
@@ -2949,23 +2973,41 @@ function getSheetRenderCache(worksheet: Worksheet): SheetRenderCache {
   const autoFilterCells = new Set<string>();
   if (worksheet.autoFilter) {
     const af = worksheet.autoFilter;
-    for (let c = af.left; c <= af.right; c++) autoFilterCells.add(`${af.top}:${c}`);
+    const filterIdentity = coordinateIndexIdentity(
+      'worksheet-auto-filter-index',
+      'expand-auto-filter-coordinates',
+    );
+    assertCoordinateRangeArea(
+      { top: af.top, bottom: af.top, left: af.left, right: af.right },
+      filterIdentity,
+    );
+    for (let c = af.left; c <= af.right; c++) {
+      addCoordinateIndexEntry(autoFilterCells, `${af.top}:${c}`, filterIdentity);
+    }
   }
 
   const hyperlinkMap = new Map<string, string>();
+  const hyperlinkIdentity = coordinateIndexIdentity(
+    'worksheet-hyperlink-index',
+    'index-hyperlink-coordinates',
+  );
   for (const hl of worksheet.hyperlinks ?? []) {
-    if (hl.url) hyperlinkMap.set(`${hl.row}:${hl.col}`, hl.url);
+    if (hl.url) setCoordinateIndexValue(hyperlinkMap, `${hl.row}:${hl.col}`, hl.url, hyperlinkIdentity);
   }
 
   const commentCells = new Set<string>();
+  const commentIdentity = coordinateIndexIdentity(
+    'worksheet-comment-index',
+    'index-comment-coordinates',
+  );
   for (const ref of worksheet.commentRefs ?? []) {
     const parsed = parseA1Ref(ref);
-    if (parsed) commentCells.add(`${parsed.row}:${parsed.col}`);
+    if (parsed) addCoordinateIndexEntry(commentCells, `${parsed.row}:${parsed.col}`, commentIdentity);
   }
 
   const entry: SheetRenderCache = {
     cellMap,
-    cfContext: compileCf(worksheet),
+    cfContext: compileCf(worksheet, cellMap),
     mergeSkipSet,
     autoFilterCells,
     hyperlinkMap,
@@ -3038,6 +3080,10 @@ export function renderViewport(
 
   // Merge anchor sizes are cellScale-scaled, so they stay per-frame.
   const mergeAnchorMap = new Map<string, { totalW: number; totalH: number; right: number; bottom: number }>();
+  const mergeAnchorIdentity = coordinateIndexIdentity(
+    'worksheet-merge-anchor-index',
+    'index-merge-anchor-coordinates',
+  );
   for (const mc of worksheet.mergeCells ?? []) {
     let totalW = 0;
     for (let c = mc.left; c <= mc.right; c++) {
@@ -3047,7 +3093,12 @@ export function renderViewport(
     for (let r = mc.top; r <= mc.bottom; r++) {
       totalH += sp(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight));
     }
-    mergeAnchorMap.set(`${mc.top}:${mc.left}`, { totalW, totalH, right: mc.right, bottom: mc.bottom });
+    setCoordinateIndexValue(
+      mergeAnchorMap,
+      `${mc.top}:${mc.left}`,
+      { totalW, totalH, right: mc.right, bottom: mc.bottom },
+      mergeAnchorIdentity,
+    );
   }
 
   const rc: RenderContext = {

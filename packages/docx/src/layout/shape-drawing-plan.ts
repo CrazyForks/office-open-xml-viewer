@@ -2,6 +2,7 @@ import type { ArrowEnd, DrawingMLShapePaintPlan, Stroke } from '@silurus/ooxml-c
 import type { ShapeRun } from '../types.js';
 import type {
   DrawingPaintCommand,
+  DeepReadonly,
   LayoutDiagnostic,
   LayoutRect,
   VmlTextPathAcquisitionInput,
@@ -48,7 +49,7 @@ function arrowEnd(end: ShapeRun['headEnd']): ArrowEnd | undefined {
   return end ? { type: end.type, w: end.w, len: end.len } : undefined;
 }
 
-function shapeStroke(shape: Readonly<ShapeRun>): Stroke | null {
+function shapeStroke(shape: DeepReadonly<ShapeRun>): Stroke | null {
   if (!shape.stroke || !shape.strokeWidth || shape.strokeWidth <= 0) return null;
   return {
     color: shape.stroke,
@@ -61,7 +62,7 @@ function shapeStroke(shape: Readonly<ShapeRun>): Stroke | null {
 }
 
 export function planShapeDrawing(
-  shape: Readonly<ShapeRun>,
+  shape: DeepReadonly<ShapeRun>,
   bounds: LayoutRect,
   text?: TextLayoutService,
   textPath?: Readonly<VmlTextPathAcquisitionInput>,

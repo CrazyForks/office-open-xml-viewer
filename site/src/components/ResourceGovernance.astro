@@ -1,0 +1,95 @@
+<div class="rg-grid">
+  <div class="rg-copy">
+    <p class="eyebrow">Resource governance</p>
+    <h2 class="section-title">Put predictable limits on large files.</h2>
+    <p class="section-lead">
+      DOCX, XLSX and PPTX share measured package-expansion limits. The defaults allow
+      <strong>128 MiB per part</strong> and <strong>256 MiB across distinct parts read</strong>
+      during a package session. Crossing a limit rejects with a structured
+      <code>OoxmlResourceLimitError</code> before that measured condition is left to an
+      opaque browser crash.
+    </p>
+    <div class="rg-facts">
+      <div>
+        <strong>Calibrate with real traffic</strong>
+        <span><code>onResourceMetrics</code> works independently of debug logging, so an application can collect content-free sizes, counts and timings under its own telemetry policy.</span>
+      </div>
+      <div>
+        <strong>Inspect without instrumentation</strong>
+        <span><code>debug: true</code> prints the same report as one aligned console card. The library never transmits or stores it.</span>
+      </div>
+      <div>
+        <strong>Choose stronger containment</strong>
+        <span><code>mode: 'worker'</code> keeps parser and renderer state away from Window. It is opt-in and is not an operating-system process or a strict memory sandbox.</span>
+      </div>
+    </div>
+    <p class="rg-caveat">
+      These are deterministic admission and structural limits, not exact JavaScript, WASM,
+      decoded-image, canvas or GPU memory accounting. They reduce catastrophic-failure risk;
+      they cannot guarantee that every device avoids OOM.
+    </p>
+  </div>
+
+  <pre class="rg-code"><code><span class="kw">const</span> viewer = <span class="kw">new</span> DocxViewer(canvas, {'{'}
+  resourceLimits: {'{'}
+    maxArchiveEntryBytes: <span class="num">128</span> * <span class="num">1024</span> * <span class="num">1024</span>,
+    maxTotalInflatedBytes: <span class="num">256</span> * <span class="num">1024</span> * <span class="num">1024</span>,
+  {'}'},
+  onResourceMetrics(metrics) {'{'}
+    analytics.record(<span class="str">'ooxml-resource-usage'</span>, metrics);
+  {'}'},
+  <span class="cm">// debug: true, // local or staging inspection</span>
+  <span class="cm">// mode: 'worker', // optional stronger containment</span>
+{'}'});</code></pre>
+</div>
+
+<style>
+  .rg-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+    gap: 48px;
+    align-items: center;
+  }
+  .rg-copy .section-lead { max-width: 68ch; }
+  .rg-copy .section-lead strong { color: var(--text); }
+  .rg-copy code, .rg-facts code, .rg-caveat code { font-family: var(--mono); color: var(--text); font-size: 0.9em; }
+  .rg-facts { display: grid; gap: 14px; margin-top: 28px; }
+  .rg-facts > div {
+    display: grid;
+    grid-template-columns: 190px 1fr;
+    gap: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .rg-facts strong { font-size: 14px; }
+  .rg-facts span { color: var(--text-dim); font-size: 14px; }
+  .rg-caveat {
+    margin: 22px 0 0;
+    padding: 13px 15px;
+    border-left: 2px solid var(--accent-2);
+    background: rgba(129, 140, 248, 0.06);
+    color: var(--text-dim);
+    font-size: 13.5px;
+  }
+  .rg-code {
+    margin: 0;
+    padding: 24px;
+    overflow-x: auto;
+    background: #0d1117;
+    border: 1px solid var(--border-bright);
+    border-radius: 14px;
+    box-shadow: var(--glow);
+  }
+  .rg-code code { font-family: var(--mono); font-size: 12.5px; line-height: 1.8; color: var(--text); }
+  .rg-code .kw { color: var(--accent-2); }
+  .rg-code .num { color: var(--accent-3); }
+  .rg-code .str { color: var(--accent); }
+  .rg-code .cm { color: var(--text-faint); }
+  @media (max-width: 900px) {
+    .rg-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 560px) {
+    .rg-facts > div { grid-template-columns: 1fr; gap: 5px; }
+    .rg-code { padding: 18px; }
+  }
+</style>

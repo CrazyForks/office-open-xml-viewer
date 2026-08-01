@@ -12,7 +12,6 @@ import type {
   ChartRun,
   ShapeRun,
   DocTable,
-  TableBorders,
   TextPath,
   TblpPr,
 } from './types.js';
@@ -20,22 +19,21 @@ import type {
   NumberingMarkerShapeInput,
   FloatingTablePositionInput,
   SourceRef,
-  TableColumnLayoutInput,
   TableFormatInput,
-  TablePreferredWidthConstraint,
   TableRowExceptionInput,
   TableRowHeightInput,
   VmlTextPathAcquisitionInput,
 } from './layout/types.js';
 import type { MathOccurrence } from './layout/resources.js';
-import { anchorOccurrenceKey, mathResourceKey, sourceKey } from './layout/source-key.js';
+import { anchorOccurrenceKey, chartResourceKey, mathResourceKey, sourceKey } from './layout/source-key.js';
+import { mathFallbackText } from './layout/math-fallback-text.js';
 import type {
   ComplexFieldBoundaryInput,
   TextFontSlotPresence,
   TextFontSlots,
   UnavailableDrawingAcquisitionRun,
 } from './layout/text.js';
-import type { ParagraphAcquisitionInput, ParagraphAcquisitionRun } from './layout/text.js';
+import type { ParagraphAcquisitionInput, ParagraphAcquisitionRun, ParagraphLayoutSource } from './layout/text.js';
 import type { AnchorAcquisitionInput, InternalAnchorRunWire } from './layout/anchor-input.js';
 import {
   paragraphTypographyAcquisitionInput,
@@ -48,14 +46,24 @@ import {
   normalizeTextBoxInput,
   type TextBoxAcquisitionInput,
 } from './layout/textbox-input.js';
-import { tableCellHorizontalSpacingInsets } from './layout/table-columns.js';
 import {
-  divideExactLengthKey,
-  exactLengthKeyFromDecimal,
-  exactLengthKeyFromNumber,
-  exactLengthKeyToNumber,
-  multiplyExactLengthKeys,
-} from './layout/exact-length.js';
+  effectiveTableWidthKind,
+  projectTableColumnLayoutInput,
+  tableDxaPtFromLexical,
+  tableWidthConstraintFromLexical,
+  type CellIntrinsicWidths,
+  type TableAcquisitionInput,
+  type TableCellLayoutAcquisitionWire,
+  type TableLayoutAcquisitionWire,
+  type TableLayoutSource,
+  type TableMarginAcquisitionWire,
+  type TablePropertyExceptionAcquisitionWire,
+  type TableRowHeightAcquisitionWire,
+  type TableRowLayoutAcquisitionWire,
+  type TableSourceAcquisitionInput,
+  type TableSourceSemanticInput,
+  type TableWidthAcquisitionWire,
+} from './layout/table-source-acquisition.js';
 import {
   sectionPageBox,
   type BodySectionIndexInput,
@@ -80,6 +88,21 @@ import {
   mapParseDiagnostics,
   type ParseDiagnosticWire,
 } from './layout/diagnostics.js';
+
+export type {
+  CellIntrinsicWidths,
+  TableAcquisitionInput,
+  TableCellLayoutAcquisitionWire,
+  TableLayoutAcquisitionWire,
+  TableLayoutKindAcquisitionWire,
+  TableMarginAcquisitionWire,
+  TablePropertyExceptionAcquisitionWire,
+  TableRowHeightAcquisitionWire,
+  TableRowLayoutAcquisitionWire,
+  TableSourceAcquisitionInput,
+  TableSourceSemanticInput,
+  TableWidthAcquisitionWire,
+} from './layout/table-source-acquisition.js';
 
 export interface InternalRunFontSlots {
   readonly direct: TextFontSlots;
@@ -334,81 +357,6 @@ const sectionPlacementInputsByBody = new WeakMap<
   WeakMap<object, DocumentSectionPlacementInputs>
 >();
 
-/** Lexical CT_TblWidth facts. Element absence is represented by the owning
- * nullable field; null attributes retain malformed/partial authored OOXML. */
-export interface TableWidthAcquisitionWire {
-  readonly kind: string | null;
-  readonly value: string | null;
-}
-
-export interface TableLayoutKindAcquisitionWire {
-  readonly kind: string | null;
-}
-
-export interface TableMarginAcquisitionWire {
-  readonly top?: TableWidthAcquisitionWire | null;
-  readonly bottom?: TableWidthAcquisitionWire | null;
-  readonly start?: TableWidthAcquisitionWire | null;
-  readonly end?: TableWidthAcquisitionWire | null;
-  readonly left?: TableWidthAcquisitionWire | null;
-  readonly right?: TableWidthAcquisitionWire | null;
-}
-
-export interface TableLayoutAcquisitionWire {
-  readonly effectiveStyleId: string | null;
-  /** Effective flow participation under
-   * `word-effective-floating-table-positioning`, not lexical `tblpPr`
-   * presence/absence. */
-  readonly ordinaryFlow: boolean;
-  /** Parser-owned ECMA-376 Part 1 §17.4.37 logical-table membership. The parser
-   * assigns one id per logical table (a standalone table receives its own id),
-   * so equal ids on directly adjacent source tables mean one logical table. */
-  readonly logicalSequenceId?: string | null;
-  readonly logicalRowOffset?: number;
-  readonly logicalTotalRows?: number;
-  readonly grid: {
-    readonly authored: boolean;
-    readonly columns: readonly { readonly width: string | null }[];
-    readonly requiredColumnCount: number;
-  };
-  readonly preferredWidth: TableWidthAcquisitionWire | null;
-  readonly layout: TableLayoutKindAcquisitionWire | null;
-  readonly cellSpacing: TableWidthAcquisitionWire | null;
-  readonly cellMargins?: TableMarginAcquisitionWire | null;
-}
-
-export interface TableRowHeightAcquisitionWire {
-  readonly value: string | null;
-  readonly rule: string;
-  readonly ruleAuthored: boolean;
-}
-
-export interface TablePropertyExceptionAcquisitionWire {
-  readonly preferredWidth: TableWidthAcquisitionWire | null;
-  readonly layout: TableLayoutKindAcquisitionWire | null;
-  readonly justification: string | null;
-  readonly indent: TableWidthAcquisitionWire | null;
-  readonly borders: TableBorders | null;
-  readonly cellMargins: TableMarginAcquisitionWire | null;
-  readonly cellSpacing: TableWidthAcquisitionWire | null;
-}
-
-export interface TableRowLayoutAcquisitionWire {
-  readonly height: TableRowHeightAcquisitionWire | null;
-  readonly justification: string | null;
-  readonly beforeWidth: TableWidthAcquisitionWire | null;
-  readonly afterWidth: TableWidthAcquisitionWire | null;
-  readonly cellSpacing: TableWidthAcquisitionWire | null;
-  readonly styleCellSpacing?: TableWidthAcquisitionWire | null;
-  readonly styleCellMargins?: TableMarginAcquisitionWire | null;
-  readonly exception: TablePropertyExceptionAcquisitionWire | null;
-}
-
-export interface TableCellLayoutAcquisitionWire {
-  readonly preferredWidth: TableWidthAcquisitionWire | null;
-  readonly margins: TableMarginAcquisitionWire | null;
-}
-
 interface InternalTable extends DocTable {
   readonly __tableLayout?: TableLayoutAcquisitionWire;
 }
@@ -421,21 +369,14 @@ type InternalTableCell = DocTable['rows'][number]['cells'][number] & {
   readonly __tableCellLayout?: TableCellLayoutAcquisitionWire;
 };
 
-export interface TableAcquisitionInput {
-  readonly table: TableLayoutAcquisitionWire | null;
-  readonly rows: readonly {
-    readonly row: TableRowLayoutAcquisitionWire | null;
-    readonly cells: readonly (TableCellLayoutAcquisitionWire | null)[];
-  }[];
-}
-
 const tableAcquisitionInputs = new WeakMap<object, TableAcquisitionInput>();
 const tableFormatInputs = new WeakMap<object, TableFormatInput>();
+const tableSourceAcquisitionInputs = new WeakMap<object, TableSourceAcquisitionInput>();
 
 /** Snapshot serde-only table facts once at the parser/model boundary. Layout
  * receives only clone-safe immutable data, while hand-built public `DocTable`
  * values remain supported through aligned null entries and their public fields. */
-export function tableAcquisitionInput(table: Readonly<DocTable>): TableAcquisitionInput {
+export function tableAcquisitionInput(table: TableLayoutSource): TableAcquisitionInput {
   const cached = tableAcquisitionInputs.get(table);
   if (cached) return cached;
   const internal = table as Readonly<InternalTable>;
@@ -455,16 +396,66 @@ export function tableAcquisitionInput(table: Readonly<DocTable>): TableAcquisiti
   return input;
 }
 
+const finiteOrNull = (value: number | null | undefined): number | null => (
+  value != null && Number.isFinite(value) ? value : null
+);
+
+/** Detach only public semantics consumed by the column algorithm. Content and
+ * nested tables remain owned by the document repository, preventing a table
+ * fact per nesting level from retaining the same subtree repeatedly. */
+function tableColumnSemanticInput(
+  table: TableLayoutSource,
+): TableSourceSemanticInput {
+  return snapshotPlainData({
+    // The stable TypeScript shape requires colWidths, but historical rich
+    // textbox fixtures and JS callers may omit it. The pre-extraction column
+    // path treated an absent parser grid as an empty compatibility grid.
+    colWidths: (table.colWidths ?? []).map((width) => (
+      Number.isFinite(width) && width >= 0 ? width : 0
+    )),
+    layout: table.layout ?? null,
+    widthPt: finiteOrNull(table.widthPt),
+    widthPct: finiteOrNull(table.widthPct),
+    rows: table.rows.map((row) => ({
+      gridBefore: finiteOrNull(row.gridBefore) ?? 0,
+      gridAfter: finiteOrNull(row.gridAfter) ?? 0,
+      cells: row.cells.map((cell) => ({
+        colSpan: finiteOrNull(cell.colSpan) ?? 1,
+        widthPt: finiteOrNull(cell.widthPt),
+        widthPct: finiteOrNull(cell.widthPct),
+      })),
+    })),
+  }, 'DOCX table column semantic input') as TableSourceSemanticInput;
+}
+
+/** Complete immutable table source fact. Layout can retain and replay this
+ * value without a parser-model object, WeakMap, or acquisition callback. */
+export function tableSourceAcquisitionInput(
+  table: TableLayoutSource,
+): TableSourceAcquisitionInput {
+  const cached = tableSourceAcquisitionInputs.get(table);
+  if (cached) return cached;
+  const input = deepFreezePlainData({
+    semantic: tableColumnSemanticInput(table),
+    lexical: tableAcquisitionInput(table),
+    format: tableFormatInput(table),
+  }) as TableSourceAcquisitionInput;
+  tableSourceAcquisitionInputs.set(table, input);
+  return input;
+}
+
 /** Effective flow classification acquired before tblpPr defaults erase the
  * distinction governed by `word-effective-floating-table-positioning`. */
-export function tableParticipatesInOrdinaryFlow(table: Readonly<DocTable>): boolean {
-  return tableFormatInput(table).ordinaryFlow;
+export function tableParticipatesInOrdinaryFlow(table: TableLayoutSource): boolean {
+  return tableSourceAcquisitionInput(table).format.ordinaryFlow;
 }
 
 /** Positioning payload only when `word-effective-floating-table-positioning`
  * treats the authored tblpPr as effective. */
-export function effectiveTablePositioning(table: Readonly<DocTable>): TblpPr | null {
-  return tableFormatInput(table).positioning === null ? null : (table.tblpPr ?? null);
+export function effectiveTablePositioning(table: TableLayoutSource): TblpPr | null {
+  return tableSourceAcquisitionInput(table).format.positioning === null
+    ? null
+    : (table.tblpPr ?? null);
 }
 
 function floatingTablePositionInput(positioning: TblpPr): FloatingTablePositionInput {
@@ -483,11 +474,6 @@ function floatingTablePositionInput(positioning: TblpPr): FloatingTablePositionI
   };
 }
 
-type TableLexicalWidth = Readonly<{
-  kind: string | null;
-  value: string | null;
-}>;
-
 function finiteTableLexicalNumber(value: string | null, allowPercent: boolean): number | null {
   if (value === null) return null;
   const lexical = value.trim();
@@ -495,38 +481,6 @@ function finiteTableLexicalNumber(value: string | null, allowPercent: boolean): 
   if (numeric.length === 0) return null;
   const parsed = Number(numeric);
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-function effectiveTableWidthKind(width: TableLexicalWidth): string {
-  // ECMA-376 §17.4.87 makes the measurement syntax authoritative when it
-  // contradicts @type. Keeping this resolution here prevents each consumer
-  // from assigning different semantics to the same CT_TblWidth value.
-  return width.value?.trim().endsWith('%') ? 'pct' : (width.kind ?? 'dxa');
-}
-
-function tableWidthConstraintFromLexical(
-  width: TableLexicalWidth | null | undefined,
-): TablePreferredWidthConstraint | null {
-  if (!width) return null;
-  const lexicalValue = width.value?.trim() ?? '';
-  // §17.4.87: omitted type defaults to dxa and omitted w defaults to zero.
-  const kind = effectiveTableWidthKind(width);
-  if (kind === 'dxa') {
-    const value = finiteTableLexicalNumber(width.value ?? '0', false);
-    return value === null ? null : { kind: 'dxa', value: value / 20 };
-  }
-  if (kind !== 'pct') return null;
-  const value = finiteTableLexicalNumber(width.value ?? '0', true);
-  if (value === null) return null;
-  return {
-    kind: 'pct',
-    value: lexicalValue.endsWith('%') ? value / 100 : value / 5000,
-  };
-}
-
-function tableDxaPtFromLexical(width: TableLexicalWidth | null | undefined): number | null {
-  const constraint = tableWidthConstraintFromLexical(width);
-  return constraint?.kind === 'dxa' ? constraint.value : null;
 }
 
 function tableTwipsValuePt(value: string | null | undefined): number | null {
@@ -551,7 +505,7 @@ function privateTableRowHeight(height: TableRowHeightAcquisitionWire): TableRowH
   };
 }
 
-function publicTableRowHeight(row: Readonly<DocTable['rows'][number]>): TableRowHeightInput | null {
+function publicTableRowHeight(row: TableLayoutSource['rows'][number]): TableRowHeightInput | null {
   if (row.rowHeight === null || !Number.isFinite(row.rowHeight)) return null;
   // The stable public model predates authored-presence retention. Keep its
   // compatibility fallback at the model boundary, never in the layout solver.
@@ -596,8 +550,8 @@ function wordTableMarginPt(
 }
 
 function effectiveTableCellMargins(
-  table: Readonly<DocTable>,
-  cell: Readonly<DocTable['rows'][number]['cells'][number]>,
+  table: TableLayoutSource,
+  cell: TableLayoutSource['rows'][number]['cells'][number],
   hasPrivateCellWire: boolean,
   cellMargins: TableMarginAcquisitionWire | null | undefined,
   exceptionMargins: TableMarginAcquisitionWire | null | undefined,
@@ -692,7 +646,7 @@ function normalizedTableRowException(
 }
 
 /** Resolve parser-private and public-compatibility table formatting once. */
-export function tableFormatInput(table: Readonly<DocTable>): TableFormatInput {
+export function tableFormatInput(table: TableLayoutSource): TableFormatInput {
   const cached = tableFormatInputs.get(table);
   if (cached) return cached;
   const acquisition = tableAcquisitionInput(table);
@@ -922,267 +876,20 @@ function bodyLayoutSequenceInput(
   }));
 }
 
-export interface CellIntrinsicWidths {
-  readonly minWidthPt: number;
-  readonly maxWidthPt: number;
-}
-
-function publicTableCellConstraint(
-  cell: DocTable['rows'][number]['cells'][number],
-): TablePreferredWidthConstraint | null {
-  if (cell.widthPt != null) return { kind: 'dxa', value: cell.widthPt };
-  if (cell.widthPct != null) return { kind: 'pct', value: cell.widthPct / 5000 };
-  return null;
-}
-
-function tablePreferredWidthPt(
-  table: DocTable,
-  input: TableAcquisitionInput,
-  availableWidthPt: number,
-  firstRowException: TableRowExceptionInput | null,
-): number | null {
-  const exception = firstRowException?.preferredWidth ?? null;
-  if (firstRowException?.preferredWidthAuthored) {
-    // `word-first-row-table-exception-scope`: authored auto/nil/zero values
-    // shadow the parent tblW without becoming an invented physical length.
-    if (exception?.kind === 'dxa') return exception.value > 0 ? exception.value : null;
-    if (exception?.kind === 'pct') {
-      return exception.value > 0 ? exception.value * availableWidthPt : null;
-    }
-    return null;
-  }
-  const lexical = tableWidthConstraintFromLexical(input.table?.preferredWidth);
-  if (lexical?.kind === 'dxa') return lexical.value > 0 ? lexical.value : null;
-  if (lexical?.kind === 'pct') return lexical.value > 0 ? lexical.value * availableWidthPt : null;
-  if (table.widthPt != null && table.widthPt > 0) return table.widthPt;
-  if (table.widthPct != null && table.widthPct > 0) return table.widthPct / 5000 * availableWidthPt;
-  return null;
-}
-
-const tableGridPointFactors: Readonly<Record<string, string>> = Object.freeze({
-  pt: '1/1',
-  in: '72/1',
-  cm: '3600/127',
-  mm: '360/127',
-  pc: '12/1',
-  pi: '12/1',
-});
-
-const xsdUnsignedLongMaximum = '18446744073709551615';
-
-function xsdUnsignedLongLexical(value: string): string | null {
-  const collapsed = value
-    .replace(/[\u0009\u000a\u000d\u0020]+/g, ' ')
-    .replace(/^ | $/g, '');
-  const match = /^([+-]?)([0-9]+)$/.exec(collapsed);
-  if (!match) return null;
-  const [, sign, authoredDigits] = match;
-  if (sign === '-' && /[1-9]/.test(authoredDigits!)) return null;
-  const digits = authoredDigits!.replace(/^0+/, '') || '0';
-  if (digits.length > xsdUnsignedLongMaximum.length
-    || (digits.length === xsdUnsignedLongMaximum.length && digits > xsdUnsignedLongMaximum)) {
-    return null;
-  }
-  return collapsed;
-}
-
-/** One resolved tblGrid column paired with its deterministic binary64 geometry.
- *
- * `key` distinguishes three states precisely:
- *  - a valid exact key: the authored identity is known exactly;
- *  - `'0/1'`: a DEFINITIONAL zero — the width was missing or lexically invalid,
- *    so it is repaired to a known-zero identity (not "unknown");
- *  - `null`: a valid measure whose exact authored identity is UNAVAILABLE
- *    (over budget). `null` does NOT assert equality between tracks; two distinct
- *    over-budget widths can share `null` yet carry different `widthPt`, and the
- *    union must keep them distinct rather than merging on geometry. */
-interface GridTrack {
-  readonly key: string | null;
-  readonly widthPt: number;
-}
-
-/** A valid exact key retains its identity only while it maps to a finite
- * coordinate; an over-range (infinite) coordinate has no paint geometry, so the
- * identity is dropped and the width falls back to zero. */
-function exactTrack(key: string): GridTrack {
-  const widthPt = exactLengthKeyToNumber(key);
-  return Number.isFinite(widthPt) ? { key, widthPt } : definitionalZeroTrack;
-}
-
-/** Deterministic geometry for a lexically valid but over-budget universal
- * measure: convert the magnitude to binary64 FIRST, then apply the exact unit
- * factor and round once. The exact identity is unknown (`key: null`), but the
- * authored geometry survives (0.000…001pt -> 0, 72.000…001pt -> 72pt). */
-function degradedTrack(magnitude: string, factor: string): GridTrack {
-  const magnitudeF64 = Number(magnitude);
-  if (!Number.isFinite(magnitudeF64)) return definitionalZeroTrack;
-  const exactMagnitude = exactLengthKeyFromNumber(magnitudeF64);
-  const widthPt = exactMagnitude === null
-    ? 0
-    : exactLengthKeyToNumber(multiplyExactLengthKeys(exactMagnitude, factor));
-  return Number.isFinite(widthPt) ? { key: null, widthPt } : definitionalZeroTrack;
-}
-
-/** Normalize one ST_TwipsMeasure / ST_PositiveUniversalMeasure tblGrid column at
- * the parser/layout adapter. Layout owns exact topology arithmetic but not OOXML
- * unit or lexical semantics; this returns the exact authored identity together
- * with its geometry. */
-/** A missing or lexically invalid width is repaired to a DEFINITIONAL zero: the
- * identity is known (zero), not unknown. */
-const definitionalZeroTrack: GridTrack = { key: '0/1', widthPt: 0 };
-
-function tableGridTrack(value: string | null | undefined): GridTrack {
-  if (value == null) return definitionalZeroTrack;
-  const unsignedLong = xsdUnsignedLongLexical(value);
-  if (unsignedLong !== null) {
-    // xsd:unsignedLong is bounded (<= 2^64-1), so it is always within the exact
-    // budget and never needs degradation.
-    const twips = exactLengthKeyFromDecimal(unsignedLong);
-    return twips === null ? definitionalZeroTrack : exactTrack(divideExactLengthKey(twips, 20n));
-  }
-  // Union whitespace follows the successful member: xsd:unsignedLong collapses
-  // XML whitespace, while the xsd:string-based universal measure preserves it.
-  // Normalizing the union before member selection would accept unit-bearing
-  // values outside ECMA-376's lexical space.
-  const universal = /^([0-9]+(?:\.[0-9]+)?)(mm|cm|in|pt|pc|pi)$/.exec(value);
-  if (!universal) return definitionalZeroTrack;
-  const factor = tableGridPointFactors[universal[2]!]!;
-  const magnitude = exactLengthKeyFromDecimal(universal[1]!);
-  return magnitude === null
-    ? degradedTrack(universal[1]!, factor)
-    : exactTrack(multiplyExactLengthKeys(magnitude, factor));
-}
-
-interface TableGridLayout {
-  readonly widthsPt: readonly number[];
-  readonly widthKeys: readonly (string | null)[];
-}
-
-/** Resolve the tblGrid column topology once into paired numeric widths and exact
- * identity keys. A hand-built table keeps the public numeric `Math.max(0, width)`
- * contract. */
-function tableGridLayout(table: DocTable, input: TableAcquisitionInput): TableGridLayout {
-  const grid = input.table?.grid;
-  if (!grid) {
-    const tracks = table.colWidths.map((width): GridTrack => (
-      Number.isFinite(width) && width >= 0
-        ? { widthPt: width, key: exactLengthKeyFromNumber(width) ?? '0/1' }
-        : definitionalZeroTrack
-    ));
-    return {
-      widthsPt: tracks.map((track) => track.widthPt),
-      widthKeys: tracks.map((track) => track.key),
-    };
-  }
-  const count = Math.max(grid.requiredColumnCount, grid.columns.length);
-  const tracks = Array.from({ length: count }, (_unused, column) => (
-    tableGridTrack(grid.columns[column]?.width ?? null)
-  ));
-  return {
-    widthsPt: tracks.map((track) => track.widthPt),
-    widthKeys: tracks.map((track) => track.key),
-  };
-}
-
-function skippedTableWidthConstraint(
-  width: TableLexicalWidth | null | undefined,
-  availableWidthPt: number,
-): TablePreferredWidthConstraint | null {
-  const constraint = tableWidthConstraintFromLexical(width);
-  if (constraint?.kind !== 'pct') return constraint;
-  return { kind: 'dxa', value: Math.max(0, constraint.value) * Math.max(0, availableWidthPt) };
-}
-
 /** Project normalized parser/model facts into the pure §17.18.87 solver contract. */
 export function tableColumnLayoutInput(
-  table: Readonly<DocTable>,
+  table: TableLayoutSource,
   availableWidthPt: number,
-  intrinsicWidths: (cell: Readonly<DocTable['rows'][number]['cells'][number]>) => CellIntrinsicWidths,
+  intrinsicWidths: (cell: TableLayoutSource['rows'][number]['cells'][number]) => CellIntrinsicWidths,
   maximumWidthPt: number = availableWidthPt,
-): TableColumnLayoutInput {
-  const acquisition = tableAcquisitionInput(table);
-  const format = tableFormatInput(table);
-  const { widthsPt: gridWidthsPt, widthKeys: gridWidthKeys } = tableGridLayout(
-    table as DocTable,
-    acquisition,
+): import('./layout/types.js').TableColumnLayoutInput {
+  const source = tableSourceAcquisitionInput(table);
+  return projectTableColumnLayoutInput(
+    source,
+    availableWidthPt,
+    (rowIndex, cellIndex) => intrinsicWidths(table.rows[rowIndex]!.cells[cellIndex]!),
+    maximumWidthPt,
   );
-  const layoutKind = format.firstRowException?.layout === 'fixed'
-    ? 'fixed'
-    : (acquisition.table?.layout?.kind ?? table.layout);
-  const authoredGridCount = acquisition.table?.grid.authored
-    ? acquisition.table.grid.columns.length
-    : null;
-  const normalizedBeforeSpans = table.rows.map((row) => {
-    const requested = Math.max(0, row.gridBefore ?? 0);
-    return authoredGridCount !== null && requested > authoredGridCount ? 0 : requested;
-  });
-  const contentGridCount = Math.max(
-    authoredGridCount ?? 0,
-    acquisition.table?.grid.requiredColumnCount ?? 0,
-    ...table.rows.map((row, rowIndex) => (
-      (normalizedBeforeSpans[rowIndex] ?? 0)
-      + row.cells.reduce((total, cell) => total + Math.max(1, cell.colSpan), 0)
-    )),
-  );
-  return {
-    layout: layoutKind === 'fixed' ? 'fixed' : 'autofit',
-    availableWidthPt: Math.max(0, maximumWidthPt),
-    gridWidthsPt,
-    gridWidthKeys,
-    tablePreferredWidthPt: tablePreferredWidthPt(
-      table as DocTable,
-      acquisition,
-      availableWidthPt,
-      format.firstRowException,
-    ),
-    rows: table.rows.map((row, rowIndex) => {
-      const rowInput = acquisition.rows[rowIndex];
-      const beforeSpan = normalizedBeforeSpans[rowIndex] ?? 0;
-      const requestedAfterSpan = Math.max(0, row.gridAfter ?? 0);
-      const occupiedColumns = beforeSpan
-        + row.cells.reduce((total, cell) => total + Math.max(1, cell.colSpan), 0);
-      const afterSpan = authoredGridCount !== null
-        && occupiedColumns + requestedAfterSpan > contentGridCount
-        ? 0
-        : requestedAfterSpan;
-      let columnStart = beforeSpan;
-      return {
-        before: beforeSpan > 0 ? {
-          columnSpan: beforeSpan,
-          preferredWidth: skippedTableWidthConstraint(rowInput?.row?.beforeWidth, availableWidthPt),
-        } : null,
-        after: afterSpan > 0 ? {
-          columnSpan: afterSpan,
-          preferredWidth: skippedTableWidthConstraint(rowInput?.row?.afterWidth, availableWidthPt),
-        } : null,
-        cells: row.cells.map((cell, cellIndex) => {
-          const wire = rowInput?.cells[cellIndex] ?? null;
-          const span = Math.max(1, cell.colSpan);
-          const intrinsic = layoutKind === 'fixed'
-            ? { minWidthPt: 0, maxWidthPt: 0 }
-            : intrinsicWidths(cell);
-          const spacingInsets = tableCellHorizontalSpacingInsets(
-            format.rows[rowIndex]?.cellSpacingPt ?? 0,
-            columnStart,
-            span,
-            gridWidthsPt.length,
-          );
-          const horizontalSpacingPt = spacingInsets.startPt + spacingInsets.endPt;
-          const result = {
-            columnStart,
-            columnSpan: span,
-            preferredWidth: tableWidthConstraintFromLexical(wire?.preferredWidth)
-              ?? publicTableCellConstraint(cell),
-            minContentWidthPt: Math.max(0, intrinsic.minWidthPt) + horizontalSpacingPt,
-            maxContentWidthPt:
-              Math.max(intrinsic.minWidthPt, intrinsic.maxWidthPt) + horizontalSpacingPt,
-          };
-          columnStart += span;
-          return result;
-        }),
-      };
-    }),
-  };
 }
 
 function setBodySectionPlacementInputs(
@@ -1582,7 +1289,7 @@ export function textBoxAcquisitionInput(
   shape: Readonly<ShapeRun>,
   source: SourceRef,
 ): TextBoxAcquisitionInput {
-  const content = textBoxContentAcquisitionInput(shape);
+  const content = (shape as InternalShapeRun).textBoxContent;
   return content === undefined
       ? snapshotPlainData({
         kind: 'compatibility',
@@ -1592,14 +1299,14 @@ export function textBoxAcquisitionInput(
     : snapshotPlainData({
         kind: 'complete',
         source,
-        blocks: content,
+        blockCount: content.length,
       }, 'DOCX complete text box acquisition input');
 }
 
 /** Snapshot private paragraph-mark rPr facts at the parser boundary. Retained
  * line layout receives only this plain immutable service input. */
 export function paragraphMarkShapeInput(
-  paragraph: DocParagraph,
+  paragraph: ParagraphLayoutSource,
 ): NumberingMarkerShapeInput | undefined {
   const facts = internalParagraph(paragraph).paragraphMarkFontFacts;
   if (!facts) return undefined;
@@ -1634,15 +1341,18 @@ export function paragraphMarkShapeInput(
 
 /** Immutable all-run snapshot for the retained paragraph acquisition kernel. */
 export function paragraphAcquisitionInput(
-  paragraph: DocParagraph,
+  paragraph: ParagraphLayoutSource,
   source: SourceRef,
 ): ParagraphAcquisitionInput {
+  const parserParagraph = paragraph as unknown as DocParagraph;
   // Table pagination may have attached legacy cache stamps containing live font
   // resolver functions. They are renderer state, not parser/model facts, and must
   // never cross the retained acquisition boundary.
   const {
     layoutLines: _layoutLines,
     lineSlice: _lineSlice,
+    runs: _runs,
+    paragraphMarkFontFacts: _privateParagraphMarkFontFacts,
     __paragraphTypographyAcquisition: _privateParagraphTypography,
     __complexFieldBoundaries: _privateComplexFieldBoundaries,
     ...semanticParagraph
@@ -1650,7 +1360,7 @@ export function paragraphAcquisitionInput(
     __paragraphTypographyAcquisition?: InternalParagraphTypographyWire;
     __complexFieldBoundaries?: readonly InternalComplexFieldBoundaryWire[];
   };
-  const typographyInput = paragraphTypographyAcquisitionInput(paragraph);
+  const typographyInput = paragraphTypographyAcquisitionInput(parserParagraph);
   const complexFieldBoundaries = (
     paragraph as InternalDocParagraph
   ).__complexFieldBoundaries?.map((boundary): ComplexFieldBoundaryInput => ({
@@ -1669,31 +1379,39 @@ export function paragraphAcquisitionInput(
       ? {}
       : { hyperlinkAnchor: boundary.hyperlinkAnchor }),
   }));
-  const snapshot = structuredClone(semanticParagraph) as DocParagraph;
-  const sidecarEntries = unavailableDrawingEntries(paragraph);
+  const numbering = semanticParagraph.numbering as (NumberingInfo & { fontFacts?: InternalRunFontFacts }) | null;
+  const canonicalNumbering = numbering == null ? null : (({
+    fontFacts: _privateNumberingFontFacts,
+    ...retainedNumbering
+  }) => retainedNumbering)(numbering);
+  const snapshot = structuredClone({
+    ...semanticParagraph,
+    numbering: canonicalNumbering,
+  }) as Omit<DocParagraph, 'runs'>;
+  const sidecarEntries = unavailableDrawingEntries(parserParagraph);
   const runPairs: Array<Readonly<{
     run: DocRun | UnavailableDrawingRunWire;
     originalRun: DocRun | UnavailableDrawingRunWire;
   }>> = [];
   if (sidecarEntries.length === 0) {
-    snapshot.runs.forEach((run, runIndex) => {
-      runPairs.push({ run, originalRun: paragraph.runs[runIndex]! });
+    parserParagraph.runs.forEach((run, runIndex) => {
+      runPairs.push({ run, originalRun: parserParagraph.runs[runIndex]! });
     });
   } else {
     let entryIndex = 0;
-    for (let publicRunIndex = 0; publicRunIndex <= snapshot.runs.length; publicRunIndex += 1) {
+    for (let publicRunIndex = 0; publicRunIndex <= parserParagraph.runs.length; publicRunIndex += 1) {
       while (sidecarEntries[entryIndex]?.publicRunIndex === publicRunIndex) {
         const originalRun = sidecarEntries[entryIndex]!.run;
         runPairs.push({
-          run: structuredClone(originalRun) as UnavailableDrawingRunWire,
+          run: originalRun,
           originalRun,
         });
         entryIndex += 1;
       }
-      if (publicRunIndex < snapshot.runs.length) {
+      if (publicRunIndex < parserParagraph.runs.length) {
         runPairs.push({
-          run: snapshot.runs[publicRunIndex]!,
-          originalRun: paragraph.runs[publicRunIndex]!,
+          run: parserParagraph.runs[publicRunIndex]!,
+          originalRun: parserParagraph.runs[publicRunIndex]!,
         });
       }
     }
@@ -1718,9 +1436,13 @@ export function paragraphAcquisitionInput(
       const runRef: SourceRef = Object.freeze({ ...source, path: Object.freeze([...source.path, runIndex]) });
       const internal = run as Partial<InternalMathRun>;
       return Object.freeze({
-        ...run,
+        type: 'math',
+        display: run.display,
+        fontSize: run.fontSize,
+        ...(run.jc === undefined ? {} : { jc: run.jc }),
         source: internal.source ?? runRef,
         resourceKey: internal.resourceKey ?? mathResourceKey(runRef, run.display ? 'display' : 'inline'),
+        fallbackText: mathFallbackText(run.nodes),
       });
     }
     if (run.type === 'anchorHost') {
@@ -1743,8 +1465,14 @@ export function paragraphAcquisitionInput(
           }, 'DOCX scoped anchor acquisition input');
       const { __anchorAcquisition: _privateAnchor, ...publicRun } = run as typeof run & InternalAnchorRunWire;
       if (run.type !== 'shape') {
+        const retainedRun = run.type === 'chart'
+          ? (({ chart: _chartPayload, ...marker }) => ({
+              ...marker,
+              resourceKey: chartResourceKey({ ...source, path: [...source.path, runIndex] }),
+            }))(publicRun as Extract<DocRun, { type: 'chart' }>)
+          : publicRun;
         return Object.freeze({
-          ...publicRun,
+          ...structuredClone(retainedRun),
           ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
         }) as ParagraphAcquisitionRun;
       }
@@ -1759,11 +1487,18 @@ export function paragraphAcquisitionInput(
         storyInstance: `${shapeSource.story}:${shapeSource.storyInstance}:${shapeSource.path.join('.')}`,
         path: [],
       });
+      const {
+        textBoxContent: _privateTextBoxContent,
+        textBlocks: _publicCompatibilityTextBlocks,
+        textPath: _privateVmlTextPath,
+        ...retainedShape
+      } = publicRun as InternalShapeRun;
       return Object.freeze({
-        ...publicRun,
+        type: 'shape' as const,
+        ...structuredClone(retainedShape),
         ...(vmlTextPathInput === undefined ? {} : { vmlTextPathInput }),
         ...((textBoxInput.kind === 'complete'
-          ? textBoxInput.blocks.length
+          ? textBoxInput.blockCount
           : textBoxInput.paragraphs.length) === 0 ? {} : { textBoxInput }),
         ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
       }) as ParagraphAcquisitionRun;
@@ -1776,22 +1511,22 @@ export function paragraphAcquisitionInput(
         ...publicRun
       } = run as typeof run & { __typographyAcquisition?: InternalRunTypographyWire };
       return Object.freeze({
-        ...publicRun,
+        ...structuredClone(publicRun),
         ...(runTypographyInput === undefined ? {} : { typographyInput: runTypographyInput }),
       }) as ParagraphAcquisitionRun;
     }
-    return Object.freeze({ ...run }) as ParagraphAcquisitionRun;
+    return Object.freeze(structuredClone(run)) as ParagraphAcquisitionRun;
   });
   return deepFreezePlainData({
     ...snapshot,
-    runs: runs as ParagraphAcquisitionRun[],
+    runs: runs as readonly ParagraphAcquisitionRun[],
     ...(complexFieldBoundaries?.length
       ? { complexFieldBoundaries }
       : {}),
     numberingMarkerShapeInput: paragraph.numbering
       ? numberingMarkerShapeInput(
           paragraph.numbering,
-          paragraph.runs.find(
+          parserParagraph.runs.find(
             (run): run is Extract<DocRun, { type: 'text' | 'field' }> =>
               run.type === 'text' || run.type === 'field',
           )?.fontSize ?? paragraph.defaultFontSize ?? 10,
@@ -1807,6 +1542,20 @@ export function paragraphAcquisitionInput(
  * parser model is untouched and the returned public model contains only the
  * declared `DocRun` union. */
 export function normalizeInternalDocumentModel(doc: DocxDocumentModel): NormalizedDocumentInput {
+  return normalizeInternalDocumentModelWithOwnership(doc, false);
+}
+
+/** Destructive equivalent for an exclusively builder-owned parser graph. It
+ * preserves the same normalized contract while replacing changed ancestry in
+ * place, avoiding another complete body-index graph at the stream terminal. */
+export function normalizeOwnedInternalDocumentModel(doc: DocxDocumentModel): NormalizedDocumentInput {
+  return normalizeInternalDocumentModelWithOwnership(doc, true);
+}
+
+function normalizeInternalDocumentModelWithOwnership(
+  doc: DocxDocumentModel,
+  consumeOwned: boolean,
+): NormalizedDocumentInput {
   const occurrences: MathOccurrence[] = [];
   const normalizeElement = (
     element: BodyElement,
@@ -1867,8 +1616,12 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
         };
         const textBoxStoryInstance = `${shapeSource.story}:${shapeSource.storyInstance}:${shapeSource.path.join('.')}`;
         let contentChanged = false;
-        const textBoxContent = content.map((block, blockIndex): InternalTextBoxBlock => {
-          if (block.type === 'unsupportedTextBoxBlock') return block;
+        const textBoxContent = (consumeOwned ? content : new Array<InternalTextBoxBlock>(content.length));
+        content.forEach((block, blockIndex): void => {
+          if (block.type === 'unsupportedTextBoxBlock') {
+            textBoxContent[blockIndex] = block;
+            return;
+          }
           const normalized = normalizeElement(
             block,
             'textbox',
@@ -1876,16 +1629,25 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
             [blockIndex],
           ) as Extract<BodyElement, { type: 'paragraph' | 'table' }>;
           if (normalized !== block) contentChanged = true;
-          return normalized;
+          textBoxContent[blockIndex] = normalized;
         });
         if (!contentChanged) {
           runs.push(run);
           return;
         }
         runsChanged = true;
-        runs.push({ ...run, textBoxContent } as DocRun);
+        if (consumeOwned) {
+          shape.textBoxContent = textBoxContent;
+          runs.push(run as DocRun);
+        } else {
+          runs.push({ ...run, textBoxContent } as DocRun);
+        }
       });
-      const paragraph = runsChanged ? { ...element, runs } : element;
+      const paragraph = runsChanged
+        ? (consumeOwned
+            ? Object.assign(element, { runs })
+            : { ...element, runs })
+        : element;
       if (unavailableDrawings.length > 0) {
         unavailableDrawingSidecars.set(
           paragraph,
@@ -1895,6 +1657,14 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
       return paragraph;
     }
     if (element.type === 'table') {
+      if (consumeOwned) {
+        element.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
+          cell.content = normalizeBody(
+            cell.content as BodyElement[], story, storyInstance, [...path, rowIndex, cellIndex],
+          ) as typeof cell.content;
+        }));
+        return element;
+      }
       let tableChanged = false;
       const rows = element.rows.map((row, rowIndex) => {
         let rowChanged = false;
@@ -1943,6 +1713,17 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
     storyInstance: string,
     prefix: number[] = [],
   ): BodyElement[] => {
+    if (consumeOwned) {
+      for (let elementIndex = 0; elementIndex < body.length; elementIndex += 1) {
+        body[elementIndex] = normalizeElement(
+          body[elementIndex]!,
+          story,
+          storyInstance,
+          [...prefix, elementIndex],
+        );
+      }
+      return body;
+    }
     let changed = false;
     const normalized = body.map((element, elementIndex): BodyElement => {
       const next = normalizeElement(
@@ -1957,9 +1738,10 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
     return changed ? normalized : body;
   };
   const normalizeParts = (
-    parts: HeadersFooters,
+    parts: HeadersFooters | undefined,
     story: 'header' | 'footer',
   ): HeadersFooters => {
+    if (!parts) return { default: null, first: null, even: null };
     let result = parts;
     for (const kind of ['default', 'first', 'even'] as const) {
       const part = parts[kind];
@@ -1979,6 +1761,10 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
     story: 'footnote' | 'endnote',
   ): T[] | undefined => {
     if (!notes) return notes;
+    if (consumeOwned) {
+      for (const note of notes) note.content = normalizeBody(note.content, story, note.id);
+      return notes;
+    }
     let changed = false;
     const normalized = notes.map((note) => {
       const content = normalizeBody(note.content, story, note.id);
@@ -2039,8 +1825,8 @@ export function internalNumberingInfo(numbering: NumberingInfo): InternalNumberi
   return numbering as InternalNumberingInfo;
 }
 
-export function internalParagraph(paragraph: DocParagraph): InternalDocParagraph {
-  return paragraph as InternalDocParagraph;
+export function internalParagraph(paragraph: ParagraphLayoutSource): InternalDocParagraph {
+  return paragraph as unknown as InternalDocParagraph;
 }
 
 export function internalDocumentModel(doc: DocxDocumentModel): InternalDocxDocumentModel {
@@ -2071,7 +1857,7 @@ export const bodyAcquisitionInputProjections = Object.freeze({
  */
 function documentScopedBodyAcquisitionInputProjections(): BodyAcquisitionInputProjections {
   const paragraphInputs = new WeakMap<
-    DocParagraph,
+    object,
     Map<string, ParagraphAcquisitionInput>
   >();
   const cachedParagraphAcquisitionInput: BodyAcquisitionInputProjections['paragraphAcquisitionInput'] = (

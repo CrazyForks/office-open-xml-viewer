@@ -5,6 +5,9 @@ import type {
   ParsedWorkbook,
   Worksheet,
 } from './types.js';
+import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
+import type { NormalizedOoxmlResourcePolicy } from '@silurus/ooxml-core/worker';
+import type { PullSessionIdentity } from '@silurus/ooxml-core/worker';
 
 /**
  * View-only per-band size overrides for one sheet, carried with every worker
@@ -67,7 +70,7 @@ export type WireRenderViewportOptions = Omit<
 // `init` arm is copied verbatim from `WorkerRequest`.
 export type RenderWorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number; useGoogleFonts?: boolean }
+  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; useGoogleFonts?: boolean }
   // `parseSheet` lets worker-mode XlsxWorkbook.getWorksheet (and the
   // resolveValidationList range path that awaits it) work, mirroring how the
   // pptx render worker handles `extractMedia` for getMedia. The render worker
@@ -76,7 +79,8 @@ export type RenderWorkerRequest =
   // main-mode message getWorksheet posts but is ignored (the worker derives the
   // sheet name from its own `workbook`). No `data`: like main-mode `parseSheet`,
   // the buffer retained at `parse` is reused — never re-sent per sheet.
-  | { type: 'parseSheet'; id: number; sheetIndex: number; sheetName?: string; maxZipEntryBytes?: number }
+  | { type: 'parseSheet'; id: number; sheetIndex: number; sheetName?: string }
+  | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } & PullSessionIdentity<number>)
   | { type: 'renderViewport'; id: number; sheetIndex: number; viewport: ViewportRange; opts: WireRenderViewportOptions }
   // Worker render mode decodes images in-worker via a getImage closure; this arm
   // exists only for protocol parity with worker.ts (so a stray extractImage
@@ -95,6 +99,12 @@ export type RenderWorkerResponse =
   // tabColors, …) working; per-sheet data stays worker-side and is parsed on
   // demand.
   | Exclude<WorkerResponse, { type: 'parsed' } | { type: 'parsedSheet' }>
-  | { type: 'parsed'; id: number; workbook: ParsedWorkbook }
+  | {
+      type: 'parsed';
+      id: number;
+      workbook: ParsedWorkbook;
+      usage?: OoxmlResourceUsageSnapshot;
+    }
   | { type: 'parsedSheet'; id: number; worksheet: Worksheet }
-  | { type: 'viewportRendered'; id: number; bitmap: ImageBitmap };
+  | { type: 'viewportRendered'; id: number; bitmap: ImageBitmap }
+  | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>);

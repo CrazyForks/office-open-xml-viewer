@@ -1,14 +1,14 @@
-function canonicalValue(value: unknown): string {
+function canonicalValue(value: unknown, path = '$'): string {
   if (value === null || typeof value === 'boolean' || typeof value === 'number') {
     return JSON.stringify(value);
   }
   if (typeof value === 'string') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalValue).join(',')}]`;
+  if (Array.isArray(value)) return `[${value.map((item, index) => canonicalValue(item, `${path}[${index}]`)).join(',')}]`;
   if (typeof value === 'object') {
     const record = value as Readonly<Record<string, unknown>>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalValue(record[key])}`).join(',')}}`;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalValue(record[key], `${path}.${key}`)}`).join(',')}}`;
   }
-  throw new TypeError(`Cannot fingerprint ${typeof value}`);
+  throw new TypeError(`Cannot fingerprint ${typeof value} at ${path}`);
 }
 
 export function stableFingerprint(namespace: string, value: unknown): string {
