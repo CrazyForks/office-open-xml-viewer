@@ -45,10 +45,15 @@ function makeWorkbook(
   respond: (
     request: WorkerRequest | RenderWorkerRequest | PullSessionCommand<number>,
   ) => Promise<Record<string, unknown>>,
+  workerTimeoutMs?: number,
 ) {
   let nextId = 1;
   const request = vi.fn(
-    (build: (id: number) => WorkerRequest | RenderWorkerRequest | PullSessionCommand<number>) =>
+    (
+      build: (id: number) => WorkerRequest | RenderWorkerRequest | PullSessionCommand<number>,
+      _transfer?: Transferable[],
+      _options?: { timeoutMs?: number | false },
+    ) =>
       respond(build(nextId++)),
   );
   const bridge = {
@@ -66,6 +71,7 @@ function makeWorkbook(
   instance.bridge = bridge;
   instance.retainedSheetUsage = { rows: 0, cells: 0 };
   instance.resourceFailure = null;
+  instance.workerTimeoutMs = workerTimeoutMs;
   return { workbook: instance as unknown as WorkbookProbe, request };
 }
 
@@ -209,6 +215,42 @@ describe('XlsxWorkbook.getWorksheet compatibility materializer', () => {
       'cancel',
       'toMarkdown',
     ]);
+  });
+
+  it('applies the configured timeout to open, every pull, and every acknowledgement', async () => {
+    const { workbook, request } = makeWorkbook(
+      'main',
+      async (message) => streamResponse(message),
+      250,
+    );
+
+    await expect(workbook.getWorksheet(0)).resolves.toMatchObject({ name: 'Sheet1' });
+    expect(request.mock.calls.map((call) => call[2]?.timeoutMs)).toEqual([
+      250, // open
+      250, // rows pull
+      250, // rows ACK
+      250, // terminal pull
+      250, // terminal ACK
+    ]);
+  });
+
+  it('cancels with the non-expiring lifecycle path after a timed-out worksheet pull', async () => {
+    const messages: Array<WorkerRequest | RenderWorkerRequest | PullSessionCommand<number>> = [];
+    const { workbook, request } = makeWorkbook('main', async (message) => {
+      messages.push(message);
+      if (!('type' in message) && message.kind === 'pull') {
+        throw new Error('worker request timed out after 25ms');
+      }
+      return streamResponse(message);
+    }, 25);
+
+    await expect(workbook.getWorksheet(0)).rejects.toThrow('timed out after 25ms');
+    expect(messages.map((message) => 'type' in message ? message.type : message.kind)).toEqual([
+      'openSheetSession',
+      'pull',
+      'cancel',
+    ]);
+    expect(request.mock.calls.map((call) => call[2]?.timeoutMs)).toEqual([25, 25, false]);
   });
 
   it('cancels and poisons every later sibling operation before retaining an over-limit row chunk', async () => {

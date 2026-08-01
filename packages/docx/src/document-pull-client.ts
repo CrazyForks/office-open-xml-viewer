@@ -20,23 +20,28 @@ type DocumentUnit =
   | { readonly kind: 'body'; readonly body: BodyElement[] }
   | { readonly kind: 'complete'; readonly document: DocxDocumentModel };
 
+export interface MaterializeDocumentPullOptions {
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+}
+
 /** Drain one sequential DOCX operation into the backward-compatible public
  * model. Each transferred JSON unit is decoded, accepted, and ACKed before the
  * worker may produce another; no monolithic document JSON crosses realms. */
 export async function materializeDocumentPullSession(
   transport: WorkerBridgeTransport<PullSessionResponse<ArrayBuffer, number>>,
   identity: PullSessionIdentity<number>,
-  timeoutMs?: number,
+  options: MaterializeDocumentPullOptions = {},
 ): Promise<DocxDocumentModel> {
   const session = new BoundedPullSession(transport, {
     ...identity,
     maxByteCredit: MAX_DOCUMENT_UNIT_BYTES,
-    timeoutMs,
+    timeoutMs: options.timeoutMs,
   });
   const body: BodyElement[] = [];
   try {
     for (;;) {
-      const chunk = await pullWithCreditRetry(session);
+      const chunk = await pullWithCreditRetry(session, options.signal);
       try {
         const unit = parseDocumentUnit(chunk.payload);
         if (chunk.done !== (unit.kind === 'complete')) {
@@ -44,14 +49,14 @@ export async function materializeDocumentPullSession(
         }
         if (unit.kind === 'body') {
           body.push(...unit.body);
-          await chunk.ack();
+          await chunk.ack({ signal: options.signal });
           continue;
         }
         if (!Array.isArray(unit.document.body) || unit.document.body.length !== 0) {
           throw new TypeError('DOCX terminal document must not duplicate streamed body blocks');
         }
         unit.document.body = body;
-        await chunk.ack();
+        await chunk.ack({ signal: options.signal });
         return unit.document;
       } finally {
         chunk.disposeTransferred();
@@ -85,13 +90,14 @@ function parseDocumentUnit(payload: ArrayBuffer): DocumentUnit {
 
 async function pullWithCreditRetry(
   session: BoundedPullSession<ArrayBuffer, number>,
+  signal?: AbortSignal,
 ) {
   try {
-    return await session.pull(DOCX_INITIAL_BODY_PULL_BYTES);
+    return await session.pull(DOCX_INITIAL_BODY_PULL_BYTES, { signal });
   } catch (error) {
     const required = requiredCredit(error);
     if (required === undefined) throw error;
-    return session.pull(required);
+    return session.pull(required, { signal });
   }
 }
 

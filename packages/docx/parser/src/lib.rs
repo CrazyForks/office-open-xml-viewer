@@ -1,8 +1,8 @@
 use ooxml_common::json_measurement::measure_json;
 use ooxml_common::package_session::PackageLimitReporter;
 use ooxml_common::resource::{
-    HardResourceLimitKind, HARD_MAX_DOCX_BODY_CHUNK_JSON_BYTES, HARD_MAX_DOCX_BOOTSTRAP_JSON_BYTES,
-    HARD_MAX_DOCX_RETAINED_MODEL_JSON_BYTES,
+    HardResourceLimitKind, ResourceUsage, HARD_MAX_DOCX_BODY_CHUNK_JSON_BYTES,
+    HARD_MAX_DOCX_BOOTSTRAP_JSON_BYTES, HARD_MAX_DOCX_RETAINED_MODEL_JSON_BYTES,
 };
 use wasm_bindgen::prelude::*;
 
@@ -158,6 +158,7 @@ pub struct DocxArchive {
     archive: Result<parser::Zip, String>,
     document_cursor: Option<DocumentCursorState>,
     prepared_document_chunk: Option<PreparedDocumentChunk>,
+    last_document_usage: Option<ResourceUsage>,
 }
 
 #[wasm_bindgen]
@@ -193,6 +194,7 @@ impl DocxArchive {
             archive,
             document_cursor: None,
             prepared_document_chunk: None,
+            last_document_usage: None,
         })
     }
 
@@ -234,6 +236,7 @@ impl DocxArchive {
         if self.document_cursor.is_some() || self.prepared_document_chunk.is_some() {
             return Err("a document cursor is already active".to_string());
         }
+        self.last_document_usage = None;
         match self.archive.as_mut() {
             Ok(zip) => {
                 zip.begin_operation("document-cursor")?;
@@ -458,6 +461,7 @@ impl DocxArchive {
         if done {
             self.document_cursor.take();
             if let Ok(zip) = self.archive.as_mut() {
+                self.last_document_usage = zip.operation_usage();
                 zip.finish_operation()?;
             }
         } else if let Some(state) = self.document_cursor.as_mut() {
@@ -471,12 +475,28 @@ impl DocxArchive {
         self.prepared_document_chunk.take();
         self.document_cursor.take();
         if let Ok(zip) = self.archive.as_mut() {
+            if let Some(usage) = zip.operation_usage() {
+                self.last_document_usage = Some(usage);
+            }
             zip.cancel_operation();
         }
     }
 
     pub fn close_document_session(&mut self) {
         self.cancel_document_cursor();
+    }
+
+    /// Current or most recently completed document-cursor resource checkpoint.
+    pub fn document_cursor_resource_usage(&self) -> Result<Vec<u8>, JsValue> {
+        let usage = self
+            .archive
+            .as_ref()
+            .ok()
+            .and_then(parser::Zip::operation_usage)
+            .or(self.last_document_usage)
+            .ok_or_else(|| JsValue::from_str("document cursor usage is unavailable"))?;
+        serde_json::to_vec(&usage)
+            .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
     }
 
     /// Fail cached worker operations after this package session was poisoned.
@@ -676,6 +696,7 @@ mod tests {
             archive: Ok(parser::open_zip(data.to_vec()).unwrap()),
             document_cursor: None,
             prepared_document_chunk: None,
+            last_document_usage: None,
         }
     }
 
@@ -730,6 +751,9 @@ mod tests {
         assert_eq!(actual, expected);
         assert!(archive.document_cursor.is_none());
         assert!(archive.prepared_document_chunk.is_none());
+        let usage: serde_json::Value =
+            serde_json::from_slice(&archive.document_cursor_resource_usage().unwrap()).unwrap();
+        assert!(usage["operationInflatedBytes"].as_u64().unwrap() > 0);
     }
 
     #[test]

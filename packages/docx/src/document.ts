@@ -285,7 +285,7 @@ export class DocxDocument {
         const parsed = await materializeDocumentPullSession(
           this._bridge.transport(isDocumentPullResponse),
           res,
-          timeoutMs,
+          { timeoutMs },
         );
         const adapted = layoutSourceModelAdapter(parsed);
         this._source = adapted.source;
@@ -300,7 +300,7 @@ export class DocxDocument {
       const parsed = await materializeDocumentPullSession(
         this._bridge.transport(isDocumentPullResponse),
         identity,
-        timeoutMs,
+        { timeoutMs },
       );
       const adapted = layoutSourceModelAdapter(parsed);
       this._source = adapted.source;

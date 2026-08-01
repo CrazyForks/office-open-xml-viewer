@@ -6,6 +6,7 @@ use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::drawing::{parse_xsd_bool, DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use ooxml_common::ns::{attr_ns, is_w_ns, is_wp_ns, math, relationships, wordprocessingml};
 use ooxml_common::package_session::{PackageEntryStream, PackageOperation, PackageSessionHandle};
+use ooxml_common::resource::ResourceUsage;
 // Production parses go through `ooxml_common::depth::parse_guarded` (depth-guarded
 // before roxmltree's recursive tree builder). The `XmlDoc` alias survives only for
 // the in-module unit tests, which parse trusted, hand-written fixtures directly.
@@ -63,6 +64,10 @@ impl Zip {
             .operation
             .as_ref()
             .expect("operation initialized above"))
+    }
+
+    pub(crate) fn operation_usage(&self) -> Option<ResourceUsage> {
+        self.operation.as_ref().and_then(PackageOperation::usage)
     }
 
     pub(crate) fn finish_operation(&mut self) -> Result<(), String> {

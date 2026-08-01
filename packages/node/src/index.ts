@@ -6,7 +6,14 @@ export {
   type OpenPptxPresentationOptions,
   type PptxPresentationSession,
 } from './pptx';
-export { parseDocx } from './docx';
+export {
+  openDocxDocument,
+  parseDocx,
+  type DocxDocumentSession,
+  type DocxPageRenderOptions,
+  type DocxRenderedPage,
+  type OpenDocxDocumentOptions,
+} from './docx';
 export {
   iterateXlsxWorksheetRows,
   parseXlsx,
