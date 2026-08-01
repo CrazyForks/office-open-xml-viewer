@@ -15,6 +15,13 @@ function fixture(policy = {
     maxTotalInflatedBytes: 1024,
     maxArchiveEntries: 20,
     maxCentralDirectoryBytes: 64,
+    maxWorksheetRows: 100,
+    maxWorksheetCells: 250,
+    maxWorksheetCellContentUtf8Bytes: 320,
+    maxWorksheetJsonBytes: 640,
+    maxWorkbookCachedRows: 200,
+    maxWorkbookCachedCells: 500,
+    maxRendererCoordinateIndexEntries: 250,
   },
 }) {
   const root = mkdtempSync(path.join(tmpdir(), 'ooxml-resource-policy-'));
@@ -41,6 +48,14 @@ test('generates matching TypeScript and Rust constants from one policy source', 
   assert.match(
     readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
     /STANDARD_MAX_TOTAL_INFLATED_BYTES: u64 = 256/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
+    /HARD_MAX_XLSX_WORKSHEET_JSON_BYTES = 640/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
+    /HARD_MAX_XLSX_RENDERER_COORDINATE_INDEX_ENTRIES: u64 = 250/,
   );
 });
 
@@ -70,6 +85,13 @@ test('rejects invalid or internally inconsistent policy values', (context) => {
       maxTotalInflatedBytes: 1024,
       maxArchiveEntries: 20,
       maxCentralDirectoryBytes: 64,
+      maxWorksheetRows: 100,
+      maxWorksheetCells: 250,
+      maxWorksheetCellContentUtf8Bytes: 320,
+      maxWorksheetJsonBytes: 640,
+      maxWorkbookCachedRows: 200,
+      maxWorkbookCachedCells: 500,
+      maxRendererCoordinateIndexEntries: 250,
     },
   });
   context.after(() => rmSync(root, { recursive: true, force: true }));

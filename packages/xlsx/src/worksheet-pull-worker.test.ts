@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PULL_SESSION_PROTOCOL, type PullSessionCommand, type PullSessionResponse } from '@silurus/ooxml-core/worker';
 import { WorksheetPullWorker } from './worksheet-pull-worker.js';
+import { OoxmlResourceLimitError } from '@silurus/ooxml-core';
 import type { Worksheet } from './types.js';
 
 const identity = { sessionId: 4, operationId: 9, generation: 2 } as const;
@@ -24,6 +25,22 @@ function command(
 }
 
 describe('WorksheetPullWorker', () => {
+  it('latches an ordinary worker-side renderer violation for sibling operations', async () => {
+    const fatal = new OoxmlResourceLimitError('renderer index limit', {
+      stage: 'layout',
+      violation: {
+        format: 'xlsx', operation: 'render-viewport', resource: 'renderer-index', metric: 'entries',
+        limit: 250_000, observed: 250_001, configurable: false,
+        usage: { archiveEntryCount: 1, declaredInflatedBytes: 2, distinctInflatedBytes: 3, operationInflatedBytes: 4 },
+      },
+    });
+    const worker = new WorksheetPullWorker(() => null);
+    await expect(worker.run(() => { throw fatal; })).rejects.toBe(fatal);
+    const sibling = vi.fn();
+    await expect(worker.run(sibling)).rejects.toBe(fatal);
+    expect(sibling).not.toHaveBeenCalled();
+  });
+
   it('measures exact transfer bytes and commits Rust only after terminal ACK', async () => {
     const terminal: Worksheet = {
       name: 'Sheet1', rows: [], colWidths: {}, rowHeights: {}, defaultColWidth: 8.43,
@@ -70,7 +87,11 @@ describe('WorksheetPullWorker', () => {
     await worker.dispatch(command(4, { kind: 'ack', sequence: 1 }), post);
     await queued;
     expect(acknowledge).toHaveBeenCalledOnce();
-    expect(accepted).toHaveBeenCalledWith(0, expect.objectContaining({ rows: [expect.objectContaining({ index: 1 })] }));
+    expect(accepted).toHaveBeenCalledWith(
+      0,
+      expect.objectContaining({ rows: [expect.objectContaining({ index: 1 })] }),
+      expect.objectContaining({ operationInflatedBytes: 4 }),
+    );
     expect(ordinaryOperation).toHaveBeenCalledOnce();
   });
 

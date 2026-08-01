@@ -13,7 +13,17 @@ import type { CellValue, SharedString, Worksheet } from './types.js';
  * formatter, markdown — still sees fully-resolved cell text.
  */
 export function resolveSharedStrings(ws: Worksheet, sharedStrings: SharedString[]): Worksheet {
-  for (const row of ws.rows) {
+  resolveSharedStringRows(ws.rows, sharedStrings);
+  return ws;
+}
+
+/** Resolve a provisional row batch before a compatibility materializer retains
+ * it, allowing owned string bytes to be measured before `rows.push`. */
+export function resolveSharedStringRows(
+  rows: Worksheet['rows'],
+  sharedStrings: SharedString[],
+): Worksheet['rows'] {
+  for (const row of rows) {
     for (const cell of row.cells) {
       const v = cell.value;
       if (v.type === 'shared') {
@@ -35,5 +45,5 @@ export function resolveSharedStrings(ws: Worksheet, sharedStrings: SharedString[
       }
     }
   }
-  return ws;
+  return rows;
 }

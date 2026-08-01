@@ -1,4 +1,4 @@
-import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
+import { OoxmlResourceLimitError, type OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
   PULL_SESSION_PROTOCOL,
   PullSessionHost,
@@ -9,6 +9,14 @@ import {
   type PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
 import type { Row, Worksheet } from './types.js';
+import {
+  addWorksheetUsage,
+  assertWorksheetJsonBytes,
+  assertWorksheetModelUsage,
+  measureRows,
+  measureWorksheet,
+  type WorksheetModelUsage,
+} from './worksheet-resource-limits.js';
 
 export const XLSX_WORKSHEET_PULL_BYTES = 64 * 1024 * 1024;
 const XLSX_WORKSHEET_PULL_ROWS = 128;
@@ -39,15 +47,18 @@ export class WorksheetPullWorker {
     identity: PullSessionIdentity<number>;
     canceled: boolean;
   }>();
+  private resourceFailure: OoxmlResourceLimitError | undefined;
 
   constructor(
     private readonly archive: () => WorksheetCursorArchive | null | undefined,
     private readonly acceptWorksheet?: (
       sheetIndex: number,
       worksheet: Worksheet,
-    ) => void | (() => void),
+      usage?: OoxmlResourceUsageSnapshot,
+    ) => void | (() => void) | { rollback?: () => void; commit?: () => void },
     private readonly executeArchive: <T>(operation: (archive: WorksheetCursorArchive) => T) => T =
       (operation) => operation(this.requireArchive()),
+    private readonly prepareRows?: (rows: Row[]) => void,
   ) {}
 
   /** Register synchronously before a worker handler's first await. */
@@ -68,6 +79,7 @@ export class WorksheetPullWorker {
     name: string,
     identity: PullSessionIdentity<number>,
   ): Promise<void> {
+    if (this.resourceFailure) throw this.resourceFailure;
     const pending = this.pendingOpens.get(identity.sessionId);
     if (
       !pending ||
@@ -84,6 +96,7 @@ export class WorksheetPullWorker {
       if (pending.canceled) throw new Error('worksheet pull session open was canceled');
       this.executeArchive((archive) => archive.open_sheet_cursor(sheetIndex, name));
       const rows: Row[] = [];
+      let modelUsage: WorksheetModelUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0 };
       let terminal: Worksheet | undefined;
       let terminalPending = false;
       const session = new PullSessionHost<ArrayBuffer, number>({
@@ -100,8 +113,23 @@ export class WorksheetPullWorker {
               if (done !== (decoded.kind === 'finished')) {
                 throw new Error('worksheet cursor terminal marker mismatch');
               }
-              if (decoded.kind === 'rows') rows.push(...decoded.rows);
-              else terminal = decoded.worksheet;
+              try {
+                if (decoded.kind === 'rows') {
+                  this.prepareRows?.(decoded.rows);
+                  const next = addWorksheetUsage(modelUsage, measureRows(decoded.rows));
+                  assertWorksheetModelUsage(
+                    next,
+                    'get-worksheet-worker',
+                    undefined,
+                    this.readResourceUsage(),
+                  );
+                  rows.push(...decoded.rows);
+                  modelUsage = next;
+                } else terminal = decoded.worksheet;
+              } catch (error) {
+                if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
+                throw error;
+              }
             }
             terminalPending = done;
             const payload =
@@ -117,15 +145,38 @@ export class WorksheetPullWorker {
             // Render-worker mode must also accept its local retained model
             // before Rust commits, so a cache/assembly failure remains cancelable.
             let rollback: (() => void) | undefined;
-            if (this.acceptWorksheet) {
-              if (!terminal) throw new Error('worksheet terminal payload is missing');
-              terminal.rows = rows;
-              rollback = this.acceptWorksheet(sheetIndex, terminal) ?? undefined;
-            }
+            let commit: (() => void) | undefined;
             try {
+              if (this.acceptWorksheet) {
+                if (!terminal) throw new Error('worksheet terminal payload is missing');
+                terminal.rows = rows;
+                const measured = measureWorksheet(terminal);
+                const resourceUsage = this.readResourceUsage();
+                assertWorksheetModelUsage(
+                  measured,
+                  'get-worksheet-worker',
+                  undefined,
+                  resourceUsage,
+                );
+                assertWorksheetJsonBytes(
+                  measured.jsonBytes,
+                  'get-worksheet-worker',
+                  undefined,
+                  resourceUsage,
+                );
+                const accepted = this.acceptWorksheet(
+                  sheetIndex,
+                  terminal,
+                  resourceUsage,
+                );
+                if (typeof accepted === 'function') rollback = accepted;
+                else if (accepted) ({ rollback, commit } = accepted);
+              }
               this.executeArchive((archive) => archive.acknowledge_sheet_cursor_terminal());
+              commit?.();
             } catch (error) {
               rollback?.();
+              if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
               throw error;
             }
             terminalPending = false;
@@ -280,9 +331,16 @@ export class WorksheetPullWorker {
 
   run<T>(operation: () => T | Promise<T>): Promise<T> {
     const result = this.operationTail.then(() =>
-      this.coordinator.enqueue(async () => operation()));
-    this.operationTail = result.then(() => undefined, () => undefined);
-    return result;
+      this.coordinator.enqueue(async () => {
+        if (this.resourceFailure) throw this.resourceFailure;
+        return operation();
+      }));
+    const latched = result.catch((error: unknown) => {
+      if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
+      throw error;
+    });
+    this.operationTail = latched.then(() => undefined, () => undefined);
+    return latched;
   }
 
   /** Close every shared host before replacing the package archive generation. */
@@ -300,6 +358,7 @@ export class WorksheetPullWorker {
     this.sessions.clear();
     await this.operationTail;
     this.pendingOpens.clear();
+    this.resourceFailure = undefined;
   }
 
   private requireArchive(): WorksheetCursorArchive {

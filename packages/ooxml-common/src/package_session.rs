@@ -800,6 +800,20 @@ pub struct PackageOperation {
 }
 
 impl PackageOperation {
+    /// Derive format-model limit reporting from this logical operation. This is
+    /// used by materializing compatibility paths that do not have an entry
+    /// stream in hand when their retained-model or serialization ceiling is
+    /// crossed.
+    pub fn limit_reporter(&self) -> Result<PackageLimitReporter, String> {
+        let session = self.handle.inner.borrow();
+        session.ensure_healthy()?;
+        session.assert_operation_active(self.id)?;
+        Ok(PackageLimitReporter {
+            handle: self.handle.clone(),
+            operation_id: self.id,
+        })
+    }
+
     fn assert_active(&self) -> Result<(), String> {
         if self.state != OwnedOperationState::Active {
             return Err("package operation is not active".to_string());

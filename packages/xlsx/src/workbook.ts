@@ -12,6 +12,7 @@ import {
   toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
+  OoxmlResourceLimitError,
 } from '@silurus/ooxml-core';
 import {
   deserializeWorkerError,
@@ -28,7 +29,18 @@ import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
-import { resolveSharedStrings } from './shared-strings.js';
+import { resolveSharedStringRows } from './shared-strings.js';
+import {
+  addWorksheetUsage,
+  addWorksheetCacheUsage,
+  assertWorksheetCacheUsage,
+  assertWorksheetJsonBytes,
+  assertWorksheetModelUsage,
+  measureRows,
+  measureWorksheet,
+  type WorksheetCacheUsage,
+  type WorksheetModelUsage,
+} from './worksheet-resource-limits.js';
 import {
   parseListFormula,
   resolveListValues,
@@ -107,6 +119,11 @@ export class XlsxWorkbook {
   private archiveOperationTail: Promise<void> = Promise.resolve();
   private sheetSessions = new Set<BoundedPullSession<ArrayBuffer, number>>();
   private workerTimeoutMs: number | undefined;
+  private retainedSheetUsage: WorksheetCacheUsage = { rows: 0, cells: 0 };
+  /** First fatal model/package violation. Compatibility materialization happens
+   * on main, so this latch is the document-level poison boundary for every
+   * later public operation on the same workbook instance. */
+  private resourceFailure: OoxmlResourceLimitError | null = null;
 
   private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
     this.worker = worker;
@@ -183,6 +200,9 @@ export class XlsxWorkbook {
     opts: LoadOptions = {},
     resourcePolicy: NormalizedOoxmlResourcePolicy = normalizeResourcePolicy(opts),
   ): Promise<void> {
+    this.resourceFailure = null;
+    this.retainedSheetUsage = { rows: 0, cells: 0 };
+    this.sheetCache.clear();
     for (const session of this.sheetSessions ?? []) {
       await session.cancel('closed').catch(() => undefined);
     }
@@ -284,6 +304,7 @@ export class XlsxWorkbook {
   }
 
   async getWorksheet(sheetIndex: number): Promise<Worksheet> {
+    this.assertResourceHealthy();
     const cached = this.sheetCache.get(sheetIndex);
     if (cached) return cached;
     const active = this.sheetLoads.get(sheetIndex);
@@ -323,6 +344,11 @@ export class XlsxWorkbook {
     this.sheetSessions ??= new Set();
     this.sheetSessions.add(session);
     const rows: Worksheet['rows'] = [];
+    let modelUsage: WorksheetModelUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0 };
+    // The compatibility adapter knows the workbook sheet index/name but not
+    // the resolved OPC relationship target. Omit `part` rather than fabricate
+    // a package address; Rust-originated violations carry the real xl/... path.
+    const part = undefined;
     try {
       await this.bridge.request(
         (id) => ({ type: 'openSheetSession', id, sheetIndex, sheetName, ...identity }),
@@ -335,21 +361,54 @@ export class XlsxWorkbook {
           new TextDecoder().decode(new Uint8Array(chunk.payload)),
         ) as { kind: 'rows'; rows: Worksheet['rows'] } | { kind: 'finished'; worksheet: Worksheet };
         if (decoded.kind === 'rows') {
+          resolveSharedStringRows(decoded.rows, this.parsedWorkbook?.sharedStrings ?? []);
+          const nextUsage = addWorksheetUsage(modelUsage, measureRows(decoded.rows));
+          assertWorksheetModelUsage(
+            nextUsage,
+            'get-worksheet',
+            part,
+            chunk.usage ?? session.usageCheckpoint,
+          );
           rows.push(...decoded.rows);
+          modelUsage = nextUsage;
           await chunk.ack();
           continue;
         }
         const worksheet = decoded.worksheet;
         worksheet.rows = rows;
-        resolveSharedStrings(worksheet, this.parsedWorkbook?.sharedStrings ?? []);
+        // Terminal metadata contains no rows, but measure the final public model
+        // to cover exact monolithic JSON before its cache admission.
+        const measured = measureWorksheet(worksheet);
+        assertWorksheetModelUsage(
+          measured,
+          'get-worksheet',
+          part,
+          chunk.usage ?? session.usageCheckpoint,
+        );
+        assertWorksheetJsonBytes(
+          measured.jsonBytes,
+          'get-worksheet',
+          part,
+          chunk.usage ?? session.usageCheckpoint,
+        );
+        const retainedUsage = this.retainedSheetUsage ?? { rows: 0, cells: 0 };
+        const nextCache = addWorksheetCacheUsage(retainedUsage, measured);
+        assertWorksheetCacheUsage(
+          nextCache,
+          'get-worksheet',
+          part,
+          chunk.usage ?? session.usageCheckpoint,
+        );
         // Decoding and assembly above is the consumer's acceptance point. The
         // terminal ACK may now commit the prepared Rust operation.
         await chunk.ack();
+        this.retainedSheetUsage = nextCache;
         this.sheetCache.set(sheetIndex, worksheet);
         return worksheet;
       }
     } catch (error) {
       await session.cancel('request-error').catch(() => undefined);
+      if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
       throw error;
     } finally {
       this.sheetSessions.delete(session);
@@ -357,7 +416,16 @@ export class XlsxWorkbook {
   }
 
   private runArchiveOperation<T>(operation: () => Promise<T>): Promise<T> {
-    const result = (this.archiveOperationTail ?? Promise.resolve()).then(operation, operation);
+    const run = async (): Promise<T> => {
+      this.assertResourceHealthy();
+      try {
+        return await operation();
+      } catch (error) {
+        if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
+        throw error;
+      }
+    };
+    const result = (this.archiveOperationTail ?? Promise.resolve()).then(run, run);
     this.archiveOperationTail = result.then(() => undefined, () => undefined);
     return result;
   }
@@ -375,6 +443,7 @@ export class XlsxWorkbook {
    * route-through-worker decision).
    */
   async getImage(imagePath: string, mimeType: string): Promise<Blob> {
+    this.assertResourceHealthy();
     const hit = this.imageBlobCache.get(imagePath);
     if (hit) return hit;
     const queued = this.queuedImageLoads?.get(imagePath);
@@ -425,6 +494,7 @@ export class XlsxWorkbook {
    * const md = await wb.toMarkdown();
    */
   async toMarkdown(): Promise<string> {
+    this.assertResourceHealthy();
     const res = await this.runArchiveOperation(() => this.bridge.request(
       (id) => ({ type: 'toMarkdown', id }) satisfies WorkerRequest,
     ));
@@ -450,6 +520,7 @@ export class XlsxWorkbook {
     sheetIndex: number,
     formula1: string | undefined,
   ): Promise<ResolvedList> {
+    this.assertResourceHealthy();
     if (!this.parsedWorkbook) throw new Error('Workbook not loaded');
     const parsed = parseListFormula(formula1);
     if (parsed.kind !== 'range') {
@@ -515,6 +586,7 @@ export class XlsxWorkbook {
     viewport: ViewportRange,
     opts: RenderViewportOptions = {},
   ): Promise<void> {
+    this.assertResourceHealthy();
     if (this._mode === 'worker') {
       throw new Error(
         "renderViewport(canvas) is unavailable in mode: 'worker'; use renderViewportToBitmap() and paint it via an ImageBitmapRenderingContext",
@@ -549,6 +621,7 @@ export class XlsxWorkbook {
     viewport: ViewportRange,
     opts: WireRenderViewportOptions & { width: number; height: number },
   ): Promise<ImageBitmap> {
+    this.assertResourceHealthy();
     const wireOpts = { ...opts, dpr: opts.dpr ?? defaultDpr() };
     if (this._mode === 'worker') {
       if (!Number.isInteger(sheetIndex) || sheetIndex < 0 || sheetIndex >= this.sheetCount) {
@@ -639,5 +712,9 @@ export class XlsxWorkbook {
     this.imageBlobCache.clear();
     this.queuedImageLoads?.clear();
     this.rawData = null;
+  }
+
+  private assertResourceHealthy(): void {
+    if (this.resourceFailure) throw this.resourceFailure;
   }
 }

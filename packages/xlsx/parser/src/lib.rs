@@ -1,13 +1,18 @@
 use std::collections::{BTreeMap, HashMap};
 #[cfg(test)]
 use std::io::Cursor;
+use std::io::{self, Write};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{attr_ns, is_r_ns, is_x_ns, relationships};
-use ooxml_common::package_session::{PackageOperation, PackageSessionHandle};
-use ooxml_common::resource::ResourceUsage;
+use ooxml_common::package_session::{PackageLimitReporter, PackageOperation, PackageSessionHandle};
+use ooxml_common::resource::{
+    HardResourceLimitKind, ResourceUsage, HARD_MAX_XLSX_WORKSHEET_CELLS,
+    HARD_MAX_XLSX_WORKSHEET_CELL_CONTENT_UTF8_BYTES, HARD_MAX_XLSX_WORKSHEET_JSON_BYTES,
+    HARD_MAX_XLSX_WORKSHEET_ROWS,
+};
 
 mod markdown;
 mod pivot;
@@ -189,6 +194,244 @@ fn settle_xlsx_operation<T>(archive: &mut XlsxZip, result: Result<T, String>) ->
 /// (`"(zip container)"`), symmetric with docx / pptx `"(zip container)"` — so
 /// error formatting below must not wrap it in another pair of parens.
 const CONTAINER_PART: &str = "(zip container)";
+
+#[derive(Default)]
+struct WorksheetModelUsage {
+    rows: u64,
+    cells: u64,
+    owned_utf8_bytes: u64,
+}
+
+/// Count exact JSON bytes and UTF-8 bytes in serialized string values without
+/// allocating the monolithic JSON. Property names are excluded; enum-tag
+/// values are included because they are retained string values in the public
+/// compatibility model. JSON short escapes and `\uXXXX` sequences are decoded
+/// to their source scalar widths; non-ASCII Rust strings normally arrive as
+/// raw UTF-8.
+#[derive(Default)]
+struct WorksheetJsonCounter {
+    json_bytes: u64,
+    string_bytes: u64,
+    current_string_bytes: u64,
+    pending_string_bytes: Option<u64>,
+    in_string: bool,
+    escaped: bool,
+    unicode_digits: u8,
+    unicode_value: u16,
+    pending_high_surrogate: Option<u16>,
+}
+
+impl WorksheetJsonCounter {
+    fn checked_add(target: &mut u64, amount: u64) -> io::Result<()> {
+        *target = target.checked_add(amount).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "worksheet measurement overflow")
+        })?;
+        Ok(())
+    }
+
+    fn flush_pending_surrogate(&mut self) -> io::Result<()> {
+        if self.pending_high_surrogate.take().is_some() {
+            // A lone UTF-16 surrogate is not a Unicode scalar. JSON decoders
+            // conventionally replace it with U+FFFD, whose UTF-8 width is 3.
+            Self::checked_add(&mut self.current_string_bytes, 3)?;
+        }
+        Ok(())
+    }
+
+    fn finish_unicode_escape(&mut self) -> io::Result<()> {
+        let unit = std::mem::take(&mut self.unicode_value);
+        match unit {
+            0xD800..=0xDBFF => {
+                self.flush_pending_surrogate()?;
+                self.pending_high_surrogate = Some(unit);
+            }
+            0xDC00..=0xDFFF => {
+                if self.pending_high_surrogate.take().is_some() {
+                    Self::checked_add(&mut self.current_string_bytes, 4)?;
+                } else {
+                    Self::checked_add(&mut self.current_string_bytes, 3)?;
+                }
+            }
+            _ => {
+                self.flush_pending_surrogate()?;
+                let width = if unit <= 0x7F {
+                    1
+                } else if unit <= 0x7FF {
+                    2
+                } else {
+                    3
+                };
+                Self::checked_add(&mut self.current_string_bytes, width)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> io::Result<(u64, u64)> {
+        if self.in_string || self.escaped || self.unicode_digits != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "worksheet serializer ended inside a JSON string",
+            ));
+        }
+        if let Some(bytes) = self.pending_string_bytes.take() {
+            Self::checked_add(&mut self.string_bytes, bytes)?;
+        }
+        Ok((self.json_bytes, self.string_bytes))
+    }
+}
+
+impl Write for WorksheetJsonCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        Self::checked_add(&mut self.json_bytes, bytes.len() as u64)?;
+        for &byte in bytes {
+            if self.in_string {
+                if self.unicode_digits != 0 {
+                    let nibble = match byte {
+                        b'0'..=b'9' => u16::from(byte - b'0'),
+                        b'a'..=b'f' => u16::from(byte - b'a' + 10),
+                        b'A'..=b'F' => u16::from(byte - b'A' + 10),
+                        _ => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "worksheet serializer emitted an invalid unicode escape",
+                            ));
+                        }
+                    };
+                    self.unicode_value = self
+                        .unicode_value
+                        .checked_mul(16)
+                        .and_then(|value| value.checked_add(nibble))
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "worksheet unicode escape overflow",
+                            )
+                        })?;
+                    self.unicode_digits -= 1;
+                    if self.unicode_digits == 0 {
+                        self.escaped = false;
+                        self.finish_unicode_escape()?;
+                    }
+                } else if self.escaped {
+                    if byte == b'u' {
+                        self.unicode_digits = 4;
+                        self.unicode_value = 0;
+                    } else {
+                        self.flush_pending_surrogate()?;
+                        Self::checked_add(&mut self.current_string_bytes, 1)?;
+                        self.escaped = false;
+                    }
+                } else {
+                    match byte {
+                        b'\\' => self.escaped = true,
+                        b'"' => {
+                            self.flush_pending_surrogate()?;
+                            self.in_string = false;
+                            self.pending_string_bytes = Some(self.current_string_bytes);
+                            self.current_string_bytes = 0;
+                        }
+                        _ => {
+                            self.flush_pending_surrogate()?;
+                            Self::checked_add(&mut self.current_string_bytes, 1)?;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if let Some(pending) = self.pending_string_bytes {
+                if byte.is_ascii_whitespace() {
+                    continue;
+                }
+                self.pending_string_bytes = None;
+                if byte != b':' {
+                    Self::checked_add(&mut self.string_bytes, pending)?;
+                }
+            }
+            if byte == b'"' {
+                self.in_string = true;
+            }
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn measure_json<T: serde::Serialize>(value: &T) -> Result<(u64, u64), String> {
+    let mut counter = WorksheetJsonCounter::default();
+    serde_json::to_writer(&mut counter, value)
+        .map_err(|error| format!("serialize measurement error: {error}"))?;
+    counter
+        .finish()
+        .map_err(|error| format!("serialize measurement error: {error}"))
+}
+
+fn report_materialization_limit(
+    archive: &mut XlsxZip,
+    kind: HardResourceLimitKind,
+    part: &str,
+    limit: u64,
+    observed: u64,
+) -> Result<(), String> {
+    archive
+        .operation()?
+        .limit_reporter()?
+        .observe_hard_limit(kind, Some(part), limit, observed)
+}
+
+fn serialize_worksheet_bounded(
+    archive: &mut XlsxZip,
+    part: &str,
+    worksheet: &Worksheet,
+) -> Result<Vec<u8>, String> {
+    let (json_bytes, _) = measure_json(worksheet)?;
+    report_materialization_limit(
+        archive,
+        HardResourceLimitKind::WorksheetJsonBytes,
+        part,
+        HARD_MAX_XLSX_WORKSHEET_JSON_BYTES,
+        json_bytes,
+    )?;
+    serde_json::to_vec(worksheet).map_err(|error| format!("serialize error: {error}"))
+}
+
+fn row_cell_content_utf8_bytes(
+    rows: &[Row],
+    shared_strings: &[SharedString],
+) -> Result<u64, String> {
+    rows.iter().try_fold(0u64, |row_total, row| {
+        row.cells.iter().try_fold(row_total, |cell_total, cell| {
+            let formula_bytes = cell
+                .formula
+                .as_ref()
+                .map_or(0, |formula| formula.len() as u64);
+            let value_bytes = match &cell.value {
+                CellValue::Shared { si } => {
+                    let shared = shared_strings.get(*si);
+                    let shared_bytes = match shared {
+                        Some(value) => measure_json(value)?.1,
+                        None => 0,
+                    };
+                    // A shared reference becomes a materialized Text value. The
+                    // `text` discriminator is therefore retained per cell too.
+                    shared_bytes.checked_add(4)
+                }
+                value => measure_json(value)
+                    .map(|(_, strings)| strings)?
+                    .checked_add(0),
+            }
+            .ok_or_else(|| "worksheet cell string measurement overflow".to_string())?;
+            cell_total
+                .checked_add(formula_bytes)
+                .and_then(|total| total.checked_add(value_bytes))
+                .ok_or_else(|| "worksheet cell string measurement overflow".to_string())
+        })
+    })
+}
 
 /// Open a xlsx ZIP container, tagging a failure with the container part name.
 ///
@@ -423,7 +666,7 @@ fn parse_sheet_with(
         Ok(parsed) => parsed,
         Err(detail) => {
             let ws = Worksheet::placeholder(name, format!("{sheet_part}: {detail}"));
-            return serde_json::to_vec(&ws).map_err(|e| e.to_string());
+            return serialize_worksheet_bounded(archive, &sheet_part, &ws);
         }
     };
     let worksheet = finalize_projected_sheet(
@@ -435,7 +678,7 @@ fn parse_sheet_with(
         parsed,
         CurrentSheetLookup::BuildFromMaterializedRows,
     )?;
-    serde_json::to_vec(&worksheet).map_err(|error| error.to_string())
+    serialize_worksheet_bounded(archive, &sheet_part, &worksheet)
 }
 
 enum CurrentSheetLookup {
@@ -595,6 +838,178 @@ fn parse_xlsx_inner_with(
         styles,
         shared_strings: shared.shared_strings.as_ref().to_vec(),
     })
+}
+
+#[cfg(test)]
+mod retained_model_limit_tests {
+    use super::*;
+
+    fn cell(row: u32, value: CellValue, formula: Option<&str>) -> Cell {
+        Cell {
+            col: 1,
+            row,
+            value,
+            style_index: 0,
+            formula: formula.map(str::to_string),
+            show_phonetic: false,
+        }
+    }
+
+    fn row(index: u32, cells: Vec<Cell>) -> Row {
+        Row {
+            index,
+            height: None,
+            cells,
+            outline_level: 0,
+            collapsed: false,
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn counting_writer_matches_exact_serde_json_bytes() {
+        let value = serde_json::json!({
+            "ascii": "quote\" slash\\ newline\n",
+            "unicode": "é😀",
+            "array": [null, true, -0.0, "x"]
+        });
+        let (measured, _) = measure_json(&value).unwrap();
+        assert_eq!(measured as usize, serde_json::to_vec(&value).unwrap().len());
+    }
+
+    #[test]
+    fn counting_writer_decodes_short_and_unicode_escapes_but_excludes_keys() {
+        let value = serde_json::json!({
+            "ignored-key-é": "\u{0008}\t\n\u{000c}\r",
+            "also-ignored": "\u{0000}\u{000b}\u{001f}",
+            "unicode-key-😀": "é😀"
+        });
+        let (json_bytes, string_bytes) = measure_json(&value).unwrap();
+        assert_eq!(
+            json_bytes as usize,
+            serde_json::to_vec(&value).unwrap().len()
+        );
+        assert_eq!(
+            string_bytes,
+            5 + 3 + "é😀".len() as u64,
+            "only decoded string values are retained-content bytes"
+        );
+    }
+
+    #[test]
+    fn cell_string_measurement_expands_every_shared_reference() {
+        let shared = vec![SharedString {
+            text: "é".to_string(),
+            ..Default::default()
+        }];
+        let rows = vec![
+            row(1, vec![cell(1, CellValue::Shared { si: 0 }, Some("A1"))]),
+            row(2, vec![cell(2, CellValue::Shared { si: 0 }, None)]),
+            row(
+                3,
+                vec![cell(
+                    3,
+                    CellValue::Error {
+                        error: "#VALUE!".to_string(),
+                    },
+                    None,
+                )],
+            ),
+        ];
+        // Each shared cell retains the resolved `text` discriminator (4) and
+        // the two-byte UTF-8 value. The first also owns its formula. Error owns
+        // its discriminator and payload.
+        assert_eq!(
+            row_cell_content_utf8_bytes(&rows, &shared).unwrap(),
+            (4 + 2 + 2) + (4 + 2) + (5 + 7)
+        );
+    }
+
+    #[test]
+    fn escaped_controls_reach_the_hard_cell_content_boundary_and_plus_one() {
+        let payload_bytes = usize::try_from(HARD_MAX_XLSX_WORKSHEET_CELL_CONTENT_UTF8_BYTES - 4)
+            .expect("hard limit fits usize");
+        let mut text = "\0".repeat(payload_bytes);
+        let shared: Vec<SharedString> = Vec::new();
+        let exact = vec![row(
+            1,
+            vec![cell(
+                1,
+                CellValue::Text {
+                    text: text.clone(),
+                    runs: None,
+                    phonetic_runs: Vec::new(),
+                    phonetic_pr: None,
+                },
+                None,
+            )],
+        )];
+        assert_eq!(
+            row_cell_content_utf8_bytes(&exact, &shared).unwrap(),
+            HARD_MAX_XLSX_WORKSHEET_CELL_CONTENT_UTF8_BYTES
+        );
+
+        text.push('\0');
+        let over = vec![row(
+            1,
+            vec![cell(
+                1,
+                CellValue::Text {
+                    text,
+                    runs: None,
+                    phonetic_runs: Vec::new(),
+                    phonetic_pr: None,
+                },
+                None,
+            )],
+        )];
+        assert_eq!(
+            row_cell_content_utf8_bytes(&over, &shared).unwrap(),
+            HARD_MAX_XLSX_WORKSHEET_CELL_CONTENT_UTF8_BYTES + 1
+        );
+
+        let mut package = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut package));
+            writer
+                .start_file(
+                    "xl/worksheets/sheet1.xml",
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            writer.write_all(b"x").unwrap();
+            writer.finish().unwrap();
+        }
+        let mut archive = XlsxZip::new(Cursor::new(package)).unwrap();
+        archive.begin_operation("parse-sheet").unwrap();
+        let reporter = archive.operation().unwrap().limit_reporter().unwrap();
+        reporter
+            .observe_hard_limit(
+                HardResourceLimitKind::WorksheetCellContentOwnedUtf8Bytes,
+                Some("xl/worksheets/sheet1.xml"),
+                HARD_MAX_XLSX_WORKSHEET_CELL_CONTENT_UTF8_BYTES,
+                HARD_MAX_XLSX_WORKSHEET_CELL_CONTENT_UTF8_BYTES,
+            )
+            .unwrap();
+        let error = reporter
+            .observe_hard_limit(
+                HardResourceLimitKind::WorksheetCellContentOwnedUtf8Bytes,
+                Some("xl/worksheets/sheet1.xml"),
+                HARD_MAX_XLSX_WORKSHEET_CELL_CONTENT_UTF8_BYTES,
+                HARD_MAX_XLSX_WORKSHEET_CELL_CONTENT_UTF8_BYTES + 1,
+            )
+            .unwrap_err();
+        let envelope: serde_json::Value =
+            serde_json::from_str(error.strip_prefix("OOXML_RESOURCE_LIMIT:").unwrap()).unwrap();
+        assert_eq!(
+            envelope["details"]["violation"]["resource"],
+            "worksheet-cell-content"
+        );
+        assert_eq!(
+            envelope["details"]["violation"]["observed"],
+            HARD_MAX_XLSX_WORKSHEET_CELL_CONTENT_UTF8_BYTES + 1
+        );
+    }
 }
 
 fn parse_xlsx_inner(data: &[u8]) -> Result<ParsedWorkbook, String> {
@@ -1162,8 +1577,11 @@ fn stream_sheet_data_from_archive(
     shared_strings: Rc<[SharedString]>,
     theme_colors: Rc<[String]>,
 ) -> Result<StreamedSheetData, String> {
-    let mut cursor = archive.open_worksheet_cursor(part, shared_strings, theme_colors)?;
+    let reporter = archive.operation()?.limit_reporter()?;
+    let mut cursor =
+        archive.open_worksheet_cursor(part, Rc::clone(&shared_strings), theme_colors)?;
     let mut rows = Vec::new();
+    let mut usage = WorksheetModelUsage::default();
     loop {
         match cursor.pull(
             WORKSHEET_CURSOR_PULL_ROWS,
@@ -1176,6 +1594,45 @@ fn stream_sheet_data_from_archive(
                 if !batch.is_empty() && projected_bytes == 0 {
                     return Err("worksheet cursor returned an unmeasured row batch".to_string());
                 }
+                let next_rows = usage
+                    .rows
+                    .checked_add(batch.len() as u64)
+                    .ok_or_else(|| "worksheet row count overflow".to_string())?;
+                let batch_cells = batch.iter().try_fold(0u64, |total, row| {
+                    total
+                        .checked_add(row.cells.len() as u64)
+                        .ok_or_else(|| "worksheet cell count overflow".to_string())
+                })?;
+                let next_cells = usage
+                    .cells
+                    .checked_add(batch_cells)
+                    .ok_or_else(|| "worksheet cell count overflow".to_string())?;
+                let batch_strings = row_cell_content_utf8_bytes(&batch, shared_strings.as_ref())?;
+                let next_strings = usage
+                    .owned_utf8_bytes
+                    .checked_add(batch_strings)
+                    .ok_or_else(|| "worksheet string measurement overflow".to_string())?;
+                reporter.observe_hard_limit(
+                    HardResourceLimitKind::WorksheetModelRows,
+                    Some(part),
+                    HARD_MAX_XLSX_WORKSHEET_ROWS,
+                    next_rows,
+                )?;
+                reporter.observe_hard_limit(
+                    HardResourceLimitKind::WorksheetModelCells,
+                    Some(part),
+                    HARD_MAX_XLSX_WORKSHEET_CELLS,
+                    next_cells,
+                )?;
+                reporter.observe_hard_limit(
+                    HardResourceLimitKind::WorksheetCellContentOwnedUtf8Bytes,
+                    Some(part),
+                    HARD_MAX_XLSX_WORKSHEET_CELL_CONTENT_UTF8_BYTES,
+                    next_strings,
+                )?;
+                usage.rows = next_rows;
+                usage.cells = next_cells;
+                usage.owned_utf8_bytes = next_strings;
                 rows.extend(batch);
             }
             Ok(WorksheetCursorPull::Finished(tail)) => {
@@ -2900,17 +3357,30 @@ enum CursorOpenFailure {
     Sheet(String),
 }
 
-fn serialize_cursor_finished(worksheet: Worksheet) -> Result<Vec<u8>, String> {
+fn serialize_cursor_finished(
+    worksheet: Worksheet,
+    limit_reporter: Option<&PackageLimitReporter>,
+    part: Option<&str>,
+) -> Result<Vec<u8>, String> {
     #[derive(serde::Serialize)]
     struct Finished {
         kind: &'static str,
         worksheet: Worksheet,
     }
-    serde_json::to_vec(&Finished {
+    let finished = Finished {
         kind: "finished",
         worksheet,
-    })
-    .map_err(|error| format!("serialize error: {error}"))
+    };
+    let (json_bytes, _) = measure_json(&finished)?;
+    if let Some(reporter) = limit_reporter {
+        reporter.observe_hard_limit(
+            HardResourceLimitKind::WorksheetJsonBytes,
+            part,
+            HARD_MAX_XLSX_WORKSHEET_JSON_BYTES,
+            json_bytes,
+        )?;
+    }
+    serde_json::to_vec(&finished).map_err(|error| format!("serialize error: {error}"))
 }
 
 #[wasm_bindgen]
@@ -3141,6 +3611,7 @@ impl XlsxArchive {
                 .active_worksheet
                 .as_ref()
                 .expect("cursor checked above");
+            let part = (!active.sheet_path.is_empty()).then(|| format!("xl/{}", active.sheet_path));
             let worksheet = match failure {
                 CursorOpenFailure::Container(error) => degraded_container_sheet(error),
                 CursorOpenFailure::Sheet(error) => Worksheet::placeholder(
@@ -3148,7 +3619,11 @@ impl XlsxArchive {
                     format!("xl/{}: {error}", active.sheet_path),
                 ),
             };
-            let bytes = serialize_cursor_finished(worksheet)?;
+            let reporter = match self.archive.as_ref() {
+                Ok(zip) => Some(zip.active_operation()?.limit_reporter()?),
+                Err(_) => None,
+            };
+            let bytes = serialize_cursor_finished(worksheet, reporter.as_ref(), part.as_deref())?;
             self.active_worksheet
                 .as_mut()
                 .expect("cursor checked above")
@@ -3227,7 +3702,9 @@ impl XlsxArchive {
                     // placeholders, but a resource-limit violation is terminal
                     // for the package operation and must never be downgraded.
                     zip.assert_healthy()?;
-                    serialize_cursor_finished(worksheet)
+                    let reporter = zip.active_operation()?.limit_reporter()?;
+                    let part = format!("xl/{}", active.sheet_path);
+                    serialize_cursor_finished(worksheet, Some(&reporter), Some(&part))
                 })();
                 let bytes = match result {
                     Ok(bytes) => bytes,
@@ -3243,10 +3720,17 @@ impl XlsxArchive {
                             .as_ref()
                             .expect("cursor checked above");
                         let part = format!("xl/{}", active.sheet_path);
-                        serialize_cursor_finished(Worksheet::placeholder(
-                            &active.name,
-                            format!("{part}: {error}"),
-                        ))?
+                        let reporter = self
+                            .archive
+                            .as_ref()
+                            .expect("container open checked above")
+                            .active_operation()?
+                            .limit_reporter()?;
+                        serialize_cursor_finished(
+                            Worksheet::placeholder(&active.name, format!("{part}: {error}")),
+                            Some(&reporter),
+                            Some(&part),
+                        )?
                     }
                 };
                 self.active_worksheet
@@ -3269,10 +3753,17 @@ impl XlsxArchive {
                     .as_ref()
                     .expect("cursor checked above");
                 let part = format!("xl/{}", active.sheet_path);
-                let bytes = serialize_cursor_finished(Worksheet::placeholder(
-                    &active.name,
-                    format!("{part}: {error}"),
-                ))?;
+                let reporter = self
+                    .archive
+                    .as_ref()
+                    .expect("container open checked above")
+                    .active_operation()?
+                    .limit_reporter()?;
+                let bytes = serialize_cursor_finished(
+                    Worksheet::placeholder(&active.name, format!("{part}: {error}")),
+                    Some(&reporter),
+                    Some(&part),
+                )?;
                 self.active_worksheet
                     .as_mut()
                     .expect("cursor checked above")

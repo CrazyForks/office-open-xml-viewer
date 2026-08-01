@@ -71,6 +71,12 @@ pub enum HardResourceLimitKind {
     XmlNestingDepth,
     WorksheetRowProjectionBytes,
     WorksheetShellProjectionBytes,
+    WorksheetModelRows,
+    WorksheetModelCells,
+    WorksheetCellContentOwnedUtf8Bytes,
+    WorksheetJsonBytes,
+    WorksheetCacheRows,
+    WorksheetCacheCells,
 }
 
 impl HardResourceLimitKind {
@@ -83,6 +89,14 @@ impl HardResourceLimitKind {
             Self::WorksheetShellProjectionBytes => {
                 ("parsing", "worksheet-shell", "projected-bytes")
             }
+            Self::WorksheetModelRows => ("parsing", "worksheet-model", "rows"),
+            Self::WorksheetModelCells => ("parsing", "worksheet-model", "cells"),
+            Self::WorksheetCellContentOwnedUtf8Bytes => {
+                ("parsing", "worksheet-cell-content", "owned-utf8-bytes")
+            }
+            Self::WorksheetJsonBytes => ("serialization", "worksheet-json", "bytes"),
+            Self::WorksheetCacheRows => ("parsing", "worksheet-cache", "rows"),
+            Self::WorksheetCacheCells => ("parsing", "worksheet-cache", "cells"),
         }
     }
 }
@@ -622,5 +636,34 @@ mod tests {
             observe_hard_limit(HardResourceLimitKind::XmlEventBytes, None, 1, 2).unwrap_err(),
             error
         );
+    }
+
+    #[test]
+    fn worksheet_json_limit_is_inclusive_and_crosses_at_plus_one() {
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(0), Some(0));
+        let _scope = governor.scope("parse-sheet");
+        observe_hard_limit(
+            HardResourceLimitKind::WorksheetJsonBytes,
+            Some("xl/worksheets/sheet1.xml"),
+            64,
+            64,
+        )
+        .unwrap();
+        let error = observe_hard_limit(
+            HardResourceLimitKind::WorksheetJsonBytes,
+            Some("xl/worksheets/sheet1.xml"),
+            64,
+            65,
+        )
+        .unwrap_err();
+        let envelope: serde_json::Value =
+            serde_json::from_str(error.strip_prefix("OOXML_RESOURCE_LIMIT:").unwrap()).unwrap();
+        assert_eq!(envelope["details"]["stage"], "serialization");
+        assert_eq!(
+            envelope["details"]["violation"]["resource"],
+            "worksheet-json"
+        );
+        assert_eq!(envelope["details"]["violation"]["observed"], 65);
+        assert_eq!(envelope["details"]["violation"]["configurable"], false);
     }
 }

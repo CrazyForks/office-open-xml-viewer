@@ -1,7 +1,9 @@
 import { OoxmlResourceLimitError } from '@silurus/ooxml-core';
+import { HARD_MAX_XLSX_RENDERER_COORDINATE_INDEX_ENTRIES } from '@silurus/ooxml-core/worker';
 
 /** Hard implementation ceiling for each coordinate-keyed renderer index. */
-export const MAX_RENDERER_COORDINATE_INDEX_ENTRIES = 250_000;
+export const MAX_RENDERER_COORDINATE_INDEX_ENTRIES =
+  HARD_MAX_XLSX_RENDERER_COORDINATE_INDEX_ENTRIES;
 
 export interface CoordinateRange {
   top: number;

@@ -21,7 +21,16 @@ import {
 import { resourcePolicyForWasm, serializeWorkerError, type PullSessionCommand, type PullSessionResponse } from '@silurus/ooxml-core/worker';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
-import { resolveSharedStrings } from './shared-strings.js';
+import { resolveSharedStringRows, resolveSharedStrings } from './shared-strings.js';
+import {
+  addWorksheetCacheUsage,
+  assertWorksheetCacheUsage,
+  assertWorksheetJsonBytes,
+  assertWorksheetModelUsage,
+  measureWorksheet,
+  type WorksheetCacheUsage,
+  type WorksheetModelUsage,
+} from './worksheet-resource-limits.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
 import { applySizeOverrides } from './worker-protocol.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
@@ -46,6 +55,8 @@ let workbook: ParsedWorkbook | null = null;
  *  release — only the sequencing (fonts landed before first paint) matters. */
 let fontsLoaded: Promise<unknown> = Promise.resolve();
 const sheetCache = new Map<number, Worksheet>();
+const sheetCacheUsage = new Map<number, WorksheetModelUsage>();
+let retainedSheetUsage: WorksheetCacheUsage = { rows: 0, cells: 0 };
 // Synchronous-lookup map for the draw pass, keyed by imageCacheKey(path, duotone).
 // A pure lookup layer — the decoded bitmaps are owned by the shared, per-`getImage`
 // core caches; this is refreshed each frame by prefetchImages and dropped (along
@@ -58,20 +69,37 @@ const imageCache = new Map<string, CanvasImageSource | null>();
 const imageBlobCache = new Map<string, Promise<Blob>>();
 const worksheetPull = new WorksheetPullWorker(
   () => host.archive,
-  (sheetIndex, worksheet) => {
-    if (workbook) resolveSharedStrings(worksheet, workbook.sharedStrings);
+  (sheetIndex, worksheet, resourceUsage) => {
     const previous = sheetCache.get(sheetIndex);
+    const previousUsage = sheetCacheUsage.get(sheetIndex);
+    const measured = measureWorksheet(worksheet);
+    const nextUsage = addWorksheetCacheUsage(retainedSheetUsage, measured, previousUsage);
+    assertWorksheetCacheUsage(
+      nextUsage,
+      'get-worksheet-worker',
+      undefined,
+      resourceUsage,
+    );
     sheetCache.set(sheetIndex, worksheet);
-    return () => {
-      if (sheetCache.get(sheetIndex) !== worksheet) return;
-      if (previous) sheetCache.set(sheetIndex, previous);
-      else sheetCache.delete(sheetIndex);
+    return {
+      commit: () => {
+        retainedSheetUsage = nextUsage;
+        sheetCacheUsage.set(sheetIndex, measured);
+      },
+      rollback: () => {
+        if (sheetCache.get(sheetIndex) !== worksheet) return;
+        if (previous) sheetCache.set(sheetIndex, previous);
+        else sheetCache.delete(sheetIndex);
+      },
     };
   },
   (operation) => {
     const archive = host.archive;
     if (!archive) throw new Error('Workbook not loaded');
     return host.run(() => operation(archive));
+  },
+  (rows) => {
+    if (workbook) resolveSharedStringRows(rows, workbook.sharedStrings);
   },
 );
 
@@ -116,7 +144,14 @@ function parseSheetLocally(sheetIndex: number): Worksheet {
   // table so the renderer only ever sees fully-materialized text (worker-mode
   // twin of workbook.ts getWorksheet).
   resolveSharedStrings(ws, workbook.sharedStrings);
+  const measured = measureWorksheet(ws);
+  assertWorksheetModelUsage(measured, 'parse-sheet', undefined);
+  assertWorksheetJsonBytes(measured.jsonBytes, 'parse-sheet', undefined);
+  const nextUsage = addWorksheetCacheUsage(retainedSheetUsage, measured);
+  assertWorksheetCacheUsage(nextUsage, 'parse-sheet', undefined);
   sheetCache.set(sheetIndex, ws);
+  sheetCacheUsage.set(sheetIndex, measured);
+  retainedSheetUsage = nextUsage;
   return ws;
 }
 
@@ -171,6 +206,8 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
       // zip path. Symmetric with XlsxWorkbook.destroy() and the docx/pptx render
       // workers (issue #781).
       sheetCache.clear();
+      sheetCacheUsage.clear();
+      retainedSheetUsage = { rows: 0, cells: 0 };
       imageCache.clear();
       dropBitmapCacheByPath(getImage);
       dropDuotoneBitmapCache(getImage);

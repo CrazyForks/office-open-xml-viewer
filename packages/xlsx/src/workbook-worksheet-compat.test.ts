@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { XlsxWorkbook } from './workbook.js';
+import { OoxmlResourceLimitError } from '@silurus/ooxml-core';
 import type { PullSessionCommand } from '@silurus/ooxml-core/worker';
 import type { ParsedWorkbook, Worksheet, WorkerRequest } from './types.js';
 import type { RenderWorkerRequest } from './worker-protocol.js';
@@ -63,6 +64,8 @@ function makeWorkbook(
   instance.sheetCache = new Map();
   instance.sheetLoads = new Map();
   instance.bridge = bridge;
+  instance.retainedSheetUsage = { rows: 0, cells: 0 };
+  instance.resourceFailure = null;
   return { workbook: instance as unknown as WorkbookProbe, request };
 }
 
@@ -101,6 +104,45 @@ describe('XlsxWorkbook.getWorksheet compatibility materializer', () => {
     expect(second).toBe(first);
     expect(second.rows).toHaveLength(2);
     expect(request).toHaveBeenCalledTimes(5);
+  });
+
+  it('commits workbook cache totals after ACK and never double-charges a cached sheet', async () => {
+    const messages: Array<WorkerRequest | RenderWorkerRequest | PullSessionCommand<number>> = [];
+    const { workbook, request } = makeWorkbook('main', async (message) => {
+      messages.push(message);
+      if ('type' in message) {
+        return { type: 'sheetSessionOpened', id: 'id' in message ? message.id : 0 };
+      }
+      if (message.kind === 'pull') {
+        const value = message.sequence === 0
+          ? { kind: 'rows', rows: WORKSHEET.rows }
+          : { kind: 'finished', worksheet: { ...WORKSHEET, name: `Sheet${message.sessionId}`, rows: [] } };
+        const payload = new TextEncoder().encode(JSON.stringify(value)).buffer;
+        return { ...message, kind: 'chunk', byteLength: payload.byteLength, done: message.sequence === 1, payload };
+      }
+      return { ...message, kind: 'accepted', command: message.kind };
+    });
+    const state = workbook as unknown as {
+      parsedWorkbook: ParsedWorkbook;
+      retainedSheetUsage: { rows: number; cells: number };
+    };
+    state.parsedWorkbook.workbook.sheets.push({ name: 'Sheet2' } as ParsedWorkbook['workbook']['sheets'][number]);
+    state.retainedSheetUsage = { rows: 199_999, cells: 499_999 };
+
+    const first = await workbook.getWorksheet(0);
+    const afterFirst = request.mock.calls.length;
+    expect(await workbook.getWorksheet(0)).toBe(first);
+    expect(request).toHaveBeenCalledTimes(afterFirst);
+    expect(state.retainedSheetUsage).toEqual({ rows: 200_000, cells: 500_000 });
+
+    await expect(workbook.getWorksheet(1)).rejects.toBeInstanceOf(OoxmlResourceLimitError);
+    expect(state.retainedSheetUsage).toEqual({ rows: 200_000, cells: 500_000 });
+    const secondSession = messages.filter(
+      (message): message is PullSessionCommand<number> =>
+        'kind' in message && message.sessionId === 2,
+    );
+    expect(secondSession.some((message) => message.kind === 'ack' && message.sequence === 1)).toBe(false);
+    expect(secondSession.some((message) => message.kind === 'cancel')).toBe(true);
   });
 
   it('deduplicates concurrent worker-mode materialization into one request and object', async () => {
@@ -167,6 +209,66 @@ describe('XlsxWorkbook.getWorksheet compatibility materializer', () => {
       'cancel',
       'toMarkdown',
     ]);
+  });
+
+  it('cancels and poisons every later sibling operation before retaining an over-limit row chunk', async () => {
+    const oversizedRows = Array.from({ length: 100_001 }, (_, index) => ({
+      index: index + 1,
+      height: null,
+      cells: [],
+    }));
+    const messages: Array<WorkerRequest | RenderWorkerRequest | PullSessionCommand<number>> = [];
+    const { workbook } = makeWorkbook('main', async (message) => {
+      messages.push(message);
+      if ('type' in message) return streamResponse(message);
+      if (message.kind === 'pull') {
+        const payload = new TextEncoder().encode(JSON.stringify({ kind: 'rows', rows: oversizedRows })).buffer;
+        return { ...message, kind: 'chunk', byteLength: payload.byteLength, done: false, payload };
+      }
+      return { ...message, kind: 'accepted', command: message.kind };
+    });
+
+    let first: unknown;
+    try {
+      await workbook.getWorksheet(0);
+    } catch (error) {
+      first = error;
+    }
+    expect(first).toBeInstanceOf(OoxmlResourceLimitError);
+    expect((first as OoxmlResourceLimitError).details.violation).toMatchObject({
+      resource: 'worksheet-model', metric: 'rows', observed: 100_001,
+    });
+    const beforeSibling = messages.length;
+    await expect(workbook.toMarkdown()).rejects.toBe(first);
+    expect(messages).toHaveLength(beforeSibling);
+    expect(messages.some((message) => !('type' in message) && message.kind === 'cancel')).toBe(true);
+  });
+
+  it('latches a renderer resource failure across later image and markdown operations', async () => {
+    const fatal = new OoxmlResourceLimitError('renderer index limit', {
+      stage: 'layout',
+      violation: {
+        format: 'xlsx', operation: 'render-viewport', resource: 'renderer-index', metric: 'entries',
+        limit: 250_000, observed: 250_001, configurable: false,
+        usage: { archiveEntryCount: 1, declaredInflatedBytes: 2, distinctInflatedBytes: 3, operationInflatedBytes: 4 },
+      },
+    });
+    const { workbook, request } = makeWorkbook('worker', async (message) => {
+      if ('type' in message && message.type === 'renderViewport') throw fatal;
+      return streamResponse(message);
+    });
+    (workbook as unknown as { sheetCache: Map<number, Worksheet> }).sheetCache.set(0, WORKSHEET);
+
+    await expect(workbook.renderViewportToBitmap(
+      0,
+      { startRow: 0, endRow: 1, startCol: 0, endCol: 1 },
+      { width: 100, height: 100 },
+    )).rejects.toBe(fatal);
+    const requestCount = request.mock.calls.length;
+    await expect((workbook as unknown as XlsxWorkbook).getImage('xl/media/a.png', 'image/png'))
+      .rejects.toBe(fatal);
+    await expect(workbook.toMarkdown()).rejects.toBe(fatal);
+    expect(request).toHaveBeenCalledTimes(requestCount);
   });
 
   it('keeps an uncached worker render atomic ahead of later markdown', async () => {
