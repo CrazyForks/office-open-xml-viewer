@@ -7,17 +7,19 @@ use wasm_bindgen::prelude::*;
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{attr_ns, is_r_ns, is_x_ns, relationships};
 use ooxml_common::package_session::{PackageOperation, PackageSessionHandle};
+use ooxml_common::resource::ResourceUsage;
 
 mod markdown;
 mod pivot;
 use pivot::*;
 
 mod worksheet_reference;
+use worksheet_reference::{
+    extend_lookup_transactionally, resolve_worksheet_reference, ReferencedCellValue,
+    WorksheetCellLookup, WorksheetCellLookupBuilder, WorksheetReferenceSession,
+};
 #[cfg(test)]
 use worksheet_reference::{extract_reference_cells, MAX_REFERENCE_CELLS};
-use worksheet_reference::{
-    resolve_worksheet_reference, ReferencedCellValue, WorksheetReferenceSession,
-};
 
 mod worksheet_projector;
 #[cfg(test)]
@@ -26,7 +28,8 @@ use worksheet_projector::StreamedSheetData;
 
 mod worksheet_cursor;
 use worksheet_cursor::{
-    WorksheetCursorPull, WORKSHEET_CURSOR_PULL_ROWS, WORKSHEET_CURSOR_TARGET_PROJECTED_BYTES,
+    WorksheetCursor, WorksheetCursorPull, WorksheetCursorTail, WORKSHEET_CURSOR_PULL_ROWS,
+    WORKSHEET_CURSOR_TARGET_PROJECTED_BYTES,
 };
 
 mod types;
@@ -383,7 +386,6 @@ fn parse_sheet_with(
     sheet_index: u32,
     name: &str,
 ) -> Result<Vec<u8>, String> {
-    let wb_doc = parse_guarded(&shared.workbook_xml).map_err(|e| e.to_string())?;
     // `workbook.xml.rels` is mandatory for a sheet parse (the original
     // `parse_sheet` read it with `?`). `WorkbookShared` caches it leniently for
     // the `parse_xlsx` path, so on the (defensive) missing-rels case re-read it
@@ -417,30 +419,64 @@ fn parse_sheet_with(
         Rc::clone(&shared.theme_colors),
     )
     .and_then(|streamed| parse_projected_worksheet(streamed, theme_colors, name));
-    let (mut ws, hyperlink_rids, sheet_shell_xml) = match sheet_read_parse {
+    let parsed = match sheet_read_parse {
         Ok(parsed) => parsed,
         Err(detail) => {
             let ws = Worksheet::placeholder(name, format!("{sheet_part}: {detail}"));
             return serde_json::to_vec(&ws).map_err(|e| e.to_string());
         }
     };
+    let worksheet = finalize_projected_sheet(
+        archive,
+        shared,
+        sheet_index,
+        name,
+        &sheet_path,
+        parsed,
+        CurrentSheetLookup::BuildFromMaterializedRows,
+    )?;
+    serde_json::to_vec(&worksheet).map_err(|error| error.to_string())
+}
+
+enum CurrentSheetLookup {
+    BuildFromMaterializedRows,
+    Seed(Option<WorksheetCellLookup>),
+}
+
+fn finalize_projected_sheet(
+    archive: &mut XlsxZip,
+    shared: &WorkbookShared,
+    sheet_index: u32,
+    name: &str,
+    sheet_path: &str,
+    parsed: (Worksheet, HyperlinkRids, String),
+    current_lookup: CurrentSheetLookup,
+) -> Result<Worksheet, String> {
+    let wb_doc = parse_guarded(&shared.workbook_xml).map_err(|e| e.to_string())?;
+    let rels_doc = parse_guarded(&shared.rels_xml).map_err(|e| e.to_string())?;
+    let theme_colors = shared.theme_colors.as_ref();
+    let (mut ws, hyperlink_rids, sheet_shell_xml) = parsed;
 
     // Attach any drawing-anchored images and charts for this sheet
-    ws.images = load_sheet_images(archive, &sheet_path, theme_colors);
+    ws.images = load_sheet_images(archive, sheet_path, theme_colors);
     // Embedded OLE object previews (the `<oleObjects>` collection, §18.3.1.60)
     // draw through the same image
     // list; their preview parts are referenced from the worksheet XML + rels.
-    ws.images.extend(load_sheet_ole_images(
-        archive,
-        &sheet_path,
-        &sheet_shell_xml,
-    ));
+    ws.images
+        .extend(load_sheet_ole_images(archive, sheet_path, &sheet_shell_xml));
     let mut reference_session = WorksheetReferenceSession::default();
+    let materialized_rows = match current_lookup {
+        CurrentSheetLookup::BuildFromMaterializedRows => Some(ws.rows.as_slice()),
+        CurrentSheetLookup::Seed(lookup) => {
+            reference_session.seed_current_sheet(name, lookup);
+            None
+        }
+    };
     let charts = load_sheet_charts(
         archive,
-        &sheet_path,
+        sheet_path,
         Some(ChartReferenceContext {
-            worksheet: &ws,
+            materialized_rows,
             sheet_name: name,
             sheets: &shared.sheets,
             workbook_rels: &rels_doc,
@@ -454,18 +490,18 @@ fn parse_sheet_with(
         ),
     );
     ws.charts = charts;
-    ws.shape_groups = load_sheet_shape_groups(archive, &sheet_path, theme_colors);
-    ws.hyperlinks = load_hyperlinks(archive, &sheet_path, hyperlink_rids);
-    ws.comments = load_sheet_comments(archive, &sheet_path);
+    ws.shape_groups = load_sheet_shape_groups(archive, sheet_path, theme_colors);
+    ws.hyperlinks = load_hyperlinks(archive, sheet_path, hyperlink_rids);
+    ws.comments = load_sheet_comments(archive, sheet_path);
     ws.comment_refs = ws.comments.iter().map(|c| c.cell_ref.clone()).collect();
     ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
-    ws.tables = load_sheet_tables(archive, &sheet_path, theme_colors);
-    ws.slicers = load_sheet_slicers(archive, &sheet_path, theme_colors);
-    (ws.pivot_tables, ws.pivot_diagnostics) = load_sheet_pivots(archive, &sheet_path);
+    ws.tables = load_sheet_tables(archive, sheet_path, theme_colors);
+    ws.slicers = load_sheet_slicers(archive, sheet_path, theme_colors);
+    (ws.pivot_tables, ws.pivot_diagnostics) = load_sheet_pivots(archive, sheet_path);
     let sparkline_groups = load_sheet_sparklines(
         archive,
         &sheet_shell_xml,
-        &ws,
+        materialized_rows,
         name,
         &shared.sheets,
         &rels_doc,
@@ -482,7 +518,7 @@ fn parse_sheet_with(
     // (ECMA-376 §18.2.28 / §18.17.4.1).
     ws.date1904 = shared.date1904;
 
-    serde_json::to_vec(&ws).map_err(|e| e.to_string())
+    Ok(ws)
 }
 
 /// Parse one worksheet's cell data + layout and return it as UTF-8 JSON
@@ -1834,6 +1870,25 @@ fn parse_projected_worksheet(
     Ok((worksheet, hyperlink_rids, streamed.shell_xml))
 }
 
+/// Parse the terminal worksheet shell without pretending that it is a full
+/// row-bearing stream product. Production cursors have already emitted and
+/// dropped every row; only row-height metadata remains part of shell parsing.
+fn parse_projected_worksheet_tail(
+    tail: WorksheetCursorTail,
+    theme_colors: &[String],
+    name: &str,
+) -> Result<(Worksheet, HyperlinkRids, String), String> {
+    parse_projected_worksheet(
+        StreamedSheetData {
+            shell_xml: tail.shell_xml,
+            rows: Vec::new(),
+            row_heights: tail.row_heights,
+        },
+        theme_colors,
+        name,
+    )
+}
+
 #[cfg(test)]
 fn parse_worksheet(
     xml: &str,
@@ -2353,7 +2408,7 @@ fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> 
 fn load_sheet_sparklines(
     archive: &mut XlsxZip,
     sheet_xml: &str,
-    current_worksheet: &Worksheet,
+    materialized_rows: Option<&[Row]>,
     current_sheet_name: &str,
     sheets: &[SheetMeta],
     rels_doc: &roxmltree::Document,
@@ -2422,7 +2477,7 @@ fn load_sheet_sparklines(
                 let values = resolve_worksheet_reference(
                     archive,
                     f_text,
-                    current_worksheet,
+                    materialized_rows,
                     current_sheet_name,
                     sheets,
                     rels_doc,
@@ -2817,6 +2872,45 @@ pub struct XlsxArchive {
     /// Workbook-level parts parsed once and reused across sheet switches. Loaded
     /// lazily on the first `parse` / `parse_sheet` (see [`XlsxArchive::shared`]).
     shared: Option<WorkbookShared>,
+    /// At most one worksheet decoder can hold the package operation lease.
+    /// The cursor owns its entry stream; it does not borrow `archive`.
+    active_worksheet: Option<ActiveWorksheetCursor>,
+    last_cursor_pull_terminal: bool,
+    terminal_awaiting_ack: bool,
+    last_cursor_usage: Option<ResourceUsage>,
+}
+
+struct ActiveWorksheetCursor {
+    source: ActiveWorksheetSource,
+    sheet_index: u32,
+    name: String,
+    sheet_path: String,
+    reference_index: Option<WorksheetCellLookupBuilder>,
+}
+
+enum ActiveWorksheetSource {
+    Streaming(Box<WorksheetCursor>),
+    DeferredFailure(CursorOpenFailure),
+    Prepared,
+}
+
+#[derive(Clone)]
+enum CursorOpenFailure {
+    Container(String),
+    Sheet(String),
+}
+
+fn serialize_cursor_finished(worksheet: Worksheet) -> Result<Vec<u8>, String> {
+    #[derive(serde::Serialize)]
+    struct Finished {
+        kind: &'static str,
+        worksheet: Worksheet,
+    }
+    serde_json::to_vec(&Finished {
+        kind: "finished",
+        worksheet,
+    })
+    .map_err(|error| format!("serialize error: {error}"))
 }
 
 #[wasm_bindgen]
@@ -2851,6 +2945,10 @@ impl XlsxArchive {
         Ok(XlsxArchive {
             archive,
             shared: None,
+            active_worksheet: None,
+            last_cursor_pull_terminal: false,
+            terminal_awaiting_ack: false,
+            last_cursor_usage: None,
         })
     }
 
@@ -2938,6 +3036,342 @@ impl XlsxArchive {
             self.shared = None;
         }
         result.map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Open the resumable production worksheet pipeline. Only one cursor may
+    /// hold the archive's decoder lease at a time.
+    pub fn open_sheet_cursor(&mut self, sheet_index: u32, name: &str) -> Result<(), JsValue> {
+        if self.active_worksheet.is_some() {
+            return Err(JsValue::from_str("worksheet cursor is already open"));
+        }
+        self.last_cursor_pull_terminal = false;
+        self.terminal_awaiting_ack = false;
+        self.last_cursor_usage = None;
+        if let Err(error) = &self.archive {
+            self.active_worksheet = Some(ActiveWorksheetCursor {
+                source: ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Container(
+                    error.clone(),
+                )),
+                sheet_index,
+                name: CONTAINER_PART.to_string(),
+                sheet_path: String::new(),
+                reference_index: None,
+            });
+            return Ok(());
+        }
+        let zip = self
+            .archive
+            .as_mut()
+            .map_err(|error| JsValue::from_str(&format!("xlsx-parser error: {error}")))?;
+        zip.begin_operation("worksheet-cursor")
+            .map_err(|error| JsValue::from_str(&error))?;
+        let result = (|| -> Result<ActiveWorksheetCursor, String> {
+            self.ensure_shared()?;
+            let shared = self.shared.as_ref().expect("shared loaded above");
+            let rels_doc = parse_guarded(&shared.rels_xml).map_err(|error| error.to_string())?;
+            let sheet = shared
+                .sheets
+                .get(sheet_index as usize)
+                .ok_or_else(|| format!("sheet index {sheet_index} out of range"))?;
+            let sheet_path = resolve_sheet_path(&rels_doc, &sheet.r_id)
+                .ok_or_else(|| format!("rId {} not found in rels", sheet.r_id))?;
+            let part = format!("xl/{sheet_path}");
+            let zip = self.archive.as_mut().expect("container open checked above");
+            let cursor = zip.open_worksheet_cursor(
+                &part,
+                Rc::clone(&shared.shared_strings),
+                Rc::clone(&shared.theme_colors),
+            );
+            let source = match cursor {
+                Ok(cursor) => ActiveWorksheetSource::Streaming(Box::new(cursor)),
+                Err(error) => {
+                    zip.assert_healthy()?;
+                    ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Sheet(error))
+                }
+            };
+            Ok(ActiveWorksheetCursor {
+                source,
+                sheet_index,
+                name: name.to_string(),
+                sheet_path,
+                reference_index: Some(WorksheetCellLookupBuilder::bounded()),
+            })
+        })();
+        match result {
+            Ok(cursor) => {
+                self.active_worksheet = Some(cursor);
+                Ok(())
+            }
+            Err(error) => {
+                let zip = self.archive.as_mut().expect("container open checked above");
+                zip.cancel_operation();
+                Err(JsValue::from_str(&error))
+            }
+        }
+    }
+
+    /// Pull rows or the terminal row-free worksheet product as UTF-8 JSON.
+    /// The worker adapter applies hard serialized-byte credit to these bytes.
+    pub fn pull_sheet_cursor(&mut self, row_credit: usize) -> Result<Vec<u8>, JsValue> {
+        self.pull_sheet_cursor_inner(row_credit)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    fn pull_sheet_cursor_inner(&mut self, row_credit: usize) -> Result<Vec<u8>, String> {
+        if self.terminal_awaiting_ack {
+            return Err(
+                "worksheet terminal product must be acknowledged before pulling".to_string(),
+            );
+        }
+        self.last_cursor_pull_terminal = false;
+        let deferred = match &self
+            .active_worksheet
+            .as_ref()
+            .ok_or_else(|| "worksheet cursor is not open".to_string())?
+            .source
+        {
+            ActiveWorksheetSource::DeferredFailure(failure) => Some(failure.clone()),
+            ActiveWorksheetSource::Streaming(_) => None,
+            ActiveWorksheetSource::Prepared => {
+                return Err("worksheet terminal product is prepared".to_string());
+            }
+        };
+        if let Some(failure) = deferred {
+            let active = self
+                .active_worksheet
+                .as_ref()
+                .expect("cursor checked above");
+            let worksheet = match failure {
+                CursorOpenFailure::Container(error) => degraded_container_sheet(error),
+                CursorOpenFailure::Sheet(error) => Worksheet::placeholder(
+                    &active.name,
+                    format!("xl/{}: {error}", active.sheet_path),
+                ),
+            };
+            let bytes = serialize_cursor_finished(worksheet)?;
+            self.active_worksheet
+                .as_mut()
+                .expect("cursor checked above")
+                .source = ActiveWorksheetSource::Prepared;
+            self.last_cursor_pull_terminal = true;
+            self.terminal_awaiting_ack = true;
+            return Ok(bytes);
+        }
+        let shared_strings = Rc::clone(
+            &self
+                .shared
+                .as_ref()
+                .ok_or_else(|| "worksheet cursor shared state is missing".to_string())?
+                .shared_strings,
+        );
+        let source = &mut self
+            .active_worksheet
+            .as_mut()
+            .ok_or_else(|| "worksheet cursor is not open".to_string())?
+            .source;
+        let pull = match source {
+            ActiveWorksheetSource::Streaming(cursor) => {
+                cursor.pull(row_credit, WORKSHEET_CURSOR_TARGET_PROJECTED_BYTES)
+            }
+            _ => unreachable!("source checked above"),
+        };
+        match pull {
+            Ok(WorksheetCursorPull::Rows { rows, .. }) => {
+                extend_lookup_transactionally(
+                    &mut self
+                        .active_worksheet
+                        .as_mut()
+                        .expect("cursor checked above")
+                        .reference_index,
+                    &rows,
+                    shared_strings.as_ref(),
+                );
+                #[derive(serde::Serialize)]
+                struct Rows<'a> {
+                    kind: &'static str,
+                    rows: &'a [Row],
+                }
+                serde_json::to_vec(&Rows {
+                    kind: "rows",
+                    rows: &rows,
+                })
+                .map_err(|error| format!("serialize error: {error}"))
+            }
+            Ok(WorksheetCursorPull::Finished(tail)) => {
+                let active = self
+                    .active_worksheet
+                    .as_mut()
+                    .expect("cursor checked above");
+                let result = (|| -> Result<Vec<u8>, String> {
+                    let shared = self.shared.as_ref().expect("shared loaded above");
+                    let parsed = parse_projected_worksheet_tail(
+                        tail,
+                        shared.theme_colors.as_ref(),
+                        &active.name,
+                    )?;
+                    let current_index = active
+                        .reference_index
+                        .take()
+                        .map(WorksheetCellLookupBuilder::finish);
+                    let zip = self.archive.as_mut().expect("container open checked above");
+                    let worksheet = finalize_projected_sheet(
+                        zip,
+                        shared,
+                        active.sheet_index,
+                        &active.name,
+                        &active.sheet_path,
+                        parsed,
+                        CurrentSheetLookup::Seed(current_index),
+                    )?;
+                    // Ancillary parsers intentionally degrade malformed parts to
+                    // placeholders, but a resource-limit violation is terminal
+                    // for the package operation and must never be downgraded.
+                    zip.assert_healthy()?;
+                    serialize_cursor_finished(worksheet)
+                })();
+                let bytes = match result {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        let zip = self.archive.as_mut().expect("container open checked above");
+                        if let Err(resource_error) = zip.assert_healthy() {
+                            self.active_worksheet.take();
+                            zip.cancel_operation();
+                            return Err(resource_error);
+                        }
+                        let active = self
+                            .active_worksheet
+                            .as_ref()
+                            .expect("cursor checked above");
+                        let part = format!("xl/{}", active.sheet_path);
+                        serialize_cursor_finished(Worksheet::placeholder(
+                            &active.name,
+                            format!("{part}: {error}"),
+                        ))?
+                    }
+                };
+                self.active_worksheet
+                    .as_mut()
+                    .expect("cursor checked above")
+                    .source = ActiveWorksheetSource::Prepared;
+                self.last_cursor_pull_terminal = true;
+                self.terminal_awaiting_ack = true;
+                Ok(bytes)
+            }
+            Err(error) => {
+                let zip = self.archive.as_mut().expect("container open checked above");
+                if let Err(resource_error) = zip.assert_healthy() {
+                    self.active_worksheet.take();
+                    zip.cancel_operation();
+                    return Err(resource_error);
+                }
+                let active = self
+                    .active_worksheet
+                    .as_ref()
+                    .expect("cursor checked above");
+                let part = format!("xl/{}", active.sheet_path);
+                let bytes = serialize_cursor_finished(Worksheet::placeholder(
+                    &active.name,
+                    format!("{part}: {error}"),
+                ))?;
+                self.active_worksheet
+                    .as_mut()
+                    .expect("cursor checked above")
+                    .source = ActiveWorksheetSource::Prepared;
+                self.last_cursor_pull_terminal = true;
+                self.terminal_awaiting_ack = true;
+                Ok(bytes)
+            }
+        }
+    }
+
+    /// Whether the immediately preceding successful pull produced the terminal
+    /// row-free worksheet product.
+    pub fn sheet_cursor_pull_finished(&self) -> bool {
+        self.last_cursor_pull_terminal
+    }
+
+    /// Current operation accounting checkpoint for the shared pull protocol.
+    pub fn sheet_cursor_resource_usage(&self) -> Result<Vec<u8>, JsValue> {
+        let usage = self
+            .archive
+            .as_ref()
+            .ok()
+            .and_then(|zip| zip.operation.as_ref())
+            .and_then(PackageOperation::usage)
+            .or(self.last_cursor_usage)
+            .ok_or_else(|| JsValue::from_str("worksheet cursor usage is unavailable"))?;
+        serde_json::to_vec(&usage)
+            .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
+    }
+
+    /// Commit a prepared terminal product. The worker calls this only from the
+    /// shared pull host's acknowledgement of the final sequence.
+    pub fn acknowledge_sheet_cursor_terminal(&mut self) -> Result<(), JsValue> {
+        self.acknowledge_sheet_cursor_terminal_inner()
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    fn acknowledge_sheet_cursor_terminal_inner(&mut self) -> Result<(), String> {
+        if !self.terminal_awaiting_ack {
+            return Err("worksheet terminal product is not awaiting acknowledgement".to_string());
+        }
+        if self.archive.is_err() {
+            self.active_worksheet.take();
+            self.terminal_awaiting_ack = false;
+            return Ok(());
+        }
+        let zip = self.archive.as_mut().expect("container open checked above");
+        self.last_cursor_usage = zip.operation.as_ref().and_then(PackageOperation::usage);
+        let result = zip.finish_operation();
+        if let Err(resource_error) = zip.assert_healthy() {
+            zip.cancel_operation();
+            self.active_worksheet.take();
+            self.terminal_awaiting_ack = false;
+            return Err(resource_error);
+        }
+        result?;
+        self.active_worksheet.take();
+        self.terminal_awaiting_ack = false;
+        Ok(())
+    }
+
+    /// Cancel an open cursor and release its decoder lease. Idempotent.
+    pub fn cancel_sheet_cursor(&mut self) {
+        if let Some(mut active) = self.active_worksheet.take() {
+            if let ActiveWorksheetSource::Streaming(cursor) = &mut active.source {
+                cursor.cancel();
+            }
+        }
+        self.terminal_awaiting_ack = false;
+        self.last_cursor_pull_terminal = false;
+        if let Ok(zip) = self.archive.as_mut() {
+            self.last_cursor_usage = zip
+                .operation
+                .as_ref()
+                .and_then(PackageOperation::usage)
+                .or(self.last_cursor_usage);
+            zip.cancel_operation();
+        }
+    }
+
+    /// Close an open cursor and release its decoder lease. Idempotent.
+    pub fn close_sheet_cursor(&mut self) {
+        if self.terminal_awaiting_ack {
+            self.cancel_sheet_cursor();
+        } else if let Some(mut active) = self.active_worksheet.take() {
+            if let ActiveWorksheetSource::Streaming(cursor) = &mut active.source {
+                cursor.close();
+            }
+            if let Ok(zip) = self.archive.as_mut() {
+                self.last_cursor_usage = zip
+                    .operation
+                    .as_ref()
+                    .and_then(PackageOperation::usage)
+                    .or(self.last_cursor_usage);
+                zip.cancel_operation();
+            }
+            self.last_cursor_pull_terminal = false;
+        }
     }
 
     /// Extract raw bytes for one embedded image entry (e.g.
@@ -4385,7 +4819,7 @@ mod package_streaming_integration_tests {
     use std::io::Write;
     use zip::write::SimpleFileOptions;
 
-    fn forged_worksheet_package() -> Vec<u8> {
+    pub(super) fn forged_worksheet_package() -> Vec<u8> {
         const SHEET_PART: &str = "xl/worksheets/sheet1.xml";
         let padding = "x".repeat(2 * 1024);
         let worksheet = format!(
@@ -4676,6 +5110,368 @@ mod rb7_partial_degradation_tests {
             w.finish().unwrap();
         }
         buf
+    }
+
+    fn build_missing_sheet_workbook() -> Vec<u8> {
+        let workbook = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/missing.xml"/></Relationships>"#;
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            for (path, body) in [
+                ("xl/workbook.xml", workbook),
+                ("xl/_rels/workbook.xml.rels", rels),
+            ] {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(body.as_bytes()).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn build_sheet_xml_workbook(sheet: &str) -> Vec<u8> {
+        let workbook = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (path, body) in [
+                ("xl/worksheets/sheet1.xml", sheet),
+                ("xl/workbook.xml", workbook),
+                ("xl/_rels/workbook.xml.rels", rels),
+            ] {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(body.as_bytes()).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn build_forged_ancillary_workbook() -> Vec<u8> {
+        let padding = "x".repeat(2 * 1024);
+        let drawing = format!(
+            r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"><!--{padding}--></xdr:wsDr>"#
+        );
+        let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData><drawing r:id="rDrawing"/></worksheet>"#;
+        let sheet_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#;
+        let workbook = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+        let workbook_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (path, body) in [
+                ("xl/drawings/drawing1.xml", drawing.as_str()),
+                ("xl/worksheets/sheet1.xml", sheet),
+                ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels),
+                ("xl/workbook.xml", workbook),
+                ("xl/_rels/workbook.xml.rels", workbook_rels),
+            ] {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(body.as_bytes()).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        // The ancillary drawing is first. Its declared uncompressed size passes
+        // metadata preflight, but reading it exceeds the per-entry limit.
+        bytes[22..26].copy_from_slice(&1u32.to_le_bytes());
+        let central = bytes
+            .windows(4)
+            .position(|window| window == 0x0201_4b50u32.to_le_bytes())
+            .expect("drawing central-directory header");
+        bytes[central + 24..central + 28].copy_from_slice(&1u32.to_le_bytes());
+        bytes
+    }
+
+    fn corrupt_first_entry_crc(bytes: &mut [u8]) {
+        let wrong_crc = u32::from_le_bytes(bytes[14..18].try_into().unwrap()) ^ u32::MAX;
+        bytes[14..18].copy_from_slice(&wrong_crc.to_le_bytes());
+        let central = bytes
+            .windows(4)
+            .position(|window| window == 0x0201_4b50u32.to_le_bytes())
+            .unwrap();
+        bytes[central + 16..central + 20].copy_from_slice(&wrong_crc.to_le_bytes());
+    }
+
+    fn drain_cursor_model(data: Vec<u8>) -> serde_json::Value {
+        let mut archive = XlsxArchive::new(data, None, None).unwrap();
+        archive.open_sheet_cursor(0, "Sheet1").unwrap();
+        let mut rows = Vec::new();
+        loop {
+            let payload = archive.pull_sheet_cursor_inner(1).unwrap();
+            let mut envelope: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            if envelope["kind"] == "rows" {
+                rows.append(envelope["rows"].as_array_mut().unwrap());
+                continue;
+            }
+            let mut worksheet = envelope["worksheet"].take();
+            if worksheet["parseError"].is_null() {
+                worksheet["rows"] = serde_json::Value::Array(rows);
+            }
+            archive.acknowledge_sheet_cursor_terminal_inner().unwrap();
+            return worksheet;
+        }
+    }
+
+    fn build_chart_workbook(sheet1: &str, chart: &str, sheet2: Option<&str>) -> Vec<u8> {
+        let sheets = if sheet2.is_some() {
+            r#"<sheet name="Sheet1" sheetId="1" r:id="rSheet1"/><sheet name="Data" sheetId="2" r:id="rSheet2"/>"#
+        } else {
+            r#"<sheet name="Sheet1" sheetId="1" r:id="rSheet1"/>"#
+        };
+        let workbook = format!(
+            r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>{sheets}</sheets></workbook>"#
+        );
+        let second_rel = if sheet2.is_some() {
+            r#"<Relationship Id="rSheet2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>"#
+        } else {
+            ""
+        };
+        let workbook_rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSheet1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>{second_rel}</Relationships>"#
+        );
+        let sheet_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#;
+        let drawing = r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>10</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><xdr:nvGraphicFramePr><xdr:cNvPr id="1" name="Chart"/></xdr:nvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#;
+        let drawing_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#;
+        let mut entries = vec![
+            ("xl/workbook.xml", workbook.as_str()),
+            ("xl/_rels/workbook.xml.rels", workbook_rels.as_str()),
+            ("xl/worksheets/sheet1.xml", sheet1),
+            ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels),
+            ("xl/drawings/drawing1.xml", drawing),
+            ("xl/drawings/_rels/drawing1.xml.rels", drawing_rels),
+            ("xl/charts/chart1.xml", chart),
+        ];
+        if let Some(sheet2) = sheet2 {
+            entries.push(("xl/worksheets/sheet2.xml", sheet2));
+        }
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            for (path, body) in entries {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(body.as_bytes()).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn assert_cursor_parity(data: Vec<u8>) -> serde_json::Value {
+        let legacy: serde_json::Value =
+            serde_json::from_str(&parse_sheet_native(&data, 0, "Sheet1").unwrap()).unwrap();
+        let streamed = drain_cursor_model(data);
+        assert_eq!(streamed, legacy);
+        streamed
+    }
+
+    #[test]
+    fn wasm_cursor_commits_operation_only_after_terminal_ack() {
+        let mut archive = XlsxArchive::new(build_implicit_ref_workbook(), None, None).unwrap();
+        archive.open_sheet_cursor(0, "Sheet1").unwrap();
+        loop {
+            let payload = archive.pull_sheet_cursor(1).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            if value["kind"] == "finished" {
+                assert!(archive.terminal_awaiting_ack);
+                assert!(archive.archive.as_ref().unwrap().operation.is_some());
+                assert_eq!(value["worksheet"]["rows"], serde_json::json!([]));
+                let usage: serde_json::Value =
+                    serde_json::from_slice(&archive.sheet_cursor_resource_usage().unwrap())
+                        .unwrap();
+                assert!(usage["operationInflatedBytes"].as_u64().unwrap() > 0);
+                break;
+            }
+        }
+        archive.acknowledge_sheet_cursor_terminal().unwrap();
+        assert!(!archive.terminal_awaiting_ack);
+        assert!(archive.active_worksheet.is_none());
+        assert!(archive.archive.as_ref().unwrap().operation.is_none());
+        assert!(archive.sheet_cursor_resource_usage().is_ok());
+        archive.close_sheet_cursor();
+    }
+
+    #[test]
+    fn wasm_cursor_close_before_terminal_ack_cancels_idempotently() {
+        let mut archive = XlsxArchive::new(build_implicit_ref_workbook(), None, None).unwrap();
+        archive.open_sheet_cursor(0, "Sheet1").unwrap();
+        while !archive.sheet_cursor_pull_finished() {
+            archive.pull_sheet_cursor(128).unwrap();
+        }
+        let usage = archive.sheet_cursor_resource_usage().unwrap();
+        archive.close_sheet_cursor();
+        archive.close_sheet_cursor();
+        archive.cancel_sheet_cursor();
+        assert!(!archive.terminal_awaiting_ack);
+        assert!(archive.active_worksheet.is_none());
+        assert!(archive.archive.as_ref().unwrap().operation.is_none());
+        assert_eq!(archive.sheet_cursor_resource_usage().unwrap(), usage);
+    }
+
+    #[test]
+    fn wasm_cursor_missing_sheet_is_a_provisional_placeholder_until_ack() {
+        let mut archive = XlsxArchive::new(build_missing_sheet_workbook(), None, None).unwrap();
+        archive.open_sheet_cursor(0, "Sheet1").unwrap();
+        let payload = archive.pull_sheet_cursor(128).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(value["kind"], "finished");
+        assert!(value["worksheet"]["parseError"]
+            .as_str()
+            .unwrap()
+            .starts_with("xl/worksheets/missing.xml: "));
+        assert!(archive.archive.as_ref().unwrap().operation.is_some());
+        archive.acknowledge_sheet_cursor_terminal().unwrap();
+        assert!(archive.archive.as_ref().unwrap().operation.is_none());
+    }
+
+    #[test]
+    fn wasm_cursor_corrupt_container_matches_legacy_placeholder_and_commits_on_ack() {
+        let mut archive = XlsxArchive::new(b"not a zip".to_vec(), None, None).unwrap();
+        let container_error = match &archive.archive {
+            Err(error) => error.clone(),
+            Ok(_) => panic!("corrupt container must be deferred"),
+        };
+        archive.open_sheet_cursor(0, "ignored").unwrap();
+        assert!(!archive.sheet_cursor_pull_finished());
+        let payload = archive.pull_sheet_cursor(128).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(value["kind"], "finished");
+        assert_eq!(
+            value["worksheet"],
+            serde_json::to_value(degraded_container_sheet(container_error)).unwrap()
+        );
+        assert!(archive.terminal_awaiting_ack);
+        archive.acknowledge_sheet_cursor_terminal_inner().unwrap();
+        assert!(archive.active_worksheet.is_none());
+        assert!(!archive.terminal_awaiting_ack);
+    }
+
+    #[test]
+    fn wasm_cursor_resource_poison_never_prepares_or_allows_terminal_ack() {
+        let data = super::package_streaming_integration_tests::forged_worksheet_package();
+        let mut archive = XlsxArchive::new(data, Some(1024), Some(16 * 1024)).unwrap();
+        archive.open_sheet_cursor(0, "Sheet1").unwrap();
+        assert!(archive.pull_sheet_cursor_inner(128).is_err());
+        assert!(!archive.sheet_cursor_pull_finished());
+        assert!(!archive.terminal_awaiting_ack);
+        assert!(archive.active_worksheet.is_none());
+        assert!(archive.archive.as_ref().unwrap().operation.is_none());
+        assert!(archive.acknowledge_sheet_cursor_terminal_inner().is_err());
+        archive.cancel_sheet_cursor();
+        archive.close_sheet_cursor();
+    }
+
+    #[test]
+    fn wasm_cursor_ancillary_resource_poison_is_terminal_and_clears_state() {
+        let mut archive = XlsxArchive::new(
+            build_forged_ancillary_workbook(),
+            Some(1024),
+            Some(16 * 1024),
+        )
+        .expect("forged ancillary declaration passes metadata preflight");
+        archive.open_sheet_cursor(0, "Sheet1").unwrap();
+
+        let error = loop {
+            match archive.pull_sheet_cursor_inner(128) {
+                Ok(payload) => {
+                    let envelope: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+                    assert_eq!(envelope["kind"], "rows");
+                }
+                Err(error) => break error,
+            }
+        };
+        assert!(error.starts_with("OOXML_RESOURCE_LIMIT:"), "{error}");
+        assert!(!archive.sheet_cursor_pull_finished());
+        assert!(!archive.terminal_awaiting_ack);
+        assert!(archive.active_worksheet.is_none());
+        assert!(archive.archive.as_ref().unwrap().operation.is_none());
+        assert!(archive.acknowledge_sheet_cursor_terminal_inner().is_err());
+    }
+
+    #[test]
+    fn wasm_cursor_malformed_tail_placeholder_matches_legacy_parse_sheet() {
+        let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData><broken>"#;
+        let data = build_sheet_xml_workbook(sheet);
+        let legacy: serde_json::Value =
+            serde_json::from_str(&parse_sheet_native(&data, 0, "Sheet1").unwrap()).unwrap();
+        assert_eq!(drain_cursor_model(data), legacy);
+        assert!(!legacy["parseError"].is_null());
+    }
+
+    #[test]
+    fn wasm_cursor_crc_placeholder_matches_legacy_parse_sheet() {
+        let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#;
+        let mut data = build_sheet_xml_workbook(sheet);
+        corrupt_first_entry_crc(&mut data);
+        let legacy: serde_json::Value =
+            serde_json::from_str(&parse_sheet_native(&data, 0, "Sheet1").unwrap()).unwrap();
+        assert_eq!(drain_cursor_model(data), legacy);
+        assert!(!legacy["parseError"].is_null());
+    }
+
+    #[test]
+    fn wasm_cursor_current_sheet_cacheless_chart_matches_legacy_drain() {
+        let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Sales</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>One</t></is></c><c r="B2"><v>10</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Two</t></is></c><c r="B3"><v>20</v></c></row></sheetData><drawing r:id="rDrawing"/></worksheet>"#;
+        let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>Sheet1!A1</c:f></c:strRef></c:tx><c:cat><c:strRef><c:f>Sheet1!A2:A3</c:f></c:strRef></c:cat><c:val><c:numRef><c:f>Sheet1!B2:B3</c:f></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let model = assert_cursor_parity(build_chart_workbook(sheet, chart, None));
+        assert_eq!(
+            model["charts"][0]["chart"]["series"][0]["values"],
+            serde_json::json!([10.0, 20.0])
+        );
+    }
+
+    #[test]
+    fn wasm_cursor_cross_sheet_cacheless_chart_matches_legacy_drain() {
+        let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><drawing r:id="rDrawing"/></worksheet>"#;
+        let data = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Sales</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>One</t></is></c><c r="B2"><v>30</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Two</t></is></c><c r="B3"><v>40</v></c></row></sheetData></worksheet>"#;
+        let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>Data!A1</c:f></c:strRef></c:tx><c:cat><c:strRef><c:f>Data!A2:A3</c:f></c:strRef></c:cat><c:val><c:numRef><c:f>Data!B2:B3</c:f></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let model = assert_cursor_parity(build_chart_workbook(sheet, chart, Some(data)));
+        assert_eq!(
+            model["charts"][0]["chart"]["series"][0]["values"],
+            serde_json::json!([30.0, 40.0])
+        );
+    }
+
+    #[test]
+    fn wasm_cursor_authored_chart_cache_precedence_matches_legacy_drain() {
+        let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData><drawing r:id="rDrawing"/></worksheet>"#;
+        let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:f>Sheet1!A1</c:f><c:numCache><c:ptCount val="1"/><c:pt idx="0"><c:v>99</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let model = assert_cursor_parity(build_chart_workbook(sheet, chart, None));
+        assert_eq!(
+            model["charts"][0]["chart"]["series"][0]["values"],
+            serde_json::json!([99.0])
+        );
+    }
+
+    #[test]
+    fn wasm_cursor_current_sheet_sparkline_matches_legacy_drain() {
+        let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><sheetData><row r="1"><c r="A1"><v>5</v></c></row><row r="2"><c r="A2"><v>7</v></c></row></sheetData><extLst><ext uri="spark"><x14:sparklineGroups><x14:sparklineGroup><x14:sparklines><x14:sparkline><xm:f>Sheet1!A1:A2</xm:f><xm:sqref>C1</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext></extLst></worksheet>"#;
+        let model = assert_cursor_parity(build_sheet_xml_workbook(sheet));
+        assert_eq!(
+            model["sparklineGroups"][0]["sparklines"][0]["values"],
+            serde_json::json!([5.0, 7.0])
+        );
+    }
+
+    #[test]
+    fn wasm_cursor_cross_sheet_sparkline_with_nonempty_current_matches_legacy_drain() {
+        let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><sheetData><row r="1"><c r="A1"><v>99</v></c></row></sheetData><drawing r:id="rDrawing"/><extLst><ext uri="spark"><x14:sparklineGroups><x14:sparklineGroup><x14:sparklines><x14:sparkline><xm:f>Data!A1:A2</xm:f><xm:sqref>C1</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext></extLst></worksheet>"#;
+        let data = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>11</v></c></row><row r="2"><c r="A2"><v>22</v></c></row></sheetData></worksheet>"#;
+        let chart =
+            r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
+        let model = assert_cursor_parity(build_chart_workbook(sheet, chart, Some(data)));
+        assert_eq!(
+            model["sparklineGroups"][0]["sparklines"][0]["values"],
+            serde_json::json!([11.0, 22.0])
+        );
     }
 
     /// End-to-end: an implicit-reference workbook parses to a full 2×3 grid —
