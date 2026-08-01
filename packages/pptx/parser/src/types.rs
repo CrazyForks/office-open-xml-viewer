@@ -1139,7 +1139,7 @@ pub(crate) struct TextOutline {
     pub(crate) color: Option<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct Transform {
     pub(crate) x: i64,
     pub(crate) y: i64,

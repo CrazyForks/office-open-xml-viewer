@@ -1,12 +1,19 @@
-use ooxml_common::depth::parse_guarded;
+use ooxml_common::depth::{
+    parse_guarded_with_node_limit, xml_dom_complexity_exceeds, GuardedParseError,
+};
 use ooxml_common::json_measurement::measure_json;
 use ooxml_common::ns::is_r_ns;
 #[cfg(test)]
 use ooxml_common::package_session::PackageLimitReporter;
 use ooxml_common::package_session::{PackageOperation, PackageSessionHandle};
+use ooxml_common::rels::relationship_part_path;
 use ooxml_common::resource::{
-    HardResourceLimitKind, ResourceUsage, HARD_MAX_PPTX_SLIDE_JSON_BYTES,
-    HARD_MAX_PPTX_SLIDE_XML_BYTES,
+    HardResourceLimitKind, ResourceUsage, HARD_MAX_PPTX_BOOTSTRAP_JSON_BYTES,
+    HARD_MAX_PPTX_BOOTSTRAP_PROJECTION_BYTES, HARD_MAX_PPTX_BOOTSTRAP_SLIDES,
+    HARD_MAX_PPTX_MATERIALIZED_SLIDE_JSON_BYTES, HARD_MAX_PPTX_SHARED_CACHE_ENTRIES,
+    HARD_MAX_PPTX_SHARED_CACHE_PROJECTION_BYTES, HARD_MAX_PPTX_SHARED_DEPENDENCY_PROJECTION_BYTES,
+    HARD_MAX_PPTX_SHARED_DEPENDENCY_XML_BYTES, HARD_MAX_PPTX_SLIDE_JSON_BYTES,
+    HARD_MAX_PPTX_SLIDE_XML_BYTES, HARD_MAX_XML_DOM_COMPLEXITY,
 };
 use std::collections::HashMap;
 #[cfg(test)]
@@ -55,6 +62,49 @@ thread_local! {
     static COMMENT_AUTHORS_LOAD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PPTX_SLIDE_JSON_LIMIT_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static PPTX_SLIDE_XML_LIMIT_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static PPTX_INTERNAL_LIMITS_OVERRIDE: std::cell::Cell<Option<PptxInternalLimits>> = const { std::cell::Cell::new(None) };
+    static BOOTSTRAP_OUTPUT_SLIDES_RETAINED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Non-configurable browser-safety candidates. Every value comes from the one
+/// generated policy source and awaits M7 corpus calibration. JSON projections
+/// are deterministic structural proxies, not exact heap accounting; JS-side
+/// caches and the WASM allocator high-water mark remain later milestones.
+#[derive(Clone, Copy)]
+struct PptxInternalLimits {
+    shared_dependency_xml_bytes: u64,
+    xml_dom_complexity: u64,
+    shared_dependency_projection_bytes: u64,
+    shared_cache_entries: u64,
+    shared_cache_projection_bytes: u64,
+    bootstrap_slides: u64,
+    bootstrap_projection_bytes: u64,
+    bootstrap_json_bytes: u64,
+    materialized_slide_json_bytes: u64,
+}
+
+impl Default for PptxInternalLimits {
+    fn default() -> Self {
+        Self {
+            shared_dependency_xml_bytes: HARD_MAX_PPTX_SHARED_DEPENDENCY_XML_BYTES,
+            xml_dom_complexity: HARD_MAX_XML_DOM_COMPLEXITY,
+            shared_dependency_projection_bytes: HARD_MAX_PPTX_SHARED_DEPENDENCY_PROJECTION_BYTES,
+            shared_cache_entries: HARD_MAX_PPTX_SHARED_CACHE_ENTRIES,
+            shared_cache_projection_bytes: HARD_MAX_PPTX_SHARED_CACHE_PROJECTION_BYTES,
+            bootstrap_slides: HARD_MAX_PPTX_BOOTSTRAP_SLIDES,
+            bootstrap_projection_bytes: HARD_MAX_PPTX_BOOTSTRAP_PROJECTION_BYTES,
+            bootstrap_json_bytes: HARD_MAX_PPTX_BOOTSTRAP_JSON_BYTES,
+            materialized_slide_json_bytes: HARD_MAX_PPTX_MATERIALIZED_SLIDE_JSON_BYTES,
+        }
+    }
+}
+
+fn pptx_internal_limits() -> PptxInternalLimits {
+    #[cfg(test)]
+    if let Some(limits) = PPTX_INTERNAL_LIMITS_OVERRIDE.with(std::cell::Cell::get) {
+        return limits;
+    }
+    PptxInternalLimits::default()
 }
 
 fn pptx_slide_json_limit() -> u64 {
@@ -73,6 +123,15 @@ fn pptx_slide_xml_limit() -> u64 {
     HARD_MAX_PPTX_SLIDE_XML_BYTES
 }
 
+/// Defense-in-depth DOM parse for PPTX XML that has already passed the typed,
+/// attributable lexical complexity preflight in [`read_bounded_pptx_xml`].
+/// Keeping this wrapper PPTX-local prevents an uncalibrated node ceiling from
+/// changing DOCX/XLSX's shared `parse_guarded` compatibility behavior.
+fn parse_preflighted_pptx_xml(xml: &str) -> Result<roxmltree::Document<'_>, GuardedParseError> {
+    let nodes_limit = u32::try_from(pptx_internal_limits().xml_dom_complexity).unwrap_or(u32::MAX);
+    parse_guarded_with_node_limit(xml, nodes_limit)
+}
+
 /// Increment the D4 parse counter (no-op unless `cfg(test)`). Call immediately
 /// before parsing a slide-master / layout / slide XML on the pagination path.
 #[inline(always)]
@@ -85,6 +144,12 @@ fn note_layout_master_parse() {
 fn note_comment_authors_load() {
     #[cfg(test)]
     COMMENT_AUTHORS_LOAD_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+#[inline(always)]
+fn note_bootstrap_output_slide_retained() {
+    #[cfg(test)]
+    BOOTSTRAP_OUTPUT_SLIDES_RETAINED.with(|count| count.set(count.get() + 1));
 }
 
 // ===========================
@@ -240,12 +305,16 @@ struct SlideCacheJournal {
     inserted_layout_keys: Vec<String>,
     inserted_layout_source_keys: Vec<String>,
     had_comment_authors: bool,
+    had_no_master_bundle: bool,
+    projected_entries: u64,
+    projected_bytes: u64,
 }
 
 impl SlideCacheJournal {
     fn begin(shared: &PresentationShared) -> Self {
         Self {
             had_comment_authors: shared.comment_authors.is_some(),
+            had_no_master_bundle: shared.no_master_bundle.is_some(),
             ..Self::default()
         }
     }
@@ -263,7 +332,82 @@ impl SlideCacheJournal {
         if !self.had_comment_authors {
             shared.comment_authors = None;
         }
+        if !self.had_no_master_bundle {
+            shared.no_master_bundle = None;
+        }
     }
+
+    fn commit(self, shared: &mut PresentationShared) {
+        shared.cache_usage.entries = shared
+            .cache_usage
+            .entries
+            .checked_add(self.projected_entries)
+            .expect("preflighted PPTX cache entry accounting");
+        shared.cache_usage.projected_bytes = shared
+            .cache_usage
+            .projected_bytes
+            .checked_add(self.projected_bytes)
+            .expect("preflighted PPTX cache byte accounting");
+    }
+}
+
+#[derive(Default)]
+struct SharedCacheUsage {
+    entries: u64,
+    projected_bytes: u64,
+}
+
+fn observe_shared_cache_candidate<T: serde::Serialize>(
+    reporter: &ooxml_common::package_session::PackageLimitReporter,
+    part: Option<&str>,
+    value: &T,
+    usage: &mut SharedCacheUsage,
+    journal: Option<&mut SlideCacheJournal>,
+) -> Result<(), String> {
+    // Include the cache identity as well as the owned value. Entry-count caps
+    // cover map/node overhead; this projection covers retained key/value data.
+    let candidate = measure_json(&(part, value))?.json_bytes;
+    let limits = pptx_internal_limits();
+    reporter.observe_hard_limit(
+        HardResourceLimitKind::PptxSharedDependencyProjectionBytes,
+        part,
+        limits.shared_dependency_projection_bytes,
+        candidate,
+    )?;
+
+    let pending_entries = journal.as_ref().map_or(0, |entry| entry.projected_entries);
+    let pending_bytes = journal.as_ref().map_or(0, |entry| entry.projected_bytes);
+    let projected_entries = usage
+        .entries
+        .checked_add(pending_entries)
+        .and_then(|value| value.checked_add(1))
+        .unwrap_or(u64::MAX);
+    let projected_bytes = usage
+        .projected_bytes
+        .checked_add(pending_bytes)
+        .and_then(|value| value.checked_add(candidate))
+        .unwrap_or(u64::MAX);
+    reporter.observe_hard_limit(
+        HardResourceLimitKind::PptxSharedCacheEntries,
+        part,
+        limits.shared_cache_entries,
+        projected_entries,
+    )?;
+    reporter.observe_hard_limit(
+        HardResourceLimitKind::PptxSharedCacheProjectionBytes,
+        part,
+        limits.shared_cache_projection_bytes,
+        projected_bytes,
+    )?;
+
+    if let Some(journal) = journal {
+        journal.projected_entries += 1;
+        journal.projected_bytes += candidate;
+    } else {
+        usage.entries = projected_entries;
+        usage.projected_bytes = projected_bytes;
+    }
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -286,6 +430,108 @@ struct BootstrapSlide {
     index: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     part_name: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PresentationBootstrapProjection<'a> {
+    slide_count: usize,
+    slide_width: i64,
+    slide_height: i64,
+    default_text_color: Option<&'a str>,
+    major_font: Option<&'a str>,
+    minor_font: Option<&'a str>,
+    hlink_color: Option<&'a str>,
+    fol_hlink_color: Option<&'a str>,
+    slides: &'a [BootstrapSlideProjection<'a>],
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapSlideProjection<'a> {
+    index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    part_name: Option<&'a str>,
+}
+
+fn serialize_presentation_bootstrap(
+    shared: &PresentationShared,
+    reporter: &ooxml_common::package_session::PackageLimitReporter,
+) -> Result<Vec<u8>, String> {
+    let limits = pptx_internal_limits();
+    let empty_slides: [BootstrapSlideProjection<'_>; 0] = [];
+    let base = PresentationBootstrapProjection {
+        slide_count: shared.slide_descriptors.len(),
+        slide_width: shared.slide_width,
+        slide_height: shared.slide_height,
+        default_text_color: shared.theme.get("dk1").map(String::as_str),
+        major_font: shared.theme.get("+mj-lt").map(String::as_str),
+        minor_font: shared.theme.get("+mn-lt").map(String::as_str),
+        hlink_color: shared.theme.get("hlink").map(String::as_str),
+        fol_hlink_color: shared.theme.get("folHlink").map(String::as_str),
+        slides: &empty_slides,
+    };
+    let mut projected_json_bytes = measure_json(&base)?.json_bytes;
+    reporter.observe_hard_limit(
+        HardResourceLimitKind::PptxBootstrapJsonBytes,
+        Some("ppt/presentation.xml"),
+        limits.bootstrap_json_bytes,
+        projected_json_bytes,
+    )?;
+
+    let mut slides = Vec::with_capacity(shared.slide_descriptors.len());
+    for descriptor in &shared.slide_descriptors {
+        // `resolve_path` owns at most one candidate here. The exact candidate
+        // projection is admitted before it is pushed into the retained output,
+        // preventing repeated relationship targets from multiplying unchecked.
+        let part_name = descriptor
+            .relationship_id
+            .as_ref()
+            .and_then(|id| shared.pres_rels.get(id))
+            .map(|target| resolve_path("ppt", target));
+        let candidate = BootstrapSlideProjection {
+            index: descriptor.index,
+            part_name: part_name.as_deref(),
+        };
+        let candidate_bytes = measure_json(&candidate)?.json_bytes;
+        let comma = u64::from(!slides.is_empty());
+        let next_projection = projected_json_bytes
+            .saturating_add(comma)
+            .saturating_add(candidate_bytes);
+        reporter.observe_hard_limit(
+            HardResourceLimitKind::PptxBootstrapJsonBytes,
+            Some("ppt/presentation.xml"),
+            limits.bootstrap_json_bytes,
+            next_projection,
+        )?;
+        slides.push(BootstrapSlide {
+            index: descriptor.index,
+            part_name,
+        });
+        note_bootstrap_output_slide_retained();
+        projected_json_bytes = next_projection;
+    }
+
+    let bootstrap = PresentationBootstrap {
+        slide_count: shared.slide_descriptors.len(),
+        slide_width: shared.slide_width,
+        slide_height: shared.slide_height,
+        default_text_color: shared.theme.get("dk1").cloned(),
+        major_font: shared.theme.get("+mj-lt").cloned(),
+        minor_font: shared.theme.get("+mn-lt").cloned(),
+        hlink_color: shared.theme.get("hlink").cloned(),
+        fol_hlink_color: shared.theme.get("folHlink").cloned(),
+        slides,
+    };
+    let final_json_bytes = measure_json(&bootstrap)?.json_bytes;
+    debug_assert_eq!(final_json_bytes, projected_json_bytes);
+    reporter.observe_hard_limit(
+        HardResourceLimitKind::PptxBootstrapJsonBytes,
+        Some("ppt/presentation.xml"),
+        limits.bootstrap_json_bytes,
+        final_json_bytes,
+    )?;
+    serde_json::to_vec(&bootstrap).map_err(|error| format!("serialize error: {error}"))
 }
 
 #[wasm_bindgen]
@@ -373,10 +619,13 @@ impl PptxArchive {
     /// notes, and comments remain slide-local because PresentationML stores them
     /// in `p:sld` and slide relationships (ECMA-376 Part 1 §§19.2-19.3).
     pub fn presentation_bootstrap(&mut self) -> Result<Vec<u8>, JsValue> {
+        self.presentation_bootstrap_inner()
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    fn presentation_bootstrap_inner(&mut self) -> Result<Vec<u8>, String> {
         if self.prepared_slide.is_some() {
-            return Err(JsValue::from_str(
-                "a slide unit is awaiting acknowledgement",
-            ));
+            return Err("a slide unit is awaiting acknowledgement".to_string());
         }
         if self.archive.is_err() {
             let bootstrap = PresentationBootstrap {
@@ -394,45 +643,26 @@ impl PptxArchive {
                 }],
             };
             return serde_json::to_vec(&bootstrap)
-                .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")));
+                .map_err(|error| format!("serialize error: {error}"));
         }
         let zip = self.archive.as_mut().expect("container checked above");
-        zip.begin_operation("presentation-bootstrap")
-            .map_err(|error| JsValue::from_str(&error))?;
+        zip.begin_operation("presentation-bootstrap")?;
         let result = (|| -> Result<Vec<u8>, String> {
             self.ensure_presentation()?;
+            let reporter = self
+                .archive
+                .as_mut()
+                .expect("container open checked above")
+                .operation()?
+                .limit_reporter()?;
             let shared = self
                 .presentation
                 .as_ref()
                 .expect("presentation loaded above");
-            let slides = shared
-                .slide_descriptors
-                .iter()
-                .map(|descriptor| BootstrapSlide {
-                    index: descriptor.index,
-                    part_name: descriptor
-                        .relationship_id
-                        .as_ref()
-                        .and_then(|id| shared.pres_rels.get(id))
-                        .map(|target| resolve_path("ppt", target)),
-                })
-                .collect();
-            let bootstrap = PresentationBootstrap {
-                slide_count: shared.slide_descriptors.len(),
-                slide_width: shared.slide_width,
-                slide_height: shared.slide_height,
-                default_text_color: shared.theme.get("dk1").cloned(),
-                major_font: shared.theme.get("+mj-lt").cloned(),
-                minor_font: shared.theme.get("+mn-lt").cloned(),
-                hlink_color: shared.theme.get("hlink").cloned(),
-                fol_hlink_color: shared.theme.get("folHlink").cloned(),
-                slides,
-            };
-            serde_json::to_vec(&bootstrap).map_err(|e| format!("serialize error: {e}"))
+            serialize_presentation_bootstrap(shared, &reporter)
         })();
         let zip = self.archive.as_mut().expect("container open checked above");
-        let result = settle_pptx_operation(zip, result);
-        result.map_err(|error| JsValue::from_str(&error))
+        settle_pptx_operation(zip, result)
     }
 
     /// Prepare or replay one complete random-access slide. The unit is never
@@ -545,7 +775,7 @@ impl PptxArchive {
                 .as_mut()
                 .expect("presentation loaded above");
             let zip = self.archive.as_mut().expect("container open checked above");
-            let slide = produce_slide_unit_with_journal(
+            let produced = produce_slide_unit_with_journal(
                 slide_index as usize,
                 shared,
                 zip,
@@ -553,7 +783,7 @@ impl PptxArchive {
             )
             .map_err(|error| error.to_string())?;
             zip.assert_healthy()?;
-            serde_json::to_vec(&slide).map_err(|error| format!("serialize error: {error}"))
+            serde_json::to_vec(&produced.slide).map_err(|error| format!("serialize error: {error}"))
         })();
         let bytes = match result {
             Ok(bytes) => bytes,
@@ -619,7 +849,13 @@ impl PptxArchive {
             self.cancel_slide();
             return Err(error);
         }
-        self.prepared_slide.take();
+        let prepared = self
+            .prepared_slide
+            .take()
+            .expect("prepared slide was validated above");
+        if let (Some(journal), Some(shared)) = (prepared.journal, self.presentation.as_mut()) {
+            journal.commit(shared);
+        }
         Ok(())
     }
 
@@ -823,20 +1059,25 @@ pub(crate) fn read_zip_str(
     zip: &mut PptxZip,
     path: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    zip.operation()?.read_string(path).map_err(Into::into)
+    read_pptx_dependency_xml(zip, path)
 }
 
-/// Read only the primary `ppt/slides/slideN.xml` through a fixed-scratch,
-/// limit+1 bounded buffer. Related parts intentionally continue to use their
-/// existing package-entry bounds in this milestone.
-fn read_primary_slide_xml(zip: &mut PptxZip, path: &str) -> Result<String, String> {
+/// Inflate one XML part through a fixed-scratch, limit+1 buffer. At exactly the
+/// ceiling the final one-byte read is an EOF/CRC probe, so a corrupt stored part
+/// does not bypass validation. The returned allocation never intentionally
+/// retains more than limit+1 payload bytes (allocator rounding is not counted).
+fn read_bounded_pptx_xml(
+    zip: &mut PptxZip,
+    path: &str,
+    limit_u64: u64,
+    kind: HardResourceLimitKind,
+) -> Result<String, String> {
     const SCRATCH_BYTES: usize = 8 * 1024;
-    let limit_u64 = pptx_slide_xml_limit();
     let limit = usize::try_from(limit_u64)
-        .map_err(|_| "PPTX slide XML ceiling does not fit this target".to_string())?;
+        .map_err(|_| "PPTX XML ceiling does not fit this target".to_string())?;
     let retained_cap = limit
         .checked_add(1)
-        .ok_or_else(|| "PPTX slide XML ceiling overflow".to_string())?;
+        .ok_or_else(|| "PPTX XML ceiling overflow".to_string())?;
     let operation = zip.operation()?;
     let mut stream = operation.open_entry(path)?;
     let reporter = stream.limit_reporter()?;
@@ -862,16 +1103,50 @@ fn read_primary_slide_xml(zip: &mut PptxZip, path: &str) -> Result<String, Strin
         bytes.extend_from_slice(&scratch[..count]);
     }
     if bytes.len() > limit {
+        reporter.observe_hard_limit(kind, Some(path), limit_u64, limit_u64 + 1)?;
+        unreachable!("crossing a hard resource limit poisons and returns an error");
+    }
+    let xml = String::from_utf8(bytes)
+        .map_err(|error| format!("ZIP entry is not valid UTF-8 ({path}): {error}"))?;
+    let complexity_limit = pptx_internal_limits().xml_dom_complexity;
+    if xml_dom_complexity_exceeds(&xml, complexity_limit) {
         reporter.observe_hard_limit(
-            HardResourceLimitKind::PptxSlideXmlBytes,
+            HardResourceLimitKind::XmlDomComplexity,
             Some(path),
-            limit_u64,
-            limit_u64 + 1,
+            complexity_limit,
+            complexity_limit.saturating_add(1),
         )?;
         unreachable!("crossing a hard resource limit poisons and returns an error");
     }
-    String::from_utf8(bytes)
-        .map_err(|error| format!("ZIP entry is not valid UTF-8 ({path}): {error}"))
+    Ok(xml)
+}
+
+/// Primary slide input is independently bounded because it is the indivisible
+/// random-access producer unit.
+fn read_primary_slide_xml(zip: &mut PptxZip, path: &str) -> Result<String, String> {
+    read_bounded_pptx_xml(
+        zip,
+        path,
+        pptx_slide_xml_limit(),
+        HardResourceLimitKind::PptxSlideXmlBytes,
+    )
+}
+
+/// Presentation, relationship, theme, master, layout and comment-author XML
+/// can be retained directly or amplified into shared parsed models. Bound them
+/// before UTF-8, DOM and model allocation. The 16 MiB candidate is intentionally
+/// conservative and awaits corpus calibration in M7; it is not a heap estimate.
+fn read_pptx_dependency_xml(
+    zip: &mut PptxZip,
+    path: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    read_bounded_pptx_xml(
+        zip,
+        path,
+        pptx_internal_limits().shared_dependency_xml_bytes,
+        HardResourceLimitKind::PptxSharedDependencyXmlBytes,
+    )
+    .map_err(Into::into)
 }
 
 pub(crate) fn read_zip_bytes(zip: &mut PptxZip, path: &str) -> Result<Vec<u8>, String> {
@@ -969,15 +1244,18 @@ pub(crate) fn attr_f64(node: &roxmltree::Node<'_, '_>, local: &str) -> Option<f6
 //  Relationships helpers
 // ===========================
 
-/// id → target  (used for image/slide lookups by rId). Thin adapter over
-/// [`ooxml_common::rels::parse_rels`] that flattens each `RelTarget` back to its
-/// raw target string (both Internal part names and External URLs are kept
-/// verbatim — resolution to a zip part happens later via [`resolve_path`]),
-/// preserving this parser's long-standing `HashMap<rId, Target>` shape.
+/// id → raw target used by the PPTX parser's existing relationship consumers.
+/// The XML has already passed the typed lexical preflight at package read time;
+/// parse it through the PPTX-local node ceiling rather than the unbounded shared
+/// compatibility helper.
 pub(crate) fn parse_rels(xml: &str) -> HashMap<String, String> {
-    ooxml_common::rels::parse_rels(xml)
-        .into_iter()
-        .map(|(id, rel)| (id, rel.target))
+    let Ok(doc) = parse_preflighted_pptx_xml(xml) else {
+        return HashMap::new();
+    };
+    doc.root_element()
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "Relationship")
+        .filter_map(|node| Some((attr(&node, "Id")?, attr(&node, "Target")?)))
         .collect()
 }
 
@@ -1007,10 +1285,11 @@ pub(crate) fn parse_rels(xml: &str) -> HashMap<String, String> {
 /// only for compatibility; the spec-driven relId path above is primary.
 pub(crate) fn build_smartart_drawings(
     rels_xml: &str,
+    source_dir: &str,
     zip: &mut PptxZip,
 ) -> HashMap<String, String> {
     let mut result: HashMap<String, String> = HashMap::new();
-    let doc = match parse_guarded(rels_xml) {
+    let doc = match parse_preflighted_pptx_xml(rels_xml) {
         Ok(d) => d,
         Err(_) => return result,
     };
@@ -1036,7 +1315,7 @@ pub(crate) fn build_smartart_drawings(
     for (dm_rid, data_target) in data_rels {
         // 1) Canonical: read the data part's dataModelExt relId, resolve it in
         //    this same rels map.
-        let drawing_target = smartart_drawing_relid(&data_target, zip)
+        let drawing_target = smartart_drawing_relid(&data_target, source_dir, zip)
             .and_then(|drawing_rid| rid_target.get(&drawing_rid).cloned())
             // 2) Fallback: file-number-suffix match (heuristic, compat only).
             .or_else(|| {
@@ -1048,10 +1327,7 @@ pub(crate) fn build_smartart_drawings(
                 })
             });
         if let Some(dt) = drawing_target {
-            // Diagram parts live at ppt/diagrams/; every referencing part
-            // (slide / master) is one level under ppt/, so a "../diagrams/…"
-            // target resolves the same from any ppt/*/ base.
-            let drawing_path = resolve_path("ppt/slides", &dt);
+            let drawing_path = resolve_path(source_dir, &dt);
             if let Ok(xml) = read_zip_str(zip, &drawing_path) {
                 result.insert(dm_rid, xml);
             }
@@ -1064,10 +1340,14 @@ pub(crate) fn build_smartart_drawings(
 /// names for the cached drawing part (MS-ODRAWXML; the `dsp` namespace is
 /// `.../office/drawing/2008/diagram`). Returns `None` when the data part can't
 /// be read or carries no `dataModelExt@relId`.
-fn smartart_drawing_relid(data_target: &str, zip: &mut PptxZip) -> Option<String> {
-    let data_path = resolve_path("ppt/slides", data_target);
+fn smartart_drawing_relid(
+    data_target: &str,
+    source_dir: &str,
+    zip: &mut PptxZip,
+) -> Option<String> {
+    let data_path = resolve_path(source_dir, data_target);
     let xml = read_zip_str(zip, &data_path).ok()?;
-    let doc = parse_guarded(&xml).ok()?;
+    let doc = parse_preflighted_pptx_xml(&xml).ok()?;
     doc.descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "dataModelExt")
         .and_then(|n| n.attribute("relId"))
@@ -1092,7 +1372,7 @@ fn trailing_num(target: &str) -> Option<u32> {
 // prefix still matches — do not change this to an exact-match comparison, or
 // Strict documents will silently stop resolving.
 pub(crate) fn find_rel_target_by_type(rels_xml: &str, type_suffix: &str) -> Option<String> {
-    let doc = parse_guarded(rels_xml).ok()?;
+    let doc = parse_preflighted_pptx_xml(rels_xml).ok()?;
     for rel in doc.root_element().children().filter(|n| n.is_element()) {
         if let Some(rel_type) = attr(&rel, "Type") {
             if rel_type.ends_with(type_suffix) {
@@ -1111,6 +1391,12 @@ pub(crate) fn find_rel_target_by_type(rels_xml: &str, type_suffix: &str) -> Opti
 /// §9.3). Kept as a local name so the many call sites read unchanged.
 pub(crate) fn resolve_path(base_dir: &str, target: &str) -> String {
     ooxml_common::rels::resolve_target(base_dir, target)
+}
+
+/// Directory containing an OPC source part. Relationship Targets are resolved
+/// relative to this directory (ECMA-376 Part 2 §6.5.2.3).
+fn part_directory(part_path: &str) -> &str {
+    part_path.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 
 // ===========================
@@ -1133,6 +1419,7 @@ fn slide_is_hidden(root: roxmltree::Node) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn parse_slide(
     xml: &str,
+    slide_dir: &str,
     // The layout's single-pass extraction (placeholders + layout bg + layout
     // showMasterSp), built/cached by the caller against this slide's effective
     // theme (D4). `layout_xml` is still passed for the per-slide DECORATIVE walk
@@ -1221,8 +1508,8 @@ fn parse_slide(
     // recurses per element-nesting level, so a slide nested thousands deep
     // overflows the fixed WASM stack and traps *inside* `Document::parse` before
     // our own depth-guarded shape walk runs. The nesting-depth pre-check that
-    // rejects it now lives in `parse_guarded`.
-    let doc = parse_guarded(xml)?;
+    // rejects it now lives in `parse_preflighted_pptx_xml`.
+    let doc = parse_preflighted_pptx_xml(xml)?;
     let root = doc.root_element(); // <p:sld>
     let hidden = slide_is_hidden(root);
     let c_sld = child(root, "cSld");
@@ -1232,11 +1519,12 @@ fn parse_slide(
     // closures are run sequentially (one mutable borrow of `zip` at a time).
     let mut background: Option<Fill> = None;
 
-    // Slide-level bg (rels = slide rels, part dir = ppt/slides).
+    // Slide-level bg (rels and relative Targets are scoped to the actual slide
+    // source part; ECMA-376 Part 2 §6.5.2.3).
     if let Some(n) = c_sld {
         let mut resolve = |rid: &str| -> Option<String> {
             let target = rels.get(rid)?;
-            let path = resolve_path("ppt/slides", target);
+            let path = resolve_path(slide_dir, target);
             // Resolve to the zip path; verify the part exists so a dangling
             // rId still yields None (the bg chain then falls through to the
             // next level), preserving the prior data-URL behaviour.
@@ -1261,7 +1549,6 @@ fn parse_slide(
         .and_then(|n| child(n, "spTree"))
         .ok_or("missing spTree")?;
 
-    let slide_dir = "ppt/slides";
     let mut elements = Vec::new();
 
     // ── showMasterSp resolution (ECMA-376 §19.3.1.38 sld / §19.3.1.39
@@ -1293,7 +1580,7 @@ fn parse_slide(
         if eff.is_some() {
             if let Some(mxml) = master_xml {
                 note_layout_master_parse();
-                if let Ok(mdoc) = parse_guarded(mxml) {
+                if let Ok(mdoc) = parse_preflighted_pptx_xml(mxml) {
                     extract_decorative_shapes(
                         mdoc.root_element(),
                         master_dir,
@@ -1315,7 +1602,7 @@ fn parse_slide(
     // (e.g. coloured bands, logos) that are not placeholder anchors.
     if let Some(lxml) = layout_xml {
         note_layout_master_parse();
-        if let Ok(ldoc) = parse_guarded(lxml) {
+        if let Ok(ldoc) = parse_preflighted_pptx_xml(lxml) {
             let lroot = ldoc.root_element();
             if let Some(lsp_tree) = child(lroot, "cSld").and_then(|n| child(n, "spTree")) {
                 let empty_lph = LayoutPlaceholders::default();
@@ -1356,8 +1643,8 @@ fn parse_slide(
     }
 
     // ── Notes slide & comments (Phase 2 surfacing only — no rendering) ────
-    let notes = load_notes_slide(zip, rels);
-    let comments = load_pptx_comments(zip, rels, comment_authors);
+    let notes = load_notes_slide(zip, slide_dir, rels);
+    let comments = load_pptx_comments(zip, slide_dir, rels, comment_authors);
 
     Ok(Slide {
         index,
@@ -1395,7 +1682,11 @@ fn broken_slide(index: usize, part: &str, detail: &str) -> Slide {
 /// Resolve the slide's `notesSlide` relationship, read the notes part, and
 /// return its plain text (paragraphs joined by '\n'). Returns `None` when
 /// the slide has no notes part or the part can't be read.
-fn load_notes_slide(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Option<String> {
+fn load_notes_slide(
+    zip: &mut PptxZip,
+    slide_dir: &str,
+    rels: &HashMap<String, String>,
+) -> Option<String> {
     // rels here is the slide's _rels map (rId → Target) parsed by the caller.
     // The relationship Type ends with "/notesSlide". The cleanest way to find
     // the right entry is to look at every value in the map and pick the one
@@ -1404,11 +1695,10 @@ fn load_notes_slide(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Option
     let path = if target.starts_with('/') {
         target.trim_start_matches('/').to_string()
     } else {
-        // Relative to ppt/slides/ — resolve "../notesSlides/notesSlide1.xml".
-        resolve_path("ppt/slides", target)
+        resolve_path(slide_dir, target)
     };
     let xml = read_zip_str(zip, &path).ok()?;
-    let doc = parse_guarded(&xml).ok()?;
+    let doc = parse_preflighted_pptx_xml(&xml).ok()?;
     let mut buf = String::new();
     let mut prev_was_text = false;
     for n in doc.descendants() {
@@ -1440,6 +1730,7 @@ fn load_notes_slide(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Option
 /// namespace and are not yet supported.
 fn load_pptx_comments(
     zip: &mut PptxZip,
+    slide_dir: &str,
     rels: &HashMap<String, String>,
     authors: &mut Option<HashMap<String, String>>,
 ) -> Vec<PptxComment> {
@@ -1449,12 +1740,12 @@ fn load_pptx_comments(
     let path = if target.starts_with('/') {
         target.trim_start_matches('/').to_string()
     } else {
-        resolve_path("ppt/slides", target)
+        resolve_path(slide_dir, target)
     };
     let Ok(xml) = read_zip_str(zip, &path) else {
         return Vec::new();
     };
-    let Ok(doc) = parse_guarded(&xml) else {
+    let Ok(doc) = parse_preflighted_pptx_xml(&xml) else {
         return Vec::new();
     };
 
@@ -1494,7 +1785,7 @@ fn load_pptx_comments(
 fn parse_comment_authors(author_xml: Option<&str>) -> HashMap<String, String> {
     let mut authors: HashMap<String, String> = HashMap::new();
     if let Some(ax) = author_xml {
-        if let Ok(adoc) = parse_guarded(ax) {
+        if let Ok(adoc) = parse_preflighted_pptx_xml(ax) {
             for a in adoc
                 .descendants()
                 .filter(|n| n.is_element() && n.tag_name().name() == "cmAuthor")
@@ -1673,12 +1964,13 @@ fn observe_primary_slide_xml(
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 struct SlideDescriptor {
     index: usize,
     relationship_id: Option<String>,
 }
 
+#[derive(serde::Serialize)]
 struct LayoutSource {
     xml: Option<String>,
     rels: HashMap<String, String>,
@@ -1701,6 +1993,8 @@ struct PresentationShared {
     no_master_bundle: Option<ParsedMaster>,
     layout_cache: HashMap<String, ParsedLayout>,
     layout_source_cache: HashMap<String, Rc<LayoutSource>>,
+    cache_usage: SharedCacheUsage,
+    materialized_slide_json_bytes: u64,
 }
 
 impl PresentationShared {
@@ -1728,7 +2022,7 @@ fn bootstrap_presentation(
 ) -> Result<PresentationShared, Box<dyn std::error::Error>> {
     // --- presentation.xml ---
     let pres_xml = read_zip_str(zip, "ppt/presentation.xml")?;
-    let pres_doc = parse_guarded(&pres_xml)?;
+    let pres_doc = parse_preflighted_pptx_xml(&pres_xml)?;
     let pres_root = pres_doc.root_element();
 
     let sld_sz = child(pres_root, "sldSz");
@@ -1738,18 +2032,30 @@ fn bootstrap_presentation(
     // Ordered slide relationship identities. Keep one slot per `p:sldId`
     // even when the required `r:id` is malformed or missing, so partial
     // degradation cannot shift slide indices or internal-jump targets.
-    let slide_descriptors: Vec<SlideDescriptor> = child(pres_root, "sldIdLst")
-        .map(|lst| {
-            children_vec(lst, "sldId")
-                .into_iter()
-                .enumerate()
-                .map(|(index, n)| SlideDescriptor {
-                    index,
-                    relationship_id: attr_r(&n, "id"),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let reporter = zip.operation()?.limit_reporter()?;
+    let bootstrap_limits = pptx_internal_limits();
+    let mut slide_descriptors = Vec::new();
+    if let Some(list) = child(pres_root, "sldIdLst") {
+        for node in list
+            .children()
+            .filter(|node| node.is_element() && node.tag_name().name() == "sldId")
+        {
+            let observed = u64::try_from(slide_descriptors.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(1);
+            reporter.observe_hard_limit(
+                HardResourceLimitKind::PptxBootstrapSlides,
+                Some("ppt/presentation.xml"),
+                bootstrap_limits.bootstrap_slides,
+                observed,
+            )?;
+            let index = slide_descriptors.len();
+            slide_descriptors.push(SlideDescriptor {
+                index,
+                relationship_id: attr_r(&node, "id"),
+            });
+        }
+    }
 
     // --- ppt/_rels/presentation.xml.rels ---
     let pres_rels_xml = read_zip_str(zip, "ppt/_rels/presentation.xml.rels")?;
@@ -1772,23 +2078,30 @@ fn bootstrap_presentation(
     let pres_master_path: Option<String> =
         find_rel_target_by_type(&pres_rels_xml, "/slideMaster").map(|t| resolve_path("ppt", &t));
 
-    // Cache of ParsedMaster keyed by master ZIP path. Slides sharing a master
-    // reuse the bundle instead of recomputing every master-derived map. Seed it
-    // with the presentation master so the slide loop reuses the fallback build
-    // instead of rebuilding it — for a single-master deck every slide resolves
-    // to this same master, and without seeding the fallback build and the first
-    // slide's cache-miss build would each compute the identical bundle twice.
-    let mut master_cache: HashMap<String, ParsedMaster> = HashMap::new();
-    // Bundle for the truly no-master / empty-path case (no /slideMaster rel on
-    // the presentation). Only built then; otherwise the fallback is the cached
-    // presentation-master bundle.
-    let no_master_bundle: Option<ParsedMaster> = match pres_master_path.as_deref() {
-        Some(p) => {
-            master_cache.insert(p.to_owned(), build_master_bundle(p, &theme, zip));
-            None
-        }
-        None => Some(build_master_bundle("", &theme, zip)),
-    };
+    // This is a serialization-shaped projection of retained bootstrap state,
+    // measured by a streaming writer without allocating a JSON buffer. It is a
+    // deterministic safety proxy, not a claim about Rust allocator heap bytes.
+    let bootstrap_projection = measure_json(&(
+        slide_width,
+        slide_height,
+        &slide_descriptors,
+        &pres_rels,
+        &theme,
+        &pres_master_path,
+    ))?
+    .json_bytes;
+    reporter.observe_hard_limit(
+        HardResourceLimitKind::PptxBootstrapProjectionBytes,
+        Some("ppt/presentation.xml"),
+        bootstrap_limits.bootstrap_projection_bytes,
+        bootstrap_projection,
+    )?;
+
+    // Shared dependencies are loaded on the first slide that actually needs
+    // them. Bootstrap therefore retains only compact presentation metadata and
+    // never eagerly materializes the fallback master/theme inheritance bundle.
+    let master_cache: HashMap<String, ParsedMaster> = HashMap::new();
+    let no_master_bundle: Option<ParsedMaster> = None;
 
     // Cache of the layout single-pass extraction (`ParsedLayout`) keyed by layout
     // ZIP path (D4), mirroring `master_cache`. Slides sharing a layout reuse its
@@ -1819,6 +2132,8 @@ fn bootstrap_presentation(
         no_master_bundle,
         layout_cache,
         layout_source_cache,
+        cache_usage: SharedCacheUsage::default(),
+        materialized_slide_json_bytes: 0,
     })
 }
 
@@ -1826,6 +2141,7 @@ fn bootstrap_presentation(
 struct SlideRaw {
     index: usize,
     slide_path: String,
+    slide_dir: String,
     slide_xml: Result<String, String>,
     slide_rels: HashMap<String, String>,
     smartart_drawings: HashMap<String, String>,
@@ -1840,7 +2156,24 @@ fn produce_slide_unit(
     shared: &mut PresentationShared,
     zip: &mut PptxZip,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
-    produce_slide_unit_with_journal(index, shared, zip, None)
+    let produced = produce_slide_unit_with_journal(index, shared, zip, None)?;
+    let projected = shared
+        .materialized_slide_json_bytes
+        .saturating_add(produced.json_bytes);
+    let reporter = zip.operation()?.limit_reporter()?;
+    reporter.observe_hard_limit(
+        HardResourceLimitKind::PptxMaterializedSlideJsonBytes,
+        produced.slide.part_name.as_deref(),
+        pptx_internal_limits().materialized_slide_json_bytes,
+        projected,
+    )?;
+    shared.materialized_slide_json_bytes = projected;
+    Ok(produced.slide)
+}
+
+struct ProducedSlide {
+    slide: Slide,
+    json_bytes: u64,
 }
 
 /// The one canonical slide producer. Cursor callers provide a mutation journal
@@ -1851,7 +2184,7 @@ fn produce_slide_unit_with_journal(
     shared: &mut PresentationShared,
     zip: &mut PptxZip,
     mut journal: Option<&mut SlideCacheJournal>,
-) -> Result<Slide, Box<dyn std::error::Error>> {
+) -> Result<ProducedSlide, Box<dyn std::error::Error>> {
     let descriptor = shared
         .slide_descriptors
         .get(index)
@@ -1867,6 +2200,7 @@ fn produce_slide_unit_with_journal(
         no_master_bundle,
         layout_cache,
         layout_source_cache,
+        cache_usage,
         ..
     } = shared;
     let slide = 'produce: {
@@ -1890,22 +2224,18 @@ fn produce_slide_unit_with_journal(
         // (the common `slides/slide1.xml`) are unaffected. Same fix class as
         // the chart-rel resolution above.
         let slide_path = resolve_path("ppt", &rel_target);
-        let slide_file = rel_target
-            .split('/')
-            .next_back()
-            .unwrap_or("slide.xml")
-            .to_owned();
-        let rels_path = format!("ppt/slides/_rels/{slide_file}.rels");
+        let slide_dir = part_directory(&slide_path).to_owned();
+        let rels_path = relationship_part_path(&slide_path);
 
         // RB7: a slide part that can't be read no longer aborts the whole deck.
         // Record the failure and let the build loop emit a placeholder for THIS
         // slide while the others parse normally.
-        // This ceiling measures ONLY the primary `ppt/slides/slideN.xml` bytes.
+        // This ceiling measures ONLY the primary slide-part XML bytes.
         // The bounded reader rejects limit+1 before UTF-8/DOM/model work; layout,
-        // master, chart, notes, comments, and relationship inputs retain their
-        // package-entry bounds in this phase. Ordinary read/CRC/UTF-8 failures
-        // still become this slide's placeholder, while resource poison returns
-        // immediately and cannot be downgraded.
+        // master, chart, notes, comments, and relationship inputs use the shared
+        // dependency XML and DOM-complexity ceilings. Ordinary read/CRC/UTF-8
+        // failures still become this slide's placeholder, while resource poison
+        // returns immediately and cannot be downgraded.
         let slide_xml = match read_primary_slide_xml(zip, &slide_path) {
             Ok(xml) => Ok(xml),
             Err(error) => {
@@ -1915,11 +2245,11 @@ fn produce_slide_unit_with_journal(
         };
         let slide_rels_xml = read_zip_str(zip, &rels_path).unwrap_or_default();
         let slide_rels = parse_rels(&slide_rels_xml);
-        let smartart_drawings = build_smartart_drawings(&slide_rels_xml, zip);
+        let smartart_drawings = build_smartart_drawings(&slide_rels_xml, &slide_dir, zip);
 
         // Layout XML
         let layout_path = find_rel_target_by_type(&slide_rels_xml, "/slideLayout")
-            .map(|target| resolve_path("ppt/slides", &target));
+            .map(|target| resolve_path(&slide_dir, &target));
 
         if let Some(path) = layout_path.as_deref() {
             if !layout_source_cache.contains_key(path) {
@@ -1930,21 +2260,26 @@ fn produce_slide_unit_with_journal(
                     .unwrap_or_else(|| "ppt/slideLayouts".to_owned());
                 // Needed both for images inside the layout and for the
                 // layout→slideMaster chain (ECMA-376 §19.3.1.43).
-                let file = path.split('/').next_back().unwrap_or("layout.xml");
-                let rels_path = format!("ppt/slideLayouts/_rels/{file}.rels");
+                let rels_path = relationship_part_path(path);
                 let rels_xml = read_zip_str(zip, &rels_path).unwrap_or_default();
                 let rels = parse_rels(&rels_xml);
                 let master_path = find_rel_target_by_type(&rels_xml, "/slideMaster")
                     .map(|target| resolve_path(&dir, &target));
-                layout_source_cache.insert(
-                    path.to_owned(),
-                    Rc::new(LayoutSource {
-                        xml,
-                        rels,
-                        dir,
-                        master_path,
-                    }),
-                );
+                let source = LayoutSource {
+                    xml,
+                    rels,
+                    dir,
+                    master_path,
+                };
+                let reporter = zip.operation()?.limit_reporter()?;
+                observe_shared_cache_candidate(
+                    &reporter,
+                    Some(path),
+                    &source,
+                    cache_usage,
+                    journal.as_deref_mut(),
+                )?;
+                layout_source_cache.insert(path.to_owned(), Rc::new(source));
                 if let Some(journal) = journal.as_deref_mut() {
                     journal.inserted_layout_source_keys.push(path.to_owned());
                 }
@@ -1957,6 +2292,7 @@ fn produce_slide_unit_with_journal(
         let raw = SlideRaw {
             index: idx,
             slide_path,
+            slide_dir,
             slide_xml,
             slide_rels,
             smartart_drawings,
@@ -1988,26 +2324,47 @@ fn produce_slide_unit_with_journal(
         // slide's own master when the layout→master chain resolved; otherwise
         // use the presentation-level fallback bundle. Building is keyed by
         // master path so slides sharing a master don't recompute.
-        let bundle: &ParsedMaster = match master_path {
-            Some(mp) if !mp.is_empty() => {
-                if !master_cache.contains_key(mp) {
-                    let b = build_master_bundle(mp, theme, zip);
-                    master_cache.insert(mp.to_owned(), b);
+        let resolved_master_path = master_path
+            .filter(|path| !path.is_empty())
+            .or(pres_master_path.as_deref());
+        let bundle: &ParsedMaster = match resolved_master_path {
+            Some(master_path) => {
+                if !master_cache.contains_key(master_path) {
+                    let candidate = build_master_bundle(master_path, theme, zip);
+                    zip.assert_healthy()?;
+                    let reporter = zip.operation()?.limit_reporter()?;
+                    observe_shared_cache_candidate(
+                        &reporter,
+                        Some(master_path),
+                        &candidate,
+                        cache_usage,
+                        journal.as_deref_mut(),
+                    )?;
+                    master_cache.insert(master_path.to_owned(), candidate);
                     if let Some(journal) = journal.as_deref_mut() {
-                        journal.inserted_master_keys.push(mp.to_owned());
+                        journal.inserted_master_keys.push(master_path.to_owned());
                     }
                 }
-                &master_cache[mp]
+                &master_cache[master_path]
             }
-            // Unresolved chain → presentation-level fallback. The presentation
-            // master (when present) was seeded into the cache above, so reuse
-            // that entry; only a deck with no /slideMaster rel falls through to
-            // `no_master_bundle`.
-            _ => pres_master_path
-                .as_deref()
-                .map(|p| &master_cache[p])
-                // ast-grep-ignore: no-unwrap-in-parser-production
-                .unwrap_or_else(|| no_master_bundle.as_ref().unwrap()),
+            None => {
+                if no_master_bundle.is_none() {
+                    let candidate = build_master_bundle("", theme, zip);
+                    zip.assert_healthy()?;
+                    let reporter = zip.operation()?.limit_reporter()?;
+                    observe_shared_cache_candidate(
+                        &reporter,
+                        Some("ppt/presentation.xml#fallback-master"),
+                        &candidate,
+                        cache_usage,
+                        journal.as_deref_mut(),
+                    )?;
+                    *no_master_bundle = Some(candidate);
+                }
+                no_master_bundle
+                    .as_ref()
+                    .expect("fallback master initialized above")
+            }
         };
 
         // Per-slide color-mapping override (ECMA-376 §19.3.1.7 clrMapOvr).
@@ -2070,7 +2427,7 @@ fn produce_slide_unit_with_journal(
             // (previously each re-parsed the same string — 3 parses per override slide).
             let master_doc = bundle.master_xml.as_deref().and_then(|xml| {
                 note_layout_master_parse();
-                parse_guarded(xml).ok()
+                parse_preflighted_pptx_xml(xml).ok()
             });
             let master_root = master_doc.as_ref().map(|d| d.root_element());
             let master_bg: Option<Fill> = master_root.and_then(|root| {
@@ -2155,8 +2512,17 @@ fn produce_slide_unit_with_journal(
             (true, Some(lx), Some(lp)) => {
                 if !layout_cache.contains_key(lp) {
                     let pl = build_parsed_layout(lx, zip);
+                    zip.assert_healthy()?;
+                    let reporter = zip.operation()?.limit_reporter()?;
+                    observe_shared_cache_candidate(
+                        &reporter,
+                        Some(lp),
+                        &pl,
+                        cache_usage,
+                        journal.as_deref_mut(),
+                    )?;
                     layout_cache.insert(lp.to_owned(), pl);
-                    if let Some(journal) = journal {
+                    if let Some(journal) = journal.as_deref_mut() {
                         journal.inserted_layout_keys.push(lp.to_owned());
                     }
                 }
@@ -2177,8 +2543,10 @@ fn produce_slide_unit_with_journal(
         // dependency it needs that can't be read, etc.) degrades to a placeholder
         // carrying the part-tagged error, so one broken slide never takes the
         // whole presentation down. Healthy slides are byte-for-byte unchanged.
+        let had_comment_authors = comment_authors.is_some();
         let slide = match parse_slide(
             slide_xml,
+            &raw.slide_dir,
             parsed_layout,
             layout_xml,
             layout_rels,
@@ -2194,6 +2562,19 @@ fn produce_slide_unit_with_journal(
             Ok(slide) => slide,
             Err(e) => broken_slide(raw.index, &raw.slide_path, &e.to_string()),
         };
+        zip.assert_healthy()?;
+        if !had_comment_authors {
+            if let Some(authors) = comment_authors.as_ref() {
+                let reporter = zip.operation()?.limit_reporter()?;
+                observe_shared_cache_candidate(
+                    &reporter,
+                    Some("ppt/commentAuthors.xml"),
+                    authors,
+                    cache_usage,
+                    journal,
+                )?;
+            }
+        }
         // Stamp the resolved slide part path (e.g. `ppt/slides/slide3.xml`) so
         // the TS side can map an internal hyperlink slide jump to this index.
         // The build loop owns `raw.slide_path`; keying by it here (rather than
@@ -2216,7 +2597,7 @@ fn produce_slide_unit_with_journal(
         pptx_slide_json_limit(),
         json_bytes,
     )?;
-    Ok(slide)
+    Ok(ProducedSlide { slide, json_bytes })
 }
 
 #[cfg(test)]
@@ -2258,6 +2639,21 @@ mod tests {
     impl Drop for SlideXmlLimitOverride {
         fn drop(&mut self) {
             PPTX_SLIDE_XML_LIMIT_OVERRIDE.set(self.0);
+        }
+    }
+
+    struct InternalLimitsOverride(Option<PptxInternalLimits>);
+
+    impl InternalLimitsOverride {
+        fn set(limits: PptxInternalLimits) -> Self {
+            let previous = PPTX_INTERNAL_LIMITS_OVERRIDE.replace(Some(limits));
+            Self(previous)
+        }
+    }
+
+    impl Drop for InternalLimitsOverride {
+        fn drop(&mut self) {
+            PPTX_INTERNAL_LIMITS_OVERRIDE.set(self.0);
         }
     }
 
@@ -2391,7 +2787,7 @@ mod tests {
   <Relationship Id="rIdDrawB" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="../diagrams/drawing2.xml"/>
 </Relationships>"#;
 
-        let map = build_smartart_drawings(rels, &mut zip);
+        let map = build_smartart_drawings(rels, "ppt/slides", &mut zip);
         // Keyed by the diagramData rel Id (= the slide's r:dm value).
         // data1 → dataModelExt relId rIdDrawB → drawing2.xml ("TWO").
         assert!(
@@ -2424,7 +2820,7 @@ mod tests {
   <Relationship Id="rIdData1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="../diagrams/data1.xml"/>
   <Relationship Id="rIdDraw1" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="../diagrams/drawing1.xml"/>
 </Relationships>"#;
-        let map = build_smartart_drawings(rels, &mut zip);
+        let map = build_smartart_drawings(rels, "ppt/slides", &mut zip);
         assert!(
             map.get("rIdData1")
                 .map(|s| s.contains("ONE"))
@@ -4506,6 +4902,7 @@ mod tests {
                 doc.root_element(),
                 &theme,
                 &rels,
+                "ppt/slides",
                 None,
                 [None; 9],
                 Default::default(), // inherited_level_indents
@@ -5154,6 +5551,7 @@ mod tests {
                 doc.root_element(),
                 &theme,
                 &rels,
+                "ppt/slides",
                 None,               // inherited_font_size
                 [None; 9],          // inherited_level_font_sizes
                 Default::default(), // inherited_level_indents
@@ -5223,6 +5621,7 @@ mod tests {
                 doc.root_element(),
                 &theme,
                 &rels,
+                "ppt/slides",
                 None,
                 [None; 9],
                 Default::default(),
@@ -5304,6 +5703,7 @@ mod tests {
                 doc.root_element(),
                 &theme,
                 &rels,
+                "ppt/slides",
                 None,
                 [None; 9],
                 Default::default(), // inherited_level_indents
@@ -5389,6 +5789,7 @@ mod tests {
                 doc.root_element(),
                 &theme,
                 &rels,
+                "ppt/slides",
                 None,
                 [None; 9],
                 Default::default(),
@@ -5470,7 +5871,7 @@ mod tests {
             let bytes = empty_zip_bytes();
             let cursor = Cursor::new(bytes.clone());
             let mut zip = PptxZip::new(cursor).unwrap();
-            parse_table(tbl, &t, &theme, &rels, &mut zip).unwrap()
+            parse_table(tbl, &t, &theme, &rels, "ppt/slides", &mut zip).unwrap()
         }
 
         // rtl="1" → rtl=true, serialized.
@@ -8062,6 +8463,119 @@ mod tests {
         buf
     }
 
+    /// OPC permits a presentation relationship to point at a slide outside the
+    /// conventional `ppt/slides/` folder. Every relationship part name and
+    /// relative Target below is therefore rooted at the actual source part
+    /// (ECMA-376 Part 2 §6.5.2.3).
+    fn build_nonstandard_slide_path_deck() -> Vec<u8> {
+        const PRESENTATION: &str = r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="12192000" cy="6858000"/></p:presentation>"#;
+        const PRESENTATION_RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="/custom/deck/slides/slide.xml"/></Relationships>"#;
+        const SLIDE: &str = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:pic><p:nvPicPr><p:cNvPr id="2" name="NestedImage"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rImg"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"#;
+        const SLIDE_RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../layouts/layout.xml"/><Relationship Id="rImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image.png"/><Relationship Id="rNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notes.xml"/><Relationship Id="rComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment.xml"/></Relationships>"#;
+        const LAYOUT: &str = r#"<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="123456"/></a:solidFill></p:bgPr></p:bg><p:spTree/></p:cSld></p:sldLayout>"#;
+        const LAYOUT_RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../masters/master.xml"/></Relationships>"#;
+        const MASTER: &str = r#"<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sldMaster>"#;
+        const MASTER_RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+        const NOTES: &str = r#"<p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><a:p><a:r><a:t>Nested note</a:t></a:r></a:p></p:spTree></p:cSld></p:notes>"#;
+        const COMMENTS: &str = r#"<p:cmLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cm authorId="0"><p:text>Nested comment</p:text></p:cm></p:cmLst>"#;
+
+        zip_with_parts(&[
+            ("ppt/presentation.xml", PRESENTATION.as_bytes()),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                PRESENTATION_RELS.as_bytes(),
+            ),
+            ("custom/deck/slides/slide.xml", SLIDE.as_bytes()),
+            (
+                "custom/deck/slides/_rels/slide.xml.rels",
+                SLIDE_RELS.as_bytes(),
+            ),
+            ("custom/deck/layouts/layout.xml", LAYOUT.as_bytes()),
+            (
+                "custom/deck/layouts/_rels/layout.xml.rels",
+                LAYOUT_RELS.as_bytes(),
+            ),
+            ("custom/deck/masters/master.xml", MASTER.as_bytes()),
+            (
+                "custom/deck/masters/_rels/master.xml.rels",
+                MASTER_RELS.as_bytes(),
+            ),
+            ("custom/deck/notesSlides/notes.xml", NOTES.as_bytes()),
+            ("custom/deck/comments/comment.xml", COMMENTS.as_bytes()),
+            ("custom/deck/media/image.png", b"not-a-png"),
+        ])
+    }
+
+    #[test]
+    fn actual_slide_part_path_scopes_rels_and_relative_dependency_targets() {
+        let presentation = parse_presentation_from_bytes(&build_nonstandard_slide_path_deck())
+            .expect("nonstandard but valid OPC part layout parses");
+        let slide = &presentation.slides[0];
+        assert_eq!(
+            slide.part_name.as_deref(),
+            Some("custom/deck/slides/slide.xml")
+        );
+        assert!(slide.parse_error.is_none(), "{:?}", slide.parse_error);
+        assert!(matches!(
+            slide.background,
+            Some(Fill::Solid { ref color }) if color == "123456"
+        ));
+        assert_eq!(slide.notes.as_deref(), Some("Nested note"));
+        assert_eq!(slide.comments.len(), 1);
+        assert_eq!(slide.comments[0].text, "Nested comment");
+        let picture = slide.elements.iter().find_map(|element| match element {
+            SlideElement::Picture(picture) => Some(picture),
+            _ => None,
+        });
+        assert_eq!(
+            picture.expect("slide picture").image_path,
+            "custom/deck/media/image.png"
+        );
+    }
+
+    #[test]
+    fn no_master_fallback_never_reads_a_relationship_part_for_an_empty_source() {
+        const PRESENTATION: &str = r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#;
+        const PRESENTATION_RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide.xml"/></Relationships>"#;
+        const SLIDE: &str = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sld>"#;
+        const EMPTY_SLIDE_RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+        const MISLEADING_ROOT_RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="/poison.xml"/></Relationships>"#;
+        let poison = vec![b'x'; 1_025];
+        let data = zip_with_parts(&[
+            ("ppt/presentation.xml", PRESENTATION.as_bytes()),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                PRESENTATION_RELS.as_bytes(),
+            ),
+            ("ppt/slides/slide.xml", SLIDE.as_bytes()),
+            (
+                "ppt/slides/_rels/slide.xml.rels",
+                EMPTY_SLIDE_RELS.as_bytes(),
+            ),
+            ("_rels/.rels", MISLEADING_ROOT_RELS.as_bytes()),
+            ("poison.xml", &poison),
+        ]);
+        let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+            shared_dependency_xml_bytes: 1_024,
+            ..PptxInternalLimits::default()
+        });
+
+        let presentation = parse_presentation_from_bytes(&data)
+            .expect("empty master path must not observe the fabricated rels or poison target");
+        assert_eq!(presentation.slides.len(), 1);
+        assert!(presentation.slides[0].parse_error.is_none());
+        assert!(presentation.default_text_color.is_none());
+    }
+
+    #[test]
+    fn pptx_dom_parser_has_an_explicit_local_defense_in_depth_node_cap() {
+        let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+            xml_dom_complexity: 3,
+            ..PptxInternalLimits::default()
+        });
+        assert!(parse_preflighted_pptx_xml("<r><a/><b/></r>").is_err());
+    }
+
     #[test]
     fn slide_cursor_random_access_credit_replay_ack_and_fixed_oracle() {
         let data = build_three_slide_deck(usize::MAX, "");
@@ -8173,6 +8687,279 @@ mod tests {
         assert!(!shared
             .layout_source_cache
             .contains_key("ppt/slideLayouts/slideLayout1.xml"));
+    }
+
+    #[test]
+    fn bootstrap_projection_and_descriptor_limits_accept_exact_and_reject_plus_one() {
+        let data = build_three_slide_deck(usize::MAX, "");
+        let mut baseline = PptxArchive::new(data.clone(), None, None).unwrap();
+        baseline.presentation_bootstrap().unwrap();
+        let shared = baseline.presentation.as_ref().unwrap();
+        assert!(
+            shared.master_cache.is_empty(),
+            "bootstrap stays master-lazy"
+        );
+        assert!(shared.no_master_bundle.is_none());
+        let exact_projection = measure_json(&(
+            shared.slide_width,
+            shared.slide_height,
+            &shared.slide_descriptors,
+            &shared.pres_rels,
+            &shared.theme,
+            &shared.pres_master_path,
+        ))
+        .unwrap()
+        .json_bytes;
+
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                bootstrap_slides: 3,
+                bootstrap_projection_bytes: exact_projection,
+                ..PptxInternalLimits::default()
+            });
+            let mut exact = PptxArchive::new(data.clone(), None, None).unwrap();
+            exact.presentation_bootstrap().unwrap();
+        }
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                bootstrap_slides: 2,
+                bootstrap_projection_bytes: exact_projection,
+                ..PptxInternalLimits::default()
+            });
+            let mut over = PptxArchive::new(data.clone(), None, None).unwrap();
+            let error = over.ensure_presentation().unwrap_err();
+            assert!(error.contains("pptx-bootstrap"), "{error}");
+            assert!(error.contains(r#""metric":"slides""#), "{error}");
+        }
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                bootstrap_slides: 3,
+                bootstrap_projection_bytes: exact_projection - 1,
+                ..PptxInternalLimits::default()
+            });
+            let mut over = PptxArchive::new(data, None, None).unwrap();
+            let error = over.ensure_presentation().unwrap_err();
+            assert!(error.contains("pptx-bootstrap"), "{error}");
+            assert!(error.contains("projected-bytes"), "{error}");
+        }
+    }
+
+    #[test]
+    fn bootstrap_json_limit_bounds_repeated_relationship_target_amplification() {
+        let long_target = format!("custom/{}/slide.xml", "a".repeat(8 * 1024));
+        let data = rewrite_deck_xml(
+            build_three_slide_deck(usize::MAX, ""),
+            "ppt/presentation.xml",
+            |xml| xml.replace("rId2", "rId1").replace("rId3", "rId1"),
+        );
+        let data = rewrite_deck_xml(data, "ppt/_rels/presentation.xml.rels", |xml| {
+            xml.replacen("slides/slide1.xml", &long_target, 1)
+        });
+
+        let mut baseline = PptxArchive::new(data.clone(), None, None).unwrap();
+        let exact_bytes = baseline.presentation_bootstrap().unwrap().len() as u64;
+
+        BOOTSTRAP_OUTPUT_SLIDES_RETAINED.with(|count| count.set(0));
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                bootstrap_json_bytes: exact_bytes,
+                ..PptxInternalLimits::default()
+            });
+            let mut exact = PptxArchive::new(data.clone(), None, None).unwrap();
+            let bytes = exact
+                .presentation_bootstrap()
+                .expect("the exact bootstrap JSON ceiling is inclusive");
+            assert_eq!(bytes.len() as u64, exact_bytes);
+            assert_eq!(
+                BOOTSTRAP_OUTPUT_SLIDES_RETAINED.with(std::cell::Cell::get),
+                3
+            );
+        }
+
+        BOOTSTRAP_OUTPUT_SLIDES_RETAINED.with(|count| count.set(0));
+        let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+            bootstrap_json_bytes: exact_bytes - 1,
+            ..PptxInternalLimits::default()
+        });
+        let mut over = PptxArchive::new(data, None, None).unwrap();
+        let error = over.presentation_bootstrap_inner().unwrap_err();
+        assert!(error.starts_with("OOXML_RESOURCE_LIMIT:"), "{error}");
+        assert!(error.contains("pptx-bootstrap-json"), "{error}");
+        assert!(error.contains(r#""metric":"bytes""#), "{error}");
+        assert_eq!(
+            BOOTSTRAP_OUTPUT_SLIDES_RETAINED.with(std::cell::Cell::get),
+            2,
+            "the overflowing candidate is rejected before its owned path is retained"
+        );
+    }
+
+    #[test]
+    fn shared_cache_accounting_is_transactional_and_projection_cap_accumulates() {
+        let data = build_three_slide_deck(usize::MAX, "");
+        let mut baseline = PptxArchive::new(data.clone(), None, None).unwrap();
+        baseline.presentation_bootstrap().unwrap();
+        baseline
+            .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+            .unwrap();
+        let journal = baseline
+            .prepared_slide
+            .as_ref()
+            .and_then(|prepared| prepared.journal.as_ref())
+            .unwrap();
+        let exact_entries = journal.projected_entries;
+        let exact_bytes = journal.projected_bytes;
+        let baseline_shared = baseline.presentation.as_ref().unwrap();
+        let max_dependency_projection = baseline_shared
+            .master_cache
+            .iter()
+            .map(|(key, value)| {
+                measure_json(&(Some(key.as_str()), value))
+                    .unwrap()
+                    .json_bytes
+            })
+            .chain(baseline_shared.layout_cache.iter().map(|(key, value)| {
+                measure_json(&(Some(key.as_str()), value))
+                    .unwrap()
+                    .json_bytes
+            }))
+            .chain(
+                baseline_shared
+                    .layout_source_cache
+                    .iter()
+                    .map(|(key, value)| {
+                        measure_json(&(Some(key.as_str()), value.as_ref()))
+                            .unwrap()
+                            .json_bytes
+                    }),
+            )
+            .max()
+            .unwrap();
+        assert!(
+            exact_entries >= 3,
+            "layout source, master and layout are distinct"
+        );
+        assert_eq!(
+            baseline.presentation.as_ref().unwrap().cache_usage.entries,
+            0
+        );
+        assert_eq!(
+            baseline
+                .presentation
+                .as_ref()
+                .unwrap()
+                .cache_usage
+                .projected_bytes,
+            0
+        );
+        baseline.cancel_slide();
+        let shared = baseline.presentation.as_ref().unwrap();
+        assert_eq!(shared.cache_usage.entries, 0);
+        assert!(shared.master_cache.is_empty());
+        assert!(shared.layout_cache.is_empty());
+        assert!(shared.layout_source_cache.is_empty());
+
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                shared_cache_entries: exact_entries,
+                shared_cache_projection_bytes: exact_bytes,
+                shared_dependency_projection_bytes: max_dependency_projection,
+                ..PptxInternalLimits::default()
+            });
+            let mut exact = PptxArchive::new(data.clone(), None, None).unwrap();
+            exact.presentation_bootstrap().unwrap();
+            exact
+                .pull_slide_inner(0, 2, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+                .unwrap();
+            assert_eq!(exact.presentation.as_ref().unwrap().cache_usage.entries, 0);
+            exact.acknowledge_slide_inner(2, 1).unwrap();
+            let committed = &exact.presentation.as_ref().unwrap().cache_usage;
+            assert_eq!(committed.entries, exact_entries);
+            assert_eq!(committed.projected_bytes, exact_bytes);
+            exact
+                .pull_slide_inner(1, 3, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+                .unwrap();
+            exact.acknowledge_slide_inner(3, 1).unwrap();
+            assert_eq!(
+                exact.presentation.as_ref().unwrap().cache_usage.entries,
+                exact_entries,
+                "a second slide sharing the inheritance chain adds no cache state"
+            );
+        }
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                shared_cache_entries: exact_entries,
+                shared_cache_projection_bytes: exact_bytes - 1,
+                shared_dependency_projection_bytes: max_dependency_projection,
+                ..PptxInternalLimits::default()
+            });
+            let mut over = PptxArchive::new(data, None, None).unwrap();
+            over.presentation_bootstrap().unwrap();
+            let error = over
+                .pull_slide_inner(0, 4, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+                .unwrap_err();
+            assert!(error.contains("pptx-shared-cache"), "{error}");
+            assert!(error.contains("projected-bytes"), "{error}");
+            assert!(over.prepared_slide.is_none());
+        }
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                shared_cache_entries: exact_entries,
+                shared_cache_projection_bytes: exact_bytes,
+                shared_dependency_projection_bytes: max_dependency_projection - 1,
+                ..PptxInternalLimits::default()
+            });
+            let mut over =
+                PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None).unwrap();
+            over.presentation_bootstrap().unwrap();
+            let error = over
+                .pull_slide_inner(0, 5, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+                .unwrap_err();
+            assert!(error.contains("pptx-shared-dependency"), "{error}");
+            assert!(error.contains("projected-bytes"), "{error}");
+        }
+    }
+
+    #[test]
+    fn full_materialization_projection_is_cumulative_but_cursor_remains_one_unit() {
+        let data = build_three_slide_deck(usize::MAX, "");
+        let baseline = parse_presentation_from_bytes(&data).unwrap();
+        let exact = baseline
+            .slides
+            .iter()
+            .try_fold(0u64, |total, slide| {
+                total.checked_add(measure_json(slide).unwrap().json_bytes)
+            })
+            .unwrap();
+
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                materialized_slide_json_bytes: exact,
+                ..PptxInternalLimits::default()
+            });
+            parse_presentation_from_bytes(&data).unwrap();
+        }
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                materialized_slide_json_bytes: exact - 1,
+                ..PptxInternalLimits::default()
+            });
+            let error = parse_presentation_from_bytes(&data)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("pptx-materialized-slides"), "{error}");
+            assert!(error.contains("projected-json-bytes"), "{error}");
+        }
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                materialized_slide_json_bytes: 1,
+                ..PptxInternalLimits::default()
+            });
+            let mut cursor = PptxArchive::new(data, None, None).unwrap();
+            cursor
+                .pull_slide_inner(0, 5, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+                .unwrap();
+            cursor.acknowledge_slide_inner(5, 1).unwrap();
+        }
     }
 
     #[test]
@@ -8290,6 +9077,101 @@ mod tests {
             parses_before,
             "limit+1 must be rejected before the primary slide reaches its DOM parser"
         );
+    }
+
+    #[test]
+    fn pptx_xml_dom_complexity_preflight_accepts_exact_and_poisons_plus_one_before_dom() {
+        let siblings = "<p:ext/>".repeat(64);
+        let slide = format!(
+            r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree>{siblings}</p:spTree></p:cSld></p:sld>"#
+        );
+        let exact = (0..1_000)
+            .find(|limit| !xml_dom_complexity_exceeds(&slide, *limit))
+            .expect("fixture complexity is below the search ceiling");
+        let data = build_three_slide_deck(0, &slide);
+
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                xml_dom_complexity: exact,
+                ..PptxInternalLimits::default()
+            });
+            let mut archive = PptxArchive::new(data.clone(), None, None).unwrap();
+            archive
+                .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+                .expect("the exact XML DOM complexity ceiling is inclusive");
+            archive.acknowledge_slide_inner(1, 1).unwrap();
+        }
+
+        let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+            xml_dom_complexity: exact - 1,
+            ..PptxInternalLimits::default()
+        });
+        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        archive.presentation_bootstrap().unwrap();
+        let parses_before = LAYOUT_MASTER_PARSE_COUNT.with(std::cell::Cell::get);
+        let error = archive
+            .pull_slide_inner(0, 2, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+            .unwrap_err();
+        assert!(error.contains("xml-dom"), "{error}");
+        assert!(error.contains(r#""metric":"complexity-units""#), "{error}");
+        assert!(
+            error.contains(r#""part":"ppt/slides/slide1.xml""#),
+            "{error}"
+        );
+        assert_eq!(
+            LAYOUT_MASTER_PARSE_COUNT.with(std::cell::Cell::get),
+            parses_before,
+            "complexity limit+1 is rejected before the primary slide DOM parser"
+        );
+    }
+
+    #[test]
+    fn generic_dependency_limit_poison_is_not_swallowed_but_malformed_xml_still_degrades() {
+        let base = build_three_slide_deck(usize::MAX, "");
+        let malformed = rewrite_deck_xml(base.clone(), "ppt/slides/_rels/slide1.xml.rels", |_| {
+            "<Relationships><broken".to_string()
+        });
+        let presentation = parse_presentation_from_bytes(&malformed)
+            .expect("ordinary malformed relationship XML remains compatible degradation");
+        assert_eq!(presentation.slides.len(), 3);
+
+        let oversized = rewrite_deck_xml(base, "ppt/slides/_rels/slide1.xml.rels", |xml| {
+            format!("{xml}{}", " ".repeat(16 * 1024))
+        });
+        let exact = {
+            let mut source = zip::ZipArchive::new(Cursor::new(oversized.clone())).unwrap();
+            let mut entry = source.by_name("ppt/slides/_rels/slide1.xml.rels").unwrap();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            bytes.len() as u64
+        };
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                shared_dependency_xml_bytes: exact,
+                ..PptxInternalLimits::default()
+            });
+            let mut archive = PptxArchive::new(oversized.clone(), None, None).unwrap();
+            archive
+                .pull_slide_inner(0, 3, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+                .expect("the exact dependency XML byte ceiling includes EOF/CRC validation");
+            archive.acknowledge_slide_inner(3, 1).unwrap();
+        }
+        let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+            shared_dependency_xml_bytes: exact - 1,
+            ..PptxInternalLimits::default()
+        });
+        let mut archive = PptxArchive::new(oversized, None, None).unwrap();
+        archive.presentation_bootstrap().unwrap();
+        let error = archive
+            .pull_slide_inner(0, 4, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+            .unwrap_err();
+        assert!(error.contains("pptx-shared-dependency-xml"), "{error}");
+        assert!(
+            error.contains(r#""part":"ppt/slides/_rels/slide1.xml.rels""#),
+            "{error}"
+        );
+        assert!(archive.prepared_slide.is_none());
+        assert!(archive.archive.as_ref().unwrap().assert_healthy().is_err());
     }
 
     #[test]

@@ -71,6 +71,15 @@ pub enum HardResourceLimitKind {
     XmlNestingDepth,
     PptxSlideXmlBytes,
     PptxSlideJsonBytes,
+    PptxSharedDependencyXmlBytes,
+    XmlDomComplexity,
+    PptxSharedDependencyProjectionBytes,
+    PptxSharedCacheEntries,
+    PptxSharedCacheProjectionBytes,
+    PptxBootstrapSlides,
+    PptxBootstrapProjectionBytes,
+    PptxBootstrapJsonBytes,
+    PptxMaterializedSlideJsonBytes,
     WorksheetRowProjectionBytes,
     WorksheetShellProjectionBytes,
     WorksheetModelRows,
@@ -89,6 +98,25 @@ impl HardResourceLimitKind {
             Self::XmlNestingDepth => ("parsing", "xml-tree", "depth"),
             Self::PptxSlideXmlBytes => ("parsing", "pptx-slide-xml", "bytes"),
             Self::PptxSlideJsonBytes => ("serialization", "pptx-slide-json", "bytes"),
+            Self::PptxSharedDependencyXmlBytes => {
+                ("parsing", "pptx-shared-dependency-xml", "bytes")
+            }
+            Self::XmlDomComplexity => ("parsing", "xml-dom", "complexity-units"),
+            Self::PptxSharedDependencyProjectionBytes => {
+                ("parsing", "pptx-shared-dependency", "projected-bytes")
+            }
+            Self::PptxSharedCacheEntries => ("parsing", "pptx-shared-cache", "entries"),
+            Self::PptxSharedCacheProjectionBytes => {
+                ("parsing", "pptx-shared-cache", "projected-bytes")
+            }
+            Self::PptxBootstrapSlides => ("parsing", "pptx-bootstrap", "slides"),
+            Self::PptxBootstrapProjectionBytes => ("parsing", "pptx-bootstrap", "projected-bytes"),
+            Self::PptxBootstrapJsonBytes => ("serialization", "pptx-bootstrap-json", "bytes"),
+            Self::PptxMaterializedSlideJsonBytes => (
+                "serialization",
+                "pptx-materialized-slides",
+                "projected-json-bytes",
+            ),
             Self::WorksheetRowProjectionBytes => ("parsing", "worksheet-row", "projected-bytes"),
             Self::WorksheetShellProjectionBytes => {
                 ("parsing", "worksheet-shell", "projected-bytes")

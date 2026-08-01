@@ -20,17 +20,18 @@ use crate::theme::{bake_clr_map, parse_theme_colors, PptxSchemeResolver};
 use crate::types::*;
 use crate::{
     attr, attr_f64, attr_i64, attr_r, build_smartart_drawings, child, find_rel_target_by_type,
-    note_layout_master_parse, parse_rels, read_zip_str, resolve_path, PptxZip,
+    note_layout_master_parse, parse_preflighted_pptx_xml, parse_rels, read_zip_str, resolve_path,
+    PptxZip,
 };
 use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect, Duotone, SrcRect};
-use ooxml_common::depth::parse_guarded;
+use ooxml_common::rels::relationship_part_path;
 use std::collections::HashMap;
 
 /// Keyed first by idx (integer), then by type string.
 // `Clone` lets `parse_layout` cache one resolved `LayoutPlaceholders` per layout
 // and hand each slide a copy to layer its per-slide master txStyles fallbacks
 // onto without mutating the cached instance (D4).
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize)]
 pub(crate) struct LayoutPlaceholders {
     pub(crate) by_idx: HashMap<u32, Transform>,
     pub(crate) by_type: HashMap<String, Transform>,
@@ -127,7 +128,7 @@ pub(crate) struct LayoutPlaceholders {
     pub(crate) by_type_geometry: HashMap<String, InheritedShapeGeometry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct InheritedShapeGeometry {
     pub(crate) geometry: String,
     pub(crate) cust_geom: Option<Vec<Vec<PathCmd>>>,
@@ -188,7 +189,7 @@ impl InheritedShapeGeometry {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct InheritedBlipFill {
     /// Embedded zip path of the inherited picture-placeholder blip.
     pub(crate) image_path: String,
@@ -1462,6 +1463,7 @@ pub(crate) fn parse_layout_placeholders(
 /// held here — they are walked per-slide because they resolve against the slide's
 /// own `smartart_drawings` (§19.3.1.39 layout decorations) and are theme+zip
 /// bound; caching them keyed by layout would be unsound.
+#[derive(serde::Serialize)]
 pub(crate) struct ParsedLayout {
     pub(crate) placeholders: LayoutPlaceholders,
     /// Layout-level `<p:cSld><p:bg>` fill (ECMA-376 §19.3.1.1 / §20.1.8.14),
@@ -1521,7 +1523,7 @@ pub(crate) fn parse_layout(
     zip: &mut PptxZip,
 ) -> ParsedLayout {
     note_layout_master_parse();
-    let doc = match parse_guarded(layout_xml) {
+    let doc = match parse_preflighted_pptx_xml(layout_xml) {
         Ok(d) => d,
         // Unparseable layout → same as no layout: default placeholders/bg and
         // showMasterSp = true (the slide's own flag still applies downstream).
@@ -1577,6 +1579,7 @@ pub(crate) fn parse_layout(
 /// with its own theme/clrMap). Resolving theme/master per slide via the
 /// slide→slideLayout→slideMaster→theme rels chain is required so that scheme
 /// colors (e.g. `<a:schemeClr val="accent1">`) pick the right palette.
+#[derive(serde::Serialize)]
 pub(crate) struct ParsedMaster {
     /// The master's effective theme palette, with the master's `<p:clrMap>`
     /// pre-baked (logical names → slot hex). Includes font/line/objectDefault
@@ -1648,7 +1651,11 @@ pub(crate) fn build_master_bundle(
     fallback_theme: &HashMap<String, String>,
     zip: &mut PptxZip,
 ) -> ParsedMaster {
-    let master_xml_opt: Option<String> = read_zip_str(zip, master_path).ok();
+    let master_xml_opt: Option<String> = if master_path.is_empty() {
+        None
+    } else {
+        read_zip_str(zip, master_path).ok()
+    };
 
     let master_dir: String = master_path
         .rsplit_once('/')
@@ -1656,12 +1663,13 @@ pub(crate) fn build_master_bundle(
         .unwrap_or_else(|| "ppt/slideMasters".to_owned());
 
     // Master rels: `<master_dir>/_rels/<file>.rels`.
-    let master_file = master_path
-        .split('/')
-        .next_back()
-        .unwrap_or("slideMaster1.xml");
-    let master_rels_xml: String = {
-        let rels_p = format!("{master_dir}/_rels/{master_file}.rels");
+    let master_rels_xml: String = if master_path.is_empty() {
+        // An empty path is the explicit no-master fallback, not an OPC source
+        // part. It has no relationship part; deriving `_rels/.rels` would read
+        // an unrelated/malicious package entry into the fallback inheritance.
+        String::new()
+    } else {
+        let rels_p = relationship_part_path(master_path);
         read_zip_str(zip, &rels_p).unwrap_or_default()
     };
     let master_rels: HashMap<String, String> = parse_rels(&master_rels_xml);
@@ -1681,7 +1689,7 @@ pub(crate) fn build_master_bundle(
     bake_clr_map(&mut theme, master_xml_opt.as_deref());
 
     let master_smartart_drawings: HashMap<String, String> =
-        build_smartart_drawings(&master_rels_xml, zip);
+        build_smartart_drawings(&master_rels_xml, &master_dir, zip);
 
     // Parse the master XML EXACTLY ONCE and share the resulting `Document` across
     // every master-derived extractor below (D4: previously each `parse_master_*`
@@ -1692,7 +1700,7 @@ pub(crate) fn build_master_bundle(
     // every map defaults to empty, exactly as the prior `Option::map` chain did.
     let master_doc: Option<roxmltree::Document<'_>> = master_xml_opt.as_deref().and_then(|xml| {
         note_layout_master_parse();
-        parse_guarded(xml).ok()
+        parse_preflighted_pptx_xml(xml).ok()
     });
     let master_root: Option<roxmltree::Node<'_, '_>> =
         master_doc.as_ref().map(|d| d.root_element());
@@ -1835,6 +1843,7 @@ mod placeholder_geometry_tests {
             placeholders,
             &HashMap::new(),
             &HashMap::new(),
+            "ppt/slides",
             None,
             &mut zip,
         )

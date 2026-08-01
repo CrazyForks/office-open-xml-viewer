@@ -17,6 +17,15 @@ function fixture(policy = {
     maxCentralDirectoryBytes: 64,
     maxPptxSlideXmlBytes: 320,
     maxPptxSlideJsonBytes: 640,
+    maxPptxSharedDependencyXmlBytes: 160,
+    maxXmlDomComplexity: 20,
+    maxPptxSharedDependencyProjectionBytes: 320,
+    maxPptxSharedCacheEntries: 25,
+    maxPptxSharedCacheProjectionBytes: 960,
+    maxPptxBootstrapSlides: 10,
+    maxPptxBootstrapProjectionBytes: 320,
+    maxPptxBootstrapJsonBytes: 320,
+    maxPptxMaterializedSlideJsonBytes: 1280,
     maxWorksheetRows: 100,
     maxWorksheetCells: 250,
     maxWorksheetCellContentUtf8Bytes: 320,
@@ -65,6 +74,14 @@ test('generates matching TypeScript and Rust constants from one policy source', 
   );
   assert.match(
     readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
+    /HARD_MAX_PPTX_SHARED_CACHE_PROJECTION_BYTES: u64 = 960/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
+    /HARD_MAX_PPTX_MATERIALIZED_SLIDE_JSON_BYTES = 1280/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
     /HARD_MAX_XLSX_RENDERER_COORDINATE_INDEX_ENTRIES: u64 = 250/,
   );
 });
@@ -97,6 +114,15 @@ test('rejects invalid or internally inconsistent policy values', (context) => {
       maxCentralDirectoryBytes: 64,
       maxPptxSlideXmlBytes: 320,
       maxPptxSlideJsonBytes: 640,
+      maxPptxSharedDependencyXmlBytes: 160,
+      maxXmlDomComplexity: 20,
+      maxPptxSharedDependencyProjectionBytes: 320,
+      maxPptxSharedCacheEntries: 25,
+      maxPptxSharedCacheProjectionBytes: 960,
+      maxPptxBootstrapSlides: 10,
+      maxPptxBootstrapProjectionBytes: 320,
+      maxPptxBootstrapJsonBytes: 320,
+      maxPptxMaterializedSlideJsonBytes: 1280,
       maxWorksheetRows: 100,
       maxWorksheetCells: 250,
       maxWorksheetCellContentUtf8Bytes: 320,
@@ -113,6 +139,33 @@ test('rejects invalid or internally inconsistent policy values', (context) => {
     /must not exceed its hard ceiling/,
   );
 });
+
+for (const [name, smallerKey, largerKey] of [
+  [
+    'shared cache projection smaller than one dependency',
+    'maxPptxSharedCacheProjectionBytes',
+    'maxPptxSharedDependencyProjectionBytes',
+  ],
+  [
+    'materialized slide projection smaller than one slide',
+    'maxPptxMaterializedSlideJsonBytes',
+    'maxPptxSlideJsonBytes',
+  ],
+]) {
+  test(`rejects ${name}`, (context) => {
+    const root = fixture();
+    context.after(() => rmSync(root, { recursive: true, force: true }));
+    const policyPath = path.join(root, 'packages/ooxml-common/resource-policy.json');
+    const policy = JSON.parse(readFileSync(policyPath, 'utf8'));
+    policy.hardCeilings[smallerKey] = policy.hardCeilings[largerKey] - 1;
+    writeFileSync(policyPath, `${JSON.stringify(policy, null, 2)}\n`);
+
+    assert.throws(
+      () => synchronizeResourcePolicy({ root, write: true }),
+      new RegExp(`${smallerKey} must not be smaller than ${largerKey}`),
+    );
+  });
+}
 
 test('accepts CRLF-normalized generated files on Windows-style checkouts', (context) => {
   const root = fixture();

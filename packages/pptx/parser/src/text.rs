@@ -74,7 +74,7 @@ pub(crate) fn merge_level_sizes(
 /// itself, exactly like a paragraph's own `<a:pPr>`). Each axis is `Option` so it
 /// inherits independently: a level that sets only `marL` leaves `marR`/`indent`
 /// `None` and a lower-priority tier supplies them.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize)]
 pub(crate) struct LevelIndent {
     pub(crate) mar_l: Option<i64>,
     pub(crate) mar_r: Option<i64>,
@@ -130,7 +130,7 @@ pub(crate) fn merge_level_indents(primary: &LevelIndents, fallback: &LevelIndent
 /// `buNone`/`buAutoNum`/`buChar`/`buBlip`). Separate from the three decoration
 /// groups (colour/size/typeface) so each inherits independently across the
 /// style cascade — see [`BulletProps`].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub(crate) enum BuMarker {
     /// `<a:buNone>` — explicitly no marker (§21.1.2.4.8).
     None,
@@ -151,7 +151,7 @@ pub(crate) enum BuMarker {
 /// Bullet colour group (ECMA-376 §21.1.2.4 EG_TextBulletColor): an explicit
 /// `<a:buClr>` colour or `<a:buClrTx>` "follow the run's text colour". Absence
 /// is modelled by the enclosing `Option` (inherit from a lower style tier).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub(crate) enum BuColor {
     /// `<a:buClrTx>` (§21.1.2.4.5) — follow the text run's colour.
     FollowText,
@@ -161,7 +161,7 @@ pub(crate) enum BuColor {
 
 /// Bullet typeface group (EG_TextBulletTypeface): `<a:buFont>` explicit or
 /// `<a:buFontTx>` follow-text. Absence = inherit (enclosing `Option`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub(crate) enum BuFont {
     /// `<a:buFontTx>` (§21.1.2.4.7) — follow the text run's font.
     FollowText,
@@ -179,7 +179,7 @@ pub(crate) enum BuFont {
 /// draw time) and `sizePts` (absolute points, run-independent) — on the [`Bullet`]
 /// contract. Keeping them apart lets the renderer honour absolute-point bullets
 /// (§21.1.2.4.10) while the cascade still treats the whole size group uniformly.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub(crate) enum BuSize {
     /// `<a:buSzTx>` (§21.1.2.4.11) — follow the text run's size.
     FollowText,
@@ -200,7 +200,7 @@ pub(crate) enum BuSize {
 /// why cross-tier splits (e.g. master `buAutoNum` + slide `buClr`) lost the
 /// higher-priority colour/size/font. Collapsed into the serialized [`Bullet`]
 /// contract at the leaf via [`BulletProps::resolve`].
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub(crate) struct BulletProps {
     pub(crate) marker: Option<BuMarker>,
     pub(crate) color: Option<BuColor>,
@@ -369,6 +369,7 @@ pub(crate) fn parse_text_body(
     tx_body: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
+    source_dir: &str,
     inherited_font_size: Option<f64>,
     inherited_level_font_sizes: LevelFontSizes,
     inherited_level_indents: LevelIndents,
@@ -542,12 +543,11 @@ pub(crate) fn parse_text_body(
     // layout/master. A paragraph with no explicit bullet resolves its marker (and
     // its hanging-indent defaults) from this by `lvl` (ECMA-376 §19.7.10).
     // A slide text body's own lstStyle `<a:buBlip>` resolves against the slide's
-    // rels + part directory (ECMA-376 §21.1.2.4.2), same base as the slide's
-    // picture fills. `parse_text_body` is only ever called for slide shapes, so
-    // the part directory is always `ppt/slides`.
+    // rels + actual source-part directory (ECMA-376 §21.1.2.4.2 and Part 2
+    // §6.5.2.3), the same base as the containing shape's picture fills.
     let mut resolve_slide_blip = |rid: &str| -> Option<String> {
         let target = rels.get(rid)?;
-        let path = resolve_path("ppt/slides", target);
+        let path = resolve_path(source_dir, target);
         // Verify the part exists so a listed-but-missing rId yields None and the
         // bullet falls through to Bullet::Inherit (matches the variant's doc
         // comment), mirroring the slide picture-fill resolvers. `index_for_name`
@@ -604,6 +604,7 @@ pub(crate) fn parse_text_body(
                 p,
                 theme,
                 rels,
+                source_dir,
                 body_default_alignment.as_deref(),
                 body_default_ea_ln_brk,
                 body_default_space_before,
@@ -748,6 +749,7 @@ pub(crate) fn parse_paragraph(
     p_node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
+    source_dir: &str,
     body_default_alignment: Option<&str>,
     body_default_ea_ln_brk: Option<bool>,
     body_default_space_before: Option<i64>,
@@ -795,11 +797,12 @@ pub(crate) fn parse_paragraph(
     // bullet for this placeholder (ECMA-376 §19.7.10, §21.1.2.4). Each group
     // resolves independently, so a paragraph that sets only `buClr` still
     // inherits the level's marker (and vice versa). A paragraph's own `<a:buBlip>`
-    // embed resolves against the slide rels + `ppt/slides`, the same base as the
-    // slide's picture fills (§21.1.2.4.2).
+    // embed resolves against the containing part's rels + actual source
+    // directory, the same base as its picture fills (§21.1.2.4.2; Part 2
+    // §6.5.2.3).
     let mut resolve_para_blip = |rid: &str| -> Option<String> {
         let target = rels.get(rid)?;
-        let path = resolve_path("ppt/slides", target);
+        let path = resolve_path(source_dir, target);
         // Verify the part exists so a listed-but-missing rId yields None and the
         // buBlip marker falls through (inherit), mirroring the slide picture-fill
         // resolvers. `index_for_name` reads the central directory only (no

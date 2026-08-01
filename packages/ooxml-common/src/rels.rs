@@ -135,6 +135,24 @@ pub fn resolve_target(base_dir: &str, target: &str) -> String {
     parts.join("/")
 }
 
+/// Derive the relationship part name belonging to an OPC source part.
+///
+/// ECMA-376 Part 2 §6.5.2.3 places the relationship part in an adjacent
+/// `_rels` directory and appends `.rels` to the complete source filename:
+/// `ppt/slides/slide1.xml` becomes
+/// `ppt/slides/_rels/slide1.xml.rels`. A package-root source follows the same
+/// rule (`document.xml` becomes `_rels/document.xml.rels`).
+pub fn relationship_part_path(source_part_path: &str) -> String {
+    let (dir, file) = source_part_path
+        .rsplit_once('/')
+        .map_or(("", source_part_path), |(dir, file)| (dir, file));
+    if dir.is_empty() {
+        format!("_rels/{file}.rels")
+    } else {
+        format!("{dir}/_rels/{file}.rels")
+    }
+}
+
 impl RelTarget {
     /// Resolve this relationship's target against `base_dir`, honoring
     /// [`TargetMode`]: Internal targets are normalized to a part name via
@@ -203,6 +221,30 @@ mod tests {
         assert_eq!(
             resolve_target("xl/worksheets", "../drawings/drawing1.xml"),
             "xl/drawings/drawing1.xml"
+        );
+    }
+
+    #[test]
+    fn relationship_part_path_for_normal_nested_source() {
+        assert_eq!(
+            relationship_part_path("ppt/slides/slide1.xml"),
+            "ppt/slides/_rels/slide1.xml.rels"
+        );
+    }
+
+    #[test]
+    fn relationship_part_path_uses_the_actual_source_directory() {
+        assert_eq!(
+            relationship_part_path("custom/deck/slides/a.xml"),
+            "custom/deck/slides/_rels/a.xml.rels"
+        );
+    }
+
+    #[test]
+    fn relationship_part_path_supports_package_root_sources() {
+        assert_eq!(
+            relationship_part_path("document.xml"),
+            "_rels/document.xml.rels"
         );
     }
 
