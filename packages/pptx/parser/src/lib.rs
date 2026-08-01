@@ -921,10 +921,10 @@ impl PptxArchive {
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
     /// free `pptx_to_markdown`. A corrupt container degrades to an empty deck.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
-        self.to_markdown_inner().map_err(pptx_parser_js_error)
+        self.render_markdown_inner().map_err(pptx_parser_js_error)
     }
 
-    fn to_markdown_inner(&mut self) -> Result<String, String> {
+    fn render_markdown_inner(&mut self) -> Result<String, String> {
         if self.prepared_slide.is_some() {
             return Err("a slide unit is awaiting acknowledgement".to_string());
         }
@@ -9060,7 +9060,7 @@ mod tests {
             .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
             .unwrap();
         archive.acknowledge_slide_inner(1, 1).unwrap();
-        assert_eq!(archive.to_markdown_inner().unwrap(), expected);
+        assert_eq!(archive.render_markdown_inner().unwrap(), expected);
     }
 
     #[test]
