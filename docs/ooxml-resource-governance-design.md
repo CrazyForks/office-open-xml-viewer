@@ -20,6 +20,26 @@ The existing 512 MiB `maxZipEntryBytes` guard only caps one inflated ZIP entry.
 It does not bound aggregate inflation, parser work, model growth, serialization,
 layout state, canvas allocation, or the copies made at worker boundaries.
 
+## Reconciliation with concurrent pull requests
+
+PR #1119 identifies the same package-level failure mode and contributes the
+correct fail-closed requirements: per-entry and aggregate actual-inflation
+limits, archive-entry admission, one retained budget across operations, worker
+wiring, and package poisoning after a proven violation. This branch adopts
+those requirements, but implements them in the shared `ResourcePolicy` ->
+`ResourceGovernor` -> `PackageSession` layers so accounting, typed errors,
+usage snapshots, generated defaults, bounded readers, and later pull operations
+have one owner. The PR is therefore complementary prior art rather than a patch
+to stack or copy; its currently conflicting format-local wiring is superseded
+by the shared control plane here.
+
+PR #1124 closes a separate ownership leak: XLSX and PPTX workers survived some
+rejected loads. This branch adopts that behavior through the shared
+`disposeRejectedLoad` helper and applies the same idempotent cleanup contract to
+DOCX, XLSX, and PPTX. Focused rejected-load and destroy tests cover both a
+partially constructed instance and failure before an instance exists. Successful
+loads and the existing Viewer interfaces remain unchanged.
+
 ## Goals
 
 - Keep the existing DOCX, XLSX, and PPTX Viewer constructors, `load(source)`,
@@ -117,12 +137,28 @@ it bounded.
 
 - Preserve SpreadsheetML dependency resolution and Part 3 MCE semantics while
   moving worksheet XML through complete-row batches.
+- Compose the format driver with the shared `PullSessionHost` /
+  `BoundedPullSession` control plane; do not introduce a second XLSX-specific
+  ACK, generation, cancellation, poison, or credit state machine.
+- Treat every emitted row batch as provisional. Validate the worksheet tail,
+  ZIP CRC, and ancillary parts before preparing the terminal row-free sheet;
+  finish the package operation and publish/cache the result only after the
+  terminal chunk is acknowledged.
+- Preserve sheet-local placeholder degradation for ordinary worksheet read,
+  XML, and CRC failures. Resource-policy violations remain fatal, poison the
+  package, discard provisional rows, and can never become placeholders.
 - Remove the avoidable full worksheet string plus full serialized model overlap
   from the Viewer path; keep `getWorksheet()` as an explicitly materializing
   compatibility adapter.
+- Apply non-configurable retained-model and renderer-index ceilings to that
+  compatibility path. Raising archive limits must not expose the Window to an
+  unbounded cell/object/index amplification path.
 - Add a Node worksheet-session iterator that yields the same bounded row batches;
   keep `parseXlsx`, `parseXlsxSheet`, and `parseXlsxAllSheets` as synchronous,
-  materializing compatibility helpers.
+  materializing compatibility helpers. The browser compatibility adapter owns
+  provisional-row rollback. Lower-level Node iterator consumers see those
+  batches directly and must discard them if the terminal worksheet is a
+  `parseError` placeholder.
 
 Exit: synthetic large worksheets cross multiple pulls, render identically, stop
 at deterministic limits, and show a measured reduction in transient peak usage.
@@ -332,6 +368,34 @@ corpus and browser measurements support them. Adopting defaults below the old
 512 MiB per-entry default intentionally narrows the set of documents that load
 without overrides: source compatibility is preserved, but behavioral
 compatibility for documents above the new defaults is not.
+
+The approximately 267.7 MiB inflated worksheet reported in Issue #1102 is
+therefore rejected by the candidate per-entry default with a typed, catchable
+resource error before the browser attempts the historical monolithic model.
+That is the intentional safe default, not a claim that the document is invalid.
+A caller may raise the policy limit after measuring its environment. The
+materializing `getWorksheet()` compatibility path can still retain memory in
+proportion to all returned cells; only the bounded pull/session path may claim
+bounded in-flight row payloads, and neither path promises a fixed process heap.
+
+Raising or disabling a configurable ZIP limit must not remove internal model
+safety. M3 therefore calibrates non-configurable retained-worksheet ceilings;
+the initial candidates are 250,000 cells, 100,000 row objects, 32 MiB of owned
+UTF-8 string content, and 64 MiB of exact monolithic worksheet JSON. A workbook
+compatibility cache initially admits 500,000 cells and 200,000 rows across
+successfully committed unique sheets. These are logical implementation quotas,
+not heap estimates, and apply only to paths that retain complete worksheets;
+the additive Node row iterator may process more total rows while remaining
+subject to package, per-unit, and in-flight limits. Crossings are typed,
+non-configurable resource errors and are never converted to a degraded sheet.
+
+Renderer-derived indexes have an independent initial 250,000-entry ceiling.
+Merge and styled-table ranges can expand into many coordinates even when the
+worksheet contains few cells, so they are checked by range-area arithmetic
+before allocation. The renderer must also reuse one cell lookup for ordinary
+painting and conditional formatting rather than retaining duplicate keyed maps.
+M7 may revise these candidate values only from recorded browser/WASM evidence.
+
 The candidates and the hard archive ceilings have one language-neutral source
 in `packages/ooxml-common/resource-policy.json`; generated TypeScript and Rust
 constants are checked in CI so browser option normalization, parser-native
@@ -426,13 +490,14 @@ pull next chunk
 complete or abort -> final report + close
 ```
 
-Credit bounds inflated output and measured wire payload produced for one pull;
-it is backpressure, not a CPU-time or security policy. A Deflate decoder may
+Credit is a hard bound on the measured wire payload produced for one pull; it
+is backpressure, not a CPU-time or security policy. A Deflate decoder may
 consume more compressed input internally before producing the credited output,
 so worker termination remains the containment mechanism for a decompressor that
-does not yield. Resource limits remain independently enforced. One indivisible
-format unit may exceed ordinary credit only when it is below its hard unit
-limit; otherwise it fails deterministically instead of deadlocking the stream.
+does not yield. Resource limits remain independently enforced. A format unit is
+never emitted above the caller's credit. If one indivisible unit cannot fit, the
+pull fails deterministically with an insufficient-credit or hard-unit-limit
+error instead of exceeding the bound or deadlocking the stream.
 
 At most the internally allowed number of chunks may be in flight. Abort,
 timeout, resource violation, parser trap, and explicit destruction all converge
