@@ -1,6 +1,11 @@
-import type { DimOptions, MediaElement, WorkerResponse } from './types';
+import type { DimOptions } from './types';
 import type { PptxTextRunInfo } from './renderer';
-import type { NormalizedOoxmlResourcePolicy } from '@silurus/ooxml-core/worker';
+import type { PresentationPreflight } from './presentation-preflight';
+import type {
+  NormalizedOoxmlResourcePolicy,
+  PullSessionIdentity,
+  WorkerErrorPayload,
+} from '@silurus/ooxml-core/worker';
 
 /** Canonical compact payload emitted by Rust `presentation_bootstrap()`. */
 export interface PresentationBootstrap {
@@ -20,51 +25,64 @@ export interface PresentationBootstrapSlide {
   readonly partName?: string;
 }
 
-/** Lightweight summary returned by the render worker's `parse` — everything
- *  the main-thread proxy needs for its synchronous getters. The full model
- *  stays in the worker. */
-export interface PresentationMeta {
-  slideCount: number;
-  slideWidth: number;
-  slideHeight: number;
-  majorFont: string | null;
-  minorFont: string | null;
-  /** Speaker-notes text per slide (same contract as PptxPresentation.getNotes). */
-  notes: (string | null)[];
-  /** Media elements per slide (geometry + paths), for main-thread playback
-   *  overlays. Small: a handful of plain objects per slide. */
-  mediaElements: MediaElement[][];
-  /** `Slide.hidden` per slide (`<p:sld show="0">`, §19.3.1.38). */
-  hidden: boolean[];
-  /** `Slide.partName` per slide (normalized OPC part name, `sldIdLst` order).
-   *  Lets the main-thread proxy build the `partName → index` map that resolves
-   *  an internal hyperlink slide jump in worker mode, mirroring `hidden`/`notes`.
-   *  Entries are `undefined` only for a slide whose part path wasn't recorded. */
-  partNames: (string | undefined)[];
-}
+export type PptxWorkerRequest =
+  | { kind: 'init'; wasmUrl: string }
+  | {
+      kind: 'parse';
+      id: number;
+      buffer: ArrayBuffer;
+      resourcePolicy: NormalizedOoxmlResourcePolicy;
+    }
+  | ({
+      kind: 'openSlideSession';
+      id: number;
+      slideIndex: number;
+    } & PullSessionIdentity<number>)
+  | { kind: 'finishPresentationPreflight'; id: number }
+  | { kind: 'extractMedia'; id: number; path: string }
+  | { kind: 'extractImage'; id: number; path: string }
+  | { kind: 'toMarkdown'; id: number };
 
-// The base `parse` arm from types.ts is intentionally NOT reused: the render
-// worker's `parse` carries an extra `useGoogleFonts` flag, and two `parse`
-// arms in one union would defeat `kind`-based narrowing at use sites. The
-// `init` / `extractMedia` arms are copied verbatim from `WorkerRequest`.
+export type PptxWorkerResponse =
+  | { kind: 'presentationOpened'; id: number; bootstrap: PresentationBootstrap }
+  | ({ kind: 'slideSessionOpened'; id: number } & PullSessionIdentity<number>)
+  | { kind: 'presentationPreflightReady'; id: number; preflight: PresentationPreflight }
+  | { kind: 'mediaExtracted'; id: number; bytes: ArrayBuffer }
+  | { kind: 'imageExtracted'; id: number; bytes: ArrayBuffer }
+  | { kind: 'markdownRendered'; id: number; markdown: string }
+  | ({ kind: 'error'; id: number } & WorkerErrorPayload);
+
+// The render worker owns both the cursor and bounded slide repository. It
+// returns the exact same compact preflight contract as the main-mode worker,
+// while complete Slide models never cross into Window.
 export type RenderWorkerRequest =
   | { kind: 'init'; wasmUrl: string }
+  | {
+      kind: 'parse';
+      id: number;
+      buffer: ArrayBuffer;
+      resourcePolicy: NormalizedOoxmlResourcePolicy;
+      useGoogleFonts?: boolean;
+    }
   | { kind: 'extractMedia'; id: number; path: string }
   | { kind: 'extractImage'; id: number; path: string }
   | { kind: 'toMarkdown'; id: number }
-  | { kind: 'parse'; id: number; buffer: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; useGoogleFonts?: boolean }
-  | { kind: 'renderSlide'; id: number; slideIndex: number; width: number; dpr: number; skipMediaControls?: boolean; dim?: DimOptions }
-  // IX6 — collect a slide's text-run geometry WITHOUT transferring a bitmap. The
-  // find controller scans every slide for its runs; a bitmap per slide would be
-  // wasted work + transfer for slides the user never looks at.
+  | {
+      kind: 'renderSlide';
+      id: number;
+      slideIndex: number;
+      width: number;
+      dpr: number;
+      skipMediaControls?: boolean;
+      dim?: DimOptions;
+    }
   | { kind: 'collectRuns'; id: number; slideIndex: number; width: number };
 
 export type RenderWorkerResponse =
-  | Exclude<WorkerResponse, { kind: 'parsed' }>
-  | { kind: 'parsedMeta'; id: number; meta: PresentationMeta }
-  // IX6 — the render worker collects each rendered slide's `onTextRun` geometry
-  // (a plain, structured-clone-safe `PptxTextRunInfo[]`) and ships it beside the
-  // bitmap, so the main thread can build the text-selection / find-highlight
-  // overlay on the SAME code path as main mode (no second render).
+  | Exclude<
+      PptxWorkerResponse,
+      { kind: 'presentationOpened' | 'slideSessionOpened' | 'presentationPreflightReady' }
+    >
+  | { kind: 'presentationReady'; id: number; preflight: PresentationPreflight }
   | { kind: 'slideRendered'; id: number; bitmap: ImageBitmap; runs: PptxTextRunInfo[] }
   | { kind: 'runsCollected'; id: number; runs: PptxTextRunInfo[] };

@@ -131,6 +131,109 @@ function copyMediaElement(element: MediaElement): Readonly<MediaElement> {
   });
 }
 
+function normalizeMediaElement(value: unknown, slideIndex: number): Readonly<MediaElement> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`invalid PPTX presentation preflight media at slide ${slideIndex}`);
+  }
+  const element = value as Partial<MediaElement>;
+  for (const field of ['x', 'y', 'width', 'height', 'rotation'] as const) {
+    if (typeof element[field] !== 'number' || !Number.isFinite(element[field])) {
+      throw new Error(`invalid PPTX presentation preflight media ${field} at slide ${slideIndex}`);
+    }
+  }
+  if (
+    element.type !== 'media' ||
+    typeof element.flipH !== 'boolean' ||
+    typeof element.flipV !== 'boolean' ||
+    (element.mediaKind !== 'audio' && element.mediaKind !== 'video') ||
+    typeof element.posterPath !== 'string' ||
+    typeof element.posterMimeType !== 'string' ||
+    typeof element.mediaPath !== 'string' ||
+    typeof element.mimeType !== 'string'
+  ) {
+    throw new Error(`invalid PPTX presentation preflight media fields at slide ${slideIndex}`);
+  }
+  return copyMediaElement(element as MediaElement);
+}
+
+/** Validate, detach, and freeze a compact preflight crossing a worker boundary. */
+export function normalizePresentationPreflight(value: unknown): PresentationPreflight {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('invalid PPTX presentation preflight payload');
+  }
+  const candidate = value as Partial<PresentationPreflight>;
+  if (
+    !Number.isSafeInteger(candidate.slideCount) || (candidate.slideCount ?? -1) < 0 ||
+    !Number.isSafeInteger(candidate.slideWidth) || (candidate.slideWidth ?? 0) <= 0 ||
+    !Number.isSafeInteger(candidate.slideHeight) || (candidate.slideHeight ?? 0) <= 0 ||
+    !Array.isArray(candidate.slides) ||
+    candidate.slides.length !== candidate.slideCount ||
+    !Array.isArray(candidate.fontPreloadNames)
+  ) {
+    throw new Error('invalid PPTX presentation preflight dimensions or slide count');
+  }
+  assertNullableString(candidate.defaultTextColor, 'defaultTextColor');
+  assertNullableString(candidate.majorFont, 'majorFont');
+  assertNullableString(candidate.minorFont, 'minorFont');
+  assertNullableString(candidate.hlinkColor, 'hlinkColor');
+  assertNullableString(candidate.folHlinkColor, 'folHlinkColor');
+  const slides = candidate.slides.map((value, index): PresentationPreflightSlide => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`invalid PPTX presentation preflight slide at ${index}`);
+    }
+    const slide = value as Partial<PresentationPreflightSlide>;
+    if (
+      slide.index !== index ||
+      (slide.partName !== undefined && typeof slide.partName !== 'string') ||
+      (slide.notes !== null && typeof slide.notes !== 'string') ||
+      typeof slide.hidden !== 'boolean' ||
+      !Array.isArray(slide.mediaElements)
+    ) {
+      throw new Error(`invalid PPTX presentation preflight slide fields at ${index}`);
+    }
+    return Object.freeze({
+      index,
+      ...(slide.partName === undefined ? {} : { partName: slide.partName }),
+      notes: slide.notes,
+      hidden: slide.hidden,
+      mediaElements: Object.freeze(
+        slide.mediaElements.map((media) => normalizeMediaElement(media, index)),
+      ),
+    });
+  });
+  const fontPreloadNames = candidate.fontPreloadNames.map((name, index) => {
+    if (name !== null && typeof name !== 'string') {
+      throw new Error(`invalid PPTX presentation preflight font at ${index}`);
+    }
+    return name;
+  });
+  return Object.freeze({
+    slideCount: candidate.slideCount as number,
+    slideWidth: candidate.slideWidth as number,
+    slideHeight: candidate.slideHeight as number,
+    defaultTextColor: candidate.defaultTextColor,
+    majorFont: candidate.majorFont,
+    minorFont: candidate.minorFont,
+    hlinkColor: candidate.hlinkColor,
+    folHlinkColor: candidate.folHlinkColor,
+    slides: Object.freeze(slides),
+    fontPreloadNames: Object.freeze(fontPreloadNames),
+  });
+}
+
+export function findPreflightMimeType(
+  preflight: PresentationPreflight,
+  partPath: string,
+): string {
+  for (const slide of preflight.slides) {
+    for (const media of slide.mediaElements) {
+      if (media.mediaPath === partPath) return media.mimeType;
+      if (media.posterPath === partPath) return media.posterMimeType;
+    }
+  }
+  return '';
+}
+
 function projectSlide(
   slide: Slide,
   descriptor: PresentationBootstrapSlide,

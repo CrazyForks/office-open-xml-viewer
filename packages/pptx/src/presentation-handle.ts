@@ -62,7 +62,7 @@ export interface PresentOptions {
  */
 export async function createPresentationHandle(
   canvas: HTMLCanvasElement,
-  mediaElements: MediaElement[],
+  mediaElements: readonly Readonly<MediaElement>[],
   opts: PresentOptions,
 ): Promise<PresentationHandle> {
   const ctx = canvas.getContext('2d');

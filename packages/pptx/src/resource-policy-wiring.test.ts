@@ -10,18 +10,19 @@ describe('PptxPresentation resource-policy wiring', () => {
       request: vi.fn(async (createRequest: (id: number) => Record<string, unknown>) => {
         request = createRequest(3);
         return {
-          kind: 'parsedMeta',
+          kind: 'presentationReady',
           id: 3,
-          meta: {
+          preflight: {
             slideCount: 0,
-            slideWidth: 0,
-            slideHeight: 0,
+            slideWidth: 914400,
+            slideHeight: 914400,
+            defaultTextColor: null,
             majorFont: null,
             minorFont: null,
-            notes: [],
-            mediaElements: [],
-            hidden: [],
-            partNames: [],
+            hlinkColor: null,
+            folHlinkColor: null,
+            slides: [],
+            fontPreloadNames: [],
           },
         };
       }),

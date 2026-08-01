@@ -56,10 +56,9 @@ describe('PptxSlideRepository', () => {
       loadSlide,
     });
 
-    const first = repository.load(0);
-    const second = repository.load(0);
-    await Promise.resolve();
-    expect(loadSlide).toHaveBeenCalledTimes(1);
+    const first = repository.withSlide(0, (value) => value);
+    const second = repository.withSlide(0, (value) => value);
+    await vi.waitFor(() => expect(loadSlide).toHaveBeenCalledTimes(1));
 
     const value = slide(0);
     pending.resolve(value);
@@ -83,10 +82,10 @@ describe('PptxSlideRepository', () => {
       loadSlide,
     });
 
-    await repository.load(0);
-    await repository.load(1);
+    await repository.withSlide(0, () => undefined);
+    await repository.withSlide(1, () => undefined);
     expect(repository.usage).toEqual({ entries: 1, weight: weights[1], pending: 0 });
-    await repository.load(0);
+    await repository.withSlide(0, () => undefined);
     expect(loadSlide).toHaveBeenCalledTimes(3);
   });
 
@@ -101,10 +100,10 @@ describe('PptxSlideRepository', () => {
       loadSlide,
     });
 
-    await repository.load(0);
-    await repository.load(1);
+    await repository.withSlide(0, () => undefined);
+    await repository.withSlide(1, () => undefined);
     expect(repository.usage).toEqual({ entries: 1, weight: weights[1], pending: 0 });
-    await repository.load(0);
+    await repository.withSlide(0, () => undefined);
     expect(loadSlide).toHaveBeenCalledTimes(3);
   });
 
@@ -118,9 +117,9 @@ describe('PptxSlideRepository', () => {
       loadSlide,
     });
 
-    await expect(repository.load(0)).resolves.toBe(value);
+    await expect(repository.withSlide(0, (resolved) => resolved)).resolves.toBe(value);
     expect(repository.usage).toEqual({ entries: 0, weight: 0, pending: 0 });
-    await repository.load(0);
+    await repository.withSlide(0, () => undefined);
     expect(loadSlide).toHaveBeenCalledTimes(2);
   });
 
@@ -137,9 +136,10 @@ describe('PptxSlideRepository', () => {
       loadSlide,
     });
 
-    const staleLoad = repository.load(0);
+    const staleLoad = repository.withSlide(0, (value) => value);
+    await vi.waitFor(() => expect(loadSlide).toHaveBeenCalledTimes(1));
     repository.clear();
-    const currentLoad = repository.load(0);
+    const currentLoad = repository.withSlide(0, (value) => value);
     const stale = slide(0, 'stale');
     first.resolve(stale);
     await expect(staleLoad).resolves.toBe(stale);
@@ -148,7 +148,7 @@ describe('PptxSlideRepository', () => {
     const current = slide(0, 'current');
     second.resolve(current);
     await expect(currentLoad).resolves.toBe(current);
-    await expect(repository.load(0)).resolves.toBe(current);
+    await expect(repository.withSlide(0, (value) => value)).resolves.toBe(current);
     expect(loadSlide).toHaveBeenCalledTimes(2);
   });
 
@@ -165,8 +165,8 @@ describe('PptxSlideRepository', () => {
       loadSlide,
     });
 
-    await expect(repository.load(0)).rejects.toBe(ordinary);
-    await expect(repository.load(0)).resolves.toBe(value);
+    await expect(repository.withSlide(0, () => undefined)).rejects.toBe(ordinary);
+    await expect(repository.withSlide(0, (resolved) => resolved)).resolves.toBe(value);
     expect(loadSlide).toHaveBeenCalledTimes(2);
   });
 
@@ -183,12 +183,12 @@ describe('PptxSlideRepository', () => {
       loadSlide,
     });
 
-    await expect(repository.load(0)).rejects.toBe(failure);
-    await expect(repository.load(0)).rejects.toBe(failure);
+    await expect(repository.withSlide(0, () => undefined)).rejects.toBe(failure);
+    await expect(repository.withSlide(0, () => undefined)).rejects.toBe(failure);
     expect(loadSlide).toHaveBeenCalledTimes(1);
 
     repository.clear();
-    await expect(repository.load(0)).resolves.toBe(value);
+    await expect(repository.withSlide(0, (resolved) => resolved)).resolves.toBe(value);
     expect(loadSlide).toHaveBeenCalledTimes(2);
   });
 
@@ -206,8 +206,8 @@ describe('PptxSlideRepository', () => {
       loadSlide,
     });
 
-    await expect(repository.load(0)).rejects.toBeInstanceOf(OoxmlResourceLimitError);
-    await expect(repository.load(0)).rejects.toBeInstanceOf(OoxmlResourceLimitError);
+    await expect(repository.withSlide(0, () => undefined)).rejects.toBeInstanceOf(OoxmlResourceLimitError);
+    await expect(repository.withSlide(0, () => undefined)).rejects.toBeInstanceOf(OoxmlResourceLimitError);
     expect(loadSlide).toHaveBeenCalledTimes(1);
   });
 
@@ -224,16 +224,17 @@ describe('PptxSlideRepository', () => {
       loadSlide,
     });
 
-    await expect(repository.load(0)).rejects.toThrow('wrapped');
-    await expect(repository.load(0)).rejects.toThrow('not-json');
-    await expect(repository.load(0)).resolves.toBe(value);
+    await expect(repository.withSlide(0, () => undefined)).rejects.toThrow('wrapped');
+    await expect(repository.withSlide(0, () => undefined)).rejects.toThrow('not-json');
+    await expect(repository.withSlide(0, (resolved) => resolved)).resolves.toBe(value);
     expect(loadSlide).toHaveBeenCalledTimes(3);
   });
 
-  it('does not promote another in-flight completion after a resource failure', async () => {
-    const first = deferred<Slide>();
-    const failure = resourceLimitError();
-    const loadSlide = vi.fn((index: number) => index === 0 ? first.promise : Promise.reject(failure));
+  it('serializes different slide consumers so render continuations cannot bypass cache limits', async () => {
+    const releaseFirst = deferred<void>();
+    let activeConsumers = 0;
+    let maxActiveConsumers = 0;
+    const loadSlide = vi.fn(async (index: number) => slide(index));
     const repository = new PptxSlideRepository({
       slideCount: 2,
       maxCachedSlides: 2,
@@ -241,10 +242,64 @@ describe('PptxSlideRepository', () => {
       loadSlide,
     });
 
-    const pending = repository.load(0);
-    await expect(repository.load(1)).rejects.toBe(failure);
-    first.resolve(slide(0));
-    await expect(pending).rejects.toBe(failure);
+    const first = repository.withSlide(0, async () => {
+      activeConsumers += 1;
+      maxActiveConsumers = Math.max(maxActiveConsumers, activeConsumers);
+      await releaseFirst.promise;
+      activeConsumers -= 1;
+    });
+    const second = repository.withSlide(1, async () => {
+      activeConsumers += 1;
+      maxActiveConsumers = Math.max(maxActiveConsumers, activeConsumers);
+      activeConsumers -= 1;
+    });
+    await vi.waitFor(() => expect(loadSlide).toHaveBeenCalledTimes(1));
+    expect(activeConsumers).toBe(1);
+    releaseFirst.resolve();
+    await Promise.all([first, second]);
+    expect(maxActiveConsumers).toBe(1);
+    expect(loadSlide).toHaveBeenCalledTimes(2);
+  });
+
+  it('releases the consumer gate when a renderer callback fails', async () => {
+    const loadSlide = vi.fn(async (index: number) => slide(index));
+    const repository = new PptxSlideRepository({
+      slideCount: 2,
+      maxCachedSlides: 2,
+      maxCachedStructuralBytes: 2048,
+      loadSlide,
+    });
+
+    await expect(repository.withSlide(0, () => {
+      throw new Error('paint failed');
+    })).rejects.toThrow('paint failed');
+    await expect(repository.withSlide(1, (value) => value.index)).resolves.toBe(1);
+    expect(loadSlide).toHaveBeenCalledTimes(2);
+  });
+
+  it('latches a consumer resource failure before a queued cached render starts', async () => {
+    const fatal = resourceLimitError();
+    const releaseFirst = deferred<void>();
+    const secondConsumer = vi.fn();
+    const repository = new PptxSlideRepository({
+      slideCount: 2,
+      maxCachedSlides: 2,
+      maxCachedStructuralBytes: 2048,
+      loadSlide: async (index) => slide(index),
+    });
+
+    // Warm the second slide so this proves the health check precedes cache use.
+    await repository.withSlide(1, () => undefined);
+    const first = repository.withSlide(0, async () => {
+      await releaseFirst.promise;
+      throw fatal;
+    });
+    const second = repository.withSlide(1, secondConsumer);
+    releaseFirst.resolve();
+
+    await expect(first).rejects.toBe(fatal);
+    await expect(second).rejects.toBe(fatal);
+    expect(secondConsumer).not.toHaveBeenCalled();
     expect(repository.usage).toEqual({ entries: 0, weight: 0, pending: 0 });
   });
 
@@ -261,14 +316,15 @@ describe('PptxSlideRepository', () => {
       loadSlide,
     });
 
-    const stale = repository.load(0);
+    const stale = repository.withSlide(0, (value) => value);
     await Promise.resolve();
     repository.clear();
-    await expect(repository.load(0)).rejects.toBe(failure);
+    const currentFailure = repository.withSlide(0, () => undefined);
 
     const oldValue = slide(0, 'old generation');
     oldLoad.resolve(oldValue);
     await expect(stale).resolves.toBe(oldValue);
+    await expect(currentFailure).rejects.toBe(failure);
     expect(repository.usage).toEqual({ entries: 0, weight: 0, pending: 0 });
   });
 
@@ -287,9 +343,9 @@ describe('PptxSlideRepository', () => {
       maxCachedStructuralBytes: 1024,
       loadSlide,
     });
-    await expect(repository.load(-1)).rejects.toThrow(RangeError);
-    await expect(repository.load(1)).rejects.toThrow(RangeError);
-    await expect(repository.load(0.5)).rejects.toThrow(RangeError);
+    expect(() => repository.withSlide(-1, () => undefined)).toThrow(RangeError);
+    expect(() => repository.withSlide(1, () => undefined)).toThrow(RangeError);
+    expect(() => repository.withSlide(0.5, () => undefined)).toThrow(RangeError);
     expect(loadSlide).not.toHaveBeenCalled();
   });
 });

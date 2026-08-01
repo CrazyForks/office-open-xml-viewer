@@ -13,21 +13,13 @@ import {
   type PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
 import type { Slide } from './types.js';
-
-interface SlideCursorArchive {
-  pull_slide(
-    slideIndex: number,
-    operationId: number,
-    generation: number,
-    byteCredit: number,
-  ): Uint8Array;
-  slide_cursor_resource_usage(): Uint8Array;
-  acknowledge_slide(operationId: number, generation: number): void;
-  cancel_slide(): void | Promise<void>;
-  close_presentation_session(): void | Promise<void>;
-}
-
-type Acceptance = void | (() => void) | { rollback?: () => void; commit?: () => void };
+import {
+  acknowledgePptxSlide,
+  readPptxSlideCursorUsage,
+  type PptxSlideAcceptor,
+  type PptxSlideArchiveExecutor,
+  type PptxSlideCursorArchive,
+} from './slide-cursor-operation.js';
 type LifecycleState = 'ready' | 'resetting' | 'reset-failed';
 const RESETTING_ERROR_CODE = 'ooxml-pull-resetting';
 const RESET_FAILED_ERROR_CODE = 'ooxml-pull-reset-failed';
@@ -55,13 +47,9 @@ export class SlidePullWorker {
   private resetIdentities = new Map<number, PullSessionIdentity<number>>();
 
   constructor(
-    private readonly archive: () => SlideCursorArchive | null | undefined,
-    private readonly acceptSlide?: (
-      slideIndex: number,
-      slide: Slide,
-      usage?: OoxmlResourceUsageSnapshot,
-    ) => Acceptance,
-    private readonly executeArchive: <T>(operation: (archive: SlideCursorArchive) => T) => T =
+    private readonly archive: () => PptxSlideCursorArchive | null | undefined,
+    private readonly acceptSlide?: PptxSlideAcceptor,
+    private readonly executeArchive: PptxSlideArchiveExecutor =
       (operation) => operation(this.requireArchive()),
   ) {}
 
@@ -139,22 +127,15 @@ export class SlidePullWorker {
           measureChunk: ({ payload }) => payload.byteLength,
           acknowledge: () => {
             if (!terminalPending) throw new Error('slide unit is not awaiting acknowledgement');
-            let rollback: (() => void) | undefined;
-            let commit: (() => void) | undefined;
             try {
-              if (this.acceptSlide) {
-                if (!preparedSlide) throw new Error('slide payload is missing before acknowledgement');
-                const accepted = this.acceptSlide(slideIndex, preparedSlide, this.readResourceUsage());
-                if (typeof accepted === 'function') rollback = accepted;
-                else if (accepted) ({ rollback, commit } = accepted);
-              }
-              this.executeArchive((archive) => archive.acknowledge_slide(
-                identity.operationId,
-                identity.generation,
-              ));
-              commit?.();
+              acknowledgePptxSlide(
+                this.executeArchive,
+                identity,
+                slideIndex,
+                preparedSlide,
+                this.acceptSlide,
+              );
             } catch (error) {
-              rollback?.();
               this.latchResourceFailure(error);
               throw error;
             }
@@ -436,7 +417,7 @@ export class SlidePullWorker {
     };
   }
 
-  private requireArchive(): SlideCursorArchive {
+  private requireArchive(): PptxSlideCursorArchive {
     const archive = this.archive();
     if (!archive) throw new Error('Presentation not loaded');
     return archive;
@@ -459,18 +440,7 @@ export class SlidePullWorker {
   }
 
   private readResourceUsage(): OoxmlResourceUsageSnapshot | undefined {
-    try {
-      const value = JSON.parse(new TextDecoder().decode(
-        this.executeArchive((archive) => archive.slide_cursor_resource_usage()),
-      )) as unknown;
-      if (!isResourceUsage(value)) throw new Error('slide cursor resource usage is invalid');
-      return value;
-    } catch (error) {
-      // Bootstrap/degraded states can precede creation of the slide operation
-      // ledger. Resource and protocol failures must never use this exception.
-      if (String(error).includes('slide cursor usage is unavailable')) return undefined;
-      throw error;
-    }
+    return readPptxSlideCursorUsage(this.executeArchive);
   }
 
   private latchResourceFailure(error: unknown): void {
@@ -530,19 +500,6 @@ function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const exact = new Uint8Array(bytes.byteLength);
   exact.set(bytes);
   return exact.buffer;
-}
-
-function isResourceUsage(value: unknown): value is OoxmlResourceUsageSnapshot {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const candidate = value as Partial<OoxmlResourceUsageSnapshot>;
-  return isNonNegativeSafeInteger(candidate.archiveEntryCount) &&
-    isNonNegativeSafeInteger(candidate.declaredInflatedBytes) &&
-    isNonNegativeSafeInteger(candidate.distinctInflatedBytes) &&
-    isNonNegativeSafeInteger(candidate.operationInflatedBytes);
-}
-
-function isNonNegativeSafeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 const INSUFFICIENT_CREDIT_PATTERN = /^slide unit requires ([0-9]+) bytes but credit is ([0-9]+)$/u;

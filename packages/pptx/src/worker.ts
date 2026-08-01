@@ -1,116 +1,165 @@
+import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
 import {
-  decodeDataUrl,
-  WasmParserHost,
-} from '@silurus/ooxml-core';
-import { resourcePolicyForWasm, serializeWorkerError } from '@silurus/ooxml-core/worker';
-import type { WorkerRequest, WorkerResponse } from './types';
+  resourcePolicyForWasm,
+  serializeWorkerError,
+  type PullSessionCommand,
+  type PullSessionResponse,
+} from '@silurus/ooxml-core/worker';
+import { PresentationPreflightBuilder } from './presentation-preflight.js';
+import { isSlidePullCommand, SlidePullWorker } from './slide-pull-worker.js';
+import type {
+  PresentationBootstrap,
+  PptxWorkerRequest,
+  PptxWorkerResponse,
+} from './worker-protocol.js';
 import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 
-// RB6: a `panic = "abort"` build traps (not unwinds) on a Rust panic / OOM /
-// stack overflow, poisoning this worker's single WASM instance so every LATER
-// file would crash on the corrupted memory too. `WasmParserHost` draws the line
-// between a graceful `Result::Err` (instance stays healthy) and a trap (instance
-// recycled): `host.run(...)` catches a trap, frees the archive, marks the
-// instance poisoned, and `host.ensureReady()` respawns a fresh module before the
-// next request — so one bad file fails alone and the next parses on clean memory.
-//
-// The host also OWNS the archive handle (`host.archive`): a
-// `PptxArchive(bytes, max)` copies the file into WASM ONCE and scans the central
-// directory ONCE, then a later `extractMedia` / `extractImage` reads by zip path
-// straight from the retained archive (no re-copy, no re-open, no JS-side buffer
-// kept alive — the sole copy lives in WASM). Freed + replaced on a re-parse, and
-// freed + nulled by the host itself on a trap so a later parse never
-// double-frees a handle from a discarded instance.
 const host = new WasmParserHost<PptxArchive>(init, {
-  freeArchive: (a) => a.free(),
-  // RB6 recovery: `init` re-run is a no-op against wasm-bindgen's cached
-  // singleton, so a trap would poison every LATER file. `reinit` nulls the
-  // singleton first, forcing a genuine re-instantiation on fresh linear memory.
+  freeArchive: (archive) => archive.free(),
   reinit,
 });
 
-self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
-  const req = e.data;
+let preflightBuilder: PresentationPreflightBuilder | null = null;
+type PresentationLifecycleState = 'empty' | 'opening' | 'ready' | 'failed';
+let presentationState: PresentationLifecycleState = 'empty';
 
-  if (req.kind === 'init') {
-    // Retain the init lifecycle in the host rather than a `ready` flag +
-    // handshake. Every request below `await`s `ensureReady()`, so a REJECTED
-    // init rejects the request (the catch posts an `error` response the bridge
-    // turns into a rejected `load()`), never a silent hang on a main-side `ready`
-    // wait. After a trap, `ensureReady()` respawns a fresh module here.
-    host.setWasmUrl(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
+function reservePresentationParse(): void {
+  if (presentationState !== 'empty') {
+    const error = new Error('this PPTX worker already owns a presentation parse');
+    error.name = 'PptxWorkerStateError';
+    throw Object.assign(error, { code: 'ooxml-pptx-parse-already-started' });
+  }
+  presentationState = 'opening';
+}
+
+const slidePull = new SlidePullWorker(
+  () => host.archive,
+  (slideIndex, slide, usage) => {
+    if (!preflightBuilder) return;
+    if (slideIndex !== preflightBuilder.acceptedSlideCount) {
+      throw new Error(
+        `PPTX preflight expected slide ${preflightBuilder.acceptedSlideCount}, received ${slideIndex}`,
+      );
+    }
+    return preflightBuilder.prepareSlide(slide, usage);
+  },
+  (operation) => {
+    const archive = host.archive;
+    if (!archive) throw new Error('Presentation not loaded');
+    return host.run(() => operation(archive));
+  },
+);
+
+const post = (
+  message: PptxWorkerResponse | PullSessionResponse<ArrayBuffer, number>,
+  transfer?: Transferable[],
+) => (self.postMessage as (value: unknown, transfer?: Transferable[]) => void)(message, transfer);
+
+self.onmessage = async (
+  event: MessageEvent<PptxWorkerRequest | PullSessionCommand<number>>,
+) => {
+  const request = event.data;
+
+  if (isSlidePullCommand(request)) {
+    await slidePull.dispatchSafely(request, post);
     return;
   }
 
-  // Echo the correlation id so the client routes the response to the right
-  // pending promise (id correlation, not response-type matching).
-  const id = req.id;
+  if (request.kind === 'init') {
+    host.setWasmUrl(decodeDataUrl(request.wasmUrl) ?? request.wasmUrl);
+    return;
+  }
+
+  const id = request.id;
+  let ownsParseReservation = false;
   try {
-    await host.ensureReady();
-    if (req.kind !== 'parse' && host.archive) {
-      const retained = host.archive;
-      host.run(() => retained.assert_healthy());
+    // Reservation must happen before the first await, but still inside the
+    // correlated error boundary so poison/identity failures cannot orphan a
+    // main-side request indefinitely.
+    if (request.kind === 'openSlideSession') slidePull.reserveOpen(request);
+    if (request.kind === 'parse') {
+      reservePresentationParse();
+      ownsParseReservation = true;
     }
-    if (req.kind === 'parse') {
-      const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
-      const bytes = new Uint8Array(req.buffer);
-      // Both the construction and `parse()` run under `host.run` so a trap in
-      // EITHER poisons + recycles the instance (and frees the archive). Adopting
-      // via `setArchive` frees any prior handle first — the re-parse dispose.
-      // `parse()` returns the model as UTF-8 JSON bytes (Result<Vec<u8>,
-      // JsValue>). wasm-bindgen hands back a fresh Uint8Array that owns its
-      // buffer, so forward it to the main thread as a transferable — no clone,
-      // no decode here. The single decode + JSON.parse happens once, on main.
-      const json = host.run(() => {
-        const archive = new PptxArchive(bytes, maxEntry, maxTotal);
-        host.setArchive(archive);
-        return archive.parse();
-      });
-      const presentationJson = json.buffer as ArrayBuffer;
-      const msg: WorkerResponse = { kind: 'parsed', id, presentationJson };
-      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [
-        presentationJson,
-      ]);
+    if (request.kind === 'openSlideSession') {
+      await host.ensureReady();
+      await slidePull.open(request.slideIndex, request);
+      await slidePull.postOpenedSafely(
+        request,
+        () => post({
+          kind: 'slideSessionOpened',
+          id,
+          sessionId: request.sessionId,
+          operationId: request.operationId,
+          generation: request.generation,
+        }),
+        (error) => post({ kind: 'error', id, ...serializeWorkerError(error) }),
+      );
       return;
     }
 
-    const archive = host.archive;
+    if (request.kind === 'parse') await slidePull.reset();
+    await slidePull.run(async () => {
+      await host.ensureReady();
+      if (request.kind !== 'parse' && host.archive) {
+        const retained = host.archive;
+        host.run(() => retained.assert_healthy());
+      }
 
-    if (req.kind === 'extractMedia') {
+      if (request.kind === 'parse') {
+        preflightBuilder = null;
+        const [maxEntry, maxTotal] = resourcePolicyForWasm(request.resourcePolicy);
+        const bootstrap = host.run(() => {
+          const archive = new PptxArchive(
+            new Uint8Array(request.buffer),
+            maxEntry,
+            maxTotal,
+          );
+          host.setArchive(archive);
+          return JSON.parse(
+            new TextDecoder().decode(archive.presentation_bootstrap()),
+          ) as PresentationBootstrap;
+        });
+        preflightBuilder = new PresentationPreflightBuilder(bootstrap);
+        post({ kind: 'presentationOpened', id, bootstrap });
+        presentationState = 'ready';
+        return;
+      }
+
+      const archive = host.archive;
       if (!archive) throw new Error('No pptx loaded');
-      // wasm-bindgen already hands back a fresh, standalone Uint8Array here (its
-      // glue does `getArrayU8FromWasm0(ptr,len).slice()` then frees the Rust Vec),
-      // so `bytes.buffer` is a full-span, non-WASM-backed ArrayBuffer we own
-      // outright — transfer it directly. A second `new Uint8Array(bytes).slice()`
-      // would just re-copy the whole entry for nothing.
-      const out = host.run(() => archive.extract_media(req.path).buffer as ArrayBuffer);
-      const msg: WorkerResponse = { kind: 'mediaExtracted', id, bytes: out };
-      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [out]);
-      return;
-    }
 
-    if (req.kind === 'extractImage') {
-      if (!archive) throw new Error('No pptx loaded');
-      // See extractMedia above: the extracted Uint8Array already owns a
-      // standalone full-span buffer, so transfer it without a second copy.
-      const out = host.run(() => archive.extract_image(req.path).buffer as ArrayBuffer);
-      const msg: WorkerResponse = { kind: 'imageExtracted', id, bytes: out };
-      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [out]);
-      return;
-    }
+      if (request.kind === 'finishPresentationPreflight') {
+        if (!preflightBuilder) throw new Error('PPTX presentation preflight is not active');
+        const preflight = preflightBuilder.finish();
+        preflightBuilder = null;
+        post({ kind: 'presentationPreflightReady', id, preflight });
+        return;
+      }
 
-    if (req.kind === 'toMarkdown') {
-      if (!archive) throw new Error('No pptx loaded');
-      // Project the already-opened handle to markdown (no re-copy of the file,
-      // no re-scan of the central directory). A plain string has no transferable
-      // backing, so it is posted by structured clone like any other value.
-      const markdown = host.run(() => archive.to_markdown());
-      const msg: WorkerResponse = { kind: 'markdownRendered', id, markdown };
-      self.postMessage(msg);
-      return;
+      if (request.kind === 'extractMedia') {
+        const bytes = host.run(() => archive.extract_media(request.path).buffer as ArrayBuffer);
+        post({ kind: 'mediaExtracted', id, bytes }, [bytes]);
+        return;
+      }
+
+      if (request.kind === 'extractImage') {
+        const bytes = host.run(() => archive.extract_image(request.path).buffer as ArrayBuffer);
+        post({ kind: 'imageExtracted', id, bytes }, [bytes]);
+        return;
+      }
+
+      if (request.kind === 'toMarkdown') {
+        post({ kind: 'markdownRendered', id, markdown: host.run(() => archive.to_markdown()) });
+      }
+    });
+  } catch (error) {
+    if (ownsParseReservation) presentationState = 'failed';
+    if (request.kind === 'openSlideSession') slidePull.abandonOpen(request.sessionId);
+    try {
+      post({ kind: 'error', id, ...serializeWorkerError(error) });
+    } catch {
+      // Ownership cleanup already converged; the response channel is gone.
     }
-  } catch (err) {
-    const msg: WorkerResponse = { kind: 'error', id, ...serializeWorkerError(err) };
-    self.postMessage(msg);
   }
 };

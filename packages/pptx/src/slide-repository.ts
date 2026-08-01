@@ -35,6 +35,7 @@ export class PptxSlideRepository {
   readonly #loadSlide: (slideIndex: number) => Slide | PromiseLike<Slide>;
   readonly #cache: BoundedAsyncLruCache<number, Slide>;
   #generation = 0;
+  #consumerTail: Promise<void> = Promise.resolve();
   #resourceFailure: OoxmlResourceLimitError | undefined;
   #resourceFailureGeneration: number | undefined;
 
@@ -59,11 +60,45 @@ export class PptxSlideRepository {
     return this.#cache.usage;
   }
 
-  async load(slideIndex: number): Promise<Slide> {
+  /**
+   * Give one consumer temporary access to a complete Slide.
+   *
+   * Consumers are serialized deliberately: an async renderer can otherwise
+   * keep an evicted Slide alive in its continuation while later loads fill the
+   * cache again, bypassing both cache ceilings. With one consumer at a time,
+   * the active Slide remains the newest retained entry for the whole callback,
+   * so cache ownership and live renderer ownership describe the same bounded
+   * model set rather than two additive sets.
+   */
+  withSlide<T>(
+    slideIndex: number,
+    consume: (slide: Slide) => T | PromiseLike<T>,
+  ): Promise<T> {
     this.#assertSlideIndex(slideIndex);
-    if (this.#resourceFailure) throw this.#resourceFailure;
+    const requestedGeneration = this.#generation;
+    const result = this.#consumerTail.then(async () => {
+      if (requestedGeneration !== this.#generation) {
+        if (this.#resourceFailure) throw this.#resourceFailure;
+        throw new Error('PPTX slide repository generation is stale');
+      }
+      if (this.#resourceFailure) throw this.#resourceFailure;
+      const slide = await this.#load(slideIndex, requestedGeneration);
+      try {
+        return await consume(slide);
+      } catch (error) {
+        const resourceFailure = asResourceFailure(error);
+        if (!resourceFailure) throw error;
+        this.#latchResourceFailure(resourceFailure, requestedGeneration);
+        throw this.#resourceFailureGeneration === requestedGeneration
+          ? (this.#resourceFailure ?? resourceFailure)
+          : resourceFailure;
+      }
+    });
+    this.#consumerTail = result.then(() => undefined, () => undefined);
+    return result;
+  }
 
-    const generation = this.#generation;
+  async #load(slideIndex: number, generation: number): Promise<Slide> {
     return this.#cache.getOrLoad(slideIndex, async () => {
       let slide: Slide;
       try {

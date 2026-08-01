@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { PptxPresentation } from './presentation';
-import type { WorkerRequest } from './types';
+import type { PptxWorkerRequest as WorkerRequest } from './worker-protocol';
 
 /**
  * `PptxPresentation.getImage(path, mime)` routes through the persistent worker
