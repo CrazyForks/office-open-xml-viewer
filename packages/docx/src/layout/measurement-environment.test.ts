@@ -57,7 +57,7 @@ describe('layout measurement environment', () => {
     expect(eligible({ segments: [{ ...text[0], rtl: true }] as LayoutSeg[] })).toBe(false);
     expect(eligible({ segments: [{ isTab: true }] as LayoutSeg[] })).toBe(false);
     expect(eligible({
-      segments: [{ ...text[0], mathNodes: [] }] as unknown as LayoutSeg[],
+      segments: [{ ...text[0], math: true }] as unknown as LayoutSeg[],
     })).toBe(false);
     expect(eligible({ segments: [{ ...text[0], emphasisMark: 'dot' }] as LayoutSeg[] })).toBe(false);
   });

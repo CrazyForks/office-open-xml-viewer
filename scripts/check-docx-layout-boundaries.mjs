@@ -41,6 +41,7 @@ const FINAL_RENDERER_EXPORTS = new Set([
   'dropColorReplacedCache',
   'prepareMathRuns',
   'renderDocumentToCanvas',
+  'renderLayoutSourceToCanvas',
   'setResolvedLocalFonts',
 ]);
 
@@ -1967,14 +1968,10 @@ function assertBodyKernelServiceOwner(root) {
     && ts.isIdentifier(parentCall.arguments[0])
     && parentCall.arguments[0].text === 'services'
     && parentCall.arguments[1] === call
-    && call.arguments.length === 4
-    && call.arguments.slice(0, 3).every((argument, index) => (
-      ts.isIdentifier(argument) && argument.text === ['doc', 'context', 'localMetrics'][index]
-    ))
-    && ts.isPropertyAccessExpression(call.arguments[3])
-    && ts.isIdentifier(call.arguments[3].expression)
-    && call.arguments[3].expression.text === 'productionInput'
-    && call.arguments[3].name.text === 'bodyModelGateway';
+    && call.arguments.length === 3
+    && call.arguments.every((argument, index) => (
+      ts.isIdentifier(argument) && argument.text === ['source', 'context', 'localMetrics'][index]
+    ));
   let insideOwner = false;
   for (let node = parentCall; node; node = node.parent) {
     if (node === owner) insideOwner = true;
@@ -2148,11 +2145,12 @@ function isCanonicalWorkerVariantAttachment(call, source) {
   if (call.arguments.length !== 1) return false;
   const value = unwrapStaticExpression(call.arguments[0]);
   if (!ts.isObjectLiteralExpression(value)) return false;
-  const model = objectProperty(value, 'model');
+  const retainedSource = objectProperty(value, 'source');
   const services = objectProperty(value, 'services');
   const buildLayout = objectProperty(value, 'buildLayout');
-  if (!model || !services || !ts.isPropertyAssignment(buildLayout)) return false;
-  const modelExpression = ts.isShorthandPropertyAssignment(model) ? model.name : model.initializer;
+  if (!retainedSource || !services || !ts.isPropertyAssignment(buildLayout)) return false;
+  const sourceExpression = ts.isShorthandPropertyAssignment(retainedSource)
+    ? retainedSource.name : retainedSource.initializer;
   const servicesExpression = ts.isShorthandPropertyAssignment(services) ? services.name : services.initializer;
   const builder = unwrapStaticExpression(buildLayout.initializer);
   if (!ts.isArrowFunction(builder)
@@ -2161,7 +2159,7 @@ function isCanonicalWorkerVariantAttachment(call, source) {
   const layoutCall = callOf(builder.body, 'layoutDocument');
   return layoutCall !== null
     && layoutCall.arguments.length === 3
-    && layoutCall.arguments[0].getText(source) === modelExpression.getText(source)
+    && layoutCall.arguments[0].getText(source) === sourceExpression.getText(source)
     && layoutCall.arguments[1].getText(source) === servicesExpression.getText(source)
     && layoutCall.arguments[2].getText(source) === builder.parameters[0].name.text;
 }
@@ -2196,11 +2194,28 @@ function returnedObjectLiteral(body) {
 
 function workerRenderCallIsCanonical(call, source) {
   if (call.arguments.length !== 4) return false;
+  let block = call.parent;
+  while (block && !ts.isBlock(block)) block = block.parent;
+  const sourceDeclaration = block?.statements.flatMap((statement) => (
+    ts.isVariableStatement(statement)
+      ? statement.declarationList.declarations.filter((declaration) => (
+          ts.isIdentifier(declaration.name) && declaration.name.text === 'source'
+        ))
+      : []
+  ));
+  const sourceLookup = sourceDeclaration?.length === 1
+    ? callOf(sourceDeclaration[0].initializer, 'layoutSourceStoreOf')
+    : null;
+  if (sourceLookup?.arguments.length !== 1
+    || sourceLookup.arguments[0].getText(source) !== 'doc.layoutServices') return false;
   const options = unwrapStaticExpression(call.arguments[3]);
   if (!ts.isObjectLiteralExpression(options)) return false;
   const services = objectProperty(options, 'layoutServices');
   const defaultDate = objectProperty(options, 'defaultCurrentDateMs');
-  return ts.isPropertyAssignment(services)
+  return call.arguments[0].getText(source) === 'source'
+    && call.arguments[1].getText(source) === 'canvas'
+    && call.arguments[2].getText(source) === 'req.pageIndex'
+    && ts.isPropertyAssignment(services)
     && services.initializer.getText(source) === 'doc.layoutServices'
     && ts.isPropertyAssignment(defaultDate)
     && defaultDate.initializer.getText(source) === 'doc.defaultCurrentDateMs';
@@ -2208,7 +2223,7 @@ function workerRenderCallIsCanonical(call, source) {
 
 function workerRetentionCallIsCanonical(call, source) {
   return call.arguments.length === 3
-    && call.arguments[0].getText(source) === 'model'
+    && call.arguments[0].getText(source) === 'source'
     && call.arguments[1].getText(source) === 'layoutServices'
     && call.arguments[2].getText(source) === 'req.defaultCurrentDateMs';
 }
@@ -2226,20 +2241,20 @@ function workerRetentionSeamIsCanonical(source) {
     || retention.parameters.length !== 3
     || retention.parameters.some((parameter) => !ts.isIdentifier(parameter.name))
     || retention.parameters.map((parameter) => parameter.name.getText(source)).join(',')
-      !== 'model,layoutServices,defaultCurrentDateMs') return false;
+      !== 'source,layoutServices,defaultCurrentDateMs') return false;
   const attachments = callsNamed(retention.body, 'attachDocumentLayoutVariants');
   if (attachments.length !== 1
     || callsNamed(retention.body, 'layoutDocument').length !== 1
     || !isCanonicalWorkerVariantAttachment(attachments[0], source)) return false;
   const attachment = unwrapStaticExpression(attachments[0].arguments[0]);
   if (!ts.isObjectLiteralExpression(attachment)) return false;
-  const model = objectProperty(attachment, 'model');
+  const retainedSource = objectProperty(attachment, 'source');
   const services = objectProperty(attachment, 'services');
   const defaultDate = objectProperty(attachment, 'defaultCurrentDateMs');
-  const modelExpression = ts.isShorthandPropertyAssignment(model)
-    ? model.name
-    : ts.isPropertyAssignment(model)
-      ? model.initializer
+  const sourceExpression = ts.isShorthandPropertyAssignment(retainedSource)
+    ? retainedSource.name
+    : ts.isPropertyAssignment(retainedSource)
+      ? retainedSource.initializer
       : null;
   const servicesExpression = ts.isShorthandPropertyAssignment(services)
     ? services.name
@@ -2252,12 +2267,11 @@ function workerRetentionSeamIsCanonical(source) {
       ? defaultDate.initializer
       : null;
   const returned = returnedObjectLiteral(retention.body);
-  return modelExpression?.getText(source) === 'model'
+  return sourceExpression?.getText(source) === 'source'
     && servicesExpression?.getText(source) === 'layoutServices'
     && defaultDateExpression?.getText(source) === 'defaultCurrentDateMs'
     && returned !== null
     && exactObjectPropertyIdentities(returned, new Map([
-      ['model', 'model'],
       ['layoutServices', 'layoutServices'],
       ['layoutVariants', 'variants.store'],
       ['defaultCurrentDateMs', 'defaultCurrentDateMs'],
@@ -2383,7 +2397,7 @@ function assertCanonicalCutoverBoundaries(root) {
     visit(source);
     const variantAttachments = callsNamed(source, 'attachDocumentLayoutVariants');
     const retentionCalls = callsNamed(source, 'retainRenderWorkerDocumentLayout');
-    const rendererCalls = callsNamed(source, 'renderDocumentToCanvas');
+    const rendererCalls = callsNamed(source, 'renderLayoutSourceToCanvas');
     if (topLevelPages
       || duplicateSelection
       || variantAttachments.length !== 0
@@ -2580,6 +2594,50 @@ function adapterBodyIsAllowed(body, callable) {
   });
 }
 
+function exactArgumentTexts(call, expected, source) {
+  return call !== null
+    && call.arguments.length === expected.length
+    && call.arguments.every((argument, index) => argument.getText(source) === expected[index]);
+}
+
+function sourceRendererBodyIsCanonical(declaration, source) {
+  if (!declaration?.body || declaration.body.statements.length !== 2) return false;
+  const [first, second] = declaration.body.statements;
+  if (!ts.isVariableStatement(first)
+    || first.declarationList.declarations.length !== 1) return false;
+  const retained = first.declarationList.declarations[0];
+  if (!ts.isIdentifier(retained.name) || retained.name.text !== 'normalized') return false;
+  if (!exactArgumentTexts(
+    callOf(retained.initializer, 'normalizeRenderOptions'),
+    ['source', 'canvas', 'pageIndex', 'opts'],
+    source,
+  )) return false;
+  if (!ts.isReturnStatement(second)) return false;
+  return exactArgumentTexts(
+    callOf(second.expression, 'renderSelectedDocumentPage'),
+    [
+      'normalized.selection.layout',
+      'normalized.selection.page',
+      'canvas',
+      'normalized.paintOptions',
+    ],
+    source,
+  );
+}
+
+function publicRendererBodyIsCanonical(declaration, source) {
+  if (!declaration?.body || declaration.body.statements.length !== 1) return false;
+  const returned = declaration.body.statements[0];
+  if (!ts.isReturnStatement(returned)) return false;
+  const render = callOf(returned.expression, 'renderLayoutSourceToCanvas');
+  if (render?.arguments.length !== 4) return false;
+  const sourceCall = callOf(render.arguments[0], 'layoutSourceStore');
+  return exactArgumentTexts(sourceCall, ['doc'], source)
+    && render.arguments[1].getText(source) === 'canvas'
+    && render.arguments[2].getText(source) === 'pageIndex'
+    && render.arguments[3].getText(source) === 'opts';
+}
+
 function assertFinalRendererAdapter(root) {
   const renderer = resolve(root, DOCX_SOURCE, 'renderer.ts');
   if (!existsSync(renderer)) fail('FINAL_ADAPTER_MISSING', `${DOCX_SOURCE}/renderer.ts`);
@@ -2599,14 +2657,16 @@ function assertFinalRendererAdapter(root) {
   const callable = rendererImportBindings(source);
   callable.add('createLayoutServices');
   callable.add('normalizeRenderOptions');
-  for (const statement of source.statements) {
-    if (ts.isFunctionDeclaration(statement)
-      && statement.name
-      && statement.name.text === 'renderDocumentToCanvas'
-      && statement.body
-      && !adapterBodyIsAllowed(statement.body, callable)) {
-      fail('FINAL_ADAPTER_BODY', statement.name.text);
-    }
+  callable.add('renderLayoutSourceToCanvas');
+  const sourceRenderer = source.statements.find((statement) => ts.isFunctionDeclaration(statement)
+    && statement.name?.text === 'renderLayoutSourceToCanvas');
+  const publicRenderer = source.statements.find((statement) => ts.isFunctionDeclaration(statement)
+    && statement.name?.text === 'renderDocumentToCanvas');
+  if (!sourceRendererBodyIsCanonical(sourceRenderer, source)) {
+    fail('FINAL_ADAPTER_BODY', 'renderLayoutSourceToCanvas');
+  }
+  if (!publicRendererBodyIsCanonical(publicRenderer, source)) {
+    fail('FINAL_ADAPTER_BODY', 'renderDocumentToCanvas');
   }
   for (const edge of moduleEdges(renderer)) {
     if (!edge.literal) fail('FINAL_ADAPTER_IMPORT', '<dynamic>');
@@ -2618,6 +2678,7 @@ function assertFinalRendererAdapter(root) {
     const allowed = rel.startsWith(`${LAYOUT_SOURCE}/`)
       || rel.startsWith(`${PAINT_SOURCE}/`)
       || rel === LAYOUT_RUNTIME_ADAPTER
+      || rel === `${DOCX_SOURCE}/layout-source-model-adapter.ts`
       || rel === TEXT_RUN_PROJECTION_ADAPTER
       || (edge.typeOnly && rel === `${DOCX_SOURCE}/types.ts`);
     if (!allowed) fail('FINAL_ADAPTER_IMPORT', `${DOCX_SOURCE}/renderer.ts -> ${rel}`);

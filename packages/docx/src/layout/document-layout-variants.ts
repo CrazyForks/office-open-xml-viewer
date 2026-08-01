@@ -1,5 +1,5 @@
-import type { DocxDocumentModel } from '../types.js';
 import { layoutParseErrorPage } from './error-page.js';
+import type { LayoutSourceStore } from './layout-source-store.js';
 import {
   layoutOptionsForRender,
   type LayoutOptions,
@@ -12,30 +12,29 @@ import {
 import type { DeepReadonly, DocumentLayout, LayoutPage, LayoutServices } from './types.js';
 import { LayoutVariantStore, type DocumentLayoutBuilder } from './variant-store.js';
 
-export interface DocumentLayoutVariantFactoryInput {
-  readonly model: DocxDocumentModel;
+export type DocumentLayoutVariantFactoryInput = Readonly<{
+  readonly source: LayoutSourceStore;
   readonly services: LayoutServices;
   readonly defaultCurrentDateMs: number;
   readonly buildLayout: DocumentLayoutBuilder;
-}
+}>;
 
 export interface AttachedDocumentLayoutVariants {
   readonly store: LayoutVariantStore;
   readonly defaultOptions: LayoutOptions;
 }
 
-export function attachDocumentLayoutVariants({
-  model,
-  services,
-  defaultCurrentDateMs,
-  buildLayout,
-}: DocumentLayoutVariantFactoryInput): AttachedDocumentLayoutVariants {
+export function attachDocumentLayoutVariants(
+  input: DocumentLayoutVariantFactoryInput,
+): AttachedDocumentLayoutVariants {
+  const { services, defaultCurrentDateMs, buildLayout } = input;
   const defaultOptions = layoutOptionsForRender({ defaultCurrentDateMs });
-  const parseError = model.parseError === undefined
+  const fatalParse = input.source.fatalParse;
+  const parseError = fatalParse === null
     ? null
     : layoutParseErrorPage(
-        model.parseError,
-        { widthPt: model.section.pageWidth, heightPt: model.section.pageHeight },
+        fatalParse.message,
+        fatalParse.pageSize,
         services.text,
       );
   const store = new LayoutVariantStore(

@@ -1,18 +1,16 @@
-import type { DocxDocumentModel, BodyElement, DocParagraph, DocTable, DocTableCell, CellElement, DocRun, ImageRun, ChartRun, ShapeRun, HeaderFooter, SectionProps } from '../types';
+import type { BodyElement, DocParagraph, DocTable, DocTableCell, DocRun, ImageRun, ChartRun, ShapeRun, SectionProps } from '../types';
 import type { ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import { type FloatRect, FLOAT_OVERLAP_EPS, isWrapFloat } from '../float-layout.js';
 import { type FrameBox, computeFrameBox, frameXContainer, pushFloatRect } from '../frame-geometry.js';
 import { resolveFloatingTableBoxPt } from '../float-table-geometry.js';
 import { xContainer, yContainer, resolveAnchorX, resolveAnchorY } from '../anchor-geometry.js';
-import { resolveDocumentLayoutSettings, resolveParagraphLayoutContext, resolveSectionLayoutContext, type DocumentLayoutSettings, type SectionLayoutContext } from '../layout-context.js';
-import type { BlockLayoutAlgorithms, BodyFlowRegistryDeltaPt, BodyFlowRegistrySnapshotPt, DrawingMLCollisionRegistrySnapshotPt, LayoutServices, FloatRegistryEntryPt, FloatRegistrySnapshotPt, FloatingTablePlacementLayout, DrawingMLCollisionEntryPt, NoteLayout, ParagraphLayout, SourceRef, StoryBlockInput, StoryLayout, TableLayout, TableLayoutInput } from './types.js';
-import type { CompleteTextBoxBlockInput } from './textbox-input.js';
+import { resolveParagraphLayoutContext, resolveSectionLayoutContext, type DocumentLayoutSettings, type SectionLayoutContext } from '../layout-context.js';
+import type { BlockLayoutAlgorithms, BodyFlowRegistryDeltaPt, BodyFlowRegistrySnapshotPt, DeepReadonly, DrawingMLCollisionRegistrySnapshotPt, LayoutServices, FloatRegistryEntryPt, FloatRegistrySnapshotPt, FloatingTablePlacementLayout, DrawingMLCollisionEntryPt, NoteLayout, ParagraphLayout, SourceRef, StoryBlockInput, StoryLayout, TableLayout, TableLayoutInput } from './types.js';
 import { beginFloatingTablePlacementTransaction, floatingTableRegistryDelta, resolveFloatingTablePlacementInTransaction, validateFloatingTableRegistryDelta } from './floating-table-transaction.js';
 import { floatRegistryParticipant, resolveBlockFlowAdmission, resolvePageAnchoredTableDeferral } from './floats.js';
 import { ExactConvergenceError, convergeExactState } from './convergence.js';
 import { LayoutInvariantError } from './diagnostics.js';
 import type { LayoutOptions } from './options.js';
-import { paginatedFlowHasPaginationDependentFields } from './pagination-fields.js';
 import { createLayoutServicesRuntimeView, fieldAcquisitionContextOf, verticalGlyphMeasurementServiceOf } from './runtime-state.js';
 import { attachStoryBlockLayoutAlgorithms, layoutStory as layoutSharedStory } from './stories.js';
 import { buildNoteNumberMap, footnoteIdsInRetainedLines, footnoteIdsInRetainedSlice, indexNotes, noteReferenceIdsInDocumentOrder } from './note-reference-ownership.js';
@@ -22,11 +20,10 @@ import { FlowCapacityExceededError } from './flow.js';
 import { projectBodyOccurrence } from './occurrence-projection.js';
 import {
   sectionBodyInsetPt as bodyMarginInsetPt,
-  createBodySectionIndex,
   physicalSectionGeometry,
 } from './context.js';
 import { isAllRotatedVerticalTextDirection, isVerticalSection, isVerticalTextDirection, physicalLayoutSection, verticalLayoutSection } from './section-orientation.js';
-import { docDefaultFontSizePt, gridForParagraphContext, paragraphMeasurementEnvironment } from './measurement-environment.js';
+import { gridForParagraphContext, paragraphMeasurementEnvironment } from './measurement-environment.js';
 import { BODY_STORY_CONTEXT, bodyAnchorReferenceFrames, retainedTableRecord, resolveBodyParagraphLayoutContext, resolveStateParagraphLayoutContext, withTableCellStory } from './acquisition-state.js';
 import { applyNumberingBodyOffset, resolveNumberingMarkerGeometry } from './numbering-marker.js';
 import { resolveTableColumnWidths } from './table-columns.js';
@@ -54,39 +51,35 @@ import { resolveAnchorFrame } from './anchor-frame.js';
 import { isPageLevelWrapFloat } from './anchor-classification.js';
 import { physicalToLogicalAnchorBox } from '../vertical-text.js';
 import type { MeasurementTextContext } from './measurement-capabilities.js';
-import type { TblpPr } from '../types.js';
-import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
-import type { BodySectionIndexInput } from './context.js';
+import type {
+  LayoutFlowBlock,
+  LayoutParagraphBlock,
+  LayoutSourceStore,
+  LayoutStoryBlock,
+  LayoutTableBlock,
+} from './layout-source-store.js';
+import type { ParagraphChartRun, ParagraphImageRun, ParagraphLayoutSource, ParagraphShapeRun } from './text.js';
+import type { TableLayoutSource } from './table-source-acquisition.js';
+import { prepareBodyFrameMetadata } from './frame.js';
 import {
   physicalToLogicalMatrix,
   uprightPhysicalExtent,
   writingModeFromTextDirection,
 } from './coordinate-space.js';
 
-export interface ProductionBodyModelGateway {
-  readonly acquisitionInputs: BodyAcquisitionInputProjections;
-  readonly bodySectionIndex: BodySectionIndexInput;
-  effectiveTablePositioning(table: Readonly<DocTable>): TblpPr | null;
-  publicAnchorBridge(
-    run: Readonly<DocRun>,
-    source: SourceRef,
-    runIndex: number,
-  ): Readonly<{ occurrenceId: string; pageOwned: boolean }> | null;
-}
-
 export function createProductionBodyLayoutRuntime(
-  doc: DocxDocumentModel,
+  source: LayoutSourceStore,
   measureContext: MeasurementTextContext | null,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>,
-  model: ProductionBodyModelGateway,
 ) {
+  prepareBodyFrameMetadata(source.blocks.body);
+  const model = source.acquisition;
   const bodyAcquisitionInputProjections = model.acquisitionInputs;
-  const bodySectionIndexInput = () => model.bodySectionIndex;
   const effectiveTablePositioning = model.effectiveTablePositioning;
   const publicAnchorBridge = model.publicAnchorBridge;
   const documentFontFamilyClasses = fontClassesWithPitches(
-    doc.fontFamilyClasses,
-    doc.fontFamilyPitches,
+    source.fonts.familyClasses,
+    source.fonts.familyPitches,
   );
   const anchoredImageCollisionKey = (
     imagePath: string,
@@ -160,7 +153,7 @@ function buildMeasureState(
         containerShading: cell.background ?? state.containerShading,
         floats: [],
         floatParaSeq: 0,
-        pageAnchorPrescanned: new Set<DocParagraph>(),
+        pageAnchorPrescanned: new Set<ParagraphLayoutSource>(),
       }),
       acquireParagraph: (
         cellState,
@@ -178,7 +171,7 @@ function buildMeasureState(
           path: [...paragraphPath],
         };
         const publicRuns = paragraph.runs.filter((run, runIndex) =>
-          publicAnchorBridge(run, source, runIndex) !== null);
+          publicAnchorBridge(source, runIndex) !== null);
         if (publicRuns.length > 0) {
           // Hand-built compatibility runs have no parser anchor/host acquisition
           // facts, so their paragraph-top projection stays outside the parser
@@ -354,7 +347,7 @@ function buildMeasureState(
 }
 
 function buildConcreteBodyLayoutKernel(
-  doc: DocxDocumentModel,
+  source: LayoutSourceStore,
   measureContext: MeasurementTextContext | null,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>,
 ): BodyLayoutKernel {
@@ -385,42 +378,24 @@ function buildConcreteBodyLayoutKernel(
     });
   };
   const sourceElement = (
-    source: SourceRef,
-  ): Extract<BodyElement, { type: 'paragraph' | 'table' }> => {
-    if (source.story !== 'body' || source.storyInstance !== 'body' || source.path.length !== 1) {
+    ref: SourceRef,
+  ): LayoutFlowBlock => {
+    if (ref.story !== 'body' || ref.storyInstance !== 'body' || ref.path.length !== 1) {
       throw new Error('Body acquisition requires a top-level body source');
     }
-    const element = doc.body[source.path[0]!];
+    const element = source.blocks.resolve(ref);
     if (!element || (element.type !== 'paragraph' && element.type !== 'table')) {
-      throw new Error(`Body source does not identify a flow block: ${source.path.join('.')}`);
+      throw new Error(`Body source does not identify a flow block: ${ref.path.join('.')}`);
     }
     return element;
   };
-  const nestedSourceElement = (source: SourceRef): BodyElement | CellElement => {
-    if (source.story !== 'body' || source.storyInstance !== 'body'
-      || source.path.length === 0 || (source.path.length - 1) % 3 !== 0) {
-      throw new Error('Nested body acquisition requires a canonical source path');
-    }
-    let element: BodyElement | CellElement | undefined = doc.body[source.path[0]!];
-    for (let offset = 1; offset < source.path.length; offset += 3) {
-      if (!element || element.type !== 'table') {
-        throw new Error(`Nested body source leaves table ownership: ${source.path.join('.')}`);
-      }
-      element = element.rows[source.path[offset]!]
-        ?.cells[source.path[offset + 1]!]
-        ?.content[source.path[offset + 2]!];
-    }
-    if (!element || (element.type !== 'paragraph' && element.type !== 'table')) {
-      throw new Error(`Nested body source does not identify a flow block: ${source.path.join('.')}`);
-    }
-    return element;
-  };
-  /** Body acquisition stays at the kernel adapter because it resolves legacy
-   * renderer state into retained paragraph inputs; layout-owned projections
-   * below it receive only immutable structural values. */
+  const nestedSourceElement = (ref: SourceRef): LayoutFlowBlock => source.blocks.resolve(ref);
+  /** Body acquisition stays at the kernel adapter because it resolves renderer
+   * state into retained paragraph inputs; layout-owned projections below it
+   * receive only immutable structural values. */
   const acquireBodyParagraphAtLocation = (
     state: BodyAcquisitionState,
-    paragraph: DocParagraph,
+    paragraph: LayoutParagraphBlock,
     source: SourceRef,
     location: BodyAcquisitionLocation,
     availableInlineExtentPt: number,
@@ -436,7 +411,7 @@ function buildConcreteBodyLayoutKernel(
     };
     const context = resolveBodyParagraphLayoutContext(state, paragraph);
     return acquireParagraphResult(
-      state.acquisitionInputs.paragraphAcquisitionInput(paragraph, source),
+      paragraph,
       {
         id: `${source.story}:${source.storyInstance}:${source.path.join('.')}`,
         source,
@@ -484,7 +459,7 @@ function buildConcreteBodyLayoutKernel(
     ) {
       if (!measureContext) throw new Error('Body layout acquisition requires a measurement context');
       const physicalSection: SectionProps = {
-        ...doc.section,
+        ...source.section,
         ...input.section.geometry,
         textDirection: input.section.textDirection,
         vAlign: input.section.verticalAlignment,
@@ -496,39 +471,28 @@ function buildConcreteBodyLayoutKernel(
         measureContext,
         section,
         documentFontFamilyClasses,
-        resolveDocumentLayoutSettings(doc),
+        source.documentLayoutSettings,
         resolvedLocalFonts,
         services,
         options,
       );
-      const footnotesById = indexNotes(doc.footnotes ?? []);
+      const sourceFootnotes = source.blocks.footnotes;
+      const sourceEndnotes = source.blocks.endnotes;
+      const footnotesById = indexNotes(sourceFootnotes);
       state.noteNumbers = new Map([
         ...[...buildNoteNumberMap(
-          doc.footnotes,
-          noteReferenceIdsInDocumentOrder(doc.body, 'footnote'),
+          sourceFootnotes,
+          noteReferenceIdsInDocumentOrder(source.blocks.body, 'footnote'),
         )].map(
           ([id, number]) => [`footnote:${id}`, number] as const,
         ),
         ...[...buildNoteNumberMap(
-          doc.endnotes,
-          noteReferenceIdsInDocumentOrder(doc.body, 'endnote'),
+          sourceEndnotes,
+          noteReferenceIdsInDocumentOrder(source.blocks.body, 'endnote'),
         )].map(
           ([id, number]) => [`endnote:${id}`, number] as const,
         ),
       ]);
-      const stories = new Map<string, HeaderFooter>();
-      createBodySectionIndex(bodySectionIndexInput()).occurrences.forEach((occurrence) => {
-        const prefix = occurrence.markerBodyIndex === null
-          ? null
-          : `section:${occurrence.markerBodyIndex}`;
-        for (const kind of ['default', 'first', 'even'] as const) {
-          const storyInstance = prefix === null ? kind : `${prefix}:${kind}`;
-          const header = occurrence.headers[kind];
-          const footer = occurrence.footers[kind];
-          if (header) stories.set(`header:${storyInstance}`, header);
-          if (footer) stories.set(`footer:${storyInstance}`, footer);
-        }
-      });
       let location = input.initialLocation;
       const pageRegistryFlowDomainId = (pageIndex: number) => `body:page:${pageIndex}:registry`;
       let floatRegistry: FloatRegistrySnapshotPt = Object.freeze({
@@ -565,7 +529,7 @@ function buildConcreteBodyLayoutKernel(
       };
       applyLocation(location);
       const publicParagraphFloatAcquisition = (
-        paragraph: DocParagraph,
+        paragraph: LayoutParagraphBlock,
         source: SourceRef,
         candidate: BodyAcquisitionState,
         onlyOccurrenceIds?: ReadonlySet<string>,
@@ -574,7 +538,7 @@ function buildConcreteBodyLayoutKernel(
         const committedOccurrenceIds = new Set(floatRegistry.entries.map((entry) => entry.occurrenceId));
         const publicRuns = paragraph.runs.flatMap((run, runIndex) => {
           if (run.type !== 'shape' && run.type !== 'image' && run.type !== 'chart') return [];
-          const bridge = publicAnchorBridge(run, source, runIndex);
+          const bridge = publicAnchorBridge(source, runIndex);
           if (!bridge
             || (onlyOccurrenceIds && !onlyOccurrenceIds.has(bridge.occurrenceId))
             || committedOccurrenceIds.has(bridge.occurrenceId)
@@ -697,7 +661,7 @@ function buildConcreteBodyLayoutKernel(
             paraId: index,
           })),
           floatParaSeq: request.floatingTableExclusions?.length ?? 0,
-          pageAnchorPrescanned: new Set<DocParagraph>(),
+          pageAnchorPrescanned: new Set<ParagraphLayoutSource>(),
         };
         const inheritedAuthority =
           inheritedParagraphAuthorityForReacquisition(request.acquired);
@@ -712,57 +676,22 @@ function buildConcreteBodyLayoutKernel(
           inheritedAuthority,
         );
       };
-      const endnotesById = indexNotes(doc.endnotes ?? []);
+      const endnotesById = indexNotes(source.blocks.endnotes);
       const storyLayoutCache = new Map<string, StoryLayout>();
-      const storyRoot = (source: SourceRef): readonly BodyElement[] => {
-        if (source.path.length !== 0) {
+      const storyRoot = (ref: SourceRef): readonly LayoutStoryBlock[] => {
+        if (ref.path.length !== 0) {
           throw new Error('Story acquisition requires a story-root source');
         }
-        if (source.story === 'header' || source.story === 'footer') {
-          const story = stories.get(`${source.story}:${source.storyInstance}`);
-          if (!story) throw new Error(`Unknown ${source.story} story source`);
-          return story.body;
-        }
-        if (source.story === 'footnote' || source.story === 'endnote') {
-          const note = (source.story === 'footnote' ? footnotesById : endnotesById)
-            .get(source.storyInstance);
-          if (!note) throw new Error(`Unknown ${source.story} story source`);
-          return note.content;
-        }
-        throw new Error(`Unsupported shared story source: ${source.story}`);
+        return source.blocks.storyRoot(ref);
       };
-      const storyElement = (
-        root: readonly (BodyElement | CompleteTextBoxBlockInput)[],
-        source: SourceRef,
-      ): Extract<BodyElement, { type: 'paragraph' | 'table' }> => {
-        if (source.path.length === 0 || (source.path.length - 1) % 3 !== 0) {
+      const storyElement = (sourceRef: SourceRef): LayoutFlowBlock => {
+        if (sourceRef.path.length === 0 || (sourceRef.path.length - 1) % 3 !== 0) {
           throw new Error('Story block acquisition requires a canonical source path');
         }
-        type TraversableStoryElement = Readonly<{
-          type: string;
-          rows?: readonly Readonly<{
-            cells: readonly Readonly<{
-              content: readonly TraversableStoryElement[];
-            }>[];
-          }>[];
-        }>;
-        let element = root[source.path[0]!] as TraversableStoryElement | undefined;
-        for (let offset = 1; offset < source.path.length; offset += 3) {
-          if (!element || element.type !== 'table') {
-            throw new Error(`Story source leaves table ownership: ${source.path.join('.')}`);
-          }
-          element = element.rows?.[source.path[offset]!]
-            ?.cells[source.path[offset + 1]!]
-            ?.content[source.path[offset + 2]!];
-        }
-        if (!element || (element.type !== 'paragraph' && element.type !== 'table')) {
-          throw new Error(`Story source does not identify a flow block: ${source.path.join('.')}`);
-        }
-        return element as unknown as Extract<BodyElement, { type: 'paragraph' | 'table' }>;
+        return source.blocks.resolve(sourceRef);
       };
       const acquireStoryLayout = (
         request: import('./body-layout-kernel.js').StoryLayoutAcquisitionInput,
-        explicitRoot?: readonly CompleteTextBoxBlockInput[],
       ): StoryLayout => {
         const cacheKey = JSON.stringify({
           source: request.source,
@@ -772,7 +701,7 @@ function buildConcreteBodyLayoutKernel(
         });
         const cached = storyLayoutCache.get(cacheKey);
         if (cached) return cached;
-        const root = explicitRoot ?? storyRoot(request.source);
+        const root = storyRoot(request.source);
         const noteReferenceNumber = request.source.story === 'footnote'
           || request.source.story === 'endnote'
           ? state.noteNumbers?.get(
@@ -803,7 +732,7 @@ function buildConcreteBodyLayoutKernel(
           floats: [],
           floatParaSeq: 0,
           retainedTablesBySourceIndex: new Map(),
-          pageAnchorPrescanned: new Set<DocParagraph>(),
+          pageAnchorPrescanned: new Set<ParagraphLayoutSource>(),
           noteReferenceNumber,
           verticalCJK: storyVertical,
           verticalAllRotated: storyVertical
@@ -815,7 +744,7 @@ function buildConcreteBodyLayoutKernel(
             lineNumberingEligible: false,
           },
         };
-        preRegisterPageFloats(root as readonly BodyElement[], 0, candidate);
+        preRegisterPageFloats(root, 0, candidate);
         const storyServices = createLayoutServicesRuntimeView(services);
         candidate.layoutServices = storyServices;
         const blockInputs: StoryBlockInput[] = root.flatMap((element, index): StoryBlockInput[] => {
@@ -836,7 +765,7 @@ function buildConcreteBodyLayoutKernel(
             throw new Error(`Unsupported ${request.source.story} story block: ${element.type}`);
           }
           const dependencies = candidate.retainedTableAcquisition;
-          const table = element as unknown as DocTable;
+          const table: LayoutTableBlock = element;
           const columns = resolveColumnWidths(
             table,
             request.container.bounds.widthPt,
@@ -851,18 +780,18 @@ function buildConcreteBodyLayoutKernel(
             dependencies,
           ).input];
         });
-        let previousParagraph: DocParagraph | null = null;
+        let previousParagraph: LayoutParagraphBlock | null = null;
         const algorithms: BlockLayoutAlgorithms = {
           layoutParagraph(block, placement) {
-            const paragraph = storyElement(root, block.source);
+            const paragraph = storyElement(block.source);
             if (paragraph.type !== 'paragraph') throw new Error('Story paragraph source kind mismatch');
             const sourceIndex = block.source.path[0]!;
-            const previous = sourceIndex > 0 && root[sourceIndex - 1]?.type === 'paragraph'
-              ? root[sourceIndex - 1] as DocParagraph
-              : null;
-            const next = root[sourceIndex + 1]?.type === 'paragraph'
-              ? root[sourceIndex + 1] as DocParagraph
-              : null;
+            const previousCandidate = sourceIndex > 0 ? root[sourceIndex - 1] : undefined;
+            const previous: LayoutParagraphBlock | null = previousCandidate?.type === 'paragraph'
+              ? previousCandidate : null;
+            const nextCandidate = root[sourceIndex + 1];
+            const next: LayoutParagraphBlock | null = nextCandidate?.type === 'paragraph'
+              ? nextCandidate : null;
             const previousAfterPt = previousParagraph?.spaceAfter ?? 0;
             const spacing = paragraphGapAdjustment(
               previousParagraph,
@@ -878,10 +807,10 @@ function buildConcreteBodyLayoutKernel(
             candidate.contentX = placement.container.bounds.xPt;
             candidate.contentW = placement.container.bounds.widthPt;
             const publicRuns = paragraph.runs.filter((run, runIndex) =>
-              publicAnchorBridge(run, block.source, runIndex) !== null);
+              publicAnchorBridge(block.source, runIndex) !== null);
             if (publicRuns.length > 0) {
               registerAnchorFloats(
-                { ...paragraph, runs: publicRuns },
+                Object.freeze({ ...paragraph, runs: Object.freeze(publicRuns) }),
                 candidate,
                 candidate.y,
               );
@@ -890,7 +819,7 @@ function buildConcreteBodyLayoutKernel(
             const borderEdges = resolveParagraphBorderEdges(previous, paragraph, next);
             const result = acquireRegisteredParagraph(
               candidate,
-              candidate.acquisitionInputs.paragraphAcquisitionInput(paragraph, block.source),
+              paragraph,
               {
                 id: `${block.source.story}:${block.source.storyInstance}:${block.source.path.join('.')}`,
                 source: block.source,
@@ -979,18 +908,11 @@ function buildConcreteBodyLayoutKernel(
           pageIndex: state.pageIndex,
           section,
           container: request.container,
-        }, request.blocks);
+        });
       };
       state.acquireCompleteTextBoxStory = acquireCompleteTextBoxStory;
       const session: BodyLayoutSession = {
-        hasPaginationFields: paginatedFlowHasPaginationDependentFields(
-          doc.body,
-          doc.footnotes ?? [],
-          [
-            ...[...stories.values()].map((story) => story.body),
-            ...(doc.endnotes ?? []).map((note) => note.content),
-          ],
-        ),
+        hasPaginationFields: source.hasPaginationFields,
         measureParagraph(request: BodyParagraphAcquisitionInput) {
           applyLocation(request.location);
           const paragraph = sourceElement(request.input.source);
@@ -1008,7 +930,7 @@ function buildConcreteBodyLayoutKernel(
               paragraph,
               frameGroup,
               state,
-              frameAnchorLineHeightPx(doc.body, paragraph, state),
+              frameAnchorLineHeightPx(source.blocks.body, paragraph, state),
               (acquired) => { acquiredGroup = acquired; },
             );
             if (!acquiredGroup) throw new Error('Body frame acquisition omitted its retained group');
@@ -1928,7 +1850,7 @@ function buildConcreteBodyLayoutKernel(
             character: null,
             pageParity: request.location.pageIndex % 2 === 0 ? 'odd' as const : 'even' as const,
           });
-          const publicParagraphs = new Set<DocParagraph>();
+          const publicParagraphs = new Set<ParagraphLayoutSource>();
           const paragraphKey = (source: SourceRef) =>
             `${source.story}:${source.storyInstance}:${source.path.join('.')}`;
           const paragraphIds = new Map<string, number>();
@@ -1944,10 +1866,7 @@ function buildConcreteBodyLayoutKernel(
             if (paragraph.type !== 'paragraph') {
               throw new Error('Page-anchor prescan source kind mismatch');
             }
-            const acquired = state.acquisitionInputs.paragraphAcquisitionInput(
-              paragraph,
-              anchor.paragraphSource,
-            );
+            const acquired = paragraph;
             const hostMatches = acquired.runs.filter((run) =>
               run.type === 'anchorHost' && run.anchorOccurrenceId === anchor.occurrenceId);
             const payloads = acquired.runs
@@ -1974,7 +1893,7 @@ function buildConcreteBodyLayoutKernel(
               ));
             if (hostMatches.length !== 1 || payloads.length === 0) {
               const publicRun = paragraph.runs.find((run, runIndex) =>
-                publicAnchorBridge(run, anchor.paragraphSource, runIndex)?.occurrenceId
+                publicAnchorBridge(anchor.paragraphSource, runIndex)?.occurrenceId
                   === anchor.occurrenceId);
               if (publicRun) {
                 if (
@@ -2077,7 +1996,7 @@ function buildConcreteBodyLayoutKernel(
         measureLineNumberGlyph(text) {
           const previousFont = measureContext.font;
           try {
-            const fontSizePt = docDefaultFontSizePt(doc);
+            const fontSizePt = source.fonts.defaultBodyFontSizePt;
             const font = buildFont(false, false, fontSizePt, null, {});
             measureContext.font = font;
             const metrics = measureContext.measureText(text);
@@ -2203,7 +2122,7 @@ function buildConcreteBodyLayoutKernel(
   });
 }
 
-function paraGrid(para: DocParagraph, state: BodyMeasurementContext): DocGridCtx {
+function paraGrid(para: ParagraphLayoutSource, state: BodyMeasurementContext): DocGridCtx {
   return gridForParagraphContext(
     state,
     resolveStateParagraphLayoutContext(state, para),
@@ -2214,7 +2133,7 @@ function paraGrid(para: DocParagraph, state: BodyMeasurementContext): DocGridCtx
  * authoritative row advances for one top-level body occurrence. */
 function computeTablePtLayout(
   state: BodyAcquisitionState,
-  table: DocTable,
+  table: TableLayoutSource,
   contentWPt: number,
   sourceIndex: number,
 ): { colWidthsPt: number[]; rowContentHeightsPt: number[]; rowHeightsPt: number[] } {
@@ -2258,7 +2177,7 @@ function computeTablePtLayout(
  * Exported for the table-layout integration tests.
  */
 function resolveColumnWidths(
-  table: DocTable,
+  table: TableLayoutSource,
   contentWPt: number,
   state: BodyMeasurementContext,
 ): number[] {
@@ -2328,7 +2247,7 @@ function resolveColumnWidths(
     table,
     contentWPt,
     (cell) => {
-      const margins = marginsByCell.get(cell as object) ?? effCellMargins(cell as DocTableCell, table);
+      const margins = marginsByCell.get(cell as object) ?? effCellMargins(cell, table);
       return measureTableCellIntrinsicWidths(cell, margins, {
         paragraph: (paragraph) => {
           const baseContext = resolveParagraphLayoutContext(
@@ -2396,15 +2315,15 @@ function resolveColumnWidths(
 // Historical name retained while this renderer helper remains on the C3
 // migration inventory; the returned value is now canonical points.
 function frameAnchorLineHeightPx(
-  elements: BodyElement[],
-  frameEl: BodyElement,
+  elements: readonly LayoutStoryBlock[],
+  frameEl: LayoutParagraphBlock,
   state: BodyMeasurementContext,
 ): number {
   const start = elements.indexOf(frameEl);
   for (let j = start + 1; j < elements.length; j++) {
     const e = elements[j];
     if (e.type !== 'paragraph') continue;
-    const p = e as unknown as DocParagraph;
+    const p = e;
     if (p.framePr) continue; // adjacent frame paragraphs are part of the frame
     return paragraphMarkLineHeight(
       p,
@@ -2420,7 +2339,7 @@ function frameAnchorLineHeightPx(
       state.acquisitionInputs.paragraphMarkShapeInput(p),
     );
   }
-  const fp = frameEl as unknown as DocParagraph;
+  const fp = frameEl;
   return paragraphMarkLineHeight(
     fp,
     1,
@@ -2438,8 +2357,8 @@ function frameAnchorLineHeightPx(
 
 /** Resolve a prepared body frame group and attach its retained member layouts. */
 function resolveFrameBox(
-  para: DocParagraph,
-  group: BodyFrameGroup,
+  para: ParagraphLayoutSource,
+  group: BodyFrameGroup<LayoutParagraphBlock>,
   state: BodyAcquisitionState,
   anchorLineHPt: number,
   onAcquired?: (acquired: ReturnType<typeof acquireRetainedFrameGroup>) => void,
@@ -2458,10 +2377,7 @@ function resolveFrameBox(
   const acquired = acquireRetainedFrameGroup(group, {
     contexts: group.members.map((paragraph) =>
       resolveBodyParagraphLayoutContext(state, paragraph)),
-    inputs: group.members.map((paragraph, index) =>
-      state.acquisitionInputs.paragraphAcquisitionInput(paragraph, {
-        story: 'body', storyInstance: 'body', path: [group.sourceIndices[index]!],
-      })),
+    inputs: group.members,
     borderEdges,
     borderExtentsPt: group.members.map((paragraph, index) =>
       borderEdges[index]?.bottom === 'none' ? 0 : bottomBorderExtentPt(paragraph.borders)),
@@ -2538,7 +2454,7 @@ function resolveFrameBox(
  * registers no float.
  */
 function resolveShapeBox(
-  shape: ShapeRun,
+  shape: DeepReadonly<ShapeRun>,
   state: AnchorFloatRegistrationState,
   paragraphTopPt: number,
 ): { x: number; y: number; w: number; h: number } {
@@ -2657,12 +2573,17 @@ const __test_physicalLayoutSection = (logical: SectionProps): SectionProps =>
 const __test_verticalLayoutSection = (phys: SectionProps): SectionProps =>
   verticalLayoutSection(phys);
 
+type AnchorScanBlock =
+  | (ParagraphLayoutSource & Readonly<{ type: 'paragraph' }>)
+  | DeepReadonly<Exclude<BodyElement, { type: 'paragraph' }>>
+  | Extract<LayoutStoryBlock, { type: 'unsupportedTextBoxBlock' }>;
+
 /** Exported for the page-anchor pre-scan test (ECMA-376 §20.4.3.2/§20.4.3.5):
  *  drives {@link preRegisterPageFloats} from a unit test against a stub
  *  AnchorFloatRegistrationState so we can pin which paragraphs get pre-registered and that
  *  duplicate calls are idempotent. */
 const __test_preRegisterPageFloats = (
-  body: readonly BodyElement[],
+  body: readonly AnchorScanBlock[],
   startIdx: number,
   state: AnchorFloatRegistrationState,
 ): void => preRegisterPageFloats(body, startIdx, state);
@@ -2805,7 +2726,7 @@ function resolveAnchorBox(
  *  Paragraph-local floats (`paragraph`/`line`/`character`) keep the per-
  *  paragraph path so their Y stays anchored at this paragraph's top. */
 function registerAnchorFloats(
-  para: DocParagraph,
+  para: ParagraphLayoutSource,
   state: AnchorFloatRegistrationState,
   paragraphAnchorY: number,
 ): void {
@@ -2816,15 +2737,15 @@ function registerAnchorFloats(
   const prescanned = state.pageAnchorPrescanned?.has(para) ?? false;
   for (const run of para.runs) {
     if (run.type === 'image') {
-      const img = run as unknown as ImageRun;
+      const img = run;
       if (prescanned && isPageLevelWrapFloat(img)) continue;
       registerImageFloat(img, state, paragraphAnchorY, paraId);
     } else if (run.type === 'chart') {
-      const chart = run as unknown as ChartRun;
+      const chart = run;
       if (prescanned && isPageLevelWrapFloat(chart)) continue;
       registerChartFloat(chart, state, paragraphAnchorY, paraId);
     } else if (run.type === 'shape') {
-      const shp = run as unknown as ShapeRun;
+      const shp = run;
       if (prescanned && isPageLevelWrapFloat(shp)) continue;
       registerShapeFloat(shp, state, paragraphAnchorY, paraId);
     }
@@ -2851,7 +2772,7 @@ function registerAnchorFloats(
  *  the existing `registerAnchorFloats` post-newPage re-call at the split-
  *  relocation site.) */
 function preRegisterPageFloats(
-  body: readonly BodyElement[],
+  body: readonly AnchorScanBlock[],
   startIdx: number,
   state: AnchorFloatRegistrationState,
 ): void {
@@ -2866,18 +2787,18 @@ function preRegisterPageFloats(
       continue;
     }
     if (el.type !== 'paragraph') continue;
-    const para = el as unknown as DocParagraph;
+    const para = el;
     // Skip if already pre-registered (renderer may call this once per page;
     // paginator may re-call after newPage(), but newPage clears the set).
     if (state.pageAnchorPrescanned.has(para)) continue;
     let hasPageLevel = false;
     for (const run of para.runs) {
       if (run.type === 'image') {
-        if (isPageLevelWrapFloat(run as unknown as ImageRun)) { hasPageLevel = true; break; }
+        if (isPageLevelWrapFloat(run)) { hasPageLevel = true; break; }
       } else if (run.type === 'chart') {
-        if (isPageLevelWrapFloat(run as unknown as ChartRun)) { hasPageLevel = true; break; }
+        if (isPageLevelWrapFloat(run)) { hasPageLevel = true; break; }
       } else if (run.type === 'shape') {
-        if (isPageLevelWrapFloat(run as unknown as ShapeRun)) { hasPageLevel = true; break; }
+        if (isPageLevelWrapFloat(run)) { hasPageLevel = true; break; }
       }
     }
     if (!hasPageLevel) continue;
@@ -2888,15 +2809,15 @@ function preRegisterPageFloats(
     const paraId = state.floatParaSeq++;
     for (const run of para.runs) {
       if (run.type === 'image') {
-        const img = run as unknown as ImageRun;
+        const img = run;
         if (!isPageLevelWrapFloat(img)) continue;
         registerImageFloat(img, state, 0, paraId);
       } else if (run.type === 'chart') {
-        const chart = run as unknown as ChartRun;
+        const chart = run;
         if (!isPageLevelWrapFloat(chart)) continue;
         registerChartFloat(chart, state, 0, paraId);
       } else if (run.type === 'shape') {
-        const shp = run as unknown as ShapeRun;
+        const shp = run;
         if (!isPageLevelWrapFloat(shp)) continue;
         registerShapeFloat(shp, state, 0, paraId);
       }
@@ -2908,7 +2829,7 @@ function preRegisterPageFloats(
 /** Reserve the float-exclusion rect for one anchored wrap-image. Retained paint
  * owns the bitmap drawing. */
 function registerImageFloat(
-  img: ImageRun,
+  img: DeepReadonly<ImageRun>,
   state: AnchorFloatRegistrationState,
   paragraphAnchorY: number,
   paraId: number,
@@ -2950,7 +2871,7 @@ function registerImageFloat(
 /** Reserve the float-exclusion rect for one anchored wrap-chart
  *  (ECMA-376 §20.4.2.3/.16/.17). Retained paint owns chart drawing. */
 function registerChartFloat(
-  chart: ChartRun,
+  chart: DeepReadonly<Omit<ChartRun, 'chart'>>,
   state: AnchorFloatRegistrationState,
   paragraphAnchorY: number,
   paraId: number,
@@ -2978,7 +2899,7 @@ function registerChartFloat(
 /** Reserve the float-exclusion rect for one anchored wrap shape. Retained paint
  *  owns the drawing, so this only pushes an already-represented FloatRect. */
 function registerShapeFloat(
-  shape: ShapeRun,
+  shape: DeepReadonly<ShapeRun>,
   state: AnchorFloatRegistrationState,
   paragraphAnchorY: number,
   paraId: number,
@@ -3032,8 +2953,8 @@ function registerShapeFloat(
  *  default (§17.4.41). A résumé template, for example, gives one cell a larger
  *  top margin to add space above its content. */
 function effCellMargins(
-  cell: DocTableCell,
-  table: DocTable,
+  cell: TableLayoutSource['rows'][number]['cells'][number],
+  table: TableLayoutSource,
 ): { top: number; bottom: number; left: number; right: number } {
   return {
     top: cell.marginTop ?? table.cellMarginTop,
@@ -3074,7 +2995,7 @@ function effCellMargins(
 // drift against the whole-string measure (約物半角 contextual collapse stays
 // honoured). See packages/core/src/text/justify-positions.ts.
 
-  const kernel = buildConcreteBodyLayoutKernel(doc, measureContext, resolvedLocalFonts);
+  const kernel = buildConcreteBodyLayoutKernel(source, measureContext, resolvedLocalFonts);
   return Object.freeze({
     kernel,
     internals: Object.freeze({

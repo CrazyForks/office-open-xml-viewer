@@ -4,10 +4,10 @@ import type { DocParagraph, DocxDocumentModel } from '../types.js';
 import { imageResourceKey, mathResourceKey } from './source-key.js';
 import {
   chartPaintResourceKey,
-  createDocumentPaintResourceRegistry,
 } from './production-paint-resources.js';
 import { normalizeInternalDocumentModel } from '../parser-model.js';
 import { documentImageMetadataRecords } from './resources.js';
+import { layoutSourceStore } from '../layout-source-model-adapter.js';
 
 function chartModel(): ChartModel {
   return {
@@ -37,9 +37,15 @@ function paragraph(runs: DocParagraph['runs']): DocParagraph {
   } as DocParagraph;
 }
 
+const section = {
+  pageWidth: 612, pageHeight: 792,
+  marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+  headerDistance: 36, footerDistance: 36,
+} as DocxDocumentModel['section'];
+
 function documentModel(): DocxDocumentModel {
   return {
-    section: {} as DocxDocumentModel['section'],
+    section,
     headers: {
       default: {
         body: [paragraph([{
@@ -72,7 +78,7 @@ function documentModel(): DocxDocumentModel {
 
 describe('production paint resources', () => {
   it('builds clone-safe descriptors with the same structural keys as retained layout', () => {
-    const registry = createDocumentPaintResourceRegistry(documentModel());
+    const registry = layoutSourceStore(documentModel()).paintResources;
     const body = { story: 'body' as const, storyInstance: 'body', path: [0] };
     const imageKey = imageResourceKey({ ...body, path: [0, 0] }, 'word/media/image.png');
     const chartKey = chartPaintResourceKey({ ...body, path: [0, 1] });
@@ -107,7 +113,7 @@ describe('production paint resources', () => {
 
   it('addresses a valid image by authored order after an unavailable drawing', () => {
     const doc = {
-      section: {},
+      section,
       headers: {},
       footers: {},
       body: [paragraph([{
@@ -130,11 +136,7 @@ describe('production paint resources', () => {
       undefined,
       projections,
     );
-    const registry = createDocumentPaintResourceRegistry(
-      normalized.document,
-      metadata,
-      projections,
-    );
+    const registry = layoutSourceStore(normalized.document).paintResources;
     const authoredKey = imageResourceKey(
       { story: 'body', storyInstance: 'body', path: [0, 1] },
       'word/media/available.png',
@@ -144,5 +146,49 @@ describe('production paint resources', () => {
       partPath: 'word/media/available.png',
       intrinsicSize: { widthPt: 24, heightPt: 16 },
     });
+  });
+
+  it('projects image and chart resources from a complete rich text box nested table', () => {
+    const nestedParagraph = paragraph([{
+      type: 'image', imagePath: 'word/media/rich.png', mimeType: 'image/png',
+      widthPt: 17, heightPt: 13,
+    }, {
+      type: 'chart', chart: chartModel(), widthPt: 60, heightPt: 40, anchor: false,
+    }]);
+    nestedParagraph.numbering = null;
+    const shape = {
+      type: 'shape', widthPt: 50, heightPt: 30, anchorXPt: 0, anchorYPt: 0,
+      anchorXFromMargin: false, anchorYFromPara: false, zOrder: 0, subpaths: [],
+      fill: null, stroke: null,
+      textBlocks: [{ text: 'compatibility sentinel', fontSizePt: 10, alignment: 'left' }],
+      textBoxContent: [{
+        type: 'table', colWidths: [80], rows: [{ cells: [{
+          content: [nestedParagraph], colSpan: 1, vMerge: false, vAlign: 'top',
+        }] }],
+      }],
+    };
+    const store = layoutSourceStore({
+      section, headers: {}, footers: {}, body: [paragraph([shape as never])],
+    } as DocxDocumentModel);
+    const storyInstance = 'body:body:0.0';
+    const imageSource = {
+      story: 'textbox' as const, storyInstance, path: [0, 0, 0, 0, 0],
+    };
+    const chartSource = { ...imageSource, path: [0, 0, 0, 0, 1] };
+    const imageKey = imageResourceKey(imageSource, 'word/media/rich.png');
+    const chartKey = chartPaintResourceKey(chartSource);
+    const canonicalParagraph = store.blocks.resolve({
+      story: 'body', storyInstance: 'body', path: [0],
+    });
+    if (canonicalParagraph.type !== 'paragraph') throw new Error('Expected paragraph');
+    const canonicalShape = canonicalParagraph.runs[0];
+
+    expect(canonicalShape?.type).toBe('shape');
+    expect(canonicalShape).not.toHaveProperty('textBlocks');
+    expect(canonicalShape).not.toHaveProperty('textBoxContent');
+    expect(store.paintResources.resolve(imageKey, 'image')).toMatchObject({
+      intrinsicSize: { widthPt: 17, heightPt: 13 },
+    });
+    expect(store.paintResources.resolve(chartKey, 'chart').model.chartType).toBe('line');
   });
 });

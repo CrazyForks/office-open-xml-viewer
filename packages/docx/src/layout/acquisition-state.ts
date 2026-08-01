@@ -4,7 +4,7 @@ import {
   resolveParagraphLayoutContext,
 } from '../layout-context.js';
 import { getDefaultFontSize } from '../line-layout.js';
-import type { DocParagraph } from '../types.js';
+import type { ParagraphLayoutSource } from './text.js';
 import type { BodyAcquisitionState, RetainedTableRecord } from './acquisition-context.js';
 import type { AnchorReferenceFramesInput } from './anchor-frame.js';
 import { applyNumberingBodyOffset } from './numbering-marker.js';
@@ -71,7 +71,7 @@ export function bodyAnchorReferenceFrames(
 
 function applyNumberingContext(
   state: ParagraphContextState,
-  paragraph: DocParagraph,
+  paragraph: ParagraphLayoutSource,
   context: ParagraphLayoutContext,
 ): ParagraphLayoutContext {
   return applyNumberingBodyOffset(context, {
@@ -91,7 +91,7 @@ function applyNumberingContext(
 
 export function resolveBodyParagraphLayoutContext(
   state: ParagraphContextState,
-  paragraph: DocParagraph,
+  paragraph: ParagraphLayoutSource,
 ): ParagraphLayoutContext {
   return applyNumberingContext(
     state,
@@ -107,7 +107,7 @@ export function resolveBodyParagraphLayoutContext(
 
 export function resolveStateParagraphLayoutContext(
   state: ParagraphContextState & Partial<Pick<BodyAcquisitionState, 'storyContext'>>,
-  paragraph: DocParagraph,
+  paragraph: ParagraphLayoutSource,
 ): ParagraphLayoutContext {
   return applyNumberingContext(
     state,

@@ -1,5 +1,5 @@
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
-import type { DocParagraph, DocTable, DocTableCell } from '../types.js';
+import type { DocTableCell } from '../types.js';
 import type { ParagraphLayoutContext } from '../layout-context.js';
 import {
   buildFont,
@@ -18,7 +18,9 @@ import type {
   TextMeasurer,
 } from '../paragraph-measure.js';
 import { calcEffectiveFontPx } from './text.js';
-import type { TextFontSlots } from './text.js';
+import type { ParagraphLayoutSource, TextFontSlots } from './text.js';
+import type { TableLayoutSource } from './table-source-acquisition.js';
+import type { DeepReadonly } from './types.js';
 import { stableFingerprint } from './fingerprint.js';
 import {
   numberingMarkerLogicalInterval,
@@ -36,15 +38,15 @@ export interface TableCellIntrinsicWidths {
 }
 
 export interface TableCellIntrinsicWidthDependencies {
-  paragraph(paragraph: DocParagraph): TableCellIntrinsicWidths;
-  nestedTable(table: DocTable): TableCellIntrinsicWidths;
+  paragraph(paragraph: ParagraphLayoutSource): TableCellIntrinsicWidths;
+  nestedTable(table: TableLayoutSource): TableCellIntrinsicWidths;
 }
 
 /** Fold public cell content into one intrinsic interval. OOXML width/style
  * precedence is deliberately absent: parser/model projection and the column
  * solver own those separate responsibilities. */
 export function measureTableCellIntrinsicWidths(
-  cell: Readonly<DocTableCell>,
+  cell: DeepReadonly<DocTableCell>,
   margins: Readonly<{ left: number; right: number }>,
   dependencies: TableCellIntrinsicWidthDependencies,
 ): TableCellIntrinsicWidths {
@@ -327,7 +329,7 @@ function logicalLineInterval(
 }
 
 export function measureParagraphIntrinsicWidths(
-  paragraph: DocParagraph,
+  paragraph: ParagraphLayoutSource,
   context: ParagraphLayoutContext,
   maximumWidthPt: number,
   measurer: TextMeasurer,
@@ -401,7 +403,7 @@ export function measureParagraphIntrinsicWidths(
       penPt += segment.measuredWidth;
       if ('imagePath' in segment && !segment.anchor) {
         minimumAtomPt = Math.max(minimumAtomPt, segment.measuredWidth);
-      } else if ('mathNodes' in segment) {
+      } else if ('math' in segment) {
         minimumAtomPt = Math.max(minimumAtomPt, segment.measuredWidth);
       } else if ('isTab' in segment) {
         minimumAtomPt = Math.max(

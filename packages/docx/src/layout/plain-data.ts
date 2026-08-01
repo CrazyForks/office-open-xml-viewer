@@ -27,10 +27,18 @@ function assertPlainData(
   if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
     throw new TypeError(`${path} must be structured-clone-safe plain data`);
   }
+  if (Object.getOwnPropertySymbols(value).length !== 0) {
+    throw new TypeError(`${path} must contain only enumerable string data properties`);
+  }
   visiting.add(value);
   try {
-    for (const [key, child] of Object.entries(value)) {
-      assertPlainData(child, `${path}.${key}`, visiting, completed);
+    for (const key of Object.getOwnPropertyNames(value)) {
+      if (Array.isArray(value) && key === 'length') continue;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+        throw new TypeError(`${path}.${key} must be an enumerable data property`);
+      }
+      assertPlainData(descriptor.value, `${path}.${key}`, visiting, completed);
     }
   } finally {
     visiting.delete(value);
@@ -57,4 +65,12 @@ export function snapshotPlainData<T>(value: T, label: string): DeepReadonly<T> {
   } catch {
     throw new TypeError(`${label} must be structured-clone-safe plain data`);
   }
+}
+
+/** Validate and recursively seal builder-owned plain data in place. Unlike
+ * snapshotPlainData this has no second structured-clone peak; callers must own
+ * the supplied graph and must not expose it for later mutation. */
+export function sealPlainData<T>(value: T, label: string): DeepReadonly<T> {
+  assertPlainData(value, label);
+  return deepFreezePlainData(value);
 }

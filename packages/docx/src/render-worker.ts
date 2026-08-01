@@ -18,14 +18,15 @@ import {
 } from '@silurus/ooxml-core';
 import { resourcePolicyForWasm, serializeWorkerError } from '@silurus/ooxml-core/worker';
 import type { DocxDocumentModel } from './types';
-import { renderDocumentToCanvas, dropColorReplacedCache } from './renderer';
+import { renderLayoutSourceToCanvas, dropColorReplacedCache } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import { loadDocxLocalFontMetrics } from './local-font-metrics';
 import type { RenderWorkerRequest, RenderWorkerResponse, DocumentMeta } from './worker-protocol';
-import { normalizeInternalDocumentModel } from './parser-model.js';
+import { layoutSourceModelAdapter } from './layout-source-model-adapter.js';
+import { layoutSourceStoreOf } from './layout/runtime-state.js';
 import {
   retainRenderWorkerDocumentLayout,
   type RetainedRenderWorkerDocumentLayout,
@@ -112,8 +113,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         host.setArchive(archive);
         return JSON.parse(new TextDecoder().decode(archive.parse())) as DocxDocumentModel;
       });
-      const model = normalizeInternalDocumentModel(parsedModel).document;
-      if (documentRequiresDomVerticalGlyphLayout(model)) {
+      if (documentRequiresDomVerticalGlyphLayout(parsedModel)) {
         // The normalized public model deliberately omits parser-only sidecars
         // such as unavailable-drawing geometry. Send the untouched parser wire
         // to the main-thread fallback so its normalization boundary can rebuild
@@ -127,6 +127,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         post({ type: 'mainThreadVerticalFallback', id, documentJson }, [documentJson]);
         return;
       }
+      const adapted = layoutSourceModelAdapter(parsedModel);
+      const source = adapted.source;
+      const model = adapted.document;
       let googleFaces: FontFace[] = [];
       if (req.useGoogleFonts) {
         // Pagination measures text, so fonts must land before canonical layout —
@@ -149,14 +152,14 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       }
       const localMetrics = await loadDocxLocalFontMetrics(model);
       localMetricFontFaces = localMetrics.faces;
-      const layoutServices = createLayoutServices(model, {
+      const layoutServices = createLayoutServices(source, {
         localMetrics: localMetrics.metrics,
         useGoogleFonts: !!req.useGoogleFonts,
         embeddedFaces,
         googleFaces,
       });
       doc = retainRenderWorkerDocumentLayout(
-        model,
+        source,
         layoutServices,
         req.defaultCurrentDateMs,
       );
@@ -179,7 +182,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
     if (req.type === 'renderPage') {
       if (!doc) throw new Error('Document not loaded');
       const canvas = new OffscreenCanvas(1, 1); // renderer resizes it
-      await renderDocumentToCanvas(doc.model, canvas, req.pageIndex, {
+      const source = layoutSourceStoreOf(doc.layoutServices);
+      if (!source) throw new Error('Document layout source is not initialized');
+      await renderLayoutSourceToCanvas(source, canvas, req.pageIndex, {
         ...req.opts,
         fetchImage: getImage,
         layoutServices: doc.layoutServices,

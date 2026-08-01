@@ -21,7 +21,7 @@ import {
   type NormalizedOoxmlResourcePolicy,
 } from '@silurus/ooxml-core/worker';
 import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
-import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
+import { renderLayoutSourceToCanvas, documentHasMath, prepareMathRuns, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
@@ -32,6 +32,10 @@ import {
   documentLayoutRuntimeOf,
   layoutVariantStoreOf,
 } from './layout/runtime-state.js';
+import {
+  type LayoutSourceStore,
+} from './layout/layout-source-store.js';
+import { layoutSourceModelAdapter } from './layout-source-model-adapter.js';
 import type { DeepReadonly, DocumentLayout } from './layout/types.js';
 import type {
   DocumentMeta,
@@ -39,7 +43,6 @@ import type {
   RenderWorkerResponse,
   WireRenderPageOptions,
 } from './worker-protocol';
-import { normalizeInternalDocumentModel } from './parser-model.js';
 import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
 
@@ -76,6 +79,7 @@ export type RenderPageToBitmapOptions = WireRenderPageOptions & {
 
 export class DocxDocument {
   private _document: DocxDocumentModel | null = null;
+  private _source: LayoutSourceStore | null = null;
   private _meta: DocumentMeta | null = null;
   /** Lazily-built `bookmarkName → 0-based page index` map for internal hyperlink
    *  anchors (IX-nav). Built on first {@link getBookmarkPage} from the paginated
@@ -221,9 +225,9 @@ export class DocxDocument {
       if (doc._mode === 'main' && opts.math && doc._document && documentHasMath(doc._document)) {
         preparedMath = await prepareMathRuns(doc._document, opts.math);
       }
-      if (doc._mode === 'main' && doc._document) {
+      if (doc._mode === 'main' && doc._document && doc._source) {
         const runtime = documentLayoutRuntimeOf(doc);
-        runtime.services = createLayoutServices(doc._document, {
+        runtime.services = createLayoutServices(doc._source, {
           localMetrics: localMetrics?.metrics,
           useGoogleFonts: !!opts.useGoogleFonts,
           embeddedFaces: doc._embeddedFontFaces,
@@ -233,7 +237,7 @@ export class DocxDocument {
         });
         const services = runtime.services;
         const retained = retainRenderWorkerDocumentLayout(
-          doc._document,
+          doc._source,
           services,
           runtime.defaultCurrentDateMs,
         );
@@ -268,7 +272,9 @@ export class DocxDocument {
         const parsed = JSON.parse(
           new TextDecoder().decode(new Uint8Array(res.documentJson)),
         ) as DocxDocumentModel;
-        this._document = normalizeInternalDocumentModel(parsed).document;
+        const adapted = layoutSourceModelAdapter(parsed);
+        this._source = adapted.source;
+        this._document = adapted.document;
         this._meta = null;
         this._mode = 'main';
       } else {
@@ -281,13 +287,16 @@ export class DocxDocument {
       const parsed = JSON.parse(
         new TextDecoder().decode(new Uint8Array(documentJson)),
       ) as DocxDocumentModel;
-      this._document = normalizeInternalDocumentModel(parsed).document;
+      const adapted = layoutSourceModelAdapter(parsed);
+      this._source = adapted.source;
+      this._document = adapted.document;
     }
   }
 
   destroy(): void {
     this._bridge.terminate();
     this._document = null;
+    this._source = null;
     this._meta = null;
     documentLayoutRuntimeOf(this).services = null;
     this._bookmarkPages = null;
@@ -522,8 +531,8 @@ export class DocxDocument {
         "renderPage(canvas) is unavailable in mode: 'worker'; use renderPageToBitmap() and paint it via an ImageBitmapRenderingContext",
       );
     }
-    if (!this._document) throw new Error('Document not loaded');
-    return renderDocumentToCanvas(this._document, target, pageIndex, {
+    if (!this._source) throw new Error('Document not loaded');
+    return renderLayoutSourceToCanvas(this._source, target, pageIndex, {
       ...opts,
       // Lazy image bytes: the renderer fetches each embedded blip on demand by
       // zip path (decoded only when drawn) instead of reading inlined base64.

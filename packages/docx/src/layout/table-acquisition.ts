@@ -1,10 +1,10 @@
 import type {
   BorderSpec,
   CellBorders,
-  DocParagraph,
-  DocTable,
   TableBorders,
 } from '../types.js';
+import type { ParagraphLayoutSource } from './text.js';
+import type { TableLayoutSource } from './table-source-acquisition.js';
 import {
   acquireTableCellBlocks,
   isStructuralTrailingParagraph,
@@ -30,12 +30,12 @@ import type {
 
 export interface RetainedTableAcquisitionDependencies<State> {
   layoutServices(state: State): LayoutServices | undefined;
-  tableFormat(table: Readonly<DocTable>): TableFormatInput;
-  resolveColumns(table: DocTable, contentWidthPt: number, state: State): readonly number[];
-  createCellState(state: State, contentWidthPt: number, cell: DocTable['rows'][number]['cells'][number]): State;
+  tableFormat(table: TableLayoutSource): TableFormatInput;
+  resolveColumns(table: TableLayoutSource, contentWidthPt: number, state: State): readonly number[];
+  createCellState(state: State, contentWidthPt: number, cell: TableLayoutSource['rows'][number]['cells'][number]): State;
   acquireParagraph(
     state: State,
-    paragraph: DocParagraph,
+    paragraph: ParagraphLayoutSource,
     contentWidthPt: number,
     sourcePath: readonly number[],
     flowDomainId: string,
@@ -85,7 +85,7 @@ export interface NestedFloatingTableOccurrence {
 }
 
 function nextRegularParagraphIndex(
-  content: DocTable['rows'][number]['cells'][number]['content'],
+  content: TableLayoutSource['rows'][number]['cells'][number]['content'],
   afterIndex: number,
 ): number {
   const anchorBlockIndex = content.findIndex((element, index) => (
@@ -142,7 +142,7 @@ function paragraphHasPageDependency(layout: ParagraphLayout): boolean {
  * reaches back into parser/model metadata.
  */
 export function acquireRetainedTable<State>(
-  table: DocTable,
+  table: TableLayoutSource,
   columnWidthsPt: readonly number[],
   contentWidthPt: number,
   outerState: State,

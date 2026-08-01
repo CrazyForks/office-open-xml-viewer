@@ -1,10 +1,9 @@
-import type {
-  DocParagraph,
-  DocTable,
-  NumberingInfo,
-} from '../types.js';
+import type { NumberingInfo } from '../types.js';
 import type { ParagraphAcquisitionInput } from './text.js';
+import type { ParagraphLayoutSource } from './text.js';
+import type { TableLayoutSource } from './table-source-acquisition.js';
 import type {
+  DeepReadonly,
   NumberingMarkerShapeInput,
   SourceRef,
   TableColumnLayoutInput,
@@ -20,24 +19,24 @@ export interface BodyAcquisitionInputProjections {
     fallbackFontSizePt: number,
   ) => NumberingMarkerShapeInput;
   readonly paragraphMarkShapeInput: (
-    paragraph: DocParagraph,
+    paragraph: ParagraphLayoutSource,
   ) => NumberingMarkerShapeInput | undefined;
   readonly tableFormatInput: (
-    table: Readonly<DocTable>,
+    table: TableLayoutSource,
   ) => TableFormatInput;
   readonly tableColumnLayoutInput: (
-    table: Readonly<DocTable>,
+    table: TableLayoutSource,
     availableWidthPt: number,
     intrinsicWidths: (
-      cell: Readonly<DocTable['rows'][number]['cells'][number]>,
+      cell: TableLayoutSource['rows'][number]['cells'][number],
     ) => Readonly<{ minWidthPt: number; maxWidthPt: number }>,
     maximumWidthPt?: number,
   ) => TableColumnLayoutInput;
   readonly tableParticipatesInOrdinaryFlow: (
-    table: Readonly<DocTable>,
+    table: TableLayoutSource,
   ) => boolean;
   readonly paragraphAcquisitionInput: (
-    paragraph: DocParagraph,
+    paragraph: ParagraphLayoutSource,
     source: SourceRef,
   ) => ParagraphAcquisitionInput;
 }

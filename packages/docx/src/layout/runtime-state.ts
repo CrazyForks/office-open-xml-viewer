@@ -4,6 +4,7 @@ import type { NumberFormat } from '@silurus/ooxml-core';
 import type { BodyLayoutKernel } from './body-layout-kernel.js';
 import type { LayoutVariantStore } from './variant-store.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
+import type { LayoutSourceStore } from './layout-source-store.js';
 
 export interface DocumentLayoutRuntimeState {
   services: LayoutServices | null;
@@ -58,6 +59,7 @@ type LayoutServicesRuntimeOwner = object;
 
 const layoutServicesRuntimeOwners = new WeakMap<object, LayoutServicesRuntimeOwner>();
 const bodyLayoutKernels = new WeakMap<LayoutServicesRuntimeOwner, BodyLayoutKernel>();
+const layoutSourceStores = new WeakMap<LayoutServicesRuntimeOwner, LayoutSourceStore>();
 const verticalGlyphMeasurementServices = new WeakMap<
   LayoutServicesRuntimeOwner,
   VerticalGlyphMeasurementService
@@ -149,6 +151,21 @@ export function attachBodyLayoutKernel(
 export function bodyLayoutKernelOf(services: LayoutServices): BodyLayoutKernel | undefined {
   const owner = layoutServicesRuntimeOwner(services, false);
   return owner ? bodyLayoutKernels.get(owner) : undefined;
+}
+
+/** Bind every runtime service view to the one sealed acquisition source. */
+export function attachLayoutSourceStore(
+  services: LayoutServices,
+  source: LayoutSourceStore,
+): void {
+  const owner = layoutServicesRuntimeOwner(services, true)!;
+  if (layoutSourceStores.has(owner)) throw new Error('Layout source store is already attached');
+  layoutSourceStores.set(owner, source);
+}
+
+export function layoutSourceStoreOf(services: LayoutServices): LayoutSourceStore | undefined {
+  const owner = layoutServicesRuntimeOwner(services, false);
+  return owner ? layoutSourceStores.get(owner) : undefined;
 }
 
 /** Attach the synchronous vertical-glyph metric authority to the same private

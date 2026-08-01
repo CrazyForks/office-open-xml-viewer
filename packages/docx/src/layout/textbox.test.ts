@@ -11,7 +11,6 @@ import { createLayoutServices } from '../layout-runtime.js';
 import { layoutDocument } from '../document-layout.js';
 import { normalizeInternalDocumentModel } from '../parser-model.js';
 import { acquireShapeTextBoxLayout } from './paragraph.js';
-import type { CompleteTextBoxBlockInput } from './textbox-input.js';
 import type {
   FloatingTablePlacementLayout,
   ParagraphLayout,
@@ -178,10 +177,7 @@ function anchoredTextBox(
       input: {
         kind: 'complete',
         source: { story: 'textbox', storyInstance: 'shape:anchor', path: [] },
-        blocks: retainedStory.blocks.map(() => ({
-          type: 'paragraph',
-          runs: [],
-        })) as unknown as readonly CompleteTextBoxBlockInput[],
+        blockCount: retainedStory.blocks.length,
       },
       acquireCompleteStory: () => retainedStory,
     },
@@ -297,7 +293,7 @@ describe('rich text-box story acquisition', () => {
         ] }] }],
       },
       { type: 'unsupportedTextBoxBlock', qName: 'w:altChunk', sourcePath: [2] },
-    ] as unknown as readonly CompleteTextBoxBlockInput[];
+    ];
     const retainedStory: StoryLayout = {
       story: 'textbox',
       flowBounds: { xPt: 7, yPt: 11, widthPt: 80, heightPt: 25 },
@@ -340,7 +336,7 @@ describe('rich text-box story acquisition', () => {
         input: {
           kind: 'complete',
           source: { story: 'textbox', storyInstance: 'shape:9', path: [] },
-          blocks: richBlocks,
+          blockCount: richBlocks.length,
         },
         acquireCompleteStory,
       },
@@ -349,7 +345,6 @@ describe('rich text-box story acquisition', () => {
     expect(acquireCompleteStory).toHaveBeenCalledOnce();
     expect(acquireCompleteStory).toHaveBeenCalledWith(expect.objectContaining({
       source: { story: 'textbox', storyInstance: 'shape:9', path: [] },
-      blocks: richBlocks,
       container: {
         id: 'shape:9:story',
         kind: 'textbox',
@@ -447,11 +442,7 @@ describe('rich text-box story acquisition', () => {
         input: {
           kind: 'complete',
           source: { story: 'textbox', storyInstance: 'shape:vertical-float', path: [] },
-          blocks: [{
-            type: 'table',
-            colWidths: [],
-            rows: [],
-          }] as unknown as readonly CompleteTextBoxBlockInput[],
+          blockCount: 1,
         },
         acquireCompleteStory: () => retainedStory,
       },

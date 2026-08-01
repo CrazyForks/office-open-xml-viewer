@@ -77,7 +77,7 @@ export type TextBoxAcquisitionInput =
   | Readonly<{
       kind: 'complete';
       source: SourceRef;
-      blocks: readonly CompleteTextBoxBlockInput[];
+      blockCount: number;
     }>
   | Readonly<{
       kind: 'compatibility';
@@ -91,7 +91,7 @@ export type TextBoxAcquisitionInput =
  * `txbxContent` remains B2's owner; this adapter never guesses glyph geometry.
  */
 export function normalizeTextBoxInput(
-  shape: Readonly<ShapeRun>,
+  shape: DeepReadonly<ShapeRun>,
   source: SourceRef = { story: 'textbox', storyInstance: 'shape', path: [] },
   numberingMarkerProjector: NumberingMarkerProjector = compatibilityNumberingMarkerInput,
 ): readonly NormalizedTextBoxParagraphInput[] {

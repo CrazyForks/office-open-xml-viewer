@@ -3,7 +3,6 @@ import type { DocxDocumentModel } from './types.js';
 import type { ResolvedLocalFontMetric } from './layout/text.js';
 import { snapshotLocalMetrics } from './layout/text.js';
 import type { MathLayoutResource } from './layout/resources.js';
-import { productionDocumentInput } from './layout/resources.js';
 import type { BodyLayoutKernel } from './layout/body-layout-kernel.js';
 import type { LayoutServices } from './layout/types.js';
 import type {
@@ -12,32 +11,37 @@ import type {
 } from './layout/measurement-capabilities.js';
 import {
   createProductionBodyLayoutRuntime,
-  type ProductionBodyModelGateway,
 } from './layout/production-body-layout.js';
 import { createProductionLayoutServices } from './layout/production-services.js';
+import {
+  isLayoutSourceStore,
+  type LayoutSourceStore,
+} from './layout/layout-source-store.js';
+import { layoutSourceStore } from './layout-source-model-adapter.js';
 import {
   planVerticalRunWithCapability,
   verticalRunInkExtraPx,
   verticalVertGlyphReachable,
 } from './vertical-text.js';
-import { attachBodyLayoutKernel } from './layout/runtime-state.js';
+import {
+  attachBodyLayoutKernel,
+  attachLayoutSourceStore,
+} from './layout/runtime-state.js';
 
 function createConcreteBodyLayoutKernel(
-  doc: DocxDocumentModel,
+  source: LayoutSourceStore,
   measureContext: MeasurementTextContext | null,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>,
-  model: ProductionBodyModelGateway,
 ): BodyLayoutKernel {
   return createProductionBodyLayoutRuntime(
-    doc,
+    source,
     measureContext,
     resolvedLocalFonts,
-    model,
   ).kernel;
 }
 
 export function createLayoutServices(
-  doc: DocxDocumentModel,
+  input: DocxDocumentModel | LayoutSourceStore,
   options: {
     readonly localMetrics?: Readonly<Record<string, ResolvedLocalFontMetric>>;
     readonly useGoogleFonts?: boolean;
@@ -48,8 +52,7 @@ export function createLayoutServices(
     readonly googleFaces?: readonly FontFace[];
   } = {},
 ): LayoutServices {
-  const productionInput = productionDocumentInput(doc);
-  doc = productionInput.document;
+  const source = isLayoutSourceStore(input) ? input : layoutSourceStore(input);
   // Main-thread layout must use an element-backed canvas when one is available:
   // OpenType `vert` is selected through the canvas element's CSS feature state,
   // and an OffscreenCanvas cannot prove or paint that feature route. Workers
@@ -131,22 +134,19 @@ export function createLayoutServices(
     },
   });
   const localMetrics = snapshotLocalMetrics(options.localMetrics);
-  const services = createProductionLayoutServices(doc, {
+  const services = createProductionLayoutServices(source, {
     ...options,
     localMetrics,
     measureContext: context,
     verticalGlyphMeasurement,
-    fontFamilyCharsets: productionInput.fontFamilyCharsets,
-    mathOccurrences: productionInput.mathOccurrences,
-    acquisitionInputs: productionInput.bodyModelGateway.acquisitionInputs,
   });
+  attachLayoutSourceStore(services, source);
   attachBodyLayoutKernel(
     services,
     createConcreteBodyLayoutKernel(
-      doc,
+      source,
       context,
       localMetrics,
-      productionInput.bodyModelGateway,
     ),
   );
   return services;

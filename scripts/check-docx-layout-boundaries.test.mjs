@@ -36,6 +36,8 @@ const canonicalRenderer = `
 import { layoutDocument } from './layout/document.js';
 import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
 import { paintLayoutPage } from './paint/canvas-page.js';
+import { renderSelectedDocumentPage } from './paint/canvas-document.js';
+import { layoutSourceStore } from './layout-source-model-adapter.js';
 function createConcreteBodyLayoutKernel(doc, ctx, localMetrics) {
   return { doc, ctx, localMetrics };
 }
@@ -44,25 +46,37 @@ function createLayoutServices(doc, ctx, localMetrics) {
   attachBodyLayoutKernel(services, createConcreteBodyLayoutKernel(doc, ctx, localMetrics));
   return services;
 }
-export function renderDocumentToCanvas(services, input, pageIndex) {
+function normalizeRenderOptions(services, input, pageIndex) {
   const selection = selectDocumentLayoutPage(services, input, pageIndex);
   layoutDocument();
-  return paintLayoutPage(selection.page);
+  paintLayoutPage(selection.page);
+  return { selection, paintOptions: {} };
+}
+export function renderLayoutSourceToCanvas(source, canvas, pageIndex, opts) {
+  const normalized = normalizeRenderOptions(source, canvas, pageIndex, opts);
+  return renderSelectedDocumentPage(
+    normalized.selection.layout,
+    normalized.selection.page,
+    canvas,
+    normalized.paintOptions,
+  );
+}
+export function renderDocumentToCanvas(doc, canvas, pageIndex, opts) {
+  return renderLayoutSourceToCanvas(layoutSourceStore(doc), canvas, pageIndex, opts);
 }
 `;
 
 const canonicalLayoutRuntime = `
-function createConcreteBodyLayoutKernel(doc, context, localMetrics, model) {
-  return { doc, context, localMetrics, model };
+function createConcreteBodyLayoutKernel(source, context, localMetrics) {
+  return { source, context, localMetrics };
 }
-export function createLayoutServices(doc, context, localMetrics) {
-  const productionInput = { bodyModelGateway: {} };
+export function createLayoutServices(input, context, localMetrics) {
+  const source = layoutSourceStore(input);
   const services = {};
   attachBodyLayoutKernel(services, createConcreteBodyLayoutKernel(
-    doc,
+    source,
     context,
     localMetrics,
-    productionInput.bodyModelGateway,
   ));
   return services;
 }
@@ -192,23 +206,27 @@ function production(state, table, para, group) {
       + '}\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts',
     'export function paintLayoutPage(page) { return page; }\n');
+  write(root, 'packages/docx/src/paint/canvas-document.ts',
+    'export function renderSelectedDocumentPage() {}\n');
+  write(root, 'packages/docx/src/layout-source-model-adapter.ts',
+    'export function layoutSourceStore(value) { return value; }\n');
   write(root, 'packages/docx/src/render-worker-layout.ts',
     "import { layoutDocument } from './renderer.js';\n"
       + "import { attachDocumentLayoutVariants } from './layout/document-layout-variants.js';\n"
       + 'export interface RetainedRenderWorkerDocumentLayout {\n'
-      + '  model; layoutServices; layoutVariants; defaultCurrentDateMs;\n'
+      + '  layoutServices; layoutVariants; defaultCurrentDateMs;\n'
       + '}\n'
-      + 'export function retainRenderWorkerDocumentLayout(model, layoutServices, defaultCurrentDateMs) {\n'
-      + '  const variants = attachDocumentLayoutVariants({ model, services: layoutServices,\n'
+      + 'export function retainRenderWorkerDocumentLayout(source, layoutServices, defaultCurrentDateMs) {\n'
+      + '  const variants = attachDocumentLayoutVariants({ source, services: layoutServices,\n'
       + '    defaultCurrentDateMs,\n'
-      + '    buildLayout: (options) => layoutDocument(model, layoutServices, options) });\n'
-      + '  return { model, layoutServices, layoutVariants: variants.store, defaultCurrentDateMs };\n'
+      + '    buildLayout: (options) => layoutDocument(source, layoutServices, options) });\n'
+      + '  return { layoutServices, layoutVariants: variants.store, defaultCurrentDateMs };\n'
       + '}\n');
   write(root, 'packages/docx/src/render-worker.ts',
-    "import { renderDocumentToCanvas } from './renderer.js';\n"
+    "import { renderLayoutSourceToCanvas } from './renderer.js';\n"
       + "import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';\n"
-      + 'export function initializeWorker(model, layoutServices, req) {\n'
-      + '  const doc = retainRenderWorkerDocumentLayout(model, layoutServices, req.defaultCurrentDateMs);\n'
+      + 'export function initializeWorker(source, layoutServices, req) {\n'
+      + '  const doc = retainRenderWorkerDocumentLayout(source, layoutServices, req.defaultCurrentDateMs);\n'
       + '  const layout = doc.layoutVariants.defaultLayout;\n'
       + '  const pageSizes = layout.pages.map((page) => page.geometry);\n'
       + '  const meta = { pageCount: layout.pages.length,\n'
@@ -216,8 +234,10 @@ function production(state, table, para, group) {
       + '    bookmarkPages: [...buildBookmarkPageMap(layout)] };\n'
       + '  return { doc, meta };\n'
       + '}\n'
-      + 'export function renderWorkerPage(doc, canvas, pageIndex, options) {\n'
-      + '  return renderDocumentToCanvas(doc.model, canvas, pageIndex, { ...options,\n'
+      + 'export function renderWorkerPage(doc, canvas, req, options) {\n'
+      + '  const source = layoutSourceStoreOf(doc.layoutServices);\n'
+      + "  if (!source) throw new Error('missing source');\n"
+      + '  return renderLayoutSourceToCanvas(source, canvas, req.pageIndex, { ...options,\n'
       + '    layoutServices: doc.layoutServices,\n'
       + '    defaultCurrentDateMs: doc.defaultCurrentDateMs });\n'
       + '}\n'
@@ -288,20 +308,20 @@ test('requires one private concrete body-kernel owner with exact loud attachment
     )],
     ['missing attachment', canonicalLayoutRuntime.replace(
       /attachBodyLayoutKernel\(services, createConcreteBodyLayoutKernel\([\s\S]*?\n  \)\);/,
-      'createConcreteBodyLayoutKernel(doc, context, localMetrics, productionInput.bodyModelGateway);',
+      'createConcreteBodyLayoutKernel(source, context, localMetrics);',
     )],
     ['wrong owner arguments', canonicalLayoutRuntime.replace(
-      '    localMetrics,\n    productionInput.bodyModelGateway,',
-      '    productionInput.bodyModelGateway,',
+      '    context,\n    localMetrics,',
+      '    localMetrics,',
     )],
-    ['wrong model gateway', canonicalLayoutRuntime.replace(
-      '    productionInput.bodyModelGateway,',
-      '    model,',
+    ['wrong source', canonicalLayoutRuntime.replace(
+      '    source,',
+      '    input,',
     )],
     ['duplicate owner', canonicalLayoutRuntime.replace(
       'return services;',
       'attachBodyLayoutKernel(services, createConcreteBodyLayoutKernel(\n'
-        + '    doc, context, localMetrics, productionInput.bodyModelGateway,\n'
+        + '    source, context, localMetrics,\n'
         + '  ));\n  return services;',
     )],
   ]) {
@@ -1307,10 +1327,31 @@ test('final renderer rejects transitional exports, hidden algorithms, and non-la
     ['deleted pagination export', canonicalRenderer + '\nexport function paginateDocument() {}\n', 'FORBIDDEN_PAGE_PRODUCER_IDENTIFIER'],
     ['star export', canonicalRenderer + "\nexport * from './layout/document.js';\n", 'FINAL_ADAPTER_EXPORT'],
     ['hidden algorithm', canonicalRenderer + '\nexport function accidentalAlgorithm() {}\n', 'FINAL_ADAPTER_DECLARATION'],
-    ['inline layout loop', canonicalRenderer.replace(
-      'const selection = selectDocumentLayoutPage(services, input, pageIndex);',
-      'const selection = selectDocumentLayoutPage(services, input, pageIndex);\n'
-        + '  for (const item of input) paintLayoutPage(item);',
+    ['source layout loop', canonicalRenderer.replace(
+      'const normalized = normalizeRenderOptions(source, canvas, pageIndex, opts);',
+      'const normalized = normalizeRenderOptions(source, canvas, pageIndex, opts);\n'
+        + '  for (const item of source) renderSelectedDocumentPage(item);',
+    ), 'FINAL_ADAPTER_BODY'],
+    ['extra source layout', canonicalRenderer.replace(
+      'const normalized = normalizeRenderOptions(source, canvas, pageIndex, opts);',
+      'const normalized = normalizeRenderOptions(source, canvas, pageIndex, opts);\n'
+        + '  layoutDocument(source);',
+    ), 'FINAL_ADAPTER_BODY'],
+    ['extra source paint', canonicalRenderer.replace(
+      'return renderSelectedDocumentPage(',
+      'renderSelectedDocumentPage(normalized.selection.layout);\n  return renderSelectedDocumentPage(',
+    ), 'FINAL_ADAPTER_BODY'],
+    ['foreign source normalization', canonicalRenderer.replace(
+      'normalizeRenderOptions(source, canvas, pageIndex, opts)',
+      'normalizeRenderOptions(foreignSource, canvas, pageIndex, opts)',
+    ), 'FINAL_ADAPTER_BODY'],
+    ['foreign source paint canvas', canonicalRenderer.replace(
+      'normalized.selection.page,\n    canvas,',
+      'normalized.selection.page,\n    foreignCanvas,',
+    ), 'FINAL_ADAPTER_BODY'],
+    ['foreign model adapter', canonicalRenderer.replace(
+      'layoutSourceStore(doc), canvas, pageIndex, opts',
+      'layoutSourceStore(foreignDoc), canvas, pageIndex, opts',
     ), 'FINAL_ADAPTER_BODY'],
     ['non-layout import', "import { hidden } from './hidden.js';\n" + canonicalRenderer, 'FINAL_ADAPTER_IMPORT'],
   ]) {
@@ -1698,8 +1739,8 @@ test('worker run collection cannot add a second dry-render call', () => {
   const source = readFileSync(workerPath, 'utf8');
   write(root, 'packages/docx/src/render-worker.ts', source.replace(
     'export function collectWorkerRuns() { return []; }',
-    'export function collectWorkerRuns(doc, canvas, pageIndex, options) {\n'
-      + '  return renderDocumentToCanvas(doc.model, canvas, pageIndex, { ...options,\n'
+    'export function collectWorkerRuns(doc, source, canvas, req, options) {\n'
+      + '  return renderLayoutSourceToCanvas(source, canvas, req.pageIndex, { ...options,\n'
       + '    layoutServices: doc.layoutServices,\n'
       + '    defaultCurrentDateMs: doc.defaultCurrentDateMs });\n'
       + '}',
@@ -1709,6 +1750,9 @@ test('worker run collection cannot add a second dry-render call', () => {
 
 test('worker render calls require the exact retained worker layout authority', () => {
   for (const [name, from, to] of [
+    ['foreign source', 'renderLayoutSourceToCanvas(source, canvas, req.pageIndex', 'renderLayoutSourceToCanvas(foreignSource, canvas, req.pageIndex'],
+    ['foreign canvas', 'renderLayoutSourceToCanvas(source, canvas, req.pageIndex', 'renderLayoutSourceToCanvas(source, foreignCanvas, req.pageIndex'],
+    ['foreign page', 'renderLayoutSourceToCanvas(source, canvas, req.pageIndex', 'renderLayoutSourceToCanvas(source, canvas, foreignPageIndex'],
     ['foreign services', 'layoutServices: doc.layoutServices', 'layoutServices: foreignServices'],
     ['derived services', 'layoutServices: doc.layoutServices', 'layoutServices: servicesFor(doc)'],
     ['foreign default date', 'defaultCurrentDateMs: doc.defaultCurrentDateMs', 'defaultCurrentDateMs: foreignDefaultCurrentDateMs'],
@@ -1724,9 +1768,9 @@ test('worker render calls require the exact retained worker layout authority', (
 
 test('worker construction requires the canonical retained-layout wiring seam', () => {
   for (const [name, from, to] of [
-    ['foreign model', 'retainRenderWorkerDocumentLayout(model, layoutServices, req.defaultCurrentDateMs)', 'retainRenderWorkerDocumentLayout(foreignModel, layoutServices, req.defaultCurrentDateMs)'],
-    ['foreign retained services', 'retainRenderWorkerDocumentLayout(model, layoutServices, req.defaultCurrentDateMs)', 'retainRenderWorkerDocumentLayout(model, foreignServices, req.defaultCurrentDateMs)'],
-    ['foreign retained default date', 'retainRenderWorkerDocumentLayout(model, layoutServices, req.defaultCurrentDateMs)', 'retainRenderWorkerDocumentLayout(model, layoutServices, foreignDefaultCurrentDateMs)'],
+    ['foreign source', 'retainRenderWorkerDocumentLayout(source, layoutServices, req.defaultCurrentDateMs)', 'retainRenderWorkerDocumentLayout(foreignSource, layoutServices, req.defaultCurrentDateMs)'],
+    ['foreign retained services', 'retainRenderWorkerDocumentLayout(source, layoutServices, req.defaultCurrentDateMs)', 'retainRenderWorkerDocumentLayout(source, foreignServices, req.defaultCurrentDateMs)'],
+    ['foreign retained default date', 'retainRenderWorkerDocumentLayout(source, layoutServices, req.defaultCurrentDateMs)', 'retainRenderWorkerDocumentLayout(source, layoutServices, foreignDefaultCurrentDateMs)'],
   ]) {
     const root = initializeCanonicalFixture(`docx-layout-boundary-worker-construction-${name}-`);
     const workerPath = join(root, 'packages/docx/src/render-worker.ts');
@@ -1738,12 +1782,12 @@ test('worker construction requires the canonical retained-layout wiring seam', (
 
 test('worker retention attaches the exact parameter identities', () => {
   for (const [name, mutate] of [
-    ['foreign attachment model', (source) => source
-      .replace('{ model, services: layoutServices,', '{ model: foreignModel, services: layoutServices,')
-      .replace('layoutDocument(model, layoutServices, options)', 'layoutDocument(foreignModel, layoutServices, options)')],
+    ['foreign attachment source', (source) => source
+      .replace('{ source, services: layoutServices,', '{ source: foreignSource, services: layoutServices,')
+      .replace('layoutDocument(source, layoutServices, options)', 'layoutDocument(foreignSource, layoutServices, options)')],
     ['foreign attachment services', (source) => source
-      .replace('{ model, services: layoutServices,', '{ model, services: foreignServices,')
-      .replace('layoutDocument(model, layoutServices, options)', 'layoutDocument(model, foreignServices, options)')],
+      .replace('{ source, services: layoutServices,', '{ source, services: foreignServices,')
+      .replace('layoutDocument(source, layoutServices, options)', 'layoutDocument(source, foreignServices, options)')],
     ['foreign attachment default date', (source) => source.replace(
       '    defaultCurrentDateMs,',
       '    defaultCurrentDateMs: foreignDefaultCurrentDateMs,',
@@ -1759,8 +1803,8 @@ test('worker retention attaches the exact parameter identities', () => {
 
 test('worker retention returns exactly the retained parameter identities and attached store', () => {
   for (const [name, from, to] of [
-    ['foreign returned model', 'return { model, layoutServices,', 'return { model: foreignModel, layoutServices,'],
-    ['foreign returned services', 'return { model, layoutServices,', 'return { model, layoutServices: foreignServices,'],
+    ['foreign returned services', 'return { layoutServices,', 'return { layoutServices: foreignServices,'],
+    ['derived returned services', 'return { layoutServices,', 'return { layoutServices: servicesFor(layoutServices),'],
     ['foreign returned store', 'layoutVariants: variants.store', 'layoutVariants: foreignStore'],
     ['foreign returned default date', 'defaultCurrentDateMs };', 'defaultCurrentDateMs: foreignDefaultCurrentDateMs };'],
     ['missing retained field', 'layoutVariants: variants.store, ', ''],
@@ -1768,8 +1812,10 @@ test('worker retention returns exactly the retained parameter identities and att
   ]) {
     const root = initializeCanonicalFixture(`docx-layout-boundary-worker-return-${name}-`);
     const path = join(root, 'packages/docx/src/render-worker-layout.ts');
-    write(root, 'packages/docx/src/render-worker-layout.ts',
-      readFileSync(path, 'utf8').replace(from, to));
+    const source = readFileSync(path, 'utf8');
+    const mutated = source.replace(from, to);
+    assert.notEqual(mutated, source, `${name} mutation must change the fixture`);
+    write(root, 'packages/docx/src/render-worker-layout.ts', mutated);
     expectDiagnostic(root, 'WORKER_LAYOUT_SELECTION', name, '--final');
   }
 });

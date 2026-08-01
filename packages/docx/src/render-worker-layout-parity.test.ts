@@ -23,6 +23,7 @@ import { stableFingerprint } from './layout/fingerprint.js';
 import { buildBookmarkPageMap } from './bookmark-nav.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
 import { DEFAULT_OOXML_RESOURCE_LIMITS } from '@silurus/ooxml-core/worker';
+import { layoutSourceStore } from './layout-source-model-adapter.js';
 
 function services(): LayoutServices {
   return Object.freeze({
@@ -238,11 +239,11 @@ describe('render worker canonical layout parity', () => {
     const mainServices = createLayoutServices(model, { measureContext: measureContext() });
     const workerServices = createLayoutServices(model, { measureContext: measureContext() });
     attachDocumentLayoutVariants({
-      model, services: mainServices, defaultCurrentDateMs: 10,
+      source: layoutSourceStore(model), services: mainServices, defaultCurrentDateMs: 10,
       buildLayout: (options) => layoutDocument(model, mainServices, options),
     });
     attachDocumentLayoutVariants({
-      model, services: workerServices, defaultCurrentDateMs: 10,
+      source: layoutSourceStore(model), services: workerServices, defaultCurrentDateMs: 10,
       buildLayout: (options) => layoutDocument(model, workerServices, options),
     });
 
@@ -267,10 +268,10 @@ describe('render worker canonical layout parity', () => {
     const mainServices = createLayoutServices(model, { measureContext: measureContext() });
     const workerServices = createLayoutServices(model, { measureContext: measureContext() });
     attachDocumentLayoutVariants({
-      model, services: mainServices, defaultCurrentDateMs: 10,
+      source: layoutSourceStore(model), services: mainServices, defaultCurrentDateMs: 10,
       buildLayout: (options) => layoutDocument(model, mainServices, options),
     });
-    retainRenderWorkerDocumentLayout(model, workerServices, 10);
+    retainRenderWorkerDocumentLayout(layoutSourceStore(model), workerServices, 10);
 
     const options = {
       currentDate: Date.UTC(2222, 0, 1),
@@ -288,7 +289,7 @@ describe('render worker canonical layout parity', () => {
       measureContext: measureContext(),
     });
     attachDocumentLayoutVariants({
-      model,
+      source: layoutSourceStore(model),
       services: layoutServices,
       defaultCurrentDateMs: 10,
       buildLayout: (options) => layoutDocument(model, layoutServices, options),
@@ -322,14 +323,14 @@ describe('render worker canonical layout parity', () => {
     const model = realModel();
     const mainServices = createLayoutServices(model, { measureContext: measureContext() });
     const mainVariants = attachDocumentLayoutVariants({
-      model,
+      source: layoutSourceStore(model),
       services: mainServices,
       defaultCurrentDateMs: 10,
       buildLayout: (options) => layoutDocument(model, mainServices, options),
     });
     const workerServices = createLayoutServices(model, { measureContext: measureContext() });
     const workerState = retainRenderWorkerDocumentLayout(
-      model,
+      layoutSourceStore(model),
       workerServices,
       10,
     );
@@ -338,9 +339,7 @@ describe('render worker canonical layout parity', () => {
       'defaultCurrentDateMs',
       'layoutServices',
       'layoutVariants',
-      'model',
     ]);
-    expect(workerState.model).toBe(model);
     expect(workerState.layoutServices).toBe(workerServices);
     expect(layoutVariantStoreOf(workerServices)).toBe(workerState.layoutVariants);
 
@@ -388,13 +387,13 @@ describe('render worker canonical layout parity', () => {
     const model = finalNextColumnRtlModel();
     const mainServices = createLayoutServices(model, { measureContext: measureContext() });
     attachDocumentLayoutVariants({
-      model,
+      source: layoutSourceStore(model),
       services: mainServices,
       defaultCurrentDateMs: 10,
       buildLayout: (options) => layoutDocument(model, mainServices, options),
     });
     const workerState = retainRenderWorkerDocumentLayout(
-      model,
+      layoutSourceStore(model),
       createLayoutServices(model, { measureContext: measureContext() }),
       10,
     );
@@ -422,19 +421,17 @@ describe('render worker canonical layout parity', () => {
   });
 
   it('selects equal keys, fingerprints, page counts, sizes, and variants from equal normalized inputs', () => {
-    const model = {
-      body: [], section: { pageWidth: 612, pageHeight: 792 },
-    } as unknown as DocxDocumentModel;
+    const model = realModel();
     const mainServices = services();
     const workerServices = services();
     let mainBuilds = 0;
     let workerBuilds = 0;
     attachDocumentLayoutVariants({
-      model, services: mainServices, defaultCurrentDateMs: 10,
+      source: layoutSourceStore(model), services: mainServices, defaultCurrentDateMs: 10,
       buildLayout: (options) => { mainBuilds += 1; return layout(options.currentDateMs); },
     });
     attachDocumentLayoutVariants({
-      model, services: workerServices, defaultCurrentDateMs: 10,
+      source: layoutSourceStore(model), services: workerServices, defaultCurrentDateMs: 10,
       buildLayout: (options) => { workerBuilds += 1; return layout(options.currentDateMs); },
     });
 
@@ -497,7 +494,7 @@ describe('render worker canonical layout parity', () => {
     } satisfies RenderWorkerResponse;
 
     expect(Object.keys(parse).sort()).toEqual([
-      'data', 'defaultCurrentDateMs', 'id', 'type', 'useGoogleFonts',
+      'data', 'defaultCurrentDateMs', 'id', 'resourcePolicy', 'type', 'useGoogleFonts',
     ]);
     expect(Object.keys(render).sort()).toEqual(['id', 'opts', 'pageIndex', 'type']);
     expect(Object.keys(collect).sort()).toEqual(['id', 'opts', 'pageIndex', 'type']);

@@ -248,7 +248,7 @@ describe('paragraph acquisition cache', () => {
         type: 'shape',
         textBlocks: [],
         anchorAcquisitionInput: { occurrenceId: 'anchor:0' },
-        textBoxInput: { kind: 'complete', source, blocks: [] },
+        textBoxInput: { kind: 'complete', source, blockCount: 0 },
       }],
     } as unknown as ParagraphAcquisitionInput;
     const base = options(services, {

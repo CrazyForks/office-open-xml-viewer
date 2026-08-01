@@ -9,7 +9,7 @@ import type {
   SectionLayoutContext,
   StoryContext,
 } from '../layout-context.js';
-import type { DocParagraph } from '../types.js';
+import type { ParagraphLayoutSource } from './text.js';
 import type {
   MeasurementTextContext,
   VerticalGlyphMeasurementService,
@@ -65,7 +65,7 @@ export interface FloatRegistrationState extends AnchorGeometryContext {
 /** DrawingML anchor capability: float registration plus vertical-page
  * projection and page-start pre-scan ownership. */
 export interface AnchorFloatRegistrationState extends FloatRegistrationState {
-  pageAnchorPrescanned?: Set<DocParagraph>;
+  pageAnchorPrescanned?: Set<ParagraphLayoutSource>;
   verticalCJK?: boolean;
   verticalAllRotated?: boolean;
   verticalPhys?: PhysicalAnchorFrame;

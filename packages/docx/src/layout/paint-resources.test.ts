@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ChartModel } from '@silurus/ooxml-core';
 import { stableFingerprint } from './fingerprint.js';
-import { createPaintResourceRegistry } from './paint-resources.js';
+import { createPaintResourceRegistry, indexSealedPaintResourceDescriptors } from './paint-resources.js';
 import type { PaintResourceDescriptor } from './types.js';
 
 function chartModel(title: string): ChartModel {
@@ -129,6 +129,18 @@ describe('paint resource registry', () => {
     expect(Object.isFrozen(registry.descriptors)).toBe(true);
     expect(Object.isFrozen(registry.resolve('chart:body:0', 'chart').model)).toBe(true);
     expect(structuredClone(registry.descriptors)).toEqual(registry.descriptors);
+  });
+
+  it('indexes an owned sealed descriptor graph without cloning its chart payload', () => {
+    const owned = createPaintResourceRegistry(descriptors()).descriptors;
+    const chart = owned.find((descriptor) => descriptor.kind === 'chart');
+    const indexed = indexSealedPaintResourceDescriptors(owned);
+
+    expect(indexed.descriptors).toBe(owned);
+    expect(indexed.resolve('chart:body:0', 'chart')).toBe(chart);
+    expect(indexed.resolve('chart:body:0', 'chart').model).toBe(
+      chart?.kind === 'chart' ? chart.model : undefined,
+    );
   });
 
   it('rejects duplicate keys before one descriptor can shadow another', () => {

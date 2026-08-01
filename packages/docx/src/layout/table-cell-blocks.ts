@@ -1,4 +1,4 @@
-import type { CellElement, DocParagraph, DocTable, DocTableCell } from '../types.js';
+import type { CellElement } from '../types.js';
 import type { FlowFragment } from './flow-fragment.js';
 import type { ParagraphLayout } from './types.js';
 import { paragraphGapPt } from './paragraph-spacing.js';
@@ -7,28 +7,32 @@ import {
   resolveParagraphBorderEdges,
   type ParagraphBorderEdges,
 } from './paragraph-border-adjacency.js';
+import type { ParagraphLayoutSource } from './text.js';
+import type { TableLayoutSource } from './table-source-acquisition.js';
+
+type TableCellLayoutSource = TableLayoutSource['rows'][number]['cells'][number];
 
 export type AcquireNestedCellBlocks<State> = (
-  cell: DocTableCell,
-  table: DocTable,
+  cell: TableCellLayoutSource,
+  table: TableLayoutSource,
   cellTotalWidthPt: number,
   outerState: State,
   sourcePath: readonly number[],
 ) => readonly FlowFragment[];
 
 export interface TableCellBlockAcquisitionDependencies<State> {
-  resolveContentWidthPt(cell: DocTableCell, table: DocTable, totalWidthPt: number): number;
-  createCellState(outerState: State, contentWidthPt: number, cell: DocTableCell): State;
+  resolveContentWidthPt(cell: TableCellLayoutSource, table: TableLayoutSource, totalWidthPt: number): number;
+  createCellState(outerState: State, contentWidthPt: number, cell: TableCellLayoutSource): State;
   acquireParagraph(
     state: State,
-    paragraph: DocParagraph,
+    paragraph: ParagraphLayoutSource,
     contentWidthPt: number,
     sourcePath: readonly number[],
     paragraphBorderEdges: ParagraphBorderEdges,
   ): ParagraphLayout;
   acquireNestedTable(
     state: State,
-    table: DocTable,
+    table: TableLayoutSource,
     contentWidthPt: number,
     sourcePath: readonly number[],
     continuation: Readonly<{ fromPrevious: boolean; onNext: boolean }>,
@@ -38,8 +42,8 @@ export interface TableCellBlockAcquisitionDependencies<State> {
 }
 
 export interface AcquireTableCellBlocksInput<State> {
-  readonly cell: DocTableCell;
-  readonly table: DocTable;
+  readonly cell: TableCellLayoutSource;
+  readonly table: TableLayoutSource;
   readonly cellTotalWidthPt: number;
   readonly outerState: State;
   readonly sourcePath: readonly number[];
@@ -52,7 +56,7 @@ export interface RetainedCellBlockPlacement {
 }
 
 export function isStructuralTrailingParagraph(
-  content: readonly CellElement[],
+  content: TableCellLayoutSource['content'],
   index: number,
 ): boolean {
   if (index !== content.length - 1 || index === 0) return false;
@@ -70,14 +74,14 @@ export function isStructuralTrailingParagraph(
  * tables use the same document-order fold rather than a table-specific branch.
  */
 export function resolveRetainedCellBlockPlacement(
-  cell: DocTableCell,
-  table: DocTable,
+  cell: TableCellLayoutSource,
+  table: TableLayoutSource,
   blocks: readonly FlowFragment[],
   boxHeightPt: number,
 ): RetainedCellBlockPlacement {
   const blockPlacements: Array<{ offsetPt: number; advancePt: number }> = [];
   let cursorPt = 0;
-  let previousParagraph: DocParagraph | null = null;
+  let previousParagraph: ParagraphLayoutSource | null = null;
   let previousAfterPt = 0;
   let firstInkTopPt: number | undefined;
   let lastInkBottomPt = 0;
@@ -87,7 +91,7 @@ export function resolveRetainedCellBlockPlacement(
     const element = cell.content[index];
     const structural = isStructuralTrailingParagraph(cell.content, index);
     if (block.kind === 'paragraph' && element?.type === 'paragraph') {
-      const paragraph: DocParagraph = element;
+      const paragraph: ParagraphLayoutSource = element;
       const blockBeforePt = block.spacing?.beforePt ?? 0;
       const blockAfterPt = block.spacing?.afterPt ?? 0;
       const gapPt = previousParagraph
@@ -170,7 +174,7 @@ export function acquireTableCellBlocks<State>(
     if (element.type === 'paragraph') {
       const previousElement = cell.content[cellElementIndex - 1];
       const nextElement = cell.content[cellElementIndex + 1];
-      const paragraph: DocParagraph = element;
+      const paragraph: ParagraphLayoutSource = element;
       const block = dependencies.acquireParagraph(
         cellState,
         paragraph,
@@ -189,7 +193,7 @@ export function acquireTableCellBlocks<State>(
       continue;
     }
 
-    const inner: DocTable = element;
+    const inner: TableLayoutSource = element;
     const nestedSlice = element as typeof element & {
       nestedSliceContinuesFromPrevious?: boolean;
       nestedSliceContinuesOnNext?: boolean;

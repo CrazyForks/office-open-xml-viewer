@@ -81,7 +81,7 @@ function makeSegs(): LayoutSeg[] {
 const WIDE = 1000; // pt — wide enough that the paragraph never wraps
 
 function isText(s: LayoutSeg): s is LayoutTextSeg {
-  return 'text' in s && !('isTab' in s) && !('imagePath' in s) && !('mathNodes' in s);
+  return 'text' in s && !('isTab' in s) && !('imagePath' in s) && !('math' in s);
 }
 
 describe('§17.3.2.35 run charSpacing survives into the paint-scale advance', () => {

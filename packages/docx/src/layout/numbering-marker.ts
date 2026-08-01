@@ -2,7 +2,7 @@ import { symbolFontToUnicode } from '@silurus/ooxml-core';
 import type { NumberingInfo, TabStop } from '../types.js';
 import { wordNumberingSuffixAcceptsCoincidentListTab } from './line-compatibility.js';
 import { nextTabStop, type TextLayoutService, type TextShapeResult } from './text.js';
-import type { NumberingMarkerShapeInput } from './types.js';
+import type { DeepReadonly, NumberingMarkerShapeInput } from './types.js';
 
 export interface NumberingMarkerTextLayout {
   readonly shape: TextShapeResult;
@@ -55,7 +55,7 @@ export function applyNumberingBodyOffset<Context extends Readonly<{
 }>>(
   context: Context,
   input: Readonly<{
-    numbering: NumberingInfo | null;
+    numbering: DeepReadonly<NumberingInfo> | null;
     markerInput?: NumberingMarkerShapeInput;
     authoredFirstIndentPt: number;
     tabStops: readonly TabStop[];
@@ -136,7 +136,7 @@ function numberingSuffixTabStop(
  * placement must consume this same value or a hanging list acquires a different
  * first-line partition from the one it paints. */
 export function resolveNumberingMarkerGeometry(
-  numbering: NumberingInfo,
+  numbering: DeepReadonly<NumberingInfo>,
   markerInput: NumberingMarkerShapeInput,
   input: Readonly<{
     authoredFirstIndentPt: number;

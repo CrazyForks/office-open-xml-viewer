@@ -1,5 +1,5 @@
 import type { DocxDocumentModel } from '../types.js';
-import { productionDocumentInput } from '../layout/resources.js';
+import { layoutSourceStore } from '../layout-source-model-adapter.js';
 import { createProductionBodyLayoutRuntime } from '../layout/production-body-layout.js';
 import {
   decodeRaster,
@@ -8,7 +8,6 @@ import {
   type DocxFetchImage,
 } from '../paint/browser-images.js';
 import { paintResourceRegistryOf } from '../layout/runtime-state.js';
-import { createDocumentPaintResourceRegistry } from '../layout/production-paint-resources.js';
 import type { LayoutServices } from '../layout/types.js';
 
 const EMPTY_DOCUMENT = {
@@ -24,12 +23,11 @@ const EMPTY_DOCUMENT = {
   headers: {},
   footers: {},
 } as unknown as DocxDocumentModel;
-const production = productionDocumentInput(EMPTY_DOCUMENT);
+const source = layoutSourceStore(EMPTY_DOCUMENT);
 const bodyInternals = createProductionBodyLayoutRuntime(
-  production.document,
+  source,
   null,
   {},
-  production.bodyModelGateway,
 ).internals;
 
 export const {
@@ -51,6 +49,6 @@ export async function preloadImages(
 ): Promise<Map<string, DecodedImage>> {
   const registry = services
     ? paintResourceRegistryOf(services)
-    : createDocumentPaintResourceRegistry(doc);
+    : layoutSourceStore(doc).paintResources;
   return preloadPaintImages(registry.descriptors, fetchImage);
 }

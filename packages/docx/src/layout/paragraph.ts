@@ -35,13 +35,13 @@ import {
 import { computeKashidaDistribution, type KashidaLevel } from '../kashida-justify.js';
 import { imageResourceKey } from './source-key.js';
 import { stableFingerprint } from './fingerprint.js';
+import { chartResourceKey as canonicalChartResourceKey } from './source-key.js';
 import {
   planShapeDrawing,
   type ShapeDrawingPlanResult,
 } from './shape-drawing-plan.js';
 import {
   normalizeTextBoxInput,
-  type CompleteTextBoxBlockInput,
   type NormalizedTextBoxParagraphInput,
   type TextBoxAcquisitionInput,
 } from './textbox-input.js';
@@ -120,7 +120,7 @@ export {
   prepareBodyFrameMetadata,
 } from './frame.js';
 export type { BodyFrameGroup } from './frame.js';
-import type { ParagraphAcquisitionInput, ParagraphAcquisitionRun } from './text.js';
+import type { ParagraphAcquisitionInput, ParagraphAcquisitionRun, ParagraphLayoutSource } from './text.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
 import type {
   DrawingLayout,
@@ -197,7 +197,7 @@ interface RetainedTextGeometryPlan {
 }
 
 function retainedTypographyInput(
-  run: DocRun | ParagraphAcquisitionRun | undefined,
+  run: import('./text.js').ParagraphLayoutRun | undefined,
 ): RunTypographyAcquisitionInput | undefined {
   if (!run || (run.type !== 'text' && run.type !== 'field')) return undefined;
   return (run as typeof run & Readonly<{
@@ -1060,7 +1060,7 @@ function shapePlanDiagnostics(
 }
 
 function chartResourceKey(source: SourceRef): string {
-  return stableFingerprint('chart-resource', source);
+  return canonicalChartResourceKey(source);
 }
 
 function unavailableDrawingId(source: SourceRef, runIndex: number): string {
@@ -1133,7 +1133,7 @@ function retainedBaselineOffsetPt(segment: LayoutTextSeg): number {
 
 function textPlacement(
   segment: LayoutTextSeg,
-  paragraph: DocParagraph | ParagraphAcquisitionInput,
+  paragraph: ParagraphLayoutSource,
   sourceOffset: number,
   xPt: number,
   baselinePt: number,
@@ -1635,10 +1635,10 @@ function retainedGeometryPlan(
 
 function textPlanSegment(
   segment: LayoutTextSeg,
-  paragraph: DocParagraph | ParagraphAcquisitionInput,
+  paragraph: ParagraphLayoutSource,
   sourceOffset: number,
   characterGridDeltaPt: number,
-  sourceRun?: (DocRun | ParagraphAcquisitionRun) & Readonly<{
+  sourceRun?: import('./text.js').ParagraphLayoutRun & Readonly<{
     anchorOccurrenceId?: string;
   }>,
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
@@ -1902,7 +1902,7 @@ function logicalOccurrenceMap(
       if (runIndex === undefined) continue;
       const length = 'text' in segment
         ? (segment.metricOnly ? 0 : segment.text.length)
-        : 'mathNodes' in segment ? segment.fallbackText.length
+        : 'math' in segment ? segment.fallbackText.length
           : 'isTab' in segment || 'imagePath' in segment ? 1 : 0;
       measuredLengths.set(runIndex, (measuredLengths.get(runIndex) ?? 0) + length);
     }
@@ -1926,7 +1926,7 @@ function logicalOccurrenceMap(
 
 function segmentOccurrenceLength(segment: LayoutTextSeg | LayoutTabSeg | LayoutImageSeg | LayoutMathSeg): number {
   if ('text' in segment) return segment.metricOnly ? 0 : segment.text.length;
-  if ('mathNodes' in segment) return segment.fallbackText.length;
+  if ('math' in segment) return segment.fallbackText.length;
   return 1;
 }
 
@@ -2051,7 +2051,8 @@ function planMeasuredLines(
           continue;
         }
         const resourceKind = image.chart ? 'chart' : 'image';
-        const resourceKey = image.chart ? chartResourceKey(occurrence) : imageResourceKey(occurrence, image.imagePath);
+        const resourceKey = image.chartResourceKey
+          ?? (image.chart ? chartResourceKey(occurrence) : imageResourceKey(occurrence, image.imagePath));
         segments.push({
           kind: 'resource', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
           resourceKey, resourceKind, measuredWidthPt: image.measuredWidth,
@@ -2060,7 +2061,7 @@ function planMeasuredLines(
             ? { orientation: 'upright-physical' as const }
             : {}),
         });
-      } else if ('mathNodes' in segment) {
+      } else if ('math' in segment) {
         const math = segment as LayoutMathSeg;
         segments.push({
           kind: 'resource',
@@ -2079,7 +2080,7 @@ function planMeasuredLines(
       }
       sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
     }
-    const onlyMath = raw.segments.length === 1 && 'mathNodes' in (raw.segments[0] ?? {} as object)
+    const onlyMath = raw.segments.length === 1 && 'math' in (raw.segments[0] ?? {} as object)
       ? raw.segments[0] as LayoutMathSeg
       : undefined;
     return planLine({
@@ -3009,7 +3010,6 @@ export type CompleteTextBoxStoryAcquirer = (
   request: Readonly<{
     source: SourceRef;
     container: FlowContainer;
-    blocks: readonly CompleteTextBoxBlockInput[];
     /** Parser-owned vertical-page drawings acquire their shape content in the
      * same upright local frame as the surrounding DrawingML geometry. */
     coordinateSpace?: 'section-logical' | 'upright-physical';
@@ -3294,7 +3294,7 @@ function translateVerticalTextBoxTable(
 /** Acquires a DrawingML/WPS text body through the same paragraph measurement
  * and retained layout seam used by ordinary WordprocessingML paragraphs. */
 export function acquireShapeTextBoxLayout(
-  shape: Readonly<ShapeRun>,
+  shape: import('./types.js').DeepReadonly<ShapeRun>,
   rect: LayoutRect,
   options: ShapeTextBoxAcquisitionOptions,
 ): TextBoxLayout | undefined {
@@ -3314,7 +3314,7 @@ export function acquireShapeTextBoxLayout(
   };
   const storySource = acquisition.source;
   const blockCount = acquisition.kind === 'complete'
-    ? acquisition.blocks.length
+    ? acquisition.blockCount
     : acquisition.paragraphs.length;
   if (blockCount === 0) return undefined;
   const verticalMode = retainedTextBoxVerticalMode(shape.textVert);
@@ -3350,7 +3350,6 @@ export function acquireShapeTextBoxLayout(
         bounds: innerBounds,
         capacity: 'unbounded',
       },
-      blocks: acquisition.blocks,
       coordinateSpace: options.coordinateSpace ?? 'section-logical',
     });
   }
@@ -3982,7 +3981,7 @@ export interface RetainedFrameGroupAcquisition {
     exclusionId: string;
   }>;
   readonly members: readonly Readonly<{
-    paragraph: DocParagraph;
+    paragraph: ParagraphLayoutSource;
     fragment: ParagraphLayout;
     source: SourceRef;
   }>[];
@@ -4102,7 +4101,7 @@ export function acquireRetainedFrameGroup(
   }> => {
     let wrapRegistry = createParagraphWrapRegistry(`body-frame:${group.id}`);
     let cursorPt = 0;
-    let previous: DocParagraph | null = null;
+    let previous: ParagraphLayoutSource | null = null;
     let previousAfterPt = 0;
     let previousBorderExtentPt = 0;
     const retained: Array<RetainedFrameGroupAcquisition['members'][number]> = [];

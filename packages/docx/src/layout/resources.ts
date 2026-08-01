@@ -1,13 +1,11 @@
 import type { DeepReadonly, LayoutDiagnostic, SourceRef } from './types.js';
 import { stableFingerprint } from './fingerprint.js';
-import type { BodyElement, DocParagraph, DocRun, DocTable, DocxDocumentModel, ShapeRun } from '../types.js';
-import type { BodyLayoutInput } from './body-layout-input.js';
-import type { ProductionBodyModelGateway } from './production-body-layout.js';
+import type { BodyElement, DocParagraph, DocxDocumentModel } from '../types.js';
 import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
 import type { MathNode } from '@silurus/ooxml-core';
 import { rasterExceedsBudget, sniffRasterDimensions } from '@silurus/ooxml-core';
-import { imageResourceKey, mathResourceKey } from './source-key.js';
-import { normalizeInternalDocumentModel } from '../parser-model.js';
+import { mathResourceKey } from './source-key.js';
+import { projectDocumentSnapshotResources } from './production-paint-resources.js';
 
 export { imageResourceKey, mathResourceKey } from './source-key.js';
 
@@ -35,19 +33,6 @@ export interface MathOccurrence {
   readonly display: boolean;
   readonly source: SourceRef;
   readonly resourceKey: string;
-}
-
-export interface ProductionDocumentInput {
-  readonly document: DocxDocumentModel;
-  readonly mathOccurrences: readonly MathOccurrence[];
-  readonly fontFamilyCharsets: Readonly<Record<string, string>>;
-  readonly bodyLayoutInput: BodyLayoutInput;
-  readonly bodyModelGateway: ProductionBodyModelGateway;
-}
-
-/** The sole runtime parser/model gateway used by the final renderer adapter. */
-export function productionDocumentInput(doc: DocxDocumentModel): ProductionDocumentInput {
-  return normalizeInternalDocumentModel(doc);
 }
 
 export interface ImageMetadataService {
@@ -90,13 +75,6 @@ export function bodyMathOccurrences(
   };
   visit(body);
   return found;
-}
-
-/** Collect every story whose current model retains OMML MathNode runs. Parser
- * normalization gives rich text-box content its own structural story identity,
- * including equations nested in text-box tables. */
-export function documentMathOccurrences(doc: DocxDocumentModel): MathOccurrence[] {
-  return [...normalizeInternalDocumentModel(doc).mathOccurrences];
 }
 
 function finiteNonNegative(value: number, name: string): number {
@@ -176,83 +154,10 @@ export function documentImageMetadataRecords(
   resolvePictureBulletSize?: PictureBulletSizeResolver,
   acquisitionInputs?: BodyAcquisitionInputProjections,
 ): ImageMetadataRecord[] {
-  const records: ImageMetadataRecord[] = [];
-  const add = (source: SourceRef, imagePath: string, mimeType: string, widthPt: number, heightPt: number): void => {
-    records.push({ resourceKey: imageResourceKey(source, imagePath), widthPt, heightPt, mimeType });
-  };
-  const visitRun = (run: DocRun, source: SourceRef): void => {
-    if (run.type === 'image') {
-      add(source, run.imagePath, run.mimeType, run.widthPt, run.heightPt);
-      return;
-    }
-    if (run.type !== 'shape') return;
-    const shape = run as { type: 'shape' } & ShapeRun;
-    shape.textBlocks?.forEach((block, index) => {
-      if (!block.imagePath || !block.mimeType || block.imageWidthPt == null || block.imageHeightPt == null) return;
-      const textBoxSource: SourceRef = {
-        story: 'textbox',
-        storyInstance: `${source.story}:${source.storyInstance}:${source.path.join('.')}`,
-        // The compatibility block becomes one retained paragraph whose image is
-        // run 0; metadata and paint must address that same structural occurrence.
-        path: [index, 0],
-      };
-      add(textBoxSource, block.imagePath, block.mimeType, block.imageWidthPt, block.imageHeightPt);
-    });
-  };
-  const visitTable = (table: DocTable, story: SourceRef['story'], storyInstance: string, prefix: number[]): void => {
-    table.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
-      visitBody(cell.content as BodyElement[], story, storyInstance, [...prefix, rowIndex, cellIndex]);
-    }));
-  };
-  const visitBody = (body: BodyElement[], story: SourceRef['story'], storyInstance: string, prefix: number[] = []): void => {
-    body.forEach((element, elementIndex) => {
-      const path = [...prefix, elementIndex];
-      if (element.type === 'paragraph') {
-        const numbering = element.numbering;
-        if (numbering?.picBulletImagePath && numbering.picBulletMimeType) {
-          const resolvedSize = resolvePictureBulletSize?.(element);
-          const widthPt = numbering.picBulletWidthPt ?? resolvedSize?.widthPt;
-          const heightPt = numbering.picBulletHeightPt ?? resolvedSize?.heightPt;
-          if (widthPt != null && heightPt != null) {
-            add(
-              { story, storyInstance, path },
-              numbering.picBulletImagePath,
-              numbering.picBulletMimeType,
-              widthPt,
-              heightPt,
-            );
-          }
-        }
-        const paragraphSource = { story, storyInstance, path };
-        const authoredRuns = acquisitionInputs
-          ?.paragraphAcquisitionInput(element, paragraphSource).runs
-          ?? element.runs;
-        authoredRuns.forEach((run, runIndex) => {
-          if (run.type === 'image' || run.type === 'shape') {
-            visitRun(run, { ...paragraphSource, path: [...path, runIndex] });
-          }
-        });
-      } else if (element.type === 'table') {
-        visitTable(element, story, storyInstance, path);
-      }
-      if (element.type === 'sectionBreak') {
-        for (const kind of ['default', 'first', 'even'] as const) {
-          const header = element.headers?.[kind];
-          const footer = element.footers?.[kind];
-          if (header) visitBody(header.body, 'header', `section:${elementIndex}:${kind}`);
-          if (footer) visitBody(footer.body, 'footer', `section:${elementIndex}:${kind}`);
-        }
-      }
-    });
-  };
-  visitBody(doc.body, 'body', 'body');
-  for (const kind of ['default', 'first', 'even'] as const) {
-    const header = doc.headers[kind];
-    const footer = doc.footers[kind];
-    if (header) visitBody(header.body, 'header', kind);
-    if (footer) visitBody(footer.body, 'footer', kind);
-  }
-  for (const note of doc.footnotes ?? []) visitBody(note.content, 'footnote', note.id);
-  for (const note of doc.endnotes ?? []) visitBody(note.content, 'endnote', note.id);
-  return records;
+  return [...projectDocumentSnapshotResources(
+    doc,
+    acquisitionInputs,
+    [],
+    resolvePictureBulletSize,
+  ).imageMetadata];
 }

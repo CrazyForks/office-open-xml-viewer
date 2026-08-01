@@ -3,6 +3,7 @@ import {
   type KinsokuRules,
 } from '@silurus/ooxml-core';
 import { EAST_ASIAN_RE } from './layout/text.js';
+import type { ParagraphLayoutSource } from './layout/text.js';
 import {
   resolveDefaultTabPt,
 } from './line-layout.js';
@@ -118,13 +119,13 @@ export interface RunLayoutContext {
   readonly characterGrid: CharacterGridPolicy;
 }
 
-function paragraphHasRuby(paragraph: DocParagraph): boolean {
+function paragraphHasRuby(paragraph: ParagraphLayoutSource): boolean {
   return paragraph.runs.some(
     (run) => run.type === 'text' && Boolean((run as DocxTextRun).ruby),
   );
 }
 
-function paragraphHasEastAsianText(paragraph: DocParagraph): boolean {
+function paragraphHasEastAsianText(paragraph: ParagraphLayoutSource): boolean {
   return paragraph.runs.some(
     (run) => run.type === 'text' && EAST_ASIAN_RE.test((run as DocxTextRun).text),
   );
@@ -252,7 +253,7 @@ export function resolveParagraphLayoutContext(
   settings: DocumentLayoutSettings,
   section: SectionLayoutContext,
   story: StoryContext,
-  paragraph: DocParagraph,
+  paragraph: ParagraphLayoutSource,
 ): ParagraphLayoutContext {
   const lineGridActive =
     isSectionLineGrid(section.grid.kind)

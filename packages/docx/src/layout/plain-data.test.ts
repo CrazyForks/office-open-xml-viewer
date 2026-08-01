@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { snapshotPlainData } from './plain-data.js';
+import { sealPlainData, snapshotPlainData } from './plain-data.js';
 
 describe('plain layout data snapshots', () => {
   it('preserves signed unbounded finite DrawingML source-rectangle percentages exactly', () => {
@@ -42,16 +42,26 @@ describe('plain layout data snapshots', () => {
       .toThrow(/structured-clone-safe plain data/i);
   });
 
-  it('validates a shared plain-data DAG only once before cloning', () => {
-    let reads = 0;
-    const shared = Object.defineProperty({}, 'value', {
-      enumerable: true,
-      get() { reads += 1; return 7; },
-    });
-
+  it('preserves a shared plain-data DAG', () => {
+    const shared = { value: 7 };
     const snapshot = snapshotPlainData({ first: shared, second: shared }, 'layout payload');
-
     expect(snapshot.first).toBe(snapshot.second);
-    expect(reads).toBe(2); // one validation traversal and one structured clone traversal
+  });
+
+  it.each([
+    ['accessor', (value: object) => Object.defineProperty(value, 'hidden', {
+      enumerable: true, get: () => ({ retainedClosure: true }),
+    })],
+    ['non-enumerable', (value: object) => Object.defineProperty(value, 'hidden', {
+      enumerable: false, value: 'secret',
+    })],
+    ['symbol', (value: object) => Object.defineProperty(value, Symbol('hidden'), {
+      enumerable: true, value: 'secret',
+    })],
+  ])('rejects %s properties before sealing builder-owned data', (_kind, define) => {
+    const value = {};
+    define(value);
+    expect(() => sealPlainData(value, 'layout payload'))
+      .toThrow(/enumerable|string|data property/i);
   });
 });

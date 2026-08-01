@@ -1,11 +1,11 @@
-import type { DocxDocumentModel } from './types.js';
 import type { LayoutServices } from './layout/types.js';
 import { attachDocumentLayoutVariants } from './layout/document-layout-variants.js';
 import type { LayoutVariantStore } from './layout/variant-store.js';
 import { layoutDocument } from './document-layout.js';
+import type { LayoutSourceStore } from './layout/layout-source-store.js';
+import { layoutSourceStoreOf } from './layout/runtime-state.js';
 
 export interface RetainedRenderWorkerDocumentLayout {
-  readonly model: DocxDocumentModel;
   readonly layoutServices: LayoutServices;
   readonly layoutVariants: LayoutVariantStore;
   readonly defaultCurrentDateMs: number;
@@ -17,18 +17,21 @@ export interface RetainedRenderWorkerDocumentLayout {
  * ownership wiring without importing the worker's WASM and `self` side effects.
  */
 export function retainRenderWorkerDocumentLayout(
-  model: DocxDocumentModel,
+  source: LayoutSourceStore,
   layoutServices: LayoutServices,
   defaultCurrentDateMs: number,
 ): RetainedRenderWorkerDocumentLayout {
+  const retainedSource = layoutSourceStoreOf(layoutServices);
+  if (retainedSource && retainedSource !== source) {
+    throw new Error('Layout services belong to a different document source');
+  }
   const variants = attachDocumentLayoutVariants({
-    model,
+    source,
     services: layoutServices,
     defaultCurrentDateMs,
-    buildLayout: (options) => layoutDocument(model, layoutServices, options),
+    buildLayout: (options) => layoutDocument(source, layoutServices, options),
   });
   return Object.freeze({
-    model,
     layoutServices,
     layoutVariants: variants.store,
     defaultCurrentDateMs,
