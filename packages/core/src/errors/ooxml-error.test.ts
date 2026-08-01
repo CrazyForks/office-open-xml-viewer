@@ -49,6 +49,7 @@ describe('OoxmlError', () => {
         usage: {
           archiveEntryCount: 1,
           declaredInflatedBytes: 11,
+          largestInflatedEntryBytes: 11,
           distinctInflatedBytes: 11,
           operationInflatedBytes: 11,
         },
@@ -63,6 +64,7 @@ describe('OoxmlError', () => {
       resource: 'archive-entry',
       part: 'word/document.xml',
       metric: 'actual-inflated-bytes',
+      usage: { largestInflatedEntryBytes: 11 },
     });
     expect(Object.isFrozen(err.details)).toBe(true);
     expect(Object.isFrozen(err.details.violation)).toBe(true);

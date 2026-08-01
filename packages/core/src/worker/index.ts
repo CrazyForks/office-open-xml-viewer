@@ -17,6 +17,7 @@ export {
   type WasmParserHostOptions,
 } from './wasm-guard.js';
 export {
+  decodeOoxmlResourceUsage,
   deserializeWorkerError,
   parseResourceLimitError,
   serializeWorkerError,
@@ -30,6 +31,16 @@ export {
   type NormalizedOoxmlResourceOptions,
   type NormalizedOoxmlResourcePolicy,
 } from './resource-policy.js';
+export {
+  OoxmlResourceDebugSession,
+  type OoxmlResourceDebugCheckpoint,
+  type OoxmlResourceDebugReport,
+  type OoxmlResourceDebugSessionOptions,
+} from './resource-debug.js';
+export {
+  emitOoxmlResourceDebugReport,
+  formatOoxmlResourceDebugReport,
+} from './resource-debug-view.js';
 export {
   HARD_MAX_DOCX_BODY_BLOCK_XML_BYTES,
   HARD_MAX_DOCX_BODY_CHUNK_JSON_BYTES,

@@ -4,6 +4,7 @@ import { attachDocumentLayoutRuntime } from './layout/runtime-state.js';
 
 describe('DocxDocument resource-policy wiring', () => {
   it('forwards one normalized policy object to worker parsing', async () => {
+    const onUsage = vi.fn();
     let request: Record<string, unknown> | undefined;
     const instance = Object.create(DocxDocument.prototype) as Record<string, unknown>;
     attachDocumentLayoutRuntime(instance, 0);
@@ -22,6 +23,13 @@ describe('DocxDocument resource-policy wiring', () => {
             pageSizes: [],
             bookmarkPages: [],
           },
+          usage: {
+            archiveEntryCount: 3,
+            declaredInflatedBytes: 4,
+            largestInflatedEntryBytes: 5,
+            distinctInflatedBytes: 6,
+            operationInflatedBytes: 7,
+          },
         };
       }),
     };
@@ -37,9 +45,10 @@ describe('DocxDocument resource-policy wiring', () => {
           resourcePolicy: typeof policy,
           useGoogleFonts: boolean,
           timeout: number,
+          onUsage: (usage: unknown) => void,
         ): Promise<void>;
       }
-    )._parse(new ArrayBuffer(1), policy, false, 30_000);
+    )._parse(new ArrayBuffer(1), policy, false, 30_000, onUsage);
 
     expect(request).toMatchObject({
       type: 'parse',
@@ -48,5 +57,9 @@ describe('DocxDocument resource-policy wiring', () => {
     });
     expect(request).not.toHaveProperty('maxZipEntryBytes');
     expect(request).not.toHaveProperty('parserResourceLimits');
+    expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({
+      largestInflatedEntryBytes: 5,
+      distinctInflatedBytes: 6,
+    }));
   });
 });

@@ -1063,6 +1063,8 @@ export declare type OoxmlResourceName = ExtensibleLiteral<'archive' | 'archive-e
 export declare interface OoxmlResourceUsageSnapshot {
     readonly archiveEntryCount: number;
     readonly declaredInflatedBytes: number;
+    /** Largest actual decompressed size observed for one ZIP entry. */
+    readonly largestInflatedEntryBytes?: number;
     readonly distinctInflatedBytes: number;
     readonly operationInflatedBytes: number;
 }

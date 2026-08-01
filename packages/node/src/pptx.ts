@@ -1,7 +1,8 @@
 import type { OoxmlResourceLimits, OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import type { Presentation, Slide } from '@silurus/ooxml-pptx';
 import {
-  normalizeResourcePolicy,
+  normalizeLoadResourceOptions,
+  OoxmlResourceDebugSession,
   parseResourceLimitError,
   resourcePolicyForWasm,
   type PullSessionCommand,
@@ -43,6 +44,8 @@ export interface OpenPptxPresentationOptions {
   resourceLimits?: OoxmlResourceLimits;
   /** @deprecated Use `resourceLimits.maxArchiveEntryBytes`. */
   maxZipEntryBytes?: number;
+  /** Emit a data-safe resource-usage card when the session closes. */
+  debug?: boolean;
   /** Abort the current slide pull and close the session. */
   signal?: AbortSignal;
 }
@@ -100,25 +103,35 @@ export async function openPptxPresentation(
   buffer: ArrayBuffer | Uint8Array | Buffer,
   options: OpenPptxPresentationOptions = {},
 ): Promise<PptxPresentationSession> {
-  const policy = normalizeResourcePolicy(options);
-  throwIfAborted(options.signal);
-  ensureInit();
-  const [maxEntry, maxTotal] = resourcePolicyForWasm(policy);
+  const resourceOptions = normalizeLoadResourceOptions(options);
+  const debug = new OoxmlResourceDebugSession({
+    enabled: resourceOptions.debug,
+    format: 'pptx',
+    mode: 'node',
+    policy: resourceOptions.policy,
+  });
+  debug.setSourceBytes(toUint8(buffer).byteLength);
   const Archive: PptxArchiveConstructor = pptxWasm.PptxArchive;
   let archive: PptxArchiveHandle | undefined;
   try {
+    throwIfAborted(options.signal);
+    ensureInit();
+    const [maxEntry, maxTotal] = resourcePolicyForWasm(resourceOptions.policy);
     archive = new Archive(toUint8(buffer), maxEntry, maxTotal);
     const bootstrap = normalizePresentationBootstrap(JSON.parse(
       new TextDecoder().decode(archive.presentation_bootstrap()),
     ) as PresentationBootstrap);
-    return new PptxPresentationSessionImpl(archive, bootstrap, options.signal);
+    debug.checkpoint('presentation bootstrap ready');
+    return new PptxPresentationSessionImpl(archive, bootstrap, debug, options.signal);
   } catch (error) {
     try {
       archive?.free();
     } catch {
       // Preserve the open/bootstrap failure.
     }
-    throw parseResourceLimitError(error) ?? error;
+    const normalized = parseResourceLimitError(error) ?? error;
+    debug.fail(normalized);
+    throw normalized;
   }
 }
 
@@ -134,10 +147,12 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
   private closed = false;
   private closePromise: Promise<void> | undefined;
   private usage: OoxmlResourceUsageSnapshot | undefined;
+  private consumedSlides = 0;
 
   constructor(
     private readonly archive: PptxArchiveHandle,
     bootstrap: PresentationBootstrap,
+    private readonly debug: OoxmlResourceDebugSession,
     private readonly signal?: AbortSignal,
   ) {
     this.slideCount = bootstrap.slideCount;
@@ -157,6 +172,10 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
       open: async (slideIndex, identity) => {
         this.slidePull.reserveOpen(identity);
         await this.slidePull.open(slideIndex, identity);
+      },
+      onUsage: (usage) => {
+        this.usage = usage;
+        this.debug.observeUsage(usage);
       },
     });
   }
@@ -179,13 +198,16 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
         throwIfAborted(this.signal);
         const slide = await this.slideClient.load(index);
         if (!slide) throw new Error(`PPTX slide ${index} was not decoded`);
-        this.usage = await this.slidePull.run(() => readPptxSlideCursorUsage(
+        this.usage ??= await this.slidePull.run(() => readPptxSlideCursorUsage(
           (operation) => operation(this.archive),
         ));
+        this.debug.observeUsage(this.usage);
+        this.consumedSlides = index + 1;
         yield slide;
       }
     } catch (error) {
       operationError = parseResourceLimitError(error) ?? error;
+      this.debug.fail(operationError);
       throw operationError;
     } finally {
       try {
@@ -217,7 +239,12 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
     } catch (cleanupError) {
       if (operationError === undefined) throw cleanupError;
     }
-    if (operationError !== undefined) throw operationError;
+    if (operationError !== undefined) {
+      this.debug.fail(operationError);
+      throw operationError;
+    }
+    this.debug.checkpoint('presentation session closed');
+    this.debug.succeed({ slides: this.consumedSlides });
   }
 }
 

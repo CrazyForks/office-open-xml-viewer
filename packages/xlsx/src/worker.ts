@@ -3,7 +3,12 @@ import {
   decodeDataUrl,
   WasmParserHost,
 } from '@silurus/ooxml-core';
-import { resourcePolicyForWasm, serializeWorkerError, type PullSessionCommand } from '@silurus/ooxml-core/worker';
+import {
+  decodeOoxmlResourceUsage,
+  resourcePolicyForWasm,
+  serializeWorkerError,
+  type PullSessionCommand,
+} from '@silurus/ooxml-core/worker';
 import type { WorkerRequest, WorkerResponse } from './types.js';
 import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
 
@@ -103,7 +108,10 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
         return archive.parse();
       });
       const workbookJson = json.buffer as ArrayBuffer;
-      const res: WorkerResponse = { type: 'parsed', id, workbookJson };
+      const usage = host.run(() => decodeOoxmlResourceUsage(
+        host.archive!.resource_usage(),
+      ));
+      const res: WorkerResponse = { type: 'parsed', id, workbookJson, usage };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [
         workbookJson,
       ]);

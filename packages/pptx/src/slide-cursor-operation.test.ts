@@ -93,7 +93,7 @@ describe('loadPptxSlideFromCursor', () => {
       0,
       { operationId: 1, generation: 1 },
       () => undefined,
-    )).toThrow(/usage is invalid/);
+    )).toThrow(/usage checkpoint is invalid/);
     expect(archive.acknowledge_slide).not.toHaveBeenCalled();
     expect(archive.cancel_slide).toHaveBeenCalledOnce();
   });

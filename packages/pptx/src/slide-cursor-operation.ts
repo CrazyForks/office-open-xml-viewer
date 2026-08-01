@@ -1,5 +1,8 @@
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
-import { HARD_MAX_PPTX_SLIDE_JSON_BYTES } from '@silurus/ooxml-core/worker';
+import {
+  decodeOoxmlResourceUsage,
+  HARD_MAX_PPTX_SLIDE_JSON_BYTES,
+} from '@silurus/ooxml-core/worker';
 import type { Slide } from './types.js';
 
 export interface PptxSlideCursorArchive {
@@ -40,11 +43,9 @@ export function readPptxSlideCursorUsage(
   execute: PptxSlideArchiveExecutor,
 ): OoxmlResourceUsageSnapshot | undefined {
   try {
-    const value = JSON.parse(new TextDecoder().decode(
+    return decodeOoxmlResourceUsage(
       execute((archive) => archive.slide_cursor_resource_usage()),
-    )) as unknown;
-    if (!isResourceUsage(value)) throw new Error('slide cursor resource usage is invalid');
-    return value;
+    );
   } catch (error) {
     // Bootstrap can precede creation of the per-slide ledger. All malformed
     // checkpoints and real parser/resource failures remain fatal.
@@ -125,17 +126,4 @@ export function loadPptxSlideFromCursor(
     slide = undefined;
     throw error;
   }
-}
-
-function isResourceUsage(value: unknown): value is OoxmlResourceUsageSnapshot {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const candidate = value as Partial<OoxmlResourceUsageSnapshot>;
-  return isNonNegativeSafeInteger(candidate.archiveEntryCount) &&
-    isNonNegativeSafeInteger(candidate.declaredInflatedBytes) &&
-    isNonNegativeSafeInteger(candidate.distinctInflatedBytes) &&
-    isNonNegativeSafeInteger(candidate.operationInflatedBytes);
-}
-
-function isNonNegativeSafeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }

@@ -9,7 +9,9 @@ import {
   OoxmlResourceLimitError,
 } from '@silurus/ooxml-core';
 import {
-  normalizeResourcePolicy,
+  decodeOoxmlResourceUsage,
+  normalizeLoadResourceOptions,
+  OoxmlResourceDebugSession,
   parseResourceLimitError,
   resourcePolicyForWasm,
   type PullSessionCommand,
@@ -65,6 +67,8 @@ export interface OpenDocxDocumentOptions {
   resourceLimits?: OoxmlResourceLimits;
   /** @deprecated Use `resourceLimits.maxArchiveEntryBytes`. */
   maxZipEntryBytes?: number;
+  /** Emit a data-safe resource-usage card to the Node console. */
+  debug?: boolean;
   /** Stable DATE/TIME field instant captured before pagination. */
   currentDate?: Date | number;
   /** Abort between parser units or page renders. Synchronous WASM work cannot be preempted. */
@@ -138,17 +142,25 @@ export async function openDocxDocument(
   buffer: ArrayBuffer | Uint8Array | Buffer,
   options: OpenDocxDocumentOptions,
 ): Promise<DocxDocumentSession> {
-  if (!options?.factory) throw new TypeError('openDocxDocument requires a canvas factory');
-  throwIfAborted(options.signal);
-  ensureInit();
-  const policy = normalizeResourcePolicy(options);
-  const [maxEntry, maxTotal] = resourcePolicyForWasm(policy);
+  const resourceOptions = normalizeLoadResourceOptions(options ?? {});
+  const debug = new OoxmlResourceDebugSession({
+    enabled: resourceOptions.debug,
+    format: 'docx',
+    mode: 'node',
+    policy: resourceOptions.policy,
+  });
+  debug.setSourceBytes(toUint8(buffer).byteLength);
   const Archive = (docxWasm as unknown as { DocxArchive: DocxArchiveConstructor }).DocxArchive;
   let archive: DocxArchiveHandle | undefined;
   let pull: DocumentPullWorker | undefined;
   let transport: InProcessPullTransport<PullSessionResponse<ArrayBuffer, number>> | undefined;
   try {
+    if (!options?.factory) throw new TypeError('openDocxDocument requires a canvas factory');
+    throwIfAborted(options.signal);
+    ensureInit();
+    const [maxEntry, maxTotal] = resourcePolicyForWasm(resourceOptions.policy);
     archive = new Archive(toUint8(buffer), maxEntry, maxTotal);
+    debug.checkpoint('container ready');
     pull = new DocumentPullWorker(() => archive);
     const identity = { sessionId: 1, operationId: 1, generation: 1 } as const;
     pull.open(identity);
@@ -159,10 +171,17 @@ export async function openDocxDocument(
       ),
       () => undefined,
     );
+    let usage: OoxmlResourceUsageSnapshot | undefined;
     const model = await materializeDocumentPullSession(transport, identity, {
       signal: options.signal,
+      onUsage: (checkpoint) => {
+        usage = checkpoint;
+        debug.observeUsage(checkpoint);
+      },
     });
-    const usage = decodeDocumentUsage(archive.document_cursor_resource_usage());
+    usage ??= decodeDocumentUsage(archive.document_cursor_resource_usage());
+    debug.observeUsage(usage);
+    debug.checkpoint('model streamed');
     await pull.reset();
     transport.terminate();
 
@@ -179,7 +198,7 @@ export async function openDocxDocument(
       defaultCurrentDateMs,
     );
     const layout = retained.layoutVariants.defaultLayout;
-    return new DocxDocumentSessionImpl(
+    const session = new DocxDocumentSessionImpl(
       archive,
       adapted.source,
       services,
@@ -189,6 +208,9 @@ export async function openDocxDocument(
       usage,
       options.signal,
     );
+    debug.checkpoint('pagination ready');
+    debug.succeed({ pages: session.pageCount });
+    return session;
   } catch (error) {
     await pull?.reset().catch(() => undefined);
     transport?.terminate();
@@ -197,7 +219,9 @@ export async function openDocxDocument(
     } catch {
       // Preserve the open/parse/layout failure.
     }
-    throw parseResourceLimitError(error) ?? error;
+    const normalized = parseResourceLimitError(error) ?? error;
+    debug.fail(normalized);
+    throw normalized;
   }
 }
 
@@ -370,7 +394,7 @@ function normalizeCurrentDate(value: Date | number | undefined): number {
 
 function decodeDocumentUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined {
   try {
-    return JSON.parse(new TextDecoder().decode(bytes)) as OoxmlResourceUsageSnapshot;
+    return decodeOoxmlResourceUsage(bytes);
   } catch (error) {
     if (String(error).includes('document cursor usage is unavailable')) return undefined;
     throw error;

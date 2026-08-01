@@ -1,4 +1,5 @@
 import type {
+  OoxmlResourceUsageSnapshot,
   ChartModel,
   MathNode,
   SpaceLine,
@@ -1107,7 +1108,12 @@ export type WorkerResponse =
   // bytes (transferred, not cloned); the main thread does the single
   // `TextDecoder.decode` + `JSON.parse` into a `ParsedWorkbook` / `Worksheet`.
   // See `parse_xlsx` (Rust) for why.
-  | { type: 'parsed'; id: number; workbookJson: ArrayBuffer }
+  | {
+      type: 'parsed';
+      id: number;
+      workbookJson: ArrayBuffer;
+      usage?: OoxmlResourceUsageSnapshot;
+    }
   | { type: 'parsedSheet'; id: number; worksheetJson: ArrayBuffer }
   | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>)
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }

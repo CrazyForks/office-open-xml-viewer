@@ -5,6 +5,7 @@ import type {
   ParsedWorkbook,
   Worksheet,
 } from './types.js';
+import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import type { NormalizedOoxmlResourcePolicy } from '@silurus/ooxml-core/worker';
 import type { PullSessionIdentity } from '@silurus/ooxml-core/worker';
 
@@ -98,7 +99,12 @@ export type RenderWorkerResponse =
   // tabColors, …) working; per-sheet data stays worker-side and is parsed on
   // demand.
   | Exclude<WorkerResponse, { type: 'parsed' } | { type: 'parsedSheet' }>
-  | { type: 'parsed'; id: number; workbook: ParsedWorkbook }
+  | {
+      type: 'parsed';
+      id: number;
+      workbook: ParsedWorkbook;
+      usage?: OoxmlResourceUsageSnapshot;
+    }
   | { type: 'parsedSheet'; id: number; worksheet: Worksheet }
   | { type: 'viewportRendered'; id: number; bitmap: ImageBitmap }
   | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>);

@@ -18,7 +18,13 @@ import {
   dropDuotoneBitmapCache,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
-import { resourcePolicyForWasm, serializeWorkerError, type PullSessionCommand, type PullSessionResponse } from '@silurus/ooxml-core/worker';
+import {
+  decodeOoxmlResourceUsage,
+  resourcePolicyForWasm,
+  serializeWorkerError,
+  type PullSessionCommand,
+  type PullSessionResponse,
+} from '@silurus/ooxml-core/worker';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { resolveSharedStringRows, resolveSharedStrings } from './shared-strings.js';
@@ -235,7 +241,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
         // and await it in the renderViewport handler.
         fontsLoaded = preloadGoogleFonts(xlsxFontPreloadNames(workbook), XLSX_GOOGLE_FONTS);
       }
-      post({ type: 'parsed', id, workbook });
+      const usage = host.run(() => decodeOoxmlResourceUsage(
+        host.archive!.resource_usage(),
+      ));
+      post({ type: 'parsed', id, workbook, usage });
       return;
     }
     if (req.type === 'parseSheet') {

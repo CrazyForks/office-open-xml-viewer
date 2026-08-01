@@ -5,6 +5,12 @@ import { OoxmlResourceLimitError } from '@silurus/ooxml-core';
 import type { Worksheet } from './types.js';
 
 const identity = { sessionId: 4, operationId: 9, generation: 2 } as const;
+const usageBytes = new TextEncoder().encode(JSON.stringify({
+  archiveEntryCount: 1,
+  declaredInflatedBytes: 2,
+  distinctInflatedBytes: 3,
+  operationInflatedBytes: 4,
+}));
 
 async function openWorker(
   worker: WorksheetPullWorker,
@@ -101,7 +107,7 @@ describe('WorksheetPullWorker', () => {
       open_sheet_cursor: vi.fn(),
       pull_sheet_cursor: vi.fn(() => malformedRows),
       sheet_cursor_pull_finished: vi.fn(() => false),
-      sheet_cursor_resource_usage: vi.fn(() => new TextEncoder().encode('{}')),
+      sheet_cursor_resource_usage: vi.fn(() => usageBytes),
       acknowledge_sheet_cursor_terminal: vi.fn(),
       cancel_sheet_cursor: vi.fn(),
       close_sheet_cursor: vi.fn(),
@@ -132,7 +138,7 @@ describe('WorksheetPullWorker', () => {
       open_sheet_cursor: vi.fn(),
       pull_sheet_cursor: vi.fn(() => terminal),
       sheet_cursor_pull_finished: vi.fn(() => true),
-      sheet_cursor_resource_usage: vi.fn(() => new TextEncoder().encode('{}')),
+      sheet_cursor_resource_usage: vi.fn(() => usageBytes),
       acknowledge_sheet_cursor_terminal: vi.fn(),
       cancel_sheet_cursor: vi.fn(),
       close_sheet_cursor: vi.fn(),
@@ -219,7 +225,7 @@ describe('WorksheetPullWorker', () => {
       open_sheet_cursor: vi.fn(),
       pull_sheet_cursor: vi.fn(() => rows),
       sheet_cursor_pull_finished: vi.fn(() => false),
-      sheet_cursor_resource_usage: vi.fn(() => new TextEncoder().encode('{}')),
+      sheet_cursor_resource_usage: vi.fn(() => usageBytes),
       acknowledge_sheet_cursor_terminal: vi.fn(),
       cancel_sheet_cursor: vi.fn(),
       close_sheet_cursor: vi.fn(),
@@ -251,7 +257,7 @@ describe('WorksheetPullWorker', () => {
       open_sheet_cursor: vi.fn(),
       pull_sheet_cursor: vi.fn(() => terminal),
       sheet_cursor_pull_finished: vi.fn(() => true),
-      sheet_cursor_resource_usage: vi.fn(() => new TextEncoder().encode('{}')),
+      sheet_cursor_resource_usage: vi.fn(() => usageBytes),
       acknowledge_sheet_cursor_terminal: vi.fn(() => { throw new Error('ack trap'); }),
       cancel_sheet_cursor: vi.fn(),
       close_sheet_cursor: vi.fn(),

@@ -2,9 +2,11 @@ import type { ParsedWorkbook, Row, Worksheet } from '@silurus/ooxml-xlsx';
 import type { OoxmlResourceLimits, OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
   BoundedPullSession,
+  decodeOoxmlResourceUsage,
+  normalizeLoadResourceOptions,
+  OoxmlResourceDebugSession,
   PullSessionHost,
   PullSessionHostCoordinator,
-  normalizeResourcePolicy,
   parseResourceLimitError,
   resourcePolicyForWasm,
   type PullSessionCommand,
@@ -30,6 +32,7 @@ const XLSX_WORKSHEET_BATCH_ROWS = 128;
 interface XlsxArchiveHandle {
   free(): void;
   parse(): Uint8Array;
+  resource_usage(): Uint8Array;
   open_sheet_cursor(sheetIndex: number, name: string): void;
   pull_sheet_cursor(rowCredit: number): Uint8Array;
   sheet_cursor_pull_finished(): boolean;
@@ -57,6 +60,8 @@ export interface XlsxWorksheetRowIteratorOptions {
   resourceLimits?: OoxmlResourceLimits;
   /** @deprecated Use `resourceLimits.maxArchiveEntryBytes`. */
   maxZipEntryBytes?: number;
+  /** Emit a data-safe resource-usage card when iteration finishes. */
+  debug?: boolean;
   /** Abort the current pull and cancel the native worksheet cursor. */
   signal?: AbortSignal;
 }
@@ -167,19 +172,31 @@ export async function* iterateXlsxWorksheetRows(
   sheetIndex: number,
   options: XlsxWorksheetRowIteratorOptions = {},
 ): AsyncGenerator<XlsxWorksheetRowChunk, void, void> {
-  if (!Number.isSafeInteger(sheetIndex) || sheetIndex < 0) {
-    throw new RangeError('sheetIndex must be a non-negative safe integer');
-  }
-  ensureInit();
-  const policy = normalizeResourcePolicy(options);
-  const [maxEntry, maxTotal] = resourcePolicyForWasm(policy);
-  const Archive = (xlsxWasm as unknown as { XlsxArchive: XlsxArchiveConstructor }).XlsxArchive;
-  const archive = createArchive(Archive, toUint8(buffer), maxEntry, maxTotal);
+  const resourceOptions = normalizeLoadResourceOptions(options);
+  const debug = new OoxmlResourceDebugSession({
+    enabled: resourceOptions.debug,
+    format: 'xlsx',
+    mode: 'node',
+    policy: resourceOptions.policy,
+  });
+  debug.setSourceBytes(toUint8(buffer).byteLength);
+  try {
+    if (!Number.isSafeInteger(sheetIndex) || sheetIndex < 0) {
+      throw new RangeError('sheetIndex must be a non-negative safe integer');
+    }
+    ensureInit();
+    const [maxEntry, maxTotal] = resourcePolicyForWasm(resourceOptions.policy);
+    const Archive = (xlsxWasm as unknown as { XlsxArchive: XlsxArchiveConstructor }).XlsxArchive;
+    const archive = createArchive(Archive, toUint8(buffer), maxEntry, maxTotal);
   let terminalAcknowledged = false;
   let operationError: unknown;
   let session: BoundedPullSession<Uint8Array, number> | undefined;
+  let rowBatches = 0;
+  let emittedRows = 0;
   try {
     const workbook = JSON.parse(new TextDecoder().decode(archive.parse())) as ParsedWorkbook;
+    debug.observeUsage(decodeUsage(archive.resource_usage()));
+    debug.checkpoint('workbook index ready');
     const sheet = workbook.workbook.sheets[sheetIndex];
     if (!sheet) throw new RangeError(`Sheet index ${sheetIndex} out of range`);
     archive.open_sheet_cursor(sheetIndex, sheet.name);
@@ -223,6 +240,7 @@ export async function* iterateXlsxWorksheetRows(
 
     for (;;) {
       const chunk = await session.pull(XLSX_WORKSHEET_PULL_BYTES, { signal: options.signal });
+      debug.observeUsage(chunk.usage);
       const decoded = JSON.parse(new TextDecoder().decode(chunk.payload)) as WorksheetWireChunk;
       if (chunk.done !== (decoded.kind === 'finished')) {
         throw new Error('worksheet cursor terminal marker mismatch');
@@ -231,6 +249,8 @@ export async function* iterateXlsxWorksheetRows(
         // The browser compatibility path resolves these after assembly. Node's
         // row iterator resolves each bounded batch before handing it over.
         resolveSharedStringRows(decoded.rows, workbook.sharedStrings);
+        rowBatches += 1;
+        emittedRows += decoded.rows.length;
         yield {
           kind: 'rows',
           rows: decoded.rows,
@@ -254,6 +274,7 @@ export async function* iterateXlsxWorksheetRows(
     }
   } catch (error) {
     operationError = parseResourceLimitError(error) ?? error;
+    debug.fail(operationError);
     await session?.cancel('request-error').catch(() => undefined);
     throw operationError;
   } finally {
@@ -265,6 +286,21 @@ export async function* iterateXlsxWorksheetRows(
     } catch (cleanupError) {
       if (operationError === undefined) throw cleanupError;
     }
+    if (operationError === undefined) {
+      debug.checkpoint(
+        terminalAcknowledged ? 'worksheet stream complete' : 'worksheet stream closed',
+      );
+      debug.succeed({
+        'row-batches': rowBatches,
+        rows: emittedRows,
+        completed: terminalAcknowledged ? 1 : 0,
+      });
+    }
+  }
+  } catch (error) {
+    const normalized = parseResourceLimitError(error) ?? error;
+    debug.fail(normalized);
+    throw normalized;
   }
 }
 
@@ -283,7 +319,7 @@ function createArchive(
 
 function decodeUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined {
   try {
-    return JSON.parse(new TextDecoder().decode(bytes)) as OoxmlResourceUsageSnapshot;
+    return decodeOoxmlResourceUsage(bytes);
   } catch (error) {
     if (String(error).includes('worksheet cursor usage is unavailable')) return undefined;
     throw error;

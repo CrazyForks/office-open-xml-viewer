@@ -72,6 +72,8 @@ export type OoxmlFormat = 'docx' | 'xlsx' | 'pptx';
 export interface OoxmlResourceUsageSnapshot {
   readonly archiveEntryCount: number;
   readonly declaredInflatedBytes: number;
+  /** Largest actual decompressed size observed for one ZIP entry. */
+  readonly largestInflatedEntryBytes?: number;
   readonly distinctInflatedBytes: number;
   readonly operationInflatedBytes: number;
 }
@@ -148,6 +150,9 @@ export class OoxmlResourceLimitError extends Error {
       usage: Object.freeze({
         archiveEntryCount: source.usage.archiveEntryCount,
         declaredInflatedBytes: source.usage.declaredInflatedBytes,
+        ...(source.usage.largestInflatedEntryBytes === undefined
+          ? {}
+          : { largestInflatedEntryBytes: source.usage.largestInflatedEntryBytes }),
         distinctInflatedBytes: source.usage.distinctInflatedBytes,
         operationInflatedBytes: source.usage.operationInflatedBytes,
       }),

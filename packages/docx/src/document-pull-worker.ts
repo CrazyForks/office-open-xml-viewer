@@ -1,4 +1,5 @@
 import {
+  decodeOoxmlResourceUsage,
   HARD_MAX_DOCX_BODY_CHUNK_JSON_BYTES,
   HARD_MAX_DOCX_BOOTSTRAP_JSON_BYTES,
   PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
@@ -22,6 +23,7 @@ export interface DocxDocumentCursorArchive {
     byteCredit: number,
   ): Uint8Array;
   document_chunk_done(): boolean;
+  document_cursor_resource_usage?(): Uint8Array;
   acknowledge_document_chunk(
     sequence: number,
     operationId: number,
@@ -204,6 +206,11 @@ export class DocumentPullWorker {
         },
         cancel: () => this.executeArchive((archive) => archive.cancel_document_cursor()),
         close: () => this.executeArchive((archive) => archive.close_document_session()),
+        resourceUsage: () => {
+          const bytes = this.executeArchive((archive) =>
+            archive.document_cursor_resource_usage?.());
+          return bytes ? decodeOoxmlResourceUsage(bytes) : undefined;
+        },
       },
     });
   }

@@ -6,6 +6,7 @@ import type {
   PullSessionIdentity,
   PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
+import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 
 /** Lightweight summary returned by the render worker's `parse` — everything
  *  the main-thread proxy needs for its synchronous getters. The full model
@@ -53,12 +54,21 @@ export type RenderWorkerWireRequest =
 export type RenderWorkerResponse =
   | Exclude<WorkerResponse, { type: 'documentSessionOpened' }>
   | PullSessionResponse<ArrayBuffer, number>
-  | { type: 'parsedMeta'; id: number; meta: DocumentMeta }
+  | {
+      type: 'parsedMeta';
+      id: number;
+      meta: DocumentMeta;
+      usage?: OoxmlResourceUsageSnapshot;
+    }
   // OffscreenCanvas cannot select/probe the OpenType `vert` feature. A render
   // worker that parses vertical East-Asian content opens a bounded model stream
   // so the proxy can continue through main-thread rendering instead of silently
   // painting horizontal glyph forms or receiving one monolithic JSON value.
-  | ({ type: 'mainThreadVerticalFallback'; id: number } & PullSessionIdentity<number>)
+  | ({
+      type: 'mainThreadVerticalFallback';
+      id: number;
+      usage?: OoxmlResourceUsageSnapshot;
+    } & PullSessionIdentity<number>)
   // The worker projects structured-clone-safe run geometry from the same
   // retained layout variant it paints and ships it beside the bitmap.
   | { type: 'pageRendered'; id: number; bitmap: ImageBitmap; runs: DocxTextRunInfo[] }

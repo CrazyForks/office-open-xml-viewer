@@ -1,5 +1,6 @@
 import { OoxmlResourceLimitError, type OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
+  decodeOoxmlResourceUsage,
   PULL_SESSION_PROTOCOL,
   PullSessionHost,
   PullSessionHostCoordinator,
@@ -390,11 +391,9 @@ export class WorksheetPullWorker {
 
   private readResourceUsage(): OoxmlResourceUsageSnapshot | undefined {
     try {
-      return JSON.parse(
-        new TextDecoder().decode(
-          this.executeArchive((archive) => archive.sheet_cursor_resource_usage()),
-        ),
-      ) as OoxmlResourceUsageSnapshot;
+      return decodeOoxmlResourceUsage(
+        this.executeArchive((archive) => archive.sheet_cursor_resource_usage()),
+      );
     } catch (error) {
       // A corrupt container is deliberately represented by a deferred terminal
       // placeholder and has no PackageOperation ledger. That one legacy state

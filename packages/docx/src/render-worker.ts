@@ -16,6 +16,7 @@ import {
   dropBitmapCacheByPath,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
+import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
   PULL_SESSION_PROTOCOL,
   resourcePolicyForWasm,
@@ -165,10 +166,12 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       };
       documentPull.open(identity);
       let parsedModel: DocxDocumentModel;
+      let resourceUsage: OoxmlResourceUsageSnapshot | undefined;
       try {
         parsedModel = await materializeDocumentPullSession(
           createLocalDocumentPullTransport(documentPull),
           identity,
+          { onUsage: (usage) => { resourceUsage = usage; } },
         );
       } finally {
         await documentPull.reset().catch(() => undefined);
@@ -187,7 +190,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
           generation: documentGeneration,
         };
         fallbackPull.open(fallbackIdentity);
-        post({ type: 'mainThreadVerticalFallback', id, ...fallbackIdentity });
+        post({ type: 'mainThreadVerticalFallback', id, ...fallbackIdentity, usage: resourceUsage });
         return;
       }
       const adapted = layoutSourceModelAdapter(parsedModel);
@@ -239,7 +242,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         pageSizes,
         bookmarkPages: [...buildBookmarkPageMap(layout)],
       };
-      post({ type: 'parsedMeta', id, meta });
+      post({ type: 'parsedMeta', id, meta, usage: resourceUsage });
       return;
     }
     if (req.type === 'renderPage') {

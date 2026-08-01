@@ -17,6 +17,7 @@ import {
   dropDuotoneBitmapCache,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
+import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
   HARD_MAX_PPTX_CACHED_SLIDES,
   HARD_MAX_PPTX_CACHED_SLIDE_PROJECTION_BYTES,
@@ -57,6 +58,7 @@ let nextOperationId = 1;
 type PresentationLifecycleState = 'empty' | 'opening' | 'ready' | 'failed';
 let presentationState: PresentationLifecycleState = 'empty';
 let fontsLoaded: Promise<unknown> = Promise.resolve();
+let resourceUsage: OoxmlResourceUsageSnapshot | undefined;
 const rawParts = new BoundedRawPartCache({
   maxEntries: HARD_MAX_PPTX_RAW_PART_CACHE_ENTRIES,
   maxBytes: HARD_MAX_PPTX_RAW_PART_CACHE_BYTES,
@@ -92,7 +94,10 @@ function loadSlide(slideIndex: number) {
     slideIndex,
     { operationId, generation: currentGeneration },
     preflightBuilder
-      ? (index, slide, usage) => preflightBuilder?.prepareSlide(slide, usage)
+      ? (index, slide, usage) => {
+        resourceUsage = usage;
+        return preflightBuilder?.prepareSlide(slide, usage);
+      }
       : undefined,
   ));
 }
@@ -128,6 +133,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   dropDuotoneBitmapCache(getImage);
   dropSvgImageCache(getImage);
   fontsLoaded = Promise.resolve();
+  resourceUsage = undefined;
 
   const [maxEntry, maxTotal] = resourcePolicyForWasm(request.resourcePolicy);
   const bootstrap = await slidePull.run(() => executeArchiveFromNew(
@@ -184,7 +190,12 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
 
     if (request.kind === 'parse') {
       const compact = await openPresentation(request);
-      post({ kind: 'presentationReady', id: request.id, preflight: compact });
+      post({
+        kind: 'presentationReady',
+        id: request.id,
+        preflight: compact,
+        usage: resourceUsage,
+      });
       presentationState = 'ready';
       return;
     }

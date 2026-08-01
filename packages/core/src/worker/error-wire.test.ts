@@ -9,13 +9,14 @@ import {
 const USAGE = {
   archiveEntryCount: 1,
   declaredInflatedBytes: 6,
+  largestInflatedEntryBytes: 6,
   distinctInflatedBytes: 6,
   operationInflatedBytes: 6,
 };
 
 describe('worker error wire', () => {
   const rustError =
-    'OOXML_RESOURCE_LIMIT:{"code":"ooxml-resource-limit","details":{"stage":"decompression","violation":{"format":"xlsx","operation":"parse","resource":"archive-entry","part":"xl/worksheets/sheet1.xml","metric":"actual-inflated-bytes","limit":5,"observed":6,"configurable":true,"usage":{"archiveEntryCount":1,"declaredInflatedBytes":6,"distinctInflatedBytes":6,"operationInflatedBytes":6}}}}';
+    'OOXML_RESOURCE_LIMIT:{"code":"ooxml-resource-limit","details":{"stage":"decompression","violation":{"format":"xlsx","operation":"parse","resource":"archive-entry","part":"xl/worksheets/sheet1.xml","metric":"actual-inflated-bytes","limit":5,"observed":6,"configurable":true,"usage":{"archiveEntryCount":1,"declaredInflatedBytes":6,"largestInflatedEntryBytes":6,"distinctInflatedBytes":6,"operationInflatedBytes":6}}}}';
 
   it('parses an exact Rust envelope into the public typed error', () => {
     const error = parseResourceLimitError(new Error(rustError));
@@ -30,6 +31,7 @@ describe('worker error wire', () => {
       limit: 5,
       observed: 6,
       configurable: true,
+      usage: expect.objectContaining({ largestInflatedEntryBytes: 6 }),
     });
   });
 

@@ -91,7 +91,11 @@ export interface LoadOptions {
    * not guarantees of exact browser-process memory use.
    */
   resourceLimits?: OoxmlResourceLimits;
-  /** Emit a structured resource-usage report after load succeeds or fails. */
+  /**
+   * Emit one data-safe resource-usage card after load succeeds or fails.
+   * Includes observed archive counters and configured limits, but never source
+   * URLs, part names, document text, passwords, or error messages.
+   */
   debug?: boolean;
   /**
    * Reject the parse request if the parser worker does not answer within this

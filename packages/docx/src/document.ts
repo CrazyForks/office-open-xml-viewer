@@ -18,6 +18,7 @@ import {
   deserializeWorkerError,
   disposeRejectedLoad,
   normalizeLoadResourceOptions,
+  OoxmlResourceDebugSession,
   PULL_SESSION_PROTOCOL,
   type NormalizedOoxmlResourcePolicy,
 } from '@silurus/ooxml-core/worker';
@@ -162,6 +163,13 @@ export class DocxDocument {
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
+    const debug = new OoxmlResourceDebugSession({
+      enabled: resourceOptions.debug,
+      format: 'docx',
+      mode,
+      policy: resourceOptions.policy,
+    });
+    try {
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
       throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
     }
@@ -177,6 +185,8 @@ export class DocxDocument {
     // Container errors remain typed OoxmlError instances here; `instanceof`
     // would not survive the worker boundary.
     buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
+    debug.setSourceBytes(buffer.byteLength);
+    debug.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so
     // main-mode bundles never pull in its (renderer-bearing) chunk.
     const worker =
@@ -194,6 +204,7 @@ export class DocxDocument {
         resourceOptions.policy,
         mode === 'worker' ? !!opts.useGoogleFonts : false,
         opts.workerTimeoutMs,
+        (usage) => debug.observeUsage(usage),
       );
       if (mode === 'worker' && doc._mode === 'main') {
         console.warn(
@@ -255,10 +266,16 @@ export class DocxDocument {
         // the same work here so layout failures reject load() in both modes.
         retained.layoutVariants.defaultLayout;
       }
+      debug.checkpoint('model and layout ready');
+      debug.succeed({ pages: doc.pageCount });
       return doc;
     } catch (error) {
       const rejectedDocument = doc;
       disposeRejectedLoad(worker, rejectedDocument ? () => rejectedDocument.destroy() : undefined);
+      throw error;
+    }
+    } catch (error) {
+      debug.fail(error);
       throw error;
     }
   }
@@ -268,6 +285,7 @@ export class DocxDocument {
     resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts = false,
     timeoutMs?: number,
+    onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
   ): Promise<void> {
     const res = await this._bridge.request(
       (id) =>
@@ -281,11 +299,12 @@ export class DocxDocument {
       throw new Error('DOCX parse open returned a pull-protocol response');
     }
     if (this._mode === 'worker') {
+      if ('usage' in res && res.usage) onUsage?.(res.usage);
       if (res.type === 'mainThreadVerticalFallback') {
         const parsed = await materializeDocumentPullSession(
           this._bridge.transport(isDocumentPullResponse),
           res,
-          { timeoutMs },
+          { timeoutMs, onUsage },
         );
         const adapted = layoutSourceModelAdapter(parsed);
         this._source = adapted.source;
@@ -300,7 +319,7 @@ export class DocxDocument {
       const parsed = await materializeDocumentPullSession(
         this._bridge.transport(isDocumentPullResponse),
         identity,
-        { timeoutMs },
+        { timeoutMs, onUsage },
       );
       const adapted = layoutSourceModelAdapter(parsed);
       this._source = adapted.source;

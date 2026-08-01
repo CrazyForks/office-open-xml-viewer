@@ -3,6 +3,7 @@ import { PptxPresentation } from './presentation.js';
 
 describe('PptxPresentation resource-policy wiring', () => {
   it('forwards one normalized policy object to worker parsing', async () => {
+    const onUsage = vi.fn();
     let request: Record<string, unknown> | undefined;
     const instance = Object.create(PptxPresentation.prototype) as Record<string, unknown>;
     instance._mode = 'worker';
@@ -24,6 +25,13 @@ describe('PptxPresentation resource-policy wiring', () => {
             slides: [],
             fontPreloadNames: [],
           },
+          usage: {
+            archiveEntryCount: 3,
+            declaredInflatedBytes: 4,
+            largestInflatedEntryBytes: 5,
+            distinctInflatedBytes: 6,
+            operationInflatedBytes: 7,
+          },
         };
       }),
     };
@@ -39,12 +47,17 @@ describe('PptxPresentation resource-policy wiring', () => {
           resourcePolicy: typeof policy,
           useGoogleFonts: boolean,
           timeout: number,
+          onUsage: (usage: unknown) => void,
         ): Promise<void>;
       }
-    )._parse(new ArrayBuffer(1), policy, false, 30_000);
+    )._parse(new ArrayBuffer(1), policy, false, 30_000, onUsage);
 
     expect(request).toMatchObject({ kind: 'parse', id: 3, resourcePolicy: policy });
     expect(request).not.toHaveProperty('maxZipEntryBytes');
     expect(request).not.toHaveProperty('parserResourceLimits');
+    expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({
+      largestInflatedEntryBytes: 5,
+      distinctInflatedBytes: 6,
+    }));
   });
 });

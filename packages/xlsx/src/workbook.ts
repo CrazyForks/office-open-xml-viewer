@@ -19,6 +19,7 @@ import {
   BoundedPullSession,
   disposeRejectedLoad,
   normalizeLoadResourceOptions,
+  OoxmlResourceDebugSession,
   normalizeResourcePolicy,
   type NormalizedOoxmlResourcePolicy,
   PULL_SESSION_PROTOCOL,
@@ -154,6 +155,13 @@ export class XlsxWorkbook {
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<XlsxWorkbook> {
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
+    const debug = new OoxmlResourceDebugSession({
+      enabled: resourceOptions.debug,
+      format: 'xlsx',
+      mode,
+      policy: resourceOptions.policy,
+    });
+    try {
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
       throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
     }
@@ -173,6 +181,8 @@ export class XlsxWorkbook {
       buffer = source;
     }
     buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
+    debug.setSourceBytes(buffer.byteLength);
+    debug.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so
     // main-mode bundles never pull in its (renderer-bearing) chunk.
     const worker =
@@ -182,11 +192,22 @@ export class XlsxWorkbook {
     let wb: XlsxWorkbook | undefined;
     try {
       wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
-      await wb._load(buffer, opts, resourceOptions.policy);
+      await wb._load(
+        buffer,
+        opts,
+        resourceOptions.policy,
+        (usage) => debug.observeUsage(usage),
+      );
+      debug.checkpoint('workbook index ready');
+      debug.succeed({ sheets: wb.sheetCount });
       return wb;
     } catch (error) {
       const rejectedWorkbook = wb;
       disposeRejectedLoad(worker, rejectedWorkbook ? () => rejectedWorkbook.destroy() : undefined);
+      throw error;
+    }
+    } catch (error) {
+      debug.fail(error);
       throw error;
     }
   }
@@ -199,6 +220,7 @@ export class XlsxWorkbook {
     data: ArrayBuffer,
     opts: LoadOptions = {},
     resourcePolicy: NormalizedOoxmlResourcePolicy = normalizeResourcePolicy(opts),
+    onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
   ): Promise<void> {
     this.resourceFailure = null;
     this.retainedSheetUsage = { rows: 0, cells: 0 };
@@ -243,9 +265,12 @@ export class XlsxWorkbook {
     // sheetNames / tabColors / resolveValidationList keep working. In parse mode
     // it arrives as transferred UTF-8 JSON bytes — decode + parse once here.
     if (this._mode === 'worker') {
-      this.parsedWorkbook = (parsed as Extract<RenderWorkerResponse, { type: 'parsed' }>).workbook;
+      const response = parsed as Extract<RenderWorkerResponse, { type: 'parsed' }>;
+      this.parsedWorkbook = response.workbook;
+      if (response.usage) onUsage?.(response.usage);
     } else {
-      const { workbookJson } = parsed as Extract<WorkerResponse, { type: 'parsed' }>;
+      const { workbookJson, usage } = parsed as Extract<WorkerResponse, { type: 'parsed' }>;
+      if (usage) onUsage?.(usage);
       this.parsedWorkbook = JSON.parse(
         new TextDecoder().decode(new Uint8Array(workbookJson)),
       ) as ParsedWorkbook;

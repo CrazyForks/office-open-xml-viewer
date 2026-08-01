@@ -27,6 +27,7 @@ import {
   HARD_MAX_PPTX_CACHED_SLIDES,
   HARD_MAX_PPTX_CACHED_SLIDE_PROJECTION_BYTES,
   normalizeLoadResourceOptions,
+  OoxmlResourceDebugSession,
   parseResourceLimitError,
   PULL_SESSION_PROTOCOL,
   type NormalizedOoxmlResourcePolicy,
@@ -215,6 +216,13 @@ export class PptxPresentation {
   ): Promise<PptxPresentation> {
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
+    const debug = new OoxmlResourceDebugSession({
+      enabled: resourceOptions.debug,
+      format: 'pptx',
+      mode,
+      policy: resourceOptions.policy,
+    });
+    try {
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
       throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
     }
@@ -232,6 +240,8 @@ export class PptxPresentation {
     // file without a password, or a legacy-binary / unknown CFB, becomes a typed
     // OoxmlError (whose `instanceof` would not survive the worker boundary).
     buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
+    debug.setSourceBytes(buffer.byteLength);
+    debug.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so
     // main-mode bundles never pull in its (renderer-bearing) chunk.
     const worker =
@@ -252,17 +262,24 @@ export class PptxPresentation {
         resourceOptions.policy,
         mode === 'worker' ? !!opts.useGoogleFonts : false,
         opts.workerTimeoutMs,
+        (usage) => debug.observeUsage(usage),
       );
+      debug.checkpoint('presentation preflight ready');
       if (mode === 'main' && opts.useGoogleFonts && pres._preflight) {
         pres._googleFontFaces = await preloadGoogleFonts(
           pres._preflight.fontPreloadNames,
           PPTX_GOOGLE_FONTS,
         );
       }
+      debug.succeed({ slides: pres.slideCount });
       return pres;
     } catch (error) {
       const rejectedPresentation = pres;
       disposeRejectedLoad(worker, rejectedPresentation ? () => rejectedPresentation.destroy() : undefined);
+      throw error;
+    }
+    } catch (error) {
+      debug.fail(error);
       throw error;
     }
   }
@@ -272,6 +289,7 @@ export class PptxPresentation {
     resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts = false,
     timeoutMs?: number,
+    onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
   ): Promise<void> {
     const response = await this._bridge.request(
       (id) =>
@@ -282,6 +300,8 @@ export class PptxPresentation {
       { timeoutMs },
     );
     if (this._mode === 'worker') {
+      const ready = response as Extract<RenderWorkerResponse, { kind: 'presentationReady' }>;
+      if (ready.usage) onUsage?.(ready.usage);
       this._preflight = normalizePresentationPreflight(
         (response as Extract<RenderWorkerResponse, { kind: 'presentationReady' }>).preflight,
       );
@@ -306,6 +326,7 @@ export class PptxPresentation {
           { timeoutMs: operationTimeoutMs },
         );
       },
+      onUsage,
     });
 
     // Preflight deliberately drains one transferred unit at a time without

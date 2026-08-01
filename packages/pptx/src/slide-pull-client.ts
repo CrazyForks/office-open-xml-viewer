@@ -1,4 +1,4 @@
-import type { WorkerBridgeTransport } from '@silurus/ooxml-core';
+import type { OoxmlResourceUsageSnapshot, WorkerBridgeTransport } from '@silurus/ooxml-core';
 import {
   BoundedPullSession,
   HARD_MAX_PPTX_SLIDE_JSON_BYTES,
@@ -20,6 +20,7 @@ export interface PptxSlidePullClientOptions {
     identity: PullSessionIdentity<number>,
     timeoutMs?: number,
   ) => Promise<void>;
+  readonly onUsage?: (usage: OoxmlResourceUsageSnapshot) => void;
 }
 
 /** Main-realm owner of PPTX's one-slide transferred pull sessions. */
@@ -62,6 +63,8 @@ export class PptxSlidePullClient {
       await this.options.open(slideIndex, identity, timeoutMs);
       const chunk = await pullWithCreditRetry(session);
       try {
+        const usage = chunk.usage ?? session.usageCheckpoint;
+        if (usage) this.options.onUsage?.(usage);
         // JSON.parse is consumer acceptance for rendering pulls. Preflight pulls
         // deliberately skip it because the worker-side builder already parsed and
         // prepared the same transferred unit before this ACK.

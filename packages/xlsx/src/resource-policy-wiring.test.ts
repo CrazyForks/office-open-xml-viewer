@@ -3,6 +3,7 @@ import { XlsxWorkbook } from './workbook.js';
 
 describe('XlsxWorkbook resource-policy wiring', () => {
   it('sends the normalized policy once and reuses the retained session for sheets', async () => {
+    const onUsage = vi.fn();
     const requests: Record<string, unknown>[] = [];
     const instance = Object.create(XlsxWorkbook.prototype) as Record<string, unknown>;
     instance._mode = 'worker';
@@ -23,6 +24,13 @@ describe('XlsxWorkbook resource-policy wiring', () => {
               workbook: { sheets: [{ name: 'Sheet1' }] },
               styles: {},
               sharedStrings: [],
+            },
+            usage: {
+              archiveEntryCount: 3,
+              declaredInflatedBytes: 4,
+              largestInflatedEntryBytes: 5,
+              distinctInflatedBytes: 6,
+              operationInflatedBytes: 7,
             },
           };
         }
@@ -67,10 +75,11 @@ describe('XlsxWorkbook resource-policy wiring', () => {
           data: ArrayBuffer,
           options: Record<string, unknown>,
           resourcePolicy: typeof policy,
+          onUsage: (usage: unknown) => void,
         ): Promise<void>;
         getWorksheet(index: number): Promise<unknown>;
       }
-    )._load(new ArrayBuffer(1), {}, policy);
+    )._load(new ArrayBuffer(1), {}, policy, onUsage);
     await (
       instance as unknown as { getWorksheet(index: number): Promise<unknown> }
     ).getWorksheet(0);
@@ -81,5 +90,9 @@ describe('XlsxWorkbook resource-policy wiring', () => {
     expect(requests[1]).not.toHaveProperty('resourcePolicy');
     expect(requests[1]).not.toHaveProperty('maxZipEntryBytes');
     expect(requests[1]).not.toHaveProperty('parserResourceLimits');
+    expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({
+      largestInflatedEntryBytes: 5,
+      distinctInflatedBytes: 6,
+    }));
   });
 });

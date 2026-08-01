@@ -6,6 +6,7 @@ import type {
   PullSessionIdentity,
   WorkerErrorPayload,
 } from '@silurus/ooxml-core/worker';
+import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 
 /** Canonical compact payload emitted by Rust `presentation_bootstrap()`. */
 export interface PresentationBootstrap {
@@ -83,6 +84,11 @@ export type RenderWorkerResponse =
       PptxWorkerResponse,
       { kind: 'presentationOpened' | 'slideSessionOpened' | 'presentationPreflightReady' }
     >
-  | { kind: 'presentationReady'; id: number; preflight: PresentationPreflight }
+  | {
+      kind: 'presentationReady';
+      id: number;
+      preflight: PresentationPreflight;
+      usage?: OoxmlResourceUsageSnapshot;
+    }
   | { kind: 'slideRendered'; id: number; bitmap: ImageBitmap; runs: PptxTextRunInfo[] }
   | { kind: 'runsCollected'; id: number; runs: PptxTextRunInfo[] };

@@ -1,4 +1,4 @@
-import type { WorkerBridgeTransport } from '@silurus/ooxml-core';
+import type { OoxmlResourceUsageSnapshot, WorkerBridgeTransport } from '@silurus/ooxml-core';
 import {
   BoundedPullSession,
   HARD_MAX_DOCX_BODY_CHUNK_JSON_BYTES,
@@ -23,6 +23,7 @@ type DocumentUnit =
 export interface MaterializeDocumentPullOptions {
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  readonly onUsage?: (usage: OoxmlResourceUsageSnapshot) => void;
 }
 
 /** Drain one sequential DOCX operation into the backward-compatible public
@@ -43,6 +44,8 @@ export async function materializeDocumentPullSession(
     for (;;) {
       const chunk = await pullWithCreditRetry(session, options.signal);
       try {
+        const usage = chunk.usage ?? session.usageCheckpoint;
+        if (usage) options.onUsage?.(usage);
         const unit = parseDocumentUnit(chunk.payload);
         if (chunk.done !== (unit.kind === 'complete')) {
           throw new TypeError('DOCX document unit terminal flag does not match its payload');

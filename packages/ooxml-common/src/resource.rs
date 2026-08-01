@@ -57,6 +57,7 @@ pub struct ResourceOperation(u64);
 pub struct ResourceUsage {
     pub archive_entry_count: u64,
     pub declared_inflated_bytes: u64,
+    pub largest_inflated_entry_bytes: u64,
     pub distinct_inflated_bytes: u64,
     pub operation_inflated_bytes: u64,
 }
@@ -151,6 +152,9 @@ impl ResourceUsage {
         Self {
             archive_entry_count: self.archive_entry_count.min(JS_MAX_SAFE_INTEGER),
             declared_inflated_bytes: self.declared_inflated_bytes.min(JS_MAX_SAFE_INTEGER),
+            largest_inflated_entry_bytes: self
+                .largest_inflated_entry_bytes
+                .min(JS_MAX_SAFE_INTEGER),
             distinct_inflated_bytes: self.distinct_inflated_bytes.min(JS_MAX_SAFE_INTEGER),
             operation_inflated_bytes: self.operation_inflated_bytes.min(JS_MAX_SAFE_INTEGER),
         }
@@ -553,6 +557,10 @@ pub(crate) fn observe_inflated(
 
     let old = state.max_actual_by_part.get(&part_id).copied().unwrap_or(0);
     let next = old.max(cumulative_for_read);
+    state.usage.largest_inflated_entry_bytes = state
+        .usage
+        .largest_inflated_entry_bytes
+        .max(cumulative_for_read);
     let next_total = state
         .usage
         .distinct_inflated_bytes
@@ -615,6 +623,7 @@ mod tests {
             assert_eq!(governor.0.borrow().operation, "parse");
         }
         assert_eq!(governor.usage().distinct_inflated_bytes, 8);
+        assert_eq!(governor.usage().largest_inflated_entry_bytes, 4);
         assert_eq!(governor.usage().operation_inflated_bytes, 4);
     }
 

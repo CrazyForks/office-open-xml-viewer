@@ -76,6 +76,10 @@ impl XlsxZip {
         Ok(())
     }
 
+    fn usage(&self) -> ResourceUsage {
+        self.session.usage()
+    }
+
     fn operation(&mut self) -> Result<&PackageOperation, String> {
         if self.operation.is_none() {
             self.operation = Some(self.session.begin_operation("xlsx-parser-compat")?);
@@ -3312,6 +3316,18 @@ impl XlsxArchive {
                 .map_err(|error| JsValue::from_str(&error)),
             Err(_) => Ok(()),
         }
+    }
+
+    /// Session-wide archive accounting after workbook bootstrap or any later
+    /// operation. This is diagnostic data, not an allocator-memory estimate.
+    pub fn resource_usage(&self) -> Result<Vec<u8>, JsValue> {
+        let usage = self
+            .archive
+            .as_ref()
+            .map(XlsxZip::usage)
+            .map_err(|_| JsValue::from_str("xlsx resource usage is unavailable"))?;
+        serde_json::to_vec(&usage)
+            .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
     }
 
     /// Parse one worksheet by 0-based index and return it as UTF-8 JSON bytes.

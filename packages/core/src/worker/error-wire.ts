@@ -37,9 +37,25 @@ function isUsage(value: unknown): value is OoxmlResourceUsageSnapshot {
   return (
     isNonNegativeSafeInteger(usage.archiveEntryCount) &&
     isNonNegativeSafeInteger(usage.declaredInflatedBytes) &&
+    (usage.largestInflatedEntryBytes === undefined ||
+      isNonNegativeSafeInteger(usage.largestInflatedEntryBytes)) &&
     isNonNegativeSafeInteger(usage.distinctInflatedBytes) &&
     isNonNegativeSafeInteger(usage.operationInflatedBytes)
   );
+}
+
+/** Decode one canonical Rust usage checkpoint shared by all format workers. */
+export function decodeOoxmlResourceUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot {
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+  } catch {
+    throw new TypeError('OOXML resource usage checkpoint is not valid JSON');
+  }
+  if (!isUsage(value)) {
+    throw new TypeError('OOXML resource usage checkpoint is invalid');
+  }
+  return value;
 }
 
 function isFormat(value: unknown): value is OoxmlFormat {
@@ -149,6 +165,9 @@ function usageForWire(usage: OoxmlResourceUsageSnapshot): OoxmlResourceUsageSnap
   return {
     archiveEntryCount: usage.archiveEntryCount,
     declaredInflatedBytes: usage.declaredInflatedBytes,
+    ...(usage.largestInflatedEntryBytes === undefined
+      ? {}
+      : { largestInflatedEntryBytes: usage.largestInflatedEntryBytes }),
     distinctInflatedBytes: usage.distinctInflatedBytes,
     operationInflatedBytes: usage.operationInflatedBytes,
   };
