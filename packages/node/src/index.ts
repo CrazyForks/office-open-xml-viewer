@@ -4,7 +4,14 @@ export {
   extractImage as extractPptxImage,
 } from './pptx';
 export { parseDocx } from './docx';
-export { parseXlsx, parseSheet as parseXlsxSheet, parseXlsxAllSheets } from './xlsx';
+export {
+  iterateXlsxWorksheetRows,
+  parseXlsx,
+  parseSheet as parseXlsxSheet,
+  parseXlsxAllSheets,
+  type XlsxWorksheetRowChunk,
+  type XlsxWorksheetRowIteratorOptions,
+} from './xlsx';
 export {
   renderSlideNode,
   makeSourceBufferFetchImage,

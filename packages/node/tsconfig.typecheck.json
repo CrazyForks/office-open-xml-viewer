@@ -6,6 +6,8 @@
     "types": ["node"],
     "allowImportingTsExtensions": true,
     "paths": {
+      "@silurus/ooxml-core": ["../core/src/index.ts"],
+      "@silurus/ooxml-core/worker": ["../core/src/worker/index.ts"],
       "@silurus/ooxml-pptx": ["../pptx/src/types.ts"],
       "@silurus/ooxml-docx": ["../docx/src/types.ts"],
       "@silurus/ooxml-xlsx": ["../xlsx/src/types.ts"]
