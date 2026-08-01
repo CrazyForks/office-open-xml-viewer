@@ -7,6 +7,7 @@ describe('XlsxWorkbook resource-policy wiring', () => {
     const instance = Object.create(XlsxWorkbook.prototype) as Record<string, unknown>;
     instance._mode = 'worker';
     instance.sheetCache = new Map();
+    instance.sheetLoads = new Map();
     instance.imageCache = new Map();
     instance.imageBlobCache = new Map();
     instance.googleFontFaces = [];

@@ -278,7 +278,7 @@ fn parse_package_worksheet_cells(
     let mut builder = IndexedWorksheetBuilder::new(shared_strings, max_cells, max_string_bytes);
     loop {
         match projector.next_item().ok()? {
-            WorksheetProjectorItem::Row(row) => builder.push_row(row)?,
+            WorksheetProjectorItem::Row(row) => builder.push_row(row.row)?,
             WorksheetProjectorItem::Finished(_) => return Some(builder.finish()),
         }
     }

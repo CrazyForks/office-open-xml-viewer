@@ -56,6 +56,10 @@ export class XlsxWorkbook {
   private bridge: WorkerBridge<WorkerResponse | RenderWorkerResponse>;
   private parsedWorkbook: ParsedWorkbook | null = null;
   private sheetCache = new Map<number, Worksheet>();
+  /** One materialization per sheet at a time. This becomes the ownership seam
+   * for the bounded worksheet cursor: concurrent callers share one cursor and
+   * one eventual mutable compatibility object instead of doubling peak work. */
+  private sheetLoads = new Map<number, Promise<Worksheet>>();
   /** Cache of decoded image sources keyed by their zip `imagePath`. Shared
    *  across sheets. */
   private imageCache = new Map<string, CanvasImageSource | null>();
@@ -245,6 +249,18 @@ export class XlsxWorkbook {
   async getWorksheet(sheetIndex: number): Promise<Worksheet> {
     const cached = this.sheetCache.get(sheetIndex);
     if (cached) return cached;
+    const active = this.sheetLoads.get(sheetIndex);
+    if (active) return active;
+    const load = this.loadWorksheet(sheetIndex);
+    this.sheetLoads.set(sheetIndex, load);
+    try {
+      return await load;
+    } finally {
+      if (this.sheetLoads.get(sheetIndex) === load) this.sheetLoads.delete(sheetIndex);
+    }
+  }
+
+  private async loadWorksheet(sheetIndex: number): Promise<Worksheet> {
     // `!this.rawData` guards that `parse` has run: the worker retained the
     // whole-workbook buffer at parse time, and `parseSheet` reuses it. We no
     // longer re-send the buffer here (it previously structured-cloned the entire
@@ -472,6 +488,7 @@ export class XlsxWorkbook {
     this.bridge.terminate();
     this.parsedWorkbook = null;
     this.sheetCache.clear();
+    this.sheetLoads.clear();
     // Release the Google-Fonts substitutes this workbook preloaded into the
     // shared FontFaceSet (main mode). Refcounted in core: a web font also used by
     // another open workbook stays until that one is destroyed too. Without this,

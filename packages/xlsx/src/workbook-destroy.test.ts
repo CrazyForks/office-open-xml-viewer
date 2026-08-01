@@ -96,6 +96,7 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     instance.bridge = bridge;
     // Fields destroy() clears after terminate(); undefined would throw.
     instance.sheetCache = new Map();
+    instance.sheetLoads = new Map();
     instance.imageCache = new Map();
     instance.imageBlobCache = new Map();
     instance.googleFontFaces = [];
@@ -215,6 +216,7 @@ describe('XlsxWorkbook.destroy() — drops the shared image caches (GPU-leak gua
     const instance = Object.create(XlsxWorkbook.prototype) as Record<string, unknown>;
     instance.bridge = bridge;
     instance.sheetCache = new Map();
+    instance.sheetLoads = new Map();
     instance.imageCache = new Map();
     instance.imageBlobCache = new Map();
     instance.googleFontFaces = [];

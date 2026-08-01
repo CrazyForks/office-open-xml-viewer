@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 #[cfg(test)]
 use std::io::Cursor;
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 use ooxml_common::depth::parse_guarded;
@@ -21,7 +22,12 @@ use worksheet_reference::{
 mod worksheet_projector;
 #[cfg(test)]
 use worksheet_projector::stream_worksheet_rows;
-use worksheet_projector::{StreamedSheetData, WorksheetProjectorItem, WorksheetRowProjector};
+use worksheet_projector::StreamedSheetData;
+
+mod worksheet_cursor;
+use worksheet_cursor::{
+    WorksheetCursorPull, WORKSHEET_CURSOR_PULL_ROWS, WORKSHEET_CURSOR_TARGET_PROJECTED_BYTES,
+};
 
 mod types;
 pub use types::*;
@@ -70,6 +76,14 @@ impl XlsxZip {
             .operation
             .as_ref()
             .expect("operation initialized above"))
+    }
+
+    /// Return the explicitly-started operation used by persistent production
+    /// cursors. Unlike `operation`, this never creates a compatibility scope.
+    fn active_operation(&self) -> Result<&PackageOperation, String> {
+        self.operation
+            .as_ref()
+            .ok_or_else(|| "xlsx package operation is not active".to_string())
     }
 
     fn finish_operation(&mut self) -> Result<(), String> {
@@ -301,11 +315,11 @@ struct WorkbookShared {
     workbook_xml: String,
     rels_xml: String,
     sheets: Vec<SheetMeta>,
-    theme_colors: Vec<String>,
+    theme_colors: Rc<[String]>,
     /// Workbook theme `(majorFont.latin, minorFont.latin)` Latin faces
     /// (§20.1.4.2). Chart-text fallback font (CH10).
     theme_fonts: (Option<String>, Option<String>),
-    shared_strings: Vec<SharedString>,
+    shared_strings: Rc<[SharedString]>,
     /// #773: a part-tagged degradation error set when `xl/sharedStrings.xml` was
     /// PRESENT but corrupt (a broken shared-string table blanks every string cell
     /// across all sheets). `None` when the part read cleanly or is legitimately
@@ -338,16 +352,17 @@ impl WorkbookShared {
             )
         };
         let rels_xml = read_zip_string(archive, "xl/_rels/workbook.xml.rels").unwrap_or_default();
-        let theme_colors = parse_theme_colors(archive);
+        let theme_colors: Rc<[String]> = parse_theme_colors(archive).into();
         let theme_fonts = parse_theme_fonts(archive);
-        let (shared_strings, shared_strings_error) = read_shared_strings(archive, &theme_colors);
+        let (shared_strings, shared_strings_error) =
+            read_shared_strings(archive, theme_colors.as_ref());
         Ok(WorkbookShared {
             workbook_xml,
             rels_xml,
             sheets,
             theme_colors,
             theme_fonts,
-            shared_strings,
+            shared_strings: shared_strings.into(),
             shared_strings_error,
             date1904,
         })
@@ -386,7 +401,7 @@ fn parse_sheet_with(
     let sheet_path = resolve_sheet_path(&rels_doc, &sheet_meta.r_id)
         .ok_or_else(|| format!("rId {} not found in rels", sheet_meta.r_id))?;
 
-    let theme_colors = &shared.theme_colors;
+    let theme_colors = shared.theme_colors.as_ref();
     let sheet_part = format!("xl/{}", sheet_path);
     // RB7 partial degradation: the sheet's own XML read + parse are the two
     // failure points that concern ONE sheet (the workbook-level parts above are
@@ -395,9 +410,13 @@ fn parse_sheet_with(
     // names the offending part, so the OTHER sheets stay openable. Everything
     // after (images / charts / comments / …) is already lenient (returns empty
     // on error), so it stays outside this guard.
-    let sheet_read_parse =
-        stream_sheet_data_from_archive(archive, &sheet_part, &shared.shared_strings, theme_colors)
-            .and_then(|streamed| parse_projected_worksheet(streamed, theme_colors, name));
+    let sheet_read_parse = stream_sheet_data_from_archive(
+        archive,
+        &sheet_part,
+        Rc::clone(&shared.shared_strings),
+        Rc::clone(&shared.theme_colors),
+    )
+    .and_then(|streamed| parse_projected_worksheet(streamed, theme_colors, name));
     let (mut ws, hyperlink_rids, sheet_shell_xml) = match sheet_read_parse {
         Ok(parsed) => parsed,
         Err(detail) => {
@@ -425,7 +444,7 @@ fn parse_sheet_with(
             sheet_name: name,
             sheets: &shared.sheets,
             workbook_rels: &rels_doc,
-            shared_strings: &shared.shared_strings,
+            shared_strings: shared.shared_strings.as_ref(),
             session: &mut reference_session,
         }),
         theme_colors,
@@ -451,7 +470,7 @@ fn parse_sheet_with(
         &shared.sheets,
         &rels_doc,
         theme_colors,
-        &shared.shared_strings,
+        shared.shared_strings.as_ref(),
         &mut reference_session,
     );
     ws.sparkline_groups = sparkline_groups;
@@ -507,7 +526,7 @@ fn parse_xlsx_inner_with(
     archive: &mut XlsxZip,
     shared: &WorkbookShared,
 ) -> Result<ParsedWorkbook, String> {
-    let theme_colors = &shared.theme_colors;
+    let theme_colors = shared.theme_colors.as_ref();
     let styles = parse_styles(archive, theme_colors)?;
 
     // Surface each sheet's tab color (`<sheetPr><tabColor>`) on the workbook
@@ -538,7 +557,7 @@ fn parse_xlsx_inner_with(
             parse_error: shared.shared_strings_error.clone(),
         },
         styles,
-        shared_strings: shared.shared_strings.clone(),
+        shared_strings: shared.shared_strings.as_ref().to_vec(),
     })
 }
 
@@ -1104,17 +1123,26 @@ type HyperlinkRids = Vec<(u32, u32, Option<String>, Option<String>, Option<Strin
 fn stream_sheet_data_from_archive(
     archive: &mut XlsxZip,
     part: &str,
-    shared_strings: &[SharedString],
-    theme_colors: &[String],
+    shared_strings: Rc<[SharedString]>,
+    theme_colors: Rc<[String]>,
 ) -> Result<StreamedSheetData, String> {
-    let entry = archive.operation()?.open_entry(part)?;
-    let mut projector =
-        WorksheetRowProjector::from_package_entry(entry, shared_strings, theme_colors)?;
+    let mut cursor = archive.open_worksheet_cursor(part, shared_strings, theme_colors)?;
     let mut rows = Vec::new();
     loop {
-        match projector.next_item() {
-            Ok(WorksheetProjectorItem::Row(row)) => rows.push(row),
-            Ok(WorksheetProjectorItem::Finished(tail)) => {
+        match cursor.pull(
+            WORKSHEET_CURSOR_PULL_ROWS,
+            WORKSHEET_CURSOR_TARGET_PROJECTED_BYTES,
+        ) {
+            Ok(WorksheetCursorPull::Rows {
+                rows: batch,
+                projected_bytes,
+            }) => {
+                if !batch.is_empty() && projected_bytes == 0 {
+                    return Err("worksheet cursor returned an unmeasured row batch".to_string());
+                }
+                rows.extend(batch);
+            }
+            Ok(WorksheetCursorPull::Finished(tail)) => {
                 archive.assert_healthy()?;
                 return Ok(StreamedSheetData {
                     shell_xml: tail.shell_xml,
@@ -1123,10 +1151,8 @@ fn stream_sheet_data_from_archive(
                 });
             }
             Err(error) => {
-                return Err(archive
-                    .assert_healthy()
-                    .err()
-                    .unwrap_or_else(|| error.to_string()));
+                cursor.cancel();
+                return Err(archive.assert_healthy().err().unwrap_or(error));
             }
         }
     }
@@ -2468,7 +2494,7 @@ fn parse_row_cells(
     // with `parse_worksheet`'s threading; prefixed `_` to silence the warning.
     _shared_strings: &[SharedString],
     theme_colors: &[String],
-) -> Vec<Cell> {
+) -> Result<Vec<Cell>, String> {
     let mut cells = Vec::new();
     // ECMA-376 §18.3.1.4 (CT_Cell, sml.xsd) makes `@r` on `<c>` optional with no
     // default; the spec does not spell out how an omitted value is resolved. We
@@ -2489,11 +2515,24 @@ fn parse_row_cells(
         // sparkline data path (`extract_range_values`) cannot drift.
         let (col, row) = match c_node.attribute("r") {
             Some(cell_ref) => {
-                let (col, row) = parse_cell_ref(cell_ref);
-                prev_col = col;
+                let (raw_col, raw_row) = parse_cell_ref_checked(cell_ref)?;
+                let col = resolve_implicit_ordinal(
+                    Some(raw_col),
+                    &mut prev_col,
+                    SpreadsheetOrdinal::Column,
+                )?;
+                let mut row_anchor = 0;
+                let row = resolve_implicit_ordinal(
+                    Some(raw_row),
+                    &mut row_anchor,
+                    SpreadsheetOrdinal::Row,
+                )?;
                 (col, row)
             }
-            None => (resolve_implicit_ordinal(None, &mut prev_col), row_index),
+            None => (
+                resolve_implicit_ordinal(None, &mut prev_col, SpreadsheetOrdinal::Column)?,
+                row_index,
+            ),
         };
         let cell_type = c_node.attribute("t").unwrap_or("");
         let style_index: u32 = c_node
@@ -2588,7 +2627,7 @@ fn parse_row_cells(
             show_phonetic,
         });
     }
-    cells
+    Ok(cells)
 }
 
 /// Parse an `ST_Boolean` (ECMA-376 §22.9.2.7, xsd:boolean) attribute value.
@@ -2599,14 +2638,48 @@ pub(crate) fn attr_bool(node: &roxmltree::Node, name: &str) -> Option<bool> {
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on"))
 }
 
-pub(crate) fn parse_cell_ref(r: &str) -> (u32, u32) {
-    let col_str: String = r.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
-    let row_str: String = r.chars().skip_while(|c| c.is_ascii_alphabetic()).collect();
-    let col = col_str
-        .chars()
-        .fold(0u32, |acc, c| acc * 26 + (c as u32 - 'A' as u32 + 1));
-    let row = row_str.parse().unwrap_or(1);
-    (col, row)
+pub(crate) fn parse_cell_ref(reference: &str) -> (u32, u32) {
+    // Optional metadata consumers historically split only the leading letters,
+    // defaulted an unparsable suffix to row 1, and retained the parsed column.
+    // Preserve that leniency while making column arithmetic overflow-safe.
+    let split = reference
+        .find(|character: char| !character.is_ascii_alphabetic())
+        .unwrap_or(reference.len());
+    let (column_text, row_text) = reference.split_at(split);
+    let column = checked_column_ordinal(column_text).unwrap_or(0);
+    let row = row_text.parse::<u32>().unwrap_or(1);
+    (column, row)
+}
+
+fn parse_cell_ref_checked(reference: &str) -> Result<(u32, u32), String> {
+    try_parse_cell_ref(reference).ok_or_else(|| {
+        format!("worksheet cell has invalid or overflowing r reference: {reference}")
+    })
+}
+
+fn try_parse_cell_ref(reference: &str) -> Option<(u32, u32)> {
+    let split = reference
+        .find(|character: char| !character.is_ascii_alphabetic())
+        .unwrap_or(reference.len());
+    let (column_text, row_text) = reference.split_at(split);
+    if column_text.is_empty()
+        || row_text.is_empty()
+        || !row_text.chars().all(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    let column = checked_column_ordinal(column_text)?;
+    let row = row_text.parse::<u32>().ok()?;
+    Some((column, row))
+}
+
+fn checked_column_ordinal(column_text: &str) -> Option<u32> {
+    column_text.chars().try_fold(0u32, |value, character| {
+        let digit = (character.to_ascii_uppercase() as u32)
+            .checked_sub('A' as u32)?
+            .checked_add(1)?;
+        value.checked_mul(26)?.checked_add(digit)
+    })
 }
 
 /// Resolve a 1-based ordinal (a `<row>`'s row number or a `<c>`'s column) that
@@ -2620,14 +2693,52 @@ pub(crate) fn parse_cell_ref(r: &str) -> (u32, u32) {
 /// first element, with `*prev == 0` meaning "none yet", lands at 1), and an
 /// explicit value re-anchors the running counter for later omitted siblings.
 ///
-/// This is the single primitive shared by the three consumers that walk
-/// `<row>`/`<c>` sequences — `parse_worksheet` (row numbers), `parse_row_cells`
-/// (cell columns), and `extract_range_values` (sparkline data cells) — so their
-/// implicit-reference handling cannot drift apart.
-pub(crate) fn resolve_implicit_ordinal(explicit: Option<u32>, prev: &mut u32) -> u32 {
-    let resolved = explicit.unwrap_or(*prev + 1);
+/// This is the single primitive shared by worksheet row and cell sequencing.
+/// It also enforces the SpreadsheetML grid maxima, so an explicit maximum
+/// followed by an omitted ordinal fails instead of overflowing or creating an
+/// unrenderable coordinate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpreadsheetOrdinal {
+    Row,
+    Column,
+}
+
+impl SpreadsheetOrdinal {
+    const fn max(self) -> u32 {
+        match self {
+            Self::Row => 1_048_576,
+            Self::Column => 16_384,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Row => "row",
+            Self::Column => "column",
+        }
+    }
+}
+
+pub(crate) fn resolve_implicit_ordinal(
+    explicit: Option<u32>,
+    prev: &mut u32,
+    kind: SpreadsheetOrdinal,
+) -> Result<u32, String> {
+    let resolved = match explicit {
+        Some(value) => value,
+        None => prev
+            .checked_add(1)
+            .ok_or_else(|| format!("worksheet {} ordinal overflows u32", kind.name()))?,
+    };
+    if resolved == 0 || resolved > kind.max() {
+        return Err(format!(
+            "worksheet {} ordinal is outside SpreadsheetML range 1..={}: {resolved}",
+            kind.name(),
+            kind.max()
+        ));
+    }
     *prev = resolved;
-    resolved
+    Ok(resolved)
 }
 
 // ===========================
@@ -5671,6 +5782,53 @@ mod implicit_reference_tests {
         assert_eq!(ws.rows[0].index, 1, "first implicit row → 1");
         assert_eq!(ws.rows[1].index, 5, "explicit r=5 honored");
         assert_eq!(ws.rows[2].index, 6, "implicit after r=5 → 6");
+    }
+
+    #[test]
+    fn spreadsheet_ordinals_reject_zero_overflow_and_implicit_past_maximum() {
+        let max_xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetData><row r="1048576"><c r="XFD1048576"/></row></sheetData></worksheet>"#
+        );
+        let (max_sheet, _) =
+            parse_worksheet(&max_xml, &[], &[], "Sheet1").expect("grid maxima are valid");
+        assert_eq!(max_sheet.rows[0].index, 1_048_576);
+        assert_eq!(max_sheet.rows[0].cells[0].col, 16_384);
+
+        for (body, expected) in [
+            (r#"<row r="0"/>"#, "row ordinal"),
+            (r#"<row r="1048577"/>"#, "row ordinal"),
+            (r#"<row r="1048576"/><row/>"#, "row ordinal"),
+            (r#"<row r="1"><c r="A0"/></row>"#, "row ordinal"),
+            (r#"<row r="1"><c r="XFE1"/></row>"#, "column ordinal"),
+            (r#"<row r="1"><c r="XFD1"/><c/></row>"#, "column ordinal"),
+        ] {
+            let xml =
+                format!(r#"<worksheet xmlns="{NS}"><sheetData>{body}</sheetData></worksheet>"#);
+            let error = parse_worksheet(&xml, &[], &[], "Sheet1")
+                .expect_err("out-of-range worksheet ordinal must be a normal parse error");
+            assert!(error.contains(expected), "{error}");
+        }
+
+        let mut previous = u32::MAX;
+        let error = resolve_implicit_ordinal(None, &mut previous, SpreadsheetOrdinal::Row)
+            .expect_err("u32 overflow must not panic or wrap");
+        assert!(error.contains("overflows u32"), "{error}");
+
+        let huge_reference = format!("{}1", "A".repeat(128));
+        assert_eq!(parse_cell_ref("A"), (1, 1));
+        assert_eq!(parse_cell_ref("A1x"), (1, 1));
+        assert_eq!(parse_cell_ref("Afoo"), (22_037, 1));
+        assert_eq!(
+            parse_cell_ref(&huge_reference),
+            (0, 1),
+            "lenient metadata parsing preserves its fallback without overflow"
+        );
+        let strict_xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetData><row r="1"><c r="{huge_reference}"/></row></sheetData></worksheet>"#
+        );
+        let error = parse_worksheet(&strict_xml, &[], &[], "Sheet1")
+            .expect_err("strict worksheet cell references reject arithmetic overflow");
+        assert!(error.contains("invalid or overflowing"), "{error}");
     }
 
     /// Implicit references must not disturb the other minimal-exporter

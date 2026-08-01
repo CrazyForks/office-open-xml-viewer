@@ -18,15 +18,15 @@ use ooxml_common::bounded_xml::{
     NamespaceContext as StreamedNamespaceContext,
 };
 use ooxml_common::depth::{parse_guarded, MAX_XML_DEPTH};
-use ooxml_common::mce::ChoiceRequiresClassification;
 use ooxml_common::ns::is_x_ns;
 use ooxml_common::package_session::{PackageEntryStream, PackageLimitReporter};
 use ooxml_common::resource::HardResourceLimitKind;
 use quick_xml::events::Event;
-use quick_xml::NsReader;
+use quick_xml::{NsReader, XmlVersion};
 
 use crate::{
     attr_bool, parse_row_cells, resolve_implicit_ordinal, xlsx_understands_ns, Row, SharedString,
+    SpreadsheetOrdinal,
 };
 
 /// The memory-bounded portion of a worksheet parse.
@@ -62,7 +62,7 @@ const STREAMED_XML_EVENT_BYTES: usize = 1024 * 1024;
 /// conservative browser/WASM safety ceiling that still permits unusually rich
 /// authored rows while preventing many individually-small XML events from
 /// accumulating without bound.
-const STREAMED_ROW_PROJECTION_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const STREAMED_ROW_PROJECTION_BYTES: usize = 8 * 1024 * 1024;
 
 /// The retained worksheet shell contains metadata outside `sheetData`. Keep it
 /// large enough for substantial validation/formatting metadata, but bounded so
@@ -353,6 +353,12 @@ fn streamed_mce_prefixes(
             let namespace = context.namespace_for_prefix(prefix).ok_or_else(|| {
                 format!("worksheet MCE {attribute_name} uses unbound namespace prefix: {prefix}")
             })?;
+            if namespace == MCE_NS {
+                return Err(format!(
+                    "worksheet MCE {attribute_name} must not name the Markup Compatibility namespace"
+                )
+                .into());
+            }
             charge_streamed_context(base_context_bytes, derived_bytes, namespace.len(), part)?;
             Ok(namespace.to_string())
         })
@@ -381,12 +387,12 @@ fn streamed_mce_attributes<R>(
     let mut derived_bytes = 0usize;
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|e| format!("worksheet MCE attribute: {e}"))?;
-        let (namespace, local_name) = reader.resolve_attribute(attribute.key);
+        let (namespace, local_name) = reader.resolver().resolve_attribute(attribute.key);
         if !bounded_xml::resolved_namespace_is(&namespace, |namespace| namespace == MCE_NS) {
             continue;
         }
         let value = attribute
-            .unescape_value()
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|e| format!("worksheet MCE attribute value: {e}"))?
             .into_owned();
         match local_name.as_ref() {
@@ -476,6 +482,51 @@ fn check_streamed_must_understand(namespaces: &[String]) -> Result<(), String> {
     }
 }
 
+/// Validate the attribute grammar of Part 3 §§7.5–7.7 before selecting an
+/// AlternateContent branch. Namespace declarations are not attributes for
+/// this grammar. `Choice/@Requires` is the sole permitted unqualified
+/// attribute; qualified attributes must be MCE-owned or declared ignorable.
+fn validate_alternate_element_attributes<R>(
+    reader: &NsReader<R>,
+    element: &quick_xml::events::BytesStart<'_>,
+    local_name: &str,
+    scope: &StreamedMceScope,
+) -> Result<(), WorksheetProjectorError> {
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| format!("worksheet MCE attribute: {error}"))?;
+        let raw_name = attribute.key.as_ref();
+        if raw_name == b"xmlns" || raw_name.starts_with(b"xmlns:") {
+            continue;
+        }
+        let qualified = raw_name.contains(&b':');
+        if !qualified {
+            if local_name == "Choice" && raw_name == b"Requires" {
+                continue;
+            }
+            return Err(format!(
+                "worksheet MCE {local_name} has a forbidden unqualified attribute"
+            )
+            .into());
+        }
+        let (namespace, _) = reader.resolver().resolve_attribute(attribute.key);
+        let allowed = match namespace {
+            quick_xml::name::ResolveResult::Bound(namespace) => {
+                let namespace =
+                    std::str::from_utf8(namespace.as_ref()).map_err(|error| error.to_string())?;
+                namespace == MCE_NS || scope.is_ignorable(namespace)
+            }
+            _ => false,
+        };
+        if !allowed {
+            return Err(format!(
+                "worksheet MCE {local_name} qualified attribute namespace is not MCE or ignorable"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 fn streamed_processes_content(scope: &StreamedMceScope, namespace: &str, local_name: &str) -> bool {
     scope.processes_content(namespace, local_name)
 }
@@ -487,7 +538,7 @@ fn ensure_unwrapped_element_has_no_xml_context_attributes<R>(
     const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|e| format!("worksheet MCE attribute: {e}"))?;
-        let (namespace, local_name) = reader.resolve_attribute(attribute.key);
+        let (namespace, local_name) = reader.resolver().resolve_attribute(attribute.key);
         if bounded_xml::resolved_namespace_is(&namespace, |namespace| namespace == XML_NS)
             && matches!(local_name.as_ref(), b"base" | b"lang" | b"space")
         {
@@ -518,6 +569,50 @@ fn inject_moved_element_namespaces(
     })
 }
 
+/// Produce the Part 3 §9.4 step-5 processed attribute set for an ordinary
+/// retained element. Compatibility-control attributes and attributes from an
+/// unsupported ignorable namespace do not belong to the processed infoset.
+/// Application-defined extension elements bypass this function because their
+/// subtree is opaque and must be preserved byte-for-byte modulo XML writing.
+fn strip_processed_mce_attributes<R>(
+    reader: &NsReader<R>,
+    element: &mut quick_xml::events::BytesStart<'static>,
+    scope: &StreamedMceScope,
+) -> Result<(), WorksheetProjectorError> {
+    let name = std::str::from_utf8(element.name().as_ref())
+        .map_err(|error| error.to_string())?
+        .to_string();
+    let mut retained = Vec::new();
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| format!("worksheet MCE attribute: {error}"))?;
+        let (namespace, local_name) = reader.resolver().resolve_attribute(attribute.key);
+        let compatibility_control = bounded_xml::resolved_namespace_is(&namespace, |namespace| {
+            namespace == MCE_NS
+                && matches!(
+                    local_name.as_ref(),
+                    b"Ignorable" | b"ProcessContent" | b"MustUnderstand"
+                )
+        });
+        let unsupported_ignorable = match namespace {
+            quick_xml::name::ResolveResult::Bound(namespace) => {
+                let namespace =
+                    std::str::from_utf8(namespace.as_ref()).map_err(|error| error.to_string())?;
+                scope.is_ignorable(namespace) && !worksheet_understands_ns(namespace)
+            }
+            _ => false,
+        };
+        if !compatibility_control && !unsupported_ignorable {
+            retained.push(attribute.to_owned());
+        }
+    }
+    let mut processed = quick_xml::events::BytesStart::new(name);
+    for attribute in retained {
+        processed.push_attribute(attribute);
+    }
+    *element = processed;
+    Ok(())
+}
+
 fn append_projected_event(
     target: &mut Vec<u8>,
     event: &Event<'_>,
@@ -539,21 +634,38 @@ fn streamed_choice_is_understood<R>(
     _reader: &NsReader<R>,
     choice: &quick_xml::events::BytesStart<'_>,
     context: &StreamedNamespaceContext,
+    part: Option<&str>,
 ) -> Result<bool, String> {
-    match bounded_xml::classify_mce_choice_requires(
-        choice,
-        context,
-        &worksheet_understands_ns,
-        "worksheet",
-    )? {
-        ChoiceRequiresClassification::Missing | ChoiceRequiresClassification::Blank => {
-            Err("worksheet MCE Choice must have a non-empty Requires attribute".to_string())
+    let mut requires = None;
+    for attribute in choice.attributes() {
+        let attribute = attribute.map_err(|error| format!("worksheet MCE attribute: {error}"))?;
+        if attribute.key.as_ref() == b"Requires" {
+            requires = Some(
+                attribute
+                    .normalized_value(XmlVersion::Implicit1_0)
+                    .map_err(|error| format!("worksheet MCE Requires: {error}"))?
+                    .into_owned(),
+            );
         }
-        ChoiceRequiresClassification::Unresolved | ChoiceRequiresClassification::Unsupported => {
-            Ok(false)
-        }
-        ChoiceRequiresClassification::Understood => Ok(true),
     }
+    let requires = requires
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "worksheet MCE Choice must have a non-empty Requires attribute".to_string()
+        })?;
+    let mut derived_bytes = 0;
+    let namespaces = streamed_mce_prefixes(
+        &requires,
+        context,
+        "Choice Requires",
+        context.active_bytes(),
+        &mut derived_bytes,
+        part,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(namespaces
+        .iter()
+        .all(|namespace| worksheet_understands_ns(namespace)))
 }
 
 /// Append a tiny namespace-preserving wrapper around one raw `<row>`.
@@ -598,7 +710,7 @@ fn flush_streamed_rows(
     prev_row_idx: &mut u32,
     shared_strings: &[SharedString],
     theme_colors: &[String],
-) -> Result<Vec<Row>, String> {
+) -> Result<Vec<ProjectedWorksheetRow>, String> {
     if pending.is_empty() {
         return Ok(Vec::new());
     }
@@ -616,10 +728,11 @@ fn flush_streamed_rows(
     fragment.push_str("</streamed-rows>");
     let doc = parse_guarded(&fragment).map_err(|e| e.to_string())?;
     let mut rows = Vec::with_capacity(pending.len());
-    for wrapper in doc
+    for (wrapper, source) in doc
         .root_element()
         .children()
         .filter(|node| node.is_element() && node.tag_name().name() == "streamed-row")
+        .zip(pending.iter())
     {
         let row_node = wrapper
             .children()
@@ -629,12 +742,10 @@ fn flush_streamed_rows(
                     && is_x_ns(node.tag_name().namespace())
             })
             .ok_or_else(|| "streamed worksheet row lost its SpreadsheetML namespace".to_string())?;
-        rows.push(parse_row_node(
-            &row_node,
-            prev_row_idx,
-            shared_strings,
-            theme_colors,
-        ));
+        rows.push(ProjectedWorksheetRow {
+            row: parse_row_node(&row_node, prev_row_idx, shared_strings, theme_colors)?,
+            projected_bytes: source.projected_arena_bytes(),
+        });
     }
     if rows.len() != pending.len() {
         return Err("streamed worksheet row batch changed row cardinality".to_string());
@@ -648,15 +759,20 @@ fn parse_row_node(
     prev_row_idx: &mut u32,
     shared_strings: &[SharedString],
     theme_colors: &[String],
-) -> Row {
+) -> Result<Row, String> {
     // ECMA-376 §18.3.1.73 makes `@r` optional; honor an explicit value when
     // present. When omitted, take the running previous row + 1 (implicit
     // sequential numbering — the de-facto consumer convention; the spec only
     // grants the optionality). An explicit value also re-anchors the counter.
-    let row_idx = resolve_implicit_ordinal(
-        node.attribute("r").and_then(|s| s.parse::<u32>().ok()),
-        prev_row_idx,
-    );
+    let explicit_row = node
+        .attribute("r")
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .map_err(|_| format!("worksheet row has invalid r ordinal: {value}"))
+        })
+        .transpose()?;
+    let row_idx = resolve_implicit_ordinal(explicit_row, prev_row_idx, SpreadsheetOrdinal::Row)?;
     let hidden = attr_bool(node, "hidden").unwrap_or(false);
     // ECMA-376 §18.3.1.73 `<row>@ht` is the row height in points.
     // `customHeight` describes how it was set and does not gate the value.
@@ -672,15 +788,15 @@ fn parse_row_node(
         .min(7);
     let collapsed = attr_bool(node, "collapsed").unwrap_or(false);
     let row_ph = attr_bool(node, "ph").unwrap_or(false);
-    let cells = parse_row_cells(node, row_idx, row_ph, shared_strings, theme_colors);
-    Row {
+    let cells = parse_row_cells(node, row_idx, row_ph, shared_strings, theme_colors)?;
+    Ok(Row {
         index: row_idx,
         height,
         cells,
         outline_level,
         collapsed,
         hidden,
-    }
+    })
 }
 
 fn derive_streamed_namespace_context(
@@ -760,6 +876,9 @@ fn classify_streamed_element<R>(
     }
 
     let attributes = streamed_mce_attributes(reader, element, &inherited, namespace_context, part)?;
+    if is_mc && matches!(local_name, "AlternateContent" | "Choice" | "Fallback") {
+        validate_alternate_element_attributes(reader, element, local_name, &attributes.scope)?;
+    }
     if parent_is_alternate_content {
         if !is_mc || !matches!(local_name, "Choice" | "Fallback") {
             let ignored = namespace.is_some_and(|namespace| {
@@ -794,7 +913,8 @@ fn classify_streamed_element<R>(
                 );
             }
             *seen_choice = true;
-            !*selected_branch && streamed_choice_is_understood(reader, element, namespace_context)?
+            !*selected_branch
+                && streamed_choice_is_understood(reader, element, namespace_context, part)?
         } else {
             if !*seen_choice {
                 return Err(WorksheetProjectorError::Xml(
@@ -1013,7 +1133,7 @@ impl StreamedRowBatch {
         &mut self,
         shared_strings: &[SharedString],
         theme_colors: &[String],
-        ready_rows: &mut VecDeque<Row>,
+        ready_rows: &mut VecDeque<ProjectedWorksheetRow>,
     ) -> Result<(), WorksheetProjectorError> {
         for row in flush_streamed_rows(
             &mut self.pending,
@@ -1021,8 +1141,8 @@ impl StreamedRowBatch {
             shared_strings,
             theme_colors,
         )? {
-            if let Some(height) = row.height {
-                self.heights.insert(row.index, height);
+            if let Some(height) = row.row.height {
+                self.heights.insert(row.row.index, height);
             }
             ready_rows.push_back(row);
         }
@@ -1037,7 +1157,7 @@ impl StreamedRowBatch {
         part: Option<&str>,
         shared_strings: &[SharedString],
         theme_colors: &[String],
-        ready_rows: &mut VecDeque<Row>,
+        ready_rows: &mut VecDeque<ProjectedWorksheetRow>,
     ) -> Result<(), WorksheetProjectorError> {
         let projected_bytes = row.projected_arena_bytes();
         if projected_bytes > row_projection_limit {
@@ -1075,8 +1195,16 @@ pub(super) struct StreamedWorksheetRows {
 
 #[derive(Debug)]
 pub(super) enum WorksheetProjectorItem {
-    Row(Row),
+    Row(ProjectedWorksheetRow),
     Finished(StreamedWorksheetRows),
+}
+
+#[derive(Debug)]
+pub(super) struct ProjectedWorksheetRow {
+    pub(super) row: Row,
+    /// Exact bytes retained for the row's standalone internal projection,
+    /// including inherited namespace wrapper overhead.
+    pub(super) projected_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1104,7 +1232,7 @@ where
     shell_xml: Vec<u8>,
     active_row: Option<ActiveStreamedRow>,
     row_batch: StreamedRowBatch,
-    ready_rows: VecDeque<Row>,
+    ready_rows: VecDeque<ProjectedWorksheetRow>,
     finished_tail: Option<StreamedWorksheetRows>,
     shared_strings: Option<S>,
     theme_colors: Option<T>,
@@ -1382,6 +1510,9 @@ where
                         xml: Vec::new(),
                     });
                 }
+                if !*opaque {
+                    strip_processed_mce_attributes(reader, &mut start, &scope)?;
+                }
                 role = Some(retained_role);
             }
         }
@@ -1481,6 +1612,9 @@ where
                             .map(|parent| parent.namespace_context.as_ref()),
                         self.part.as_deref(),
                     )?;
+                }
+                if !*opaque {
+                    strip_processed_mce_attributes(reader, &mut empty, &_scope)?;
                 }
                 if role == StreamedHostRole::Row {
                     let element_namespaces = namespace_context.effective_bindings();
@@ -1821,7 +1955,7 @@ where
             WorksheetProjectorItem::Row(row) => {
                 // A callback failure drops the projector here, immediately
                 // releasing the source and preventing later callbacks.
-                visit_row(row)?
+                visit_row(row.row)?
             }
             WorksheetProjectorItem::Finished(tail) => return Ok(tail),
         }
@@ -1863,7 +1997,7 @@ mod worksheet_streaming_tests {
         let mut rows = Vec::new();
         loop {
             match projector.next_item()? {
-                WorksheetProjectorItem::Row(row) => rows.push(row),
+                WorksheetProjectorItem::Row(row) => rows.push(row.row),
                 WorksheetProjectorItem::Finished(tail) => {
                     return Ok(StreamedSheetData {
                         shell_xml: tail.shell_xml,
@@ -1904,7 +2038,8 @@ mod worksheet_streaming_tests {
                     && is_x_ns(node.tag_name().namespace())
             })
             .map(|node| {
-                let row = parse_row_node(&node, &mut previous_row, shared_strings, theme_colors);
+                let row = parse_row_node(&node, &mut previous_row, shared_strings, theme_colors)
+                    .expect("reference worksheet row parses");
                 if let Some(height) = row.height {
                     heights.insert(row.index, height);
                 }
@@ -2874,6 +3009,31 @@ mod worksheet_streaming_tests {
     }
 
     #[test]
+    fn processed_ordinary_elements_strip_mce_and_ignored_attributes() {
+        // ECMA-376 Part 3 §9.4 step 5(a). The adjacent extLst test covers the
+        // separate opaque application-extension rule.
+        let xml = r#"<x:worksheet
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:future="urn:example:future"
+            mc:Ignorable="future"
+            mc:ProcessContent="future:wrapper"
+            future:discard="root">
+          <x:sheetData/>
+          <x:mergeCells future:discard="collection">
+            <x:mergeCell ref="A1:B1" future:discard="item"/>
+          </x:mergeCells>
+        </x:worksheet>"#;
+
+        let streamed = stream_sheet_data(xml, &[], &[]).expect("worksheet is processed");
+        assert!(!streamed.shell_xml.contains("mc:Ignorable"));
+        assert!(!streamed.shell_xml.contains("mc:ProcessContent"));
+        assert!(!streamed.shell_xml.contains("future:discard"));
+        assert!(streamed.shell_xml.contains("xmlns:future"));
+        assert!(streamed.shell_xml.contains(r#"ref="A1:B1""#));
+    }
+
+    #[test]
     fn spreadsheetml_ext_lst_is_the_configured_opaque_boundary() {
         // Part 1 §10 designates extLst as the application-defined extension
         // element. Its contents pass through unchanged even when they contain
@@ -3082,7 +3242,7 @@ mod worksheet_streaming_tests {
     }
 
     #[test]
-    fn unbound_choice_requires_selects_fallback() {
+    fn unbound_choice_requires_is_nonconformant() {
         let xml = r#"<x:worksheet
             xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
@@ -3091,10 +3251,54 @@ mod worksheet_streaming_tests {
             <mc:Fallback><x:sheetData><x:row r="7"/></x:sheetData></mc:Fallback>
           </mc:AlternateContent>
         </x:worksheet>"#;
-        let streamed = stream_sheet_data(xml, &[], &[])
-            .expect("unresolved Requires prefix must allow Fallback");
-        assert_eq!(streamed.rows.len(), 1);
-        assert_eq!(streamed.rows[0].index, 7);
+        let error = stream_sheet_data(xml, &[], &[])
+            .expect_err("Part 3 section 7.6 requires every Requires prefix to be bound");
+        assert!(error.contains("unbound namespace prefix"), "{error}");
+    }
+
+    #[test]
+    fn mce_control_prefixes_must_not_resolve_to_the_mce_namespace() {
+        let cases = [
+            r#"mc:Ignorable="self"><x:sheetData/>"#,
+            r#"mc:MustUnderstand="self"><x:sheetData/>"#,
+            r#"><mc:AlternateContent><mc:Choice Requires="self"><x:sheetData/></mc:Choice></mc:AlternateContent>"#,
+        ];
+        for suffix in cases {
+            let xml = format!(
+                r#"<x:worksheet
+                    xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                    xmlns:mc="{MCE_NS}"
+                    xmlns:self="{MCE_NS}" {suffix}</x:worksheet>"#
+            );
+            let error = stream_sheet_data(&xml, &[], &[])
+                .expect_err("Part 3 forbids control prefixes bound to the MCE namespace");
+            assert!(
+                error.contains("must not name the Markup Compatibility namespace"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn alternate_content_elements_enforce_part3_attribute_grammar() {
+        let cases = [
+            r#"<mc:AlternateContent extra="no"><mc:Choice Requires="x"><x:sheetData/></mc:Choice></mc:AlternateContent>"#,
+            r#"<mc:AlternateContent><mc:Choice Requires="x" extra="no"><x:sheetData/></mc:Choice></mc:AlternateContent>"#,
+            r#"<mc:AlternateContent><mc:Choice Requires="future"><x:sheetData/></mc:Choice><mc:Fallback extra="no"><x:sheetData/></mc:Fallback></mc:AlternateContent>"#,
+            r#"<mc:AlternateContent><mc:Choice Requires="x" future:allowed="yes" x:forbidden="no"><x:sheetData/></mc:Choice></mc:AlternateContent>"#,
+        ];
+        for alternate in cases {
+            let xml = format!(
+                r#"<x:worksheet
+                    xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+                    xmlns:future="urn:example:future"
+                    mc:Ignorable="future">{alternate}</x:worksheet>"#
+            );
+            let error = stream_sheet_data(&xml, &[], &[])
+                .expect_err("Part 3 sections 7.5 through 7.7 constrain MCE attributes");
+            assert!(error.contains("attribute"), "{error}");
+        }
     }
 
     #[test]
