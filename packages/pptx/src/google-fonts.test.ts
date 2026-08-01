@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { FontPreloadEntry } from '@silurus/ooxml-core';
-import { PPTX_GOOGLE_FONTS } from './google-fonts';
+import {
+  PPTX_GOOGLE_FONTS,
+  PptxFontPreloadAccumulator,
+  pptxFontPreloadNames,
+} from './google-fonts';
+import type { Presentation, Slide } from './types';
 
 // Verbatim snapshot of the PPTX Office-font substitute map BEFORE the shared
 // registry consolidation (Phase 3 C7), excluding the SCRIPT_GOOGLE_FONTS spread
@@ -48,5 +53,46 @@ describe('PPTX_GOOGLE_FONTS — shared registry consolidation (oracle)', () => {
     expect(new Set(added)).toEqual(new Set(['ubuntu']));
     expect(PPTX_GOOGLE_FONTS['ubuntu'].url).toMatch(/family=Ubuntu(?:[:&]|$)/);
     expect(PPTX_GOOGLE_FONTS['ubuntu'].loadFamily).toBeUndefined();
+  });
+});
+
+describe('PptxFontPreloadAccumulator', () => {
+  it('preserves full-presentation shape, table, and chart text semantics incrementally', () => {
+    const slide = {
+      index: 0,
+      slideNumber: 1,
+      background: null,
+      elements: [
+        { type: 'shape', textBody: { paragraphs: [{ runs: [{ type: 'text', text: '日本語' }] }] } },
+        { type: 'table', rows: [{ cells: [{ textBody: { paragraphs: [{ runs: [{ type: 'text', text: 'العربية' }] }] } }] }] },
+        {
+          type: 'chart',
+          chart: {
+            title: 'Заголовок',
+            categories: ['หมวด'],
+            series: [{ name: 'סדרה' }],
+          },
+        },
+      ],
+    } as unknown as Slide;
+    const pres: Presentation = {
+      slideWidth: 1,
+      slideHeight: 1,
+      slides: [slide],
+      defaultTextColor: null,
+      majorFont: 'Yu Gothic',
+      minorFont: 'Aptos',
+    };
+    const incremental = new PptxFontPreloadAccumulator(pres.majorFont, pres.minorFont);
+    incremental.addSlide(slide);
+    expect(incremental.names()).toEqual(pptxFontPreloadNames(pres));
+    expect(incremental.names()).toEqual([
+      'Yu Gothic', 'Aptos',
+      'Noto Sans JP', 'Noto Serif JP',
+      'Noto Sans', 'Noto Serif',
+      'Noto Naskh Arabic', 'Noto Sans Arabic',
+      'Noto Sans Thai',
+      'Noto Sans Hebrew', 'Noto Serif Hebrew',
+    ]);
   });
 });

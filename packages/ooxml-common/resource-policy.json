@@ -18,6 +18,7 @@
     "maxPptxBootstrapSlides": 10000,
     "maxPptxBootstrapProjectionBytes": 33554432,
     "maxPptxBootstrapJsonBytes": 33554432,
+    "maxPptxPreflightProjectionBytes": 67108864,
     "maxPptxMaterializedSlideJsonBytes": 134217728,
     "maxWorksheetRows": 100000,
     "maxWorksheetCells": 250000,

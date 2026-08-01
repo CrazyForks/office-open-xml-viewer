@@ -2,6 +2,24 @@ import type { DimOptions, MediaElement, WorkerResponse } from './types';
 import type { PptxTextRunInfo } from './renderer';
 import type { NormalizedOoxmlResourcePolicy } from '@silurus/ooxml-core/worker';
 
+/** Canonical compact payload emitted by Rust `presentation_bootstrap()`. */
+export interface PresentationBootstrap {
+  readonly slideCount: number;
+  readonly slideWidth: number;
+  readonly slideHeight: number;
+  readonly defaultTextColor: string | null;
+  readonly majorFont: string | null;
+  readonly minorFont: string | null;
+  readonly hlinkColor: string | null;
+  readonly folHlinkColor: string | null;
+  readonly slides: readonly PresentationBootstrapSlide[];
+}
+
+export interface PresentationBootstrapSlide {
+  readonly index: number;
+  readonly partName?: string;
+}
+
 /** Lightweight summary returned by the render worker's `parse` — everything
  *  the main-thread proxy needs for its synchronous getters. The full model
  *  stays in the worker. */
