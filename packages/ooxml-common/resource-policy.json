@@ -1,0 +1,12 @@
+{
+  "defaults": {
+    "maxArchiveEntryBytes": 134217728,
+    "maxTotalInflatedBytes": 268435456
+  },
+  "hardCeilings": {
+    "maxArchiveEntryBytes": 536870912,
+    "maxTotalInflatedBytes": 1073741824,
+    "maxArchiveEntries": 20000,
+    "maxCentralDirectoryBytes": 16777216
+  }
+}

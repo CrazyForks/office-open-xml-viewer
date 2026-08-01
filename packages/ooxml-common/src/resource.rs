@@ -7,15 +7,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-pub const STANDARD_MAX_ARCHIVE_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
-pub const STANDARD_MAX_TOTAL_INFLATED_BYTES: u64 = 256 * 1024 * 1024;
-pub const HARD_MAX_ARCHIVE_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
-pub const HARD_MAX_TOTAL_INFLATED_BYTES: u64 = 1024 * 1024 * 1024;
-pub const HARD_MAX_ARCHIVE_ENTRIES: u64 = 20_000;
-/// Conservative browser-safety budget for central-directory/footer input plus
-/// filename bytes retained by the ZIP index. This bounds name copies and index
-/// growth; it is deliberately not an exact accounting of allocator heap use.
-pub const HARD_MAX_CENTRAL_DIRECTORY_BYTES: u64 = 16 * 1024 * 1024;
+// The generated hard central-directory ceiling is a conservative browser-safety
+// budget for footer/index input plus retained filename bytes; it is deliberately
+// not an exact accounting of allocator heap use.
+include!("resource-policy.generated.rs");
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]

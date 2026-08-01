@@ -2,6 +2,7 @@ import {
   OoxmlError,
   OoxmlResourceLimitError,
   type OoxmlErrorCode,
+  type OoxmlErrorStage,
   type OoxmlFormat,
   type OoxmlResourceLimitErrorDetails,
   type OoxmlResourceUsageSnapshot,
@@ -9,6 +10,9 @@ import {
 } from '../errors/ooxml-error.js';
 
 const RESOURCE_LIMIT_PREFIX = 'OOXML_RESOURCE_LIMIT:';
+const MAX_IDENTIFIER_LENGTH = 128;
+const MAX_OPERATION_LENGTH = 256;
+const MAX_PART_LENGTH = 4_096;
 
 /** Structured-clone-safe error payload shared by all OOXML workers. */
 export interface WorkerErrorPayload {
@@ -42,13 +46,73 @@ function isFormat(value: unknown): value is OoxmlFormat {
   return value === 'docx' || value === 'xlsx' || value === 'pptx';
 }
 
+function isStage(value: unknown): value is OoxmlErrorStage {
+  return value === 'container' || value === 'decompression' || value === 'parsing'
+    || value === 'serialization' || value === 'layout' || value === 'rendering'
+    || value === 'worker';
+}
+
+function isBoundedText(value: unknown, maximum: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximum
+    && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function isIdentifier(value: unknown): value is string {
+  return isBoundedText(value, MAX_IDENTIFIER_LENGTH) && /^[a-z0-9][a-z0-9-]*$/u.test(value);
+}
+
+/** Accept only a relative OPC/ZIP part address, never an external or local
+ * absolute address. Package extensions may introduce new top-level segments,
+ * so validation is structural rather than a closed directory allow-list. */
+function isSafePartAddress(value: unknown): value is string {
+  if (!isBoundedText(value, MAX_PART_LENGTH)) return false;
+  if (
+    value.startsWith('/') ||
+    value.startsWith('\\') ||
+    value.includes('\\') ||
+    value.includes('?') ||
+    value.includes('#') ||
+    value.includes('://') ||
+    /^[a-z]:/iu.test(value)
+  ) {
+    return false;
+  }
+  return value.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..');
+}
+
+type KnownPairRule = Readonly<{
+  stage: OoxmlErrorStage;
+  part: 'required' | 'forbidden' | 'optional';
+  configurable?: false;
+}>;
+
+const KNOWN_PAIR_RULES = new Map<string, KnownPairRule>([
+  ['archive-entry:declared-inflated-bytes', { stage: 'container', part: 'required' }],
+  ['archive-entry:actual-inflated-bytes', { stage: 'decompression', part: 'required' }],
+  ['archive:entry-count', { stage: 'container', part: 'forbidden', configurable: false }],
+  ['archive:central-directory-bytes', { stage: 'container', part: 'forbidden', configurable: false }],
+  ['archive:distinct-inflated-bytes', { stage: 'decompression', part: 'required' }],
+  ['xml-event:bytes', { stage: 'parsing', part: 'optional', configurable: false }],
+  ['xml-context:bytes', { stage: 'parsing', part: 'optional', configurable: false }],
+  ['xml-tree:depth', { stage: 'parsing', part: 'optional', configurable: false }],
+  ['worksheet-row:projected-bytes', { stage: 'parsing', part: 'optional', configurable: false }],
+  ['worksheet-shell:projected-bytes', { stage: 'parsing', part: 'optional', configurable: false }],
+]);
+const KNOWN_RESOURCES = new Set(
+  [...KNOWN_PAIR_RULES.keys()].map((pair) => pair.slice(0, pair.indexOf(':'))),
+);
+const KNOWN_METRICS = new Set(
+  [...KNOWN_PAIR_RULES.keys()].map((pair) => pair.slice(pair.indexOf(':') + 1)),
+);
+
 function isViolation(value: unknown): value is OoxmlResourceViolation {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const data = value as Partial<OoxmlResourceViolation>;
   if (
     !isFormat(data.format) ||
-    typeof data.operation !== 'string' ||
-    data.operation.length === 0 ||
+    !isBoundedText(data.operation, MAX_OPERATION_LENGTH) ||
+    !isIdentifier(data.resource) ||
+    !isIdentifier(data.metric) ||
     !isNonNegativeSafeInteger(data.limit) ||
     !isNonNegativeSafeInteger(data.observed) ||
     typeof data.configurable !== 'boolean' ||
@@ -56,54 +120,65 @@ function isViolation(value: unknown): value is OoxmlResourceViolation {
   ) {
     return false;
   }
-  if (data.resource === 'archive-entry') {
-    return (
-      (data.metric === 'declared-inflated-bytes' ||
-        data.metric === 'actual-inflated-bytes') &&
-      typeof data.part === 'string' &&
-      data.part.length > 0
-    );
-  }
-  if (data.resource === 'archive') {
-    if (data.metric === 'entry-count' || data.metric === 'central-directory-bytes') {
-      return data.configurable === false && !('part' in data);
-    }
-    return (
-      data.metric === 'distinct-inflated-bytes' &&
-      typeof data.part === 'string' &&
-      data.part.length > 0
-    );
-  }
-  const validOptionalPart =
-    !('part' in data) || (typeof data.part === 'string' && data.part.length > 0);
-  if (data.configurable !== false || !validOptionalPart) return false;
-  if (data.resource === 'xml-event' || data.resource === 'xml-context') {
-    return data.metric === 'bytes';
-  }
-  if (data.resource === 'xml-tree') return data.metric === 'depth';
-  return (
-    (data.resource === 'worksheet-row' || data.resource === 'worksheet-shell') &&
-    data.metric === 'projected-bytes'
-  );
+  return !('part' in data) || isSafePartAddress(data.part);
 }
 
 function isResourceLimitDetails(value: unknown): value is OoxmlResourceLimitErrorDetails {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const details = value as Partial<OoxmlResourceLimitErrorDetails>;
-  if (!isViolation(details.violation)) return false;
-  const metric = details.violation.metric;
-  const expectedStage =
-    metric === 'actual-inflated-bytes' || metric === 'distinct-inflated-bytes'
-      ? 'decompression'
-      : metric === 'bytes' || metric === 'depth' || metric === 'projected-bytes'
-        ? 'parsing'
-        : 'container';
-  return details.stage === expectedStage;
+  if (!isStage(details.stage) || !isViolation(details.violation)) return false;
+  const violation = details.violation;
+  const rule = KNOWN_PAIR_RULES.get(`${violation.resource}:${violation.metric}`);
+  if (!rule) {
+    // A newer worker may introduce a new resource or metric before its host is
+    // upgraded. Preserve that record, but do not accept a nonsensical
+    // permutation made solely from the vocabulary this host already knows.
+    return !(
+      KNOWN_RESOURCES.has(violation.resource) &&
+      KNOWN_METRICS.has(violation.metric)
+    );
+  }
+  if (details.stage !== rule.stage) return false;
+  if (rule.configurable === false && violation.configurable !== false) return false;
+  if (rule.part === 'required') return violation.part !== undefined;
+  if (rule.part === 'forbidden') return violation.part === undefined;
+  return true;
+}
+
+function usageForWire(usage: OoxmlResourceUsageSnapshot): OoxmlResourceUsageSnapshot {
+  return {
+    archiveEntryCount: usage.archiveEntryCount,
+    declaredInflatedBytes: usage.declaredInflatedBytes,
+    distinctInflatedBytes: usage.distinctInflatedBytes,
+    operationInflatedBytes: usage.operationInflatedBytes,
+  };
+}
+
+function detailsForWire(
+  details: unknown,
+): OoxmlResourceLimitErrorDetails | undefined {
+  if (!isResourceLimitDetails(details)) return undefined;
+  const violation = details.violation;
+  const candidate = {
+    stage: details.stage,
+    violation: {
+      format: violation.format,
+      operation: violation.operation,
+      resource: violation.resource,
+      metric: violation.metric,
+      ...(violation.part === undefined ? {} : { part: violation.part }),
+      limit: violation.limit,
+      observed: violation.observed,
+      configurable: violation.configurable,
+      usage: usageForWire(violation.usage),
+    },
+  };
+  return isResourceLimitDetails(candidate) ? candidate : undefined;
 }
 
 function resourceLimitMessage(details: OoxmlResourceLimitErrorDetails): string {
   const violation = details.violation;
-  const location = 'part' in violation && violation.part ? ` for ${violation.part}` : '';
+  const location = violation.part ? ` for ${violation.part}` : '';
   return `OOXML resource limit exceeded${location}: ${violation.metric} ${violation.observed} > ${violation.limit}`;
 }
 
@@ -125,30 +200,61 @@ export function parseResourceLimitError(error: unknown): OoxmlResourceLimitError
   return new OoxmlResourceLimitError(resourceLimitMessage(data.details), data.details);
 }
 
-/** Convert an arbitrary worker-side error to a structured-clone-safe payload. */
-export function serializeWorkerError(error: unknown): WorkerErrorPayload {
+function serializeWorkerErrorUnchecked(error: unknown): WorkerErrorPayload {
   const typed =
     error instanceof OoxmlError || error instanceof OoxmlResourceLimitError
       ? error
       : parseResourceLimitError(error);
   if (typed instanceof OoxmlResourceLimitError) {
+    const resourceLimit = detailsForWire(typed.details);
+    if (!resourceLimit) {
+      return {
+        message: 'Invalid OOXML resource-limit error payload',
+        errorName: 'Error',
+      };
+    }
     return {
-      message: typed.message,
-      errorName: typed.name,
-      code: typed.code,
-      resourceLimit: typed.details,
+      message: typeof typed.message === 'string' ? typed.message : resourceLimitMessage(resourceLimit),
+      errorName: 'OoxmlResourceLimitError',
+      code: 'ooxml-resource-limit',
+      resourceLimit,
     };
   }
   if (typed instanceof OoxmlError) {
-    return { message: typed.message, errorName: typed.name, code: typed.code };
+    return {
+      message: typeof typed.message === 'string' ? typed.message : String(typed.message),
+      errorName: isBoundedText(typed.name, MAX_IDENTIFIER_LENGTH) ? typed.name : 'OoxmlError',
+      ...(isIdentifier(typed.code) ? { code: typed.code } : {}),
+    };
   }
-  const ordinary = error instanceof Error ? error : new Error(String(error));
-  const details = ordinary as Error & { code?: string };
+  const sourceMessage = error instanceof Error ? error.message : String(error);
+  if (typeof sourceMessage === 'string' && sourceMessage.startsWith(RESOURCE_LIMIT_PREFIX)) {
+    return {
+      message: 'Invalid OOXML resource-limit payload',
+      errorName: 'Error',
+    };
+  }
+  const ordinary = error instanceof Error ? error : new Error(sourceMessage);
+  const details = ordinary as Error & { code?: unknown };
   return {
-    message: ordinary.message,
-    errorName: ordinary.name,
-    ...(details.code !== undefined ? { code: details.code } : {}),
+    message: typeof ordinary.message === 'string' ? ordinary.message : String(ordinary.message),
+    errorName: isBoundedText(ordinary.name, MAX_IDENTIFIER_LENGTH) ? ordinary.name : 'Error',
+    ...(typeof details.code === 'string' ? { code: details.code } : {}),
   };
+}
+
+/** Convert an arbitrary worker-side error to a structured-clone-safe payload. */
+export function serializeWorkerError(error: unknown): WorkerErrorPayload {
+  try {
+    return serializeWorkerErrorUnchecked(error);
+  } catch {
+    // Host objects and caller-mutated Error instances may expose throwing
+    // accessors. No property from such an object is safe to forward.
+    return {
+      message: 'Worker operation failed with an unreadable error',
+      errorName: 'Error',
+    };
+  }
 }
 
 const OOXML_ERROR_CODES = new Set<OoxmlErrorCode>([

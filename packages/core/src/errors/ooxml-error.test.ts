@@ -3,6 +3,8 @@ import {
   OoxmlError,
   OoxmlResourceLimitError,
   type OoxmlErrorCode,
+  type OoxmlResourceMetric,
+  type OoxmlResourceName,
 } from './ooxml-error';
 
 describe('OoxmlError', () => {
@@ -32,7 +34,7 @@ describe('OoxmlError', () => {
     }
   });
 
-  it('uses a separate additive error class with discriminated resource details', () => {
+  it('uses a separate additive error class with structured resource details', () => {
     const err = new OoxmlResourceLimitError('too large', {
       stage: 'decompression',
       violation: {
@@ -65,6 +67,15 @@ describe('OoxmlError', () => {
     expect(Object.isFrozen(err.details)).toBe(true);
     expect(Object.isFrozen(err.details.violation)).toBe(true);
     expect(Object.isFrozen(err.details.violation.usage)).toBe(true);
+  });
+
+  it('keeps future resource and metric literals source-compatible', () => {
+    const resource: OoxmlResourceName = 'slide-wire';
+    const metric: OoxmlResourceMetric = 'retained-bytes';
+    expect({ resource, metric }).toEqual({
+      resource: 'slide-wire',
+      metric: 'retained-bytes',
+    });
   });
 
   it('captures a stack trace', () => {

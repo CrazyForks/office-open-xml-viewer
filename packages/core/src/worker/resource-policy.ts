@@ -1,14 +1,16 @@
 import type { LoadOptions, OoxmlResourceLimit } from '../types/load-options.js';
-
-const MIB = 1024 * 1024;
+import {
+  STANDARD_MAX_ARCHIVE_ENTRY_BYTES,
+  STANDARD_MAX_TOTAL_INFLATED_BYTES,
+} from './resource-policy.generated.js';
 
 /**
  * Standard admission defaults. These are limits on inflated archive bytes,
  * not estimates or guarantees of process memory consumption.
  */
 export const DEFAULT_OOXML_RESOURCE_LIMITS = Object.freeze({
-  maxArchiveEntryBytes: 128 * MIB,
-  maxTotalInflatedBytes: 256 * MIB,
+  maxArchiveEntryBytes: STANDARD_MAX_ARCHIVE_ENTRY_BYTES,
+  maxTotalInflatedBytes: STANDARD_MAX_TOTAL_INFLATED_BYTES,
 });
 
 export interface NormalizedOoxmlResourcePolicy {

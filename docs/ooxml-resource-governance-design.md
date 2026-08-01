@@ -35,6 +35,10 @@ layout state, canvas allocation, or the copies made at worker boundaries.
   relevant ECMA-376 parts; it must not introduce a reduced parser dialect.
 - Preserve structured diagnostic information across worker boundaries and make
   debug usage visible from the main context.
+- Keep the existing synchronous Node parsing helpers as materializing
+  compatibility APIs, while adding an options-aware session/pull surface for
+  server-side rendering jobs that need deterministic resource policy and
+  bounded in-flight work.
 
 ## Non-goals
 
@@ -48,6 +52,9 @@ layout state, canvas allocation, or the copies made at worker boundaries.
   processing preceding layout state.
 - Existing `ArrayBuffer` input necessarily keeps a complete compressed package
   in memory. Bounded inflation and model processing do not change that fact.
+- Existing synchronous Node helpers that return a complete public model cannot
+  promise fixed total memory. Fixed-in-flight-memory server workflows use the
+  additive asynchronous session/pull surface instead.
 
 ## Delivery milestones
 
@@ -62,6 +69,9 @@ independently once M2 is complete.
 - Freeze the Viewer compatibility boundary, failure routing, public policy
   vocabulary, accounting semantics, and the format-owned responsibilities.
 - Preserve baseline public API snapshots and focused resource-limit tests.
+- Build declarations from current source before comparing separate DOCX, XLSX,
+  and PPTX public baselines with `scripts/check-public-api.mjs`; stale `dist/`
+  output must never make this gate pass.
 - Close the rejected-load worker ownership gap for all three formats.
 
 Exit: this document is internally consistent, cleanup regression tests pass for
@@ -73,7 +83,7 @@ can silently change the public contract.
 - Replace format-local option interpretation with one immutable normalizer and
   one per-session `ResourceGovernor` in core/common layers.
 - Implement the two public limits, deprecated alias reconciliation, practical
-  defaults, hidden hard quotas, discriminated errors, usage snapshots, and
+  defaults, hidden hard quotas, structured errors, usage snapshots, and
   poison semantics.
 - Enforce raw archive entry count, selected-entry declared/actual inflation,
   and actual distinct-entry aggregate inflation without trusting declarations.
@@ -89,6 +99,9 @@ repeat reads, conflict validation, worker error transport, and poisoned sessions
   unknown transferred resources are disposed.
 - Keep complete buffered package input for the existing Viewer source contract;
   do not claim URL range loading in this milestone.
+- Define the same correlated session lifecycle for browser workers and Node.
+  Node does not need a Worker hop to use backpressure, but it must use the same
+  policy, usage, error, cancel, close, and format-owned chunk contracts.
 
 Exit: protocol tests prove bounded in-flight data, backpressure, timeout/abort
 convergence, late-response disposal, and parity across the direct and simulated
@@ -107,6 +120,9 @@ it bounded.
 - Remove the avoidable full worksheet string plus full serialized model overlap
   from the Viewer path; keep `getWorksheet()` as an explicitly materializing
   compatibility adapter.
+- Add a Node worksheet-session iterator that yields the same bounded row batches;
+  keep `parseXlsx`, `parseXlsxSheet`, and `parseXlsxAllSheets` as synchronous,
+  materializing compatibility helpers.
 
 Exit: synthetic large worksheets cross multiple pulls, render identically, stop
 at deterministic limits, and show a measured reduction in transient peak usage.
@@ -117,6 +133,9 @@ at deterministic limits, and show a measured reduction in transient peak usage.
   retaining slides and their relationships as format-owned units.
 - Make navigation, media leases, cleanup, and resource failures consistent with
   the common session contract.
+- Add a Node presentation session that opens shared dependencies once and pulls
+  one slide/resource unit at a time; retain `parsePptx` and extraction helpers as
+  materializing compatibility APIs with corrected policy documentation.
 - Preserve the pooled-canvas recycling contract from PR #1127: returning a
   slide canvas to the pool clears its zoom-derived CSS height before reuse.
 
@@ -125,9 +144,12 @@ bounded transient retention, and cleanup on rejection, reload, and destroy.
 
 ### M5 — DOCX sequential layout pipeline
 
-- Move every DOCX package read onto the shared `PackageSession`; keep ordinary
-  corrupt-container and malformed required-part degradation from Issue #1088,
-  but let a resource violation poison the package and win over optional-part
+- Move every DOCX package read onto the shared `PackageSession`. Keep Issue
+  #1088's recoverable containment only for an optional object, isolated block,
+  or non-primary story whose omission is structurally proven safe. Corrupt ZIP
+  structure, a missing or malformed required XML part, invalid geometry or
+  ownership, non-convergence, and resource-policy violations remain fatal; a
+  resource violation also poisons the package and wins over optional-part
   fallback.
 - Read `word/document.xml` through a two-pass bounded cursor. The first pass
   retains only the compact section, table-adjacency, and content-control plan
@@ -138,15 +160,28 @@ bounded transient retention, and cleanup on rejection, reload, and destroy.
   -> layout -> paint pipeline. The full-model compatibility adapter and the
   streamed Viewer adapter must converge on that same store; no streamed-only or
   legacy paginator is permitted.
+- Keep the store contract independent of `DocxDocumentModel` and parser-owned
+  object identity. It owns canonical `SourceRef`-keyed paragraph, table, and
+  story records; resolved section, note, field, and font facts; and immutable
+  image/math/paint manifests. A model adapter projects parser-private facts into
+  those records before sealing, while a streamed builder creates the same
+  records directly. The mutable public compatibility model, when requested,
+  lives outside the store and cannot change sealed layout or paint inputs.
 - Keep pagination after the store is sealed. Sequential section inheritance,
   fields, notes, bookmarks, convergence, total page count, and stable Viewer
   readiness do not permit random page access or final page metadata before the
   complete required part has been validated.
+- Let Node build and paginate the same sealed source through an asynchronous
+  document session. Existing `parseDocx` remains materializing; server rendering
+  can pull completed page render inputs only after the same Viewer readiness
+  barrier, without a browser Worker and without a second semantic pipeline.
 - Preserve source compatibility for lower-level APIs that synchronously expose
   a complete document model by materializing their stream. Such adapters do not
   receive a bounded-retention claim. The self-loaded Viewer path must avoid the
   simultaneous full document XML, whole-document XML arena, Rust model, and
-  monolithic JSON representations.
+  monolithic JSON representations. The streamed builder owns its accumulated
+  records and seals them in place; sealing must not clone the complete retained
+  logical source and create a second whole-document peak.
 - Align recoverable parse/layout containment with Issue #1088. Resource limits,
   malformed required XML, invariant failures, and non-convergence remain fatal;
   already-produced chunks are never promoted to partial success after them.
@@ -209,6 +244,13 @@ The existing `string | ArrayBuffer` sources remain accepted. Existing options
 remain accepted. New resource and debug options are additive. A successful
 `load()` resolves at the same user-visible readiness point as before, and the
 existing `onError` versus rejection behavior remains unchanged.
+
+For DOCX, “fatal required-part failure” means fatal to the document transaction:
+no body batch or completed page is promoted to a partial success. It does not by
+itself redefine the established Viewer routing for a fatal-document diagnostic
+versus rejection. Resource-policy violations are different: they always reject
+with `OoxmlResourceLimitError`. This preserves the external error route while
+making Issue #1088's fatal/recoverable ownership boundary explicit.
 
 The following are internal implementation contracts and may change:
 
@@ -290,6 +332,11 @@ corpus and browser measurements support them. Adopting defaults below the old
 512 MiB per-entry default intentionally narrows the set of documents that load
 without overrides: source compatibility is preserved, but behavioral
 compatibility for documents above the new defaults is not.
+The candidates and the hard archive ceilings have one language-neutral source
+in `packages/ooxml-common/resource-policy.json`; generated TypeScript and Rust
+constants are checked in CI so browser option normalization, parser-native
+fallbacks, and effective hard caps cannot drift during calibration or later
+releases. Generation rejects a default that exceeds its hard ceiling.
 
 Archive entry count, XML nesting, relationships, model complexity, serialized
 bytes, image dimensions, canvas pixels, and timeouts remain internal quotas or
@@ -476,9 +523,12 @@ Sharing the control plane must not create a second generic OOXML semantic model.
 ## Failure contract
 
 A detected policy violation throws one `OoxmlResourceLimitError` family across
-all formats and modes. Its details are a discriminated resource record so an
-archive-level entry-count or declared-total violation does not need a dummy part
-name. Shared fields include:
+all formats and modes. Its details use one stable record with extensible
+`resource` and `metric` string axes, rather than a closed public union that must
+change whenever an internal hard quota is added. Known literals retain editor
+completion, while newer worker literals remain decodable by an older host. An
+archive-level entry-count or declared-total violation therefore does not need a
+dummy part name. Shared fields include:
 
 - stable code and stage;
 - resource/metric identifier;
@@ -511,8 +561,13 @@ window. A per-session limit does not claim to bound this combined process peak.
 
 `debug: true` enables measurement reporting but does not change limits or parser
 behavior. Workers send structured usage checkpoints to the main context. The
-main context retains checkpoints quietly and emits one final success/failure
-card, or the last checkpoint if the worker dies.
+main context retains checkpoints quietly and emits a load-complete or load-failed
+card when initial Viewer readiness settles. That card is explicitly a load
+checkpoint, not a final package-session total: lazy sheet, slide, image, font,
+or other part access may increase usage later. When a later operation fails, or
+when an owned session closes after its usage has changed, one terminal card
+reports the last complete checkpoint. This keeps logging sparse while making
+both initial limit calibration and lazy-lifetime accounting honest.
 
 The presentation is Ratatui-inspired: bordered blocks, a compact table, gauges,
 and semantic status colors. A shared styled-token view is rendered as browser

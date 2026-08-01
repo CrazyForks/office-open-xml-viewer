@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { OoxmlResourceLimitError } from '../errors/ooxml-error.js';
+import { OoxmlError, OoxmlResourceLimitError } from '../errors/ooxml-error.js';
 import {
   deserializeWorkerError,
   parseResourceLimitError,
@@ -41,6 +41,100 @@ describe('worker error wire', () => {
       resource: 'archive-entry',
       part: 'xl/worksheets/sheet1.xml',
     });
+  });
+
+  it('encodes public errors field-by-field before structured clone', () => {
+    const parsed = parseResourceLimitError(new Error(rustError))!;
+    const error = new OoxmlResourceLimitError('unsafe extras', {
+      ...parsed.details,
+      violation: {
+        ...parsed.details.violation,
+        unsafeFunction: () => undefined,
+        unsafeObject: { callback: () => undefined },
+      } as never,
+    });
+    const wire = serializeWorkerError(error);
+
+    expect(() => structuredClone(error.details)).not.toThrow();
+    expect(() => structuredClone(wire)).not.toThrow();
+    expect(wire.resourceLimit?.violation).not.toHaveProperty('unsafeFunction');
+    expect(wire.resourceLimit?.violation).not.toHaveProperty('unsafeObject');
+  });
+
+  it('drops non-string fields from ordinary errors before structured clone', () => {
+    const error = new Error('unsafe code') as Error & { code: unknown };
+    error.code = { callback: () => undefined };
+    const wire = serializeWorkerError(error);
+
+    expect(wire).not.toHaveProperty('code');
+    expect(() => structuredClone(wire)).not.toThrow();
+  });
+
+  it('contains caller-defined throwing error accessors', () => {
+    const error = new Error('hidden');
+    Object.defineProperty(error, 'code', {
+      get() {
+        throw new Error('must not escape serialization');
+      },
+    });
+
+    expect(serializeWorkerError(error)).toEqual({
+      message: 'Worker operation failed with an unreadable error',
+      errorName: 'Error',
+    });
+  });
+
+  it('sanitizes mutated typed OOXML errors before structured clone', () => {
+    const error = new OoxmlError('encrypted', 'unsafe typed error');
+    Object.assign(error, {
+      name: { callback: () => undefined },
+      code: { callback: () => undefined },
+    });
+    const wire = serializeWorkerError(error);
+
+    expect(wire).toEqual({
+      message: 'unsafe typed error',
+      errorName: 'OoxmlError',
+    });
+    expect(() => structuredClone(wire)).not.toThrow();
+  });
+
+  it('downgrades invalid public resource-limit details without cloning unsafe fields', () => {
+    const error = new OoxmlResourceLimitError('unsafe details', {
+      stage: 'parsing',
+      violation: {
+        format: 'xlsx',
+        operation: 'parse',
+        resource: (() => 'worksheet-row') as never,
+        metric: 'projected-bytes',
+        limit: 1,
+        observed: 2,
+        configurable: false,
+        usage: USAGE,
+      },
+    });
+    const wire = serializeWorkerError(error);
+
+    expect(wire).toEqual({
+      message: 'Invalid OOXML resource-limit error payload',
+      errorName: 'Error',
+    });
+    expect(() => structuredClone(wire)).not.toThrow();
+  });
+
+  it('downgrades a resource-limit error whose public fields were mutated at runtime', () => {
+    const parsed = parseResourceLimitError(new Error(rustError))!;
+    Object.assign(parsed, {
+      code: { callback: () => undefined },
+      details: null,
+    });
+    const wire = serializeWorkerError(parsed);
+
+    expect(wire).toEqual({
+      message: 'Invalid OOXML resource-limit error payload',
+      errorName: 'Error',
+    });
+    expect(() => structuredClone(wire)).not.toThrow();
   });
 
   it('represents an archive-wide metric without a dummy part', () => {
@@ -135,6 +229,17 @@ describe('worker error wire', () => {
     expect(parseResourceLimitError(`xlsx parser: ${rustError}`)).toBeUndefined();
   });
 
+  it('does not echo an invalid Rust resource payload across the worker boundary', () => {
+    const invalid = rustError.replace(
+      'xl/worksheets/sheet1.xml',
+      'file:///Users/private/document.xml',
+    );
+    expect(serializeWorkerError(new Error(invalid))).toEqual({
+      message: 'Invalid OOXML resource-limit payload',
+      errorName: 'Error',
+    });
+  });
+
   it('rejects invalid discriminants at the worker boundary', () => {
     expect(
       deserializeWorkerError({
@@ -173,22 +278,67 @@ describe('worker error wire', () => {
     const payload = structuredClone(serializeWorkerError(wrongParserStage));
     if (payload.resourceLimit) Object.assign(payload.resourceLimit, { stage: 'container' });
     expect(deserializeWorkerError(payload)).not.toBeInstanceOf(OoxmlResourceLimitError);
+
+    const missingRequiredPart = structuredClone(serializeWorkerError(new Error(rustError)));
+    if (missingRequiredPart.resourceLimit) {
+      delete (missingRequiredPart.resourceLimit.violation as { part?: string }).part;
+    }
+    expect(deserializeWorkerError(missingRequiredPart))
+      .not.toBeInstanceOf(OoxmlResourceLimitError);
   });
 
-  it('rejects removed declared-total metrics and fractional wire counters', () => {
-    const declaredTotal = structuredClone(serializeWorkerError(new Error(rustError)));
-    if (declaredTotal.resourceLimit) {
-      Object.assign(declaredTotal.resourceLimit.violation, {
-        resource: 'archive',
-        metric: 'declared-total-inflated-bytes',
-        configurable: true,
+  it('preserves a valid future resource/metric pair without a host release', () => {
+    const future = structuredClone(serializeWorkerError(new Error(rustError)));
+    if (future.resourceLimit) {
+      Object.assign(future.resourceLimit, { stage: 'serialization' });
+      Object.assign(future.resourceLimit.violation, {
+        resource: 'slide-wire',
+        metric: 'retained-bytes',
+        configurable: false,
       });
-      delete (declaredTotal.resourceLimit.violation as { part?: string }).part;
+      delete (future.resourceLimit.violation as { part?: string }).part;
     }
-    expect(deserializeWorkerError(declaredTotal)).not.toBeInstanceOf(OoxmlResourceLimitError);
+    const restored = deserializeWorkerError(future);
+    expect(restored).toBeInstanceOf(OoxmlResourceLimitError);
+    expect((restored as OoxmlResourceLimitError).details).toMatchObject({
+      stage: 'serialization',
+      violation: { resource: 'slide-wire', metric: 'retained-bytes' },
+    });
+  });
 
+  it('rejects invalid permutations of resource and metric names already known to the host', () => {
+    const invalid = structuredClone(serializeWorkerError(new Error(rustError)));
+    if (invalid.resourceLimit) {
+      Object.assign(invalid.resourceLimit, { stage: 'container' });
+      Object.assign(invalid.resourceLimit.violation, {
+        resource: 'archive-entry',
+        metric: 'entry-count',
+      });
+      delete (invalid.resourceLimit.violation as { part?: string }).part;
+    }
+
+    expect(deserializeWorkerError(invalid)).not.toBeInstanceOf(OoxmlResourceLimitError);
+  });
+
+  it('rejects fractional counters and unsafe strings', () => {
     const fractional = structuredClone(serializeWorkerError(new Error(rustError)));
-    if (fractional.resourceLimit) fractional.resourceLimit.violation.limit = 5.5;
+    if (fractional.resourceLimit) {
+      Object.assign(fractional.resourceLimit.violation, { limit: 5.5 });
+    }
     expect(deserializeWorkerError(fractional)).not.toBeInstanceOf(OoxmlResourceLimitError);
+
+    const unsafe = structuredClone(serializeWorkerError(new Error(rustError)));
+    if (unsafe.resourceLimit) {
+      Object.assign(unsafe.resourceLimit.violation, { resource: 'bad\nresource' });
+    }
+    expect(deserializeWorkerError(unsafe)).not.toBeInstanceOf(OoxmlResourceLimitError);
+
+    const unsafePart = structuredClone(serializeWorkerError(new Error(rustError)));
+    if (unsafePart.resourceLimit) {
+      Object.assign(unsafePart.resourceLimit.violation, {
+        part: '../../private/document.xml',
+      });
+    }
+    expect(deserializeWorkerError(unsafePart)).not.toBeInstanceOf(OoxmlResourceLimitError);
   });
 });

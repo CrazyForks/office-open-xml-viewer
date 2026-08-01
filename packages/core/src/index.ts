@@ -54,6 +54,8 @@ export {
   type OoxmlErrorSource,
   type OoxmlErrorStage,
   type OoxmlFormat,
+  type OoxmlResourceMetric,
+  type OoxmlResourceName,
   type OoxmlResourceLimitErrorDetails,
   type OoxmlResourceUsageSnapshot,
   type OoxmlResourceViolation,

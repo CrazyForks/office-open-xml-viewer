@@ -76,52 +76,54 @@ export interface OoxmlResourceUsageSnapshot {
   readonly operationInflatedBytes: number;
 }
 
-interface OoxmlResourceViolationBase {
-  format: OoxmlFormat;
-  operation: string;
-  limit: number;
-  observed: number;
-  configurable: boolean;
-  usage: OoxmlResourceUsageSnapshot;
+type ExtensibleLiteral<Known extends string> = Known | (string & Record<never, never>);
+
+/**
+ * Resource family reported by a policy or hard-quota violation.
+ *
+ * The known literals provide editor completion. The string tail is deliberate:
+ * adding a future format-owned unit must not break exhaustive switches compiled
+ * against an older host while a newer worker is already able to report it.
+ */
+export type OoxmlResourceName = ExtensibleLiteral<
+  | 'archive'
+  | 'archive-entry'
+  | 'xml-event'
+  | 'xml-context'
+  | 'xml-tree'
+  | 'worksheet-row'
+  | 'worksheet-shell'
+>;
+
+/** Measurement axis used by an OOXML resource violation. Extensible by design. */
+export type OoxmlResourceMetric = ExtensibleLiteral<
+  | 'declared-inflated-bytes'
+  | 'actual-inflated-bytes'
+  | 'entry-count'
+  | 'central-directory-bytes'
+  | 'distinct-inflated-bytes'
+  | 'bytes'
+  | 'depth'
+  | 'projected-bytes'
+>;
+
+/** Stable public violation record. Valid resource/metric pairings are enforced
+ * by the emitting parser and the worker decoder rather than by a closed public
+ * union that would require a breaking expansion for every new hard quota. */
+export interface OoxmlResourceViolation {
+  readonly format: OoxmlFormat;
+  readonly operation: string;
+  readonly resource: OoxmlResourceName;
+  readonly metric: OoxmlResourceMetric;
+  readonly part?: string;
+  readonly limit: number;
+  readonly observed: number;
+  readonly configurable: boolean;
+  readonly usage: OoxmlResourceUsageSnapshot;
 }
 
-export type OoxmlResourceViolation =
-  | (OoxmlResourceViolationBase & {
-      resource: 'archive-entry';
-      metric: 'declared-inflated-bytes' | 'actual-inflated-bytes';
-      part: string;
-    })
-  | (OoxmlResourceViolationBase & {
-      resource: 'archive';
-      metric: 'entry-count' | 'central-directory-bytes';
-      configurable: false;
-    })
-  | (OoxmlResourceViolationBase & {
-      resource: 'archive';
-      metric: 'distinct-inflated-bytes';
-      part: string;
-    })
-  | (OoxmlResourceViolationBase & {
-      resource: 'xml-event' | 'xml-context';
-      metric: 'bytes';
-      configurable: false;
-      part?: string;
-    })
-  | (OoxmlResourceViolationBase & {
-      resource: 'xml-tree';
-      metric: 'depth';
-      configurable: false;
-      part?: string;
-    })
-  | (OoxmlResourceViolationBase & {
-      resource: 'worksheet-row' | 'worksheet-shell';
-      metric: 'projected-bytes';
-      configurable: false;
-      part?: string;
-    });
-
 export interface OoxmlResourceLimitErrorDetails {
-  readonly stage: 'container' | 'decompression' | 'parsing';
+  readonly stage: OoxmlErrorStage;
   readonly violation: OoxmlResourceViolation;
 }
 
@@ -133,13 +135,26 @@ export class OoxmlResourceLimitError extends Error {
   constructor(message: string, details: OoxmlResourceLimitErrorDetails) {
     super(message);
     this.name = 'OoxmlResourceLimitError';
-    const violation = {
-      ...details.violation,
-      usage: Object.freeze({ ...details.violation.usage }),
-    } as OoxmlResourceViolation;
+    const source = details.violation;
+    const violation: OoxmlResourceViolation = Object.freeze({
+      format: source.format,
+      operation: source.operation,
+      resource: source.resource,
+      metric: source.metric,
+      ...(source.part === undefined ? {} : { part: source.part }),
+      limit: source.limit,
+      observed: source.observed,
+      configurable: source.configurable,
+      usage: Object.freeze({
+        archiveEntryCount: source.usage.archiveEntryCount,
+        declaredInflatedBytes: source.usage.declaredInflatedBytes,
+        distinctInflatedBytes: source.usage.distinctInflatedBytes,
+        operationInflatedBytes: source.usage.operationInflatedBytes,
+      }),
+    });
     this.details = Object.freeze({
-      ...details,
-      violation: Object.freeze(violation),
+      stage: details.stage,
+      violation,
     });
     Object.setPrototypeOf(this, OoxmlResourceLimitError.prototype);
   }
