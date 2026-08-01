@@ -5,6 +5,7 @@ import type {
 } from '@silurus/ooxml-core';
 import type {
   NormalizedOoxmlResourcePolicy,
+  PullSessionIdentity,
   WorkerErrorPayload,
 } from '@silurus/ooxml-core/worker';
 
@@ -1089,6 +1090,8 @@ export type WorkerRequest =
       sheetIndex: number;
       sheetName: string;
     }
+  | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } &
+      PullSessionIdentity<number>)
   /** Pull one embedded image's raw bytes by zip path from the buffer the worker
    *  retained at parse time. Twin of pptx/docx `extractImage`; xlsx uses the
    *  `type` discriminant. */
@@ -1106,6 +1109,7 @@ export type WorkerResponse =
   // See `parse_xlsx` (Rust) for why.
   | { type: 'parsed'; id: number; workbookJson: ArrayBuffer }
   | { type: 'parsedSheet'; id: number; worksheetJson: ArrayBuffer }
+  | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>)
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'markdownRendered'; id: number; markdown: string }
   | ({ type: 'error'; id: number } & WorkerErrorPayload);

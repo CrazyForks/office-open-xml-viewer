@@ -6,6 +6,7 @@ import type {
   Worksheet,
 } from './types.js';
 import type { NormalizedOoxmlResourcePolicy } from '@silurus/ooxml-core/worker';
+import type { PullSessionIdentity } from '@silurus/ooxml-core/worker';
 
 /**
  * View-only per-band size overrides for one sheet, carried with every worker
@@ -78,6 +79,7 @@ export type RenderWorkerRequest =
   // sheet name from its own `workbook`). No `data`: like main-mode `parseSheet`,
   // the buffer retained at `parse` is reused — never re-sent per sheet.
   | { type: 'parseSheet'; id: number; sheetIndex: number; sheetName?: string }
+  | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } & PullSessionIdentity<number>)
   | { type: 'renderViewport'; id: number; sheetIndex: number; viewport: ViewportRange; opts: WireRenderViewportOptions }
   // Worker render mode decodes images in-worker via a getImage closure; this arm
   // exists only for protocol parity with worker.ts (so a stray extractImage
@@ -98,4 +100,5 @@ export type RenderWorkerResponse =
   | Exclude<WorkerResponse, { type: 'parsed' } | { type: 'parsedSheet' }>
   | { type: 'parsed'; id: number; workbook: ParsedWorkbook }
   | { type: 'parsedSheet'; id: number; worksheet: Worksheet }
-  | { type: 'viewportRendered'; id: number; bitmap: ImageBitmap };
+  | { type: 'viewportRendered'; id: number; bitmap: ImageBitmap }
+  | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>);

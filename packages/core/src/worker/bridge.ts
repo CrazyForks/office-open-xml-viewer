@@ -87,6 +87,22 @@ export interface WorkerRequestOptions<TResponse = unknown> {
   onOrphanedResponse?: (response: TResponse) => void;
 }
 
+/**
+ * Correlated request surface consumed by higher-level protocols. A view keeps
+ * one owning {@link WorkerBridge} (and therefore one Worker message listener)
+ * while allowing a protocol such as bounded pull to describe only the response
+ * variant it handles.
+ */
+export interface WorkerBridgeTransport<TRes> {
+  request(
+    build: (id: number) => unknown,
+    transfer?: Transferable[],
+    opts?: WorkerRequestOptions<TRes>,
+  ): Promise<TRes>;
+  forgetOrphaned(ids: Iterable<number>): void;
+  terminate(): void;
+}
+
 interface PendingEntry<TRes> {
   resolve: (r: TRes) => void;
   reject: (e: Error) => void;
@@ -111,6 +127,7 @@ export class WorkerBridge<TRes = unknown> {
   private readonly _orphaned = new Map<number, (response: TRes) => void>();
   private _nextId = 1;
   private _terminated = false;
+  private _failure?: Error;
 
   constructor(worker: WorkerLike, opts: WorkerBridgeOptions<TRes>) {
     this._worker = worker;
@@ -156,7 +173,8 @@ export class WorkerBridge<TRes = unknown> {
    */
   private _handleWorkerError = (e: ErrorEvent | MessageEvent): void => {
     const detail = 'message' in e && e.message ? `: ${e.message}` : '';
-    this._rejectAll(new Error(`Worker error${detail}`));
+    this._failure ??= new Error(`Worker error${detail}`);
+    this._rejectAll(this._failure);
   };
 
   /** Reject and drain every pending request, tearing down each one's timer and
@@ -202,6 +220,10 @@ export class WorkerBridge<TRes = unknown> {
     return new Promise<TRes>((resolve, reject) => {
       if (this._terminated) {
         reject(new Error('Worker terminated'));
+        return;
+      }
+      if (this._failure) {
+        reject(this._failure);
         return;
       }
       // Already-aborted signal: reject synchronously, register nothing.
@@ -264,6 +286,34 @@ export class WorkerBridge<TRes = unknown> {
         cb.reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
+  }
+
+  /**
+   * Return a typed protocol view backed by this bridge. This installs no new
+   * listeners and allocates request ids from the same correlation namespace.
+   * The protocol remains responsible for validating its response envelope.
+   */
+  transport<TProtocolResponse extends TRes>(
+    isResponse: (response: TRes) => response is TProtocolResponse,
+  ): WorkerBridgeTransport<TProtocolResponse> {
+    return {
+      request: (build, transfer, options) =>
+        this.request(build, transfer, {
+          ...options,
+          onOrphanedResponse: options?.onOrphanedResponse
+            ? (response) => {
+                if (isResponse(response)) options.onOrphanedResponse?.(response);
+              }
+            : undefined,
+        }).then((response) => {
+          if (!isResponse(response)) {
+            throw new Error('worker response does not match the selected transport');
+          }
+          return response;
+        }),
+      forgetOrphaned: (ids) => this.forgetOrphaned(ids),
+      terminate: () => this.terminate(),
+    };
   }
 
   /** Fire-and-forget message with no correlation (e.g. the `init` message). */

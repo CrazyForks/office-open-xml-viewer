@@ -11,7 +11,7 @@ describe('XlsxWorkbook resource-policy wiring', () => {
     instance.imageCache = new Map();
     instance.imageBlobCache = new Map();
     instance.googleFontFaces = [];
-    instance.bridge = {
+    const bridge = {
       request: vi.fn(async (createRequest: (id: number) => Record<string, unknown>) => {
         const request = createRequest(requests.length + 1);
         requests.push(request);
@@ -26,10 +26,13 @@ describe('XlsxWorkbook resource-policy wiring', () => {
             },
           };
         }
-        return {
-          type: 'parsedSheet',
-          id: 2,
-          worksheet: {
+        if (request.type === 'openSheetSession') {
+          return { type: 'sheetSessionOpened', id: request.id };
+        }
+        if (request.kind === 'pull') {
+          const payload = new TextEncoder().encode(JSON.stringify({
+            kind: 'finished',
+            worksheet: {
             name: 'Sheet1',
             rows: [],
             colWidths: {},
@@ -42,10 +45,17 @@ describe('XlsxWorkbook resource-policy wiring', () => {
             conditionalFormats: [],
             images: [],
             charts: [],
-          },
-        };
+            },
+          })).buffer;
+          return { ...request, kind: 'chunk', done: true, byteLength: payload.byteLength, payload };
+        }
+        return { ...request, kind: 'accepted', command: request.kind };
       }),
+      transport: () => bridge,
+      forgetOrphaned: vi.fn(),
+      terminate: vi.fn(),
     };
+    instance.bridge = bridge;
     const policy = {
       maxArchiveEntryBytes: 64,
       maxTotalInflatedBytes: null,
@@ -65,9 +75,9 @@ describe('XlsxWorkbook resource-policy wiring', () => {
       instance as unknown as { getWorksheet(index: number): Promise<unknown> }
     ).getWorksheet(0);
 
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(4);
     expect(requests[0]).toMatchObject({ type: 'parse', resourcePolicy: policy });
-    expect(requests[1]).toMatchObject({ type: 'parseSheet', sheetIndex: 0 });
+    expect(requests[1]).toMatchObject({ type: 'openSheetSession', sheetIndex: 0 });
     expect(requests[1]).not.toHaveProperty('resourcePolicy');
     expect(requests[1]).not.toHaveProperty('maxZipEntryBytes');
     expect(requests[1]).not.toHaveProperty('parserResourceLimits');

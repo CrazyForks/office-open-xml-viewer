@@ -61,6 +61,44 @@ function makeBridge(worker: FakeWorker, onUnsolicited?: (r: Res) => void) {
 }
 
 describe('WorkerBridge', () => {
+  it('shares one listener and id namespace across typed protocol transports', async () => {
+    type Mixed =
+      | { type: 'ok'; id: number; value: string }
+      | { kind: 'chunk'; requestId: number; value: string };
+    const w = new FakeWorker();
+    const bridge = new WorkerBridge<Mixed>(w, {
+      correlate: (response) => 'requestId' in response ? response.requestId : response.id,
+    });
+    const pull = bridge.transport(
+      (response): response is Extract<Mixed, { kind: 'chunk' }> => 'requestId' in response,
+    );
+    const ordinaryRequest = bridge.request((id) => ({ type: 'ordinary', id }));
+    const pullRequest = pull.request((requestId) => ({ kind: 'pull', requestId }));
+    const ordinaryId = (w.posted[0] as { id: number }).id;
+    const requestId = (w.posted[1] as { requestId: number }).requestId;
+
+    expect(w.messageListenerCount).toBe(1);
+    expect(requestId).not.toBe(ordinaryId);
+    w.respond({ kind: 'chunk', requestId, value: 'rows' });
+    w.respond({ type: 'ok', id: ordinaryId, value: 'metadata' });
+    await expect(pullRequest).resolves.toMatchObject({ value: 'rows' });
+    await expect(ordinaryRequest).resolves.toMatchObject({ value: 'metadata' });
+  });
+
+  it('rejects a response outside a typed transport at runtime', async () => {
+    type Mixed = { type: 'ok'; id: number } | { kind: 'chunk'; requestId: number };
+    const w = new FakeWorker();
+    const bridge = new WorkerBridge<Mixed>(w, {
+      correlate: (response) => 'requestId' in response ? response.requestId : response.id,
+    });
+    const pull = bridge.transport(
+      (response): response is Extract<Mixed, { kind: 'chunk' }> => 'requestId' in response,
+    );
+    const pending = pull.request((requestId) => ({ kind: 'pull', requestId }));
+    w.respond({ type: 'ok', id: (w.posted[0] as { requestId: number }).requestId });
+    await expect(pending).rejects.toThrow('does not match the selected transport');
+  });
+
   it('correlates a response to its request by id', async () => {
     const w = new FakeWorker();
     const bridge = makeBridge(w);
@@ -390,6 +428,17 @@ describe('WorkerBridge', () => {
       await expect(p2).rejects.toThrow(/Worker error.*boom in worker/);
       // The message listener should be torn down for each settled request.
       expect(w.messageListenerCount).toBe(1); // only the bridge's own handler remains
+    });
+
+    it('rejects future cleanup requests immediately after the worker becomes unusable', async () => {
+      const w = new FakeWorker();
+      const bridge = makeBridge(w);
+      w.emitError('worker is gone');
+      const posted = w.posted.length;
+      await expect(bridge.request((id) => ({ kind: 'cancel', id }))).rejects.toThrow(
+        /Worker error.*worker is gone/,
+      );
+      expect(w.posted).toHaveLength(posted);
     });
 
     it('rejects pending requests on a messageerror (undeserializable response) too', async () => {

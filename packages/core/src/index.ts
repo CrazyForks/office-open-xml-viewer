@@ -348,6 +348,7 @@ export {
   WorkerBridge,
   type WorkerLike,
   type WorkerBridgeOptions,
+  type WorkerBridgeTransport,
   type WorkerRequestOptions,
   decodeDataUrl,
   WasmParserHost,

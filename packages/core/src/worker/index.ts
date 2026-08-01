@@ -2,6 +2,7 @@ export {
   WorkerBridge,
   type WorkerLike,
   type WorkerBridgeOptions,
+  type WorkerBridgeTransport,
   type WorkerRequestOptions,
 } from './bridge.js';
 export { decodeDataUrl } from './decode-data-url.js';

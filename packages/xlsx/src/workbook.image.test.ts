@@ -32,7 +32,7 @@ describe('XlsxWorkbook.getImage', () => {
     instance.bridge = { request };
     instance.imageBlobCache = new Map<string, Promise<Blob>>();
     const wb = instance as unknown as GetImageProbe;
-    return { wb, request };
+    return { wb, request, instance };
   }
 
   const bytesFor = (s: string) => new TextEncoder().encode(s).buffer;
@@ -68,5 +68,44 @@ describe('XlsxWorkbook.getImage', () => {
     // Same cached promise → identical Blob, single underlying request.
     expect(a).toBe(b);
     expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let an active render await a same-path public load queued behind it', async () => {
+    const { wb, request, instance } = makeWorkbook(() => ({
+      type: 'imageExtracted', id: 1, bytes: bytesFor('shared'),
+    }));
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const internal = instance as unknown as {
+      runArchiveOperation<T>(operation: () => Promise<T>): Promise<T>;
+      getImageWithinArchiveOperation(path: string, mime: string): Promise<Blob>;
+    };
+    const renderLoad = internal.runArchiveOperation(async () => {
+      entered();
+      await gate;
+      return internal.getImageWithinArchiveOperation('xl/media/image1.png', 'image/png');
+    });
+    await started;
+    const publicLoad = wb.getImage('xl/media/image1.png', 'image/png');
+    release();
+
+    const [fromRender, fromPublic] = await Promise.all([renderLoad, publicLoad]);
+    expect(fromPublic).toBe(fromRender);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes rejected byte-load caches so a later call can retry', async () => {
+    let attempt = 0;
+    const { wb, request } = makeWorkbook(() => {
+      attempt++;
+      if (attempt === 1) throw new Error('image read failed');
+      return { type: 'imageExtracted', id: 1, bytes: bytesFor('retry') };
+    });
+
+    await expect(wb.getImage('xl/media/image1.png', 'image/png')).rejects.toThrow('image read failed');
+    await expect(wb.getImage('xl/media/image1.png', 'image/png')).resolves.toBeInstanceOf(Blob);
+    expect(request).toHaveBeenCalledTimes(2);
   });
 });

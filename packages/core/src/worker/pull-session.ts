@@ -1,4 +1,4 @@
-import type { WorkerBridge, WorkerRequestOptions } from './bridge.js';
+import type { WorkerBridgeTransport, WorkerRequestOptions } from './bridge.js';
 import type { OoxmlResourceUsageSnapshot } from '../errors/ooxml-error.js';
 import {
   deserializeWorkerError,
@@ -102,7 +102,7 @@ export class BoundedPullSession<
   TPayload,
   TSessionId extends PullSessionKey = PullSessionKey,
 > {
-  private readonly bridge: WorkerBridge<PullSessionResponse<TPayload, TSessionId>>;
+  private readonly bridge: WorkerBridgeTransport<PullSessionResponse<TPayload, TSessionId>>;
   private readonly options: PullSessionClientOptions<TPayload, TSessionId>;
   private sequence = 0;
   private pulling = false;
@@ -115,7 +115,7 @@ export class BoundedPullSession<
   private readonly transferDisposers = new Set<() => void>();
 
   constructor(
-    bridge: WorkerBridge<PullSessionResponse<TPayload, TSessionId>>,
+    bridge: WorkerBridgeTransport<PullSessionResponse<TPayload, TSessionId>>,
     options: PullSessionClientOptions<TPayload, TSessionId>,
   ) {
     validateSessionId(options.sessionId);
@@ -966,7 +966,9 @@ export class PullSessionHost<
       generation: command.generation,
       requestId: command.requestId,
       error,
-      usage: this.resourceUsage(),
+      // Reporting a resourceUsage() failure must not recursively mask the
+      // original protocol/resource error with the same failing checkpoint.
+      usage: this.errorResourceUsage(),
     };
   }
 
@@ -1016,8 +1018,12 @@ export class PullSessionHost<
   }
 
   private resourceUsage(): OoxmlResourceUsageSnapshot | undefined {
+    return this.options.driver.resourceUsage?.();
+  }
+
+  private errorResourceUsage(): OoxmlResourceUsageSnapshot | undefined {
     try {
-      return this.options.driver.resourceUsage?.();
+      return this.resourceUsage();
     } catch {
       return undefined;
     }

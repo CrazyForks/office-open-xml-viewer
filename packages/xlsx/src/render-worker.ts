@@ -18,13 +18,14 @@ import {
   dropDuotoneBitmapCache,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
-import { resourcePolicyForWasm, serializeWorkerError } from '@silurus/ooxml-core/worker';
+import { resourcePolicyForWasm, serializeWorkerError, type PullSessionCommand, type PullSessionResponse } from '@silurus/ooxml-core/worker';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { resolveSharedStrings } from './shared-strings.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
 import { applySizeOverrides } from './worker-protocol.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
+import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
 
 // RB6: self-poison + auto-respawn. A trap during parse / per-sheet parse / image
 // read recycles the instance so the next workbook renders on clean linear
@@ -55,8 +56,26 @@ const imageCache = new Map<string, CanvasImageSource | null>();
 // above. Cleared on re-parse so a reused worker never serves a stale file's
 // image.
 const imageBlobCache = new Map<string, Promise<Blob>>();
+const worksheetPull = new WorksheetPullWorker(
+  () => host.archive,
+  (sheetIndex, worksheet) => {
+    if (workbook) resolveSharedStrings(worksheet, workbook.sharedStrings);
+    const previous = sheetCache.get(sheetIndex);
+    sheetCache.set(sheetIndex, worksheet);
+    return () => {
+      if (sheetCache.get(sheetIndex) !== worksheet) return;
+      if (previous) sheetCache.set(sheetIndex, previous);
+      else sheetCache.delete(sheetIndex);
+    };
+  },
+  (operation) => {
+    const archive = host.archive;
+    if (!archive) throw new Error('Workbook not loaded');
+    return host.run(() => operation(archive));
+  },
+);
 
-const post = (msg: RenderWorkerResponse, transfer?: Transferable[]) =>
+const post = (msg: RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>, transfer?: Transferable[]) =>
   (self.postMessage as (m: unknown, t?: Transferable[]) => void)(msg, transfer);
 
 /** In-worker image-byte loader (twin of the docx render-worker `getImage`). The
@@ -101,14 +120,41 @@ function parseSheetLocally(sheetIndex: number): Worksheet {
   return ws;
 }
 
-self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
+self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand<number>>) => {
   const req = e.data;
+  if (isWorksheetPullCommand(req)) {
+    await worksheetPull.dispatchSafely(req, post);
+    return;
+  }
   if (req.type === 'init') {
     host.setWasmUrl(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
     return;
   }
   const id = req.id;
+  if (req.type === 'openSheetSession') worksheetPull.reserveOpen(req);
   try {
+    if (req.type === 'openSheetSession') {
+      await host.ensureReady();
+      if (host.archive) {
+        const retained = host.archive;
+        host.run(() => retained.assert_healthy());
+      }
+      await worksheetPull.open(req.sheetIndex, req.sheetName, req);
+      await worksheetPull.postOpenedSafely(
+        req,
+        () => post({
+          type: 'sheetSessionOpened',
+          id,
+          sessionId: req.sessionId,
+          operationId: req.operationId,
+          generation: req.generation,
+        }),
+        (error) => post({ type: 'error', id, ...serializeWorkerError(error) }),
+      );
+      return;
+    }
+    if (req.type === 'parse') await worksheetPull.reset();
+    await worksheetPull.run(async () => {
     await host.ensureReady();
     if (req.type !== 'parse' && host.archive) {
       const retained = host.archive;
@@ -169,7 +215,8 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
     if (req.type === 'renderViewport') {
       if (!workbook) throw new Error('Workbook not loaded');
       await fontsLoaded;
-      const ws = parseSheetLocally(req.sheetIndex);
+      const ws = sheetCache.get(req.sheetIndex);
+      if (!ws) throw new Error('Worksheet is not loaded through its pull session');
       // Converge this worker-local sheet to the main-thread model before
       // drawing: view-only size mutations (outline collapse/expand, drag
       // resize #567) happen on the main thread's Worksheet copy and would
@@ -213,7 +260,14 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       post({ type: 'markdownRendered', id, markdown });
       return;
     }
+    });
   } catch (err) {
-    post({ type: 'error', id, ...serializeWorkerError(err) });
+    if (req.type === 'openSheetSession') worksheetPull.abandonOpen(req.sessionId);
+    try {
+      post({ type: 'error', id, ...serializeWorkerError(err) });
+    } catch {
+      // Preserve cleanup and avoid an unhandled async worker rejection when
+      // even the plain fallback response cannot be delivered.
+    }
   }
 };
