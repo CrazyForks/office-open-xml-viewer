@@ -22,6 +22,8 @@ import {
 import {
   deserializeWorkerError,
   disposeRejectedLoad,
+  HARD_MAX_PPTX_RAW_PART_CACHE_BYTES,
+  HARD_MAX_PPTX_RAW_PART_CACHE_ENTRIES,
   HARD_MAX_PPTX_CACHED_SLIDES,
   HARD_MAX_PPTX_CACHED_SLIDE_PROJECTION_BYTES,
   normalizeLoadResourceOptions,
@@ -30,6 +32,7 @@ import {
   type NormalizedOoxmlResourcePolicy,
   type PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import { PPTX_GOOGLE_FONTS } from './google-fonts';
 import {
   findPreflightMimeType,
@@ -140,8 +143,11 @@ export class PptxPresentation {
    *  {@link getSlideIndexByPartName}/{@link resolveInternalTarget} from the
    *  common compact preflight in either render mode. */
   private _slidePartIndex: Map<string, number> | null = null;
-  private _mediaCache = new Map<string, Promise<Blob>>();
-  private _imageCache = new Map<string, Promise<Blob>>();
+  /** One bounded retained-byte owner shared by images and media. */
+  private readonly _rawParts = new BoundedRawPartCache({
+    maxEntries: HARD_MAX_PPTX_RAW_PART_CACHE_ENTRIES,
+    maxBytes: HARD_MAX_PPTX_RAW_PART_CACHE_BYTES,
+  });
   /** Google-Fonts `FontFace` objects this deck preloaded into `document.fonts`
    *  (main mode only — in worker mode the worker owns them and terminates with
    *  its own FontFaceSet). Released in {@link destroy} so they do not leak into
@@ -558,23 +564,19 @@ export class PptxPresentation {
 
   /**
    * Extract raw media bytes for a zip path referenced by {@link MediaElement}.
-   * Results are cached by path for the lifetime of this instance.
+   * Results share a count- and byte-bounded cache with embedded images.
    */
   async getMedia(mediaPath: string): Promise<Blob> {
     this._assertResourceHealthy();
     try {
-      const hit = this._mediaCache.get(mediaPath);
-      if (hit) return await hit;
       const mimeType = this._findMimeTypeForPath(mediaPath);
-      const p = (async () => {
+      return await this._rawParts.get(mediaPath, mimeType, async () => {
         const res = await this._bridge.request(
           (id) => ({ kind: 'extractMedia', id, path: mediaPath }) satisfies PptxWorkerRequest,
         );
         const bytes = (res as Extract<PptxWorkerResponse, { kind: 'mediaExtracted' }>).bytes;
         return new Blob([bytes], { type: mimeType });
-      })();
-      this._mediaCache.set(mediaPath, p);
-      return await p;
+      });
     } catch (error) {
       this._rethrowWithResourceFailure(error);
     }
@@ -588,23 +590,19 @@ export class PptxPresentation {
    * Extract raw bytes for an embedded image by zip path (e.g.
    * "ppt/media/image1.png"), wrapped in a Blob of the given MIME type. Mirrors
    * {@link getMedia}; results are cached by path for the lifetime of this
-   * instance. The renderer routes its `fetchImage` option here so images are
+   * instance within a common count and byte budget. The renderer routes its `fetchImage` option here so images are
    * decoded lazily rather than inlined as base64 at parse time.
    */
   async getImage(imagePath: string, mimeType: string): Promise<Blob> {
     this._assertResourceHealthy();
     try {
-      const hit = this._imageCache.get(imagePath);
-      if (hit) return await hit;
-      const p = (async () => {
+      return await this._rawParts.get(imagePath, mimeType, async () => {
         const res = await this._bridge.request(
           (id) => ({ kind: 'extractImage', id, path: imagePath }) satisfies PptxWorkerRequest,
         );
         const bytes = (res as Extract<PptxWorkerResponse, { kind: 'imageExtracted' }>).bytes;
         return new Blob([bytes], { type: mimeType });
-      })();
-      this._imageCache.set(imagePath, p);
-      return await p;
+      });
     } catch (error) {
       this._rethrowWithResourceFailure(error);
     }
@@ -715,8 +713,7 @@ export class PptxPresentation {
     this._preflight = null;
     this._resourceFailure = null;
     this._slidePartIndex = null;
-    this._mediaCache.clear();
-    this._imageCache.clear();
+    this._rawParts.clear();
     // Release the Google-Fonts substitutes this deck preloaded into the shared
     // FontFaceSet (main mode). Refcounted in core: a web font also used by another
     // open deck stays until that one is destroyed too. Without this, every opened

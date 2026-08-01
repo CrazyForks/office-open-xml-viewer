@@ -172,6 +172,13 @@ at deterministic limits, and show a measured reduction in transient peak usage.
 - Add a Node presentation session that opens shared dependencies once and pulls
   one slide/resource unit at a time; retain `parsePptx` and extraction helpers as
   materializing compatibility APIs with corrected policy documentation.
+- Give image and media paths one count- and byte-bounded raw OPC-part owner per
+  realm. Decoded bitmap/GPU caches remain separate because they own a different
+  representation and lifetime.
+- Project Markdown by draining the canonical slide producer sequentially into a
+  bounded UTF-8 writer. The returned string is necessarily materialized, but a
+  full `Presentation` must not coexist with it and an output crossing must be a
+  typed serialization limit rather than an allocator failure.
 - Preserve the pooled-canvas recycling contract from PR #1127: returning a
   slide canvas to the pool clears its zoom-derived CSS height before reuse.
 

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import { PptxPresentation } from './presentation';
 import type { PptxWorkerRequest as WorkerRequest } from './worker-protocol';
 
@@ -6,7 +7,7 @@ import type { PptxWorkerRequest as WorkerRequest } from './worker-protocol';
  * `PptxPresentation.getImage(path, mime)` routes through the persistent worker
  * via the `extractImage` message (twin of `getMedia`/`extractMedia`), wraps the
  * returned bytes in a Blob of the requested MIME, and serves repeat calls from
- * its per-instance cache so the worker is hit at most once per path.
+ * its bounded per-instance raw-part cache so the worker is hit at most once per path.
  *
  * The constructor opens a real Worker, so we build the instance off-prototype
  * and inject a fake `_bridge` whose `request` resolves an `imageExtracted`
@@ -29,7 +30,7 @@ describe('PptxPresentation.getImage', () => {
     // intersecting the class's private members.
     const instance = Object.create(PptxPresentation.prototype) as Record<string, unknown>;
     instance._bridge = { request };
-    instance._imageCache = new Map<string, Promise<Blob>>();
+    instance._rawParts = new BoundedRawPartCache({ maxEntries: 2, maxBytes: 1024 });
     const pres = instance as unknown as GetImageProbe;
     return { pres, request };
   }
@@ -64,7 +65,7 @@ describe('PptxPresentation.getImage', () => {
 
     const a = await pres.getImage('ppt/media/image1.png', 'image/png');
     const b = await pres.getImage('ppt/media/image1.png', 'image/png');
-    // Same cached promise → identical Blob, single underlying request.
+    // Same retained raw part → identical Blob, single underlying request.
     expect(a).toBe(b);
     expect(request).toHaveBeenCalledTimes(1);
   });

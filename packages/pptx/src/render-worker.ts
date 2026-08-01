@@ -20,9 +20,12 @@ import {
 import {
   HARD_MAX_PPTX_CACHED_SLIDES,
   HARD_MAX_PPTX_CACHED_SLIDE_PROJECTION_BYTES,
+  HARD_MAX_PPTX_RAW_PART_CACHE_BYTES,
+  HARD_MAX_PPTX_RAW_PART_CACHE_ENTRIES,
   resourcePolicyForWasm,
   serializeWorkerError,
 } from '@silurus/ooxml-core/worker';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type {
   PresentationBootstrap,
   RenderWorkerRequest,
@@ -54,8 +57,10 @@ let nextOperationId = 1;
 type PresentationLifecycleState = 'empty' | 'opening' | 'ready' | 'failed';
 let presentationState: PresentationLifecycleState = 'empty';
 let fontsLoaded: Promise<unknown> = Promise.resolve();
-const mediaCache = new Map<string, Promise<Blob>>();
-const imageCache = new Map<string, Promise<Blob>>();
+const rawParts = new BoundedRawPartCache({
+  maxEntries: HARD_MAX_PPTX_RAW_PART_CACHE_ENTRIES,
+  maxBytes: HARD_MAX_PPTX_RAW_PART_CACHE_BYTES,
+});
 
 function reservePresentationParse(): void {
   if (presentationState !== 'empty') {
@@ -93,28 +98,21 @@ function loadSlide(slideIndex: number) {
 }
 
 function getMedia(path: string): Promise<Blob> {
-  const hit = mediaCache.get(path);
-  if (hit) return hit;
-  const pending = slidePull.run(() => {
+  const mimeType = findPreflightMimeType(requirePreflight(), path);
+  return rawParts.get(path, mimeType, () => slidePull.run(() => {
     const bytes = executeArchive((archive) => archive.extract_media(path));
     return new Blob(
       [new Uint8Array(bytes).slice().buffer],
-      { type: findPreflightMimeType(requirePreflight(), path) },
+      { type: mimeType },
     );
-  });
-  mediaCache.set(path, pending);
-  return pending;
+  }));
 }
 
 function getImage(path: string, mimeType: string): Promise<Blob> {
-  const hit = imageCache.get(path);
-  if (hit) return hit;
-  const pending = slidePull.run(() => {
+  return rawParts.get(path, mimeType, () => slidePull.run(() => {
     const bytes = executeArchive((archive) => archive.extract_image(path));
     return new Blob([new Uint8Array(bytes).slice().buffer], { type: mimeType });
-  });
-  imageCache.set(path, pending);
-  return pending;
+  }));
 }
 
 async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'parse' }>) {
@@ -125,8 +123,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   preflightBuilder = null;
   generation += 1;
   nextOperationId = 1;
-  mediaCache.clear();
-  imageCache.clear();
+  rawParts.clear();
   dropBitmapCacheByPath(getImage);
   dropDuotoneBitmapCache(getImage);
   dropSvgImageCache(getImage);
@@ -247,10 +244,8 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
     }
 
     if (request.kind === 'extractImage') {
-      const bytes = await slidePull.run(() => {
-        const raw = executeArchive((archive) => archive.extract_image(request.path));
-        return new Uint8Array(raw).slice().buffer;
-      });
+      const mimeType = findPreflightMimeType(compact, request.path);
+      const bytes = await (await getImage(request.path, mimeType)).arrayBuffer();
       post({ kind: 'imageExtracted', id: request.id, bytes }, [bytes]);
       return;
     }

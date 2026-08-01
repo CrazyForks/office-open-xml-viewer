@@ -10,10 +10,10 @@ use ooxml_common::rels::relationship_part_path;
 use ooxml_common::resource::{
     HardResourceLimitKind, ResourceUsage, HARD_MAX_PPTX_BOOTSTRAP_JSON_BYTES,
     HARD_MAX_PPTX_BOOTSTRAP_PROJECTION_BYTES, HARD_MAX_PPTX_BOOTSTRAP_SLIDES,
-    HARD_MAX_PPTX_MATERIALIZED_SLIDE_JSON_BYTES, HARD_MAX_PPTX_SHARED_CACHE_ENTRIES,
-    HARD_MAX_PPTX_SHARED_CACHE_PROJECTION_BYTES, HARD_MAX_PPTX_SHARED_DEPENDENCY_PROJECTION_BYTES,
-    HARD_MAX_PPTX_SHARED_DEPENDENCY_XML_BYTES, HARD_MAX_PPTX_SLIDE_JSON_BYTES,
-    HARD_MAX_PPTX_SLIDE_XML_BYTES, HARD_MAX_XML_DOM_COMPLEXITY,
+    HARD_MAX_PPTX_MARKDOWN_BYTES, HARD_MAX_PPTX_MATERIALIZED_SLIDE_JSON_BYTES,
+    HARD_MAX_PPTX_SHARED_CACHE_ENTRIES, HARD_MAX_PPTX_SHARED_CACHE_PROJECTION_BYTES,
+    HARD_MAX_PPTX_SHARED_DEPENDENCY_PROJECTION_BYTES, HARD_MAX_PPTX_SHARED_DEPENDENCY_XML_BYTES,
+    HARD_MAX_PPTX_SLIDE_JSON_BYTES, HARD_MAX_PPTX_SLIDE_XML_BYTES, HARD_MAX_XML_DOM_COMPLEXITY,
 };
 use std::collections::HashMap;
 #[cfg(test)]
@@ -28,7 +28,7 @@ mod types;
 pub(crate) use types::*;
 
 mod markdown;
-use markdown::render_presentation_md;
+use markdown::{render_presentation_md, render_slide_md, MarkdownWriter};
 
 mod chart;
 
@@ -80,6 +80,7 @@ struct PptxInternalLimits {
     bootstrap_slides: u64,
     bootstrap_projection_bytes: u64,
     bootstrap_json_bytes: u64,
+    markdown_bytes: u64,
     materialized_slide_json_bytes: u64,
 }
 
@@ -94,6 +95,7 @@ impl Default for PptxInternalLimits {
             bootstrap_slides: HARD_MAX_PPTX_BOOTSTRAP_SLIDES,
             bootstrap_projection_bytes: HARD_MAX_PPTX_BOOTSTRAP_PROJECTION_BYTES,
             bootstrap_json_bytes: HARD_MAX_PPTX_BOOTSTRAP_JSON_BYTES,
+            markdown_bytes: HARD_MAX_PPTX_MARKDOWN_BYTES,
             materialized_slide_json_bytes: HARD_MAX_PPTX_MATERIALIZED_SLIDE_JSON_BYTES,
         }
     }
@@ -191,14 +193,8 @@ pub fn pptx_to_markdown(
     max_total_inflated_bytes: Option<u64>,
 ) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
-    let pres = parse_presentation_from_bytes_with_limits(
-        data,
-        max_archive_entry_bytes,
-        max_total_inflated_bytes,
-        "markdown",
-    )
-    .map_err(pptx_parser_js_error)?;
-    Ok(render_presentation_md(&pres))
+    render_markdown_from_bytes_with_limits(data, max_archive_entry_bytes, max_total_inflated_bytes)
+        .map_err(pptx_parser_js_error)
 }
 
 /// Native equivalent of `parse_pptx` for use from the MCP server.
@@ -214,8 +210,7 @@ pub fn parse_pptx_native(data: &[u8]) -> Result<String, String> {
 /// need to read content efficiently — typical 10-30× token reduction vs. the
 /// raw JSON of `parse_pptx_native`.
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
-    let pres = parse_presentation_from_bytes_with_limits(data, None, None, "markdown")?;
-    Ok(render_presentation_md(&pres))
+    render_markdown_from_bytes_with_limits(data, None, None)
 }
 
 fn pptx_parser_js_error(error: String) -> JsValue {
@@ -926,14 +921,37 @@ impl PptxArchive {
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
     /// free `pptx_to_markdown`. A corrupt container degrades to an empty deck.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
-        let pres = match self.archive.as_mut() {
-            Ok(zip) => zip.run_operation("markdown", |zip| {
-                parse_presentation(zip).map_err(|e| e.to_string())
-            }),
-            Err(e) => Ok(degraded_container_presentation(e.clone())),
-        };
-        let pres = pres.map_err(pptx_parser_js_error)?;
-        Ok(render_presentation_md(&pres))
+        self.to_markdown_inner().map_err(pptx_parser_js_error)
+    }
+
+    fn to_markdown_inner(&mut self) -> Result<String, String> {
+        if self.prepared_slide.is_some() {
+            return Err("a slide unit is awaiting acknowledgement".to_string());
+        }
+        if let Err(error) = &self.archive {
+            return Ok(render_presentation_md(&degraded_container_presentation(
+                error.clone(),
+            )));
+        }
+
+        self.archive
+            .as_mut()
+            .expect("container open checked above")
+            .begin_operation("markdown")?;
+        let result = (|| -> Result<String, String> {
+            self.ensure_presentation()?;
+            let mut shared = self.presentation.take().expect("presentation loaded above");
+            let rendered = render_markdown_from_shared(
+                &mut shared,
+                self.archive.as_mut().expect("container open checked above"),
+            );
+            self.presentation = Some(shared);
+            rendered
+        })();
+        settle_pptx_operation(
+            self.archive.as_mut().expect("container open checked above"),
+            result,
+        )
     }
 }
 
@@ -1907,6 +1925,64 @@ fn parse_presentation_from_bytes_with_limits(
     zip.run_operation(operation, |zip| {
         parse_presentation(zip).map_err(|e| e.to_string())
     })
+}
+
+/// Open one package operation and project slides sequentially. Only the shared
+/// PresentationML bootstrap, one canonical `Slide`, and the bounded markdown
+/// result coexist; no full `Presentation` is materialized on this path.
+fn render_markdown_from_bytes_with_limits(
+    data: &[u8],
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+) -> Result<String, String> {
+    let mut zip = match open_zip_with_limits(
+        data.to_vec(),
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+    ) {
+        Ok(zip) => zip,
+        Err(error) if error.starts_with("OOXML_RESOURCE_LIMIT:") => return Err(error),
+        Err(error) => {
+            return Ok(render_presentation_md(&degraded_container_presentation(
+                error,
+            )))
+        }
+    };
+    zip.run_operation("markdown", |zip| {
+        let mut shared = bootstrap_presentation(zip).map_err(|error| error.to_string())?;
+        render_markdown_from_shared(&mut shared, zip)
+    })
+}
+
+fn render_markdown_from_shared(
+    shared: &mut PresentationShared,
+    zip: &mut PptxZip,
+) -> Result<String, String> {
+    let reporter = zip.operation()?.limit_reporter()?;
+    let limit = pptx_internal_limits().markdown_bytes;
+    let mut output = MarkdownWriter::new(limit);
+    for index in 0..shared.slide_descriptors.len() {
+        if index > 0 {
+            output.push_str("\n---\n\n");
+            reporter.observe_hard_limit(
+                HardResourceLimitKind::PptxMarkdownBytes,
+                None,
+                limit,
+                output.observed(),
+            )?;
+        }
+        let produced = produce_slide_unit_with_journal(index, shared, zip, None)
+            .map_err(|error| error.to_string())?;
+        render_slide_md(&produced.slide, &mut output);
+        reporter.observe_hard_limit(
+            HardResourceLimitKind::PptxMarkdownBytes,
+            None,
+            limit,
+            output.observed(),
+        )?;
+    }
+    zip.assert_healthy()?;
+    Ok(output.into_string())
 }
 
 fn extract_entry_with_limits(
@@ -8960,6 +9036,52 @@ mod tests {
                 .unwrap();
             cursor.acknowledge_slide_inner(5, 1).unwrap();
         }
+    }
+
+    #[test]
+    fn markdown_projection_is_sequential_equivalent_and_independent_of_full_model_limit() {
+        let data = build_three_slide_deck(usize::MAX, "");
+        let expected = render_presentation_md(&parse_presentation_from_bytes(&data).unwrap());
+        let exact_markdown_bytes = expected.len() as u64;
+
+        let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+            markdown_bytes: exact_markdown_bytes,
+            materialized_slide_json_bytes: 1,
+            ..PptxInternalLimits::default()
+        });
+        assert_eq!(
+            to_markdown_native(&data).expect("the exact markdown ceiling is inclusive"),
+            expected,
+        );
+
+        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        archive.presentation_bootstrap().unwrap();
+        archive
+            .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+            .unwrap();
+        archive.acknowledge_slide_inner(1, 1).unwrap();
+        assert_eq!(archive.to_markdown_inner().unwrap(), expected);
+    }
+
+    #[test]
+    fn markdown_projection_limit_is_typed_attributed_and_inclusive() {
+        let data = build_three_slide_deck(usize::MAX, "");
+        let exact = to_markdown_native(&data).unwrap().len() as u64;
+        let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+            markdown_bytes: exact - 1,
+            ..PptxInternalLimits::default()
+        });
+
+        let error = to_markdown_native(&data).unwrap_err();
+        assert!(error.starts_with("OOXML_RESOURCE_LIMIT:"), "{error}");
+        assert!(error.contains(r#""operation":"markdown""#), "{error}");
+        assert!(error.contains(r#""stage":"serialization""#), "{error}");
+        assert!(error.contains(r#""resource":"pptx-markdown""#), "{error}");
+        assert!(error.contains(r#""metric":"bytes""#), "{error}");
+        assert!(
+            error.contains(&format!(r#""limit":{}"#, exact - 1)),
+            "{error}"
+        );
     }
 
     #[test]

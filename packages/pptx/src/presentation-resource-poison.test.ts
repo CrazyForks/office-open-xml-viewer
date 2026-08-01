@@ -1,4 +1,5 @@
 import { OoxmlResourceLimitError } from '@silurus/ooxml-core';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import { describe, expect, it, vi } from 'vitest';
 import { PptxPresentation } from './presentation.js';
 import type { Slide } from './types.js';
@@ -66,8 +67,7 @@ describe('PptxPresentation document-level resource poison', () => {
         fontPreloadNames: [],
       },
       _slides: { withSlide },
-      _mediaCache: new Map(),
-      _imageCache: new Map(),
+      _rawParts: new BoundedRawPartCache({ maxEntries: 2, maxBytes: 1024 }),
       _resourceFailure: null,
     });
     const presentation = instance as unknown as PptxPresentation;
@@ -111,8 +111,7 @@ describe('PptxPresentation document-level resource poison', () => {
         fontPreloadNames: [],
       },
       _slides: { withSlide },
-      _mediaCache: new Map(),
-      _imageCache: new Map(),
+      _rawParts: new BoundedRawPartCache({ maxEntries: 2, maxBytes: 1024 }),
       _resourceFailure: null,
     });
     const presentation = instance as unknown as PptxPresentation;

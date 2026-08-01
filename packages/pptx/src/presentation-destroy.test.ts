@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { WorkerBridge, preloadGoogleFonts, type WorkerLike, type FontPreloadEntry } from '@silurus/ooxml-core';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import { PptxPresentation } from './presentation';
 
 /**
@@ -86,8 +87,7 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     const instance = Object.create(PptxPresentation.prototype) as Record<string, unknown>;
     instance._bridge = bridge;
     // Fields destroy() clears after terminate(); undefined would throw.
-    instance._mediaCache = new Map();
-    instance._imageCache = new Map();
+    instance._rawParts = new BoundedRawPartCache({ maxEntries: 2, maxBytes: 1024 });
     instance._googleFontFaces = [];
     instance._fetchImage = () => Promise.resolve(new Blob());
     return { pres: instance as unknown as DestroyProbe, bridge, worker };

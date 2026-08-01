@@ -1,7 +1,10 @@
 export {
   parsePptx,
+  openPptxPresentation,
   extractMedia as extractPptxMedia,
   extractImage as extractPptxImage,
+  type OpenPptxPresentationOptions,
+  type PptxPresentationSession,
 } from './pptx';
 export { parseDocx } from './docx';
 export {

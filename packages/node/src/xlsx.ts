@@ -9,7 +9,6 @@ import {
   resourcePolicyForWasm,
   type PullSessionCommand,
   type PullSessionResponse,
-  type WorkerBridgeTransport,
 } from '@silurus/ooxml-core/worker';
 // The package typecheck alias maps '@silurus/ooxml-xlsx' to types.ts (types
 // only), so the resolver value is imported from source directly — mirroring the
@@ -20,6 +19,7 @@ import {
 } from '../../xlsx/src/shared-strings.ts';
 // @ts-ignore — wasm-pack generated JS without a d.ts entry for the bare module path
 import * as xlsxWasm from '../../xlsx/src/wasm/xlsx_parser.js';
+import { InProcessPullTransport } from './in-process-pull-transport.ts';
 import { loadWasmModule, resolveWasm } from './wasm-loader.ts';
 
 let initialized = false;
@@ -209,7 +209,13 @@ export async function* iterateXlsxWorksheetRows(
         resourceUsage: () => decodeUsage(archive.sheet_cursor_resource_usage()),
       },
     });
-    const transport = new InProcessPullTransport(host, () => archive.close_sheet_cursor());
+    const transport = new InProcessPullTransport<PullSessionResponse<Uint8Array, number>>(
+      (command, respond) => host.dispatch(
+        command as PullSessionCommand<number>,
+        respond,
+      ),
+      () => archive.close_sheet_cursor(),
+    );
     session = new BoundedPullSession(transport, {
       ...identity,
       maxByteCredit: XLSX_WORKSHEET_PULL_BYTES,
@@ -272,51 +278,6 @@ function createArchive(
     return new Archive(bytes, maxEntry, maxTotal);
   } catch (error) {
     throw parseResourceLimitError(error) ?? error;
-  }
-}
-
-class InProcessPullTransport implements WorkerBridgeTransport<PullSessionResponse<Uint8Array, number>> {
-  private nextRequestId = 1;
-  private terminated = false;
-  private readonly host: PullSessionHost<Uint8Array, number>;
-  private readonly terminateHost: () => void;
-
-  constructor(
-    host: PullSessionHost<Uint8Array, number>,
-    terminateHost: () => void,
-  ) {
-    this.host = host;
-    this.terminateHost = terminateHost;
-  }
-
-  async request(
-    build: (id: number) => unknown,
-    _transfer?: Transferable[],
-    opts?: Parameters<WorkerBridgeTransport<PullSessionResponse<Uint8Array, number>>['request']>[2],
-  ): Promise<PullSessionResponse<Uint8Array, number>> {
-    if (this.terminated) throw new Error('pull transport terminated');
-    if (opts?.signal?.aborted) {
-      opts.onCancel?.(this.nextRequestId, 'abort');
-      const error = new Error('worker request aborted');
-      error.name = 'AbortError';
-      throw error;
-    }
-    const requestId = this.nextRequestId++;
-    const command = build(requestId) as PullSessionCommand<number>;
-    let response: PullSessionResponse<Uint8Array, number> | undefined;
-    await this.host.dispatch(command, (value) => {
-      response = value;
-    });
-    if (!response) throw new Error('in-process pull host did not respond');
-    return response;
-  }
-
-  forgetOrphaned(_ids: Iterable<number>): void {}
-
-  terminate(): void {
-    if (this.terminated) return;
-    this.terminated = true;
-    this.terminateHost();
   }
 }
 

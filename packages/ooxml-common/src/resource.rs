@@ -79,6 +79,7 @@ pub enum HardResourceLimitKind {
     PptxBootstrapSlides,
     PptxBootstrapProjectionBytes,
     PptxBootstrapJsonBytes,
+    PptxMarkdownBytes,
     PptxMaterializedSlideJsonBytes,
     WorksheetRowProjectionBytes,
     WorksheetShellProjectionBytes,
@@ -112,6 +113,7 @@ impl HardResourceLimitKind {
             Self::PptxBootstrapSlides => ("parsing", "pptx-bootstrap", "slides"),
             Self::PptxBootstrapProjectionBytes => ("parsing", "pptx-bootstrap", "projected-bytes"),
             Self::PptxBootstrapJsonBytes => ("serialization", "pptx-bootstrap-json", "bytes"),
+            Self::PptxMarkdownBytes => ("serialization", "pptx-markdown", "bytes"),
             Self::PptxMaterializedSlideJsonBytes => (
                 "serialization",
                 "pptx-materialized-slides",

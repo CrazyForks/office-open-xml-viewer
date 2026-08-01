@@ -1,12 +1,71 @@
-//! The pptx → GitHub-flavoured-markdown projection. These `pub(crate)` helpers
-//! are the body shared by the `#[wasm_bindgen] pptx_to_markdown`, the native
-//! `to_markdown_native`, and `PptxArchive::to_markdown` (all of which stay in
-//! `lib.rs`). Extracted verbatim from `lib.rs`.
+//! The PPTX → GitHub-flavoured-markdown projection. All public conversion paths
+//! feed canonical slides through this one bounded writer and renderer.
 
 use crate::types::*;
 use ooxml_common::math::nodes_to_text;
+use std::fmt;
 
-pub(crate) fn render_slide_md(slide: &Slide, out: &mut String) {
+/// UTF-8 markdown sink that stops retaining bytes at the configured ceiling.
+/// The parser reports the crossing through its package-scoped limit reporter;
+/// this type's single responsibility is preventing an oversized projection from
+/// first becoming an oversized allocation.
+pub(crate) struct MarkdownWriter {
+    value: String,
+    limit: u64,
+    observed: u64,
+    exceeded: bool,
+}
+
+impl MarkdownWriter {
+    pub(crate) fn new(limit: u64) -> Self {
+        Self {
+            value: String::new(),
+            limit,
+            observed: 0,
+            exceeded: false,
+        }
+    }
+
+    pub(crate) fn observed(&self) -> u64 {
+        self.observed
+    }
+
+    pub(crate) fn into_string(self) -> String {
+        self.value
+    }
+
+    pub(crate) fn push_str(&mut self, value: &str) {
+        if self.exceeded {
+            return;
+        }
+        self.observed = self
+            .observed
+            .saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX));
+        if self.observed > self.limit {
+            self.exceeded = true;
+            return;
+        }
+        self.value.push_str(value);
+    }
+
+    pub(crate) fn push(&mut self, value: char) {
+        let mut encoded = [0; 4];
+        self.push_str(value.encode_utf8(&mut encoded));
+    }
+}
+
+impl fmt::Write for MarkdownWriter {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        self.push_str(value);
+        if self.exceeded {
+            Err(fmt::Error)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn render_slide_md(slide: &Slide, out: &mut MarkdownWriter) {
     use std::fmt::Write as _;
     let title = slide_title_md(slide);
     if let Some(t) = title {
@@ -69,7 +128,7 @@ pub(crate) fn shape_text_plain(s: &ShapeElement) -> Option<String> {
     }
 }
 
-pub(crate) fn render_element_md(el: &SlideElement, out: &mut String) {
+pub(crate) fn render_element_md(el: &SlideElement, out: &mut MarkdownWriter) {
     match el {
         SlideElement::Shape(s) => {
             let ph = s.placeholder_type.as_deref().unwrap_or("");
@@ -95,7 +154,7 @@ pub(crate) fn render_element_md(el: &SlideElement, out: &mut String) {
     }
 }
 
-pub(crate) fn render_shape_md(s: &ShapeElement, out: &mut String) {
+pub(crate) fn render_shape_md(s: &ShapeElement, out: &mut MarkdownWriter) {
     let Some(tb) = &s.text_body else { return };
     if tb.paragraphs.is_empty() {
         return;
@@ -135,33 +194,41 @@ pub(crate) fn paragraph_kind(b: &Bullet, inherit_means_bullet: bool) -> ParaKind
     }
 }
 
-pub(crate) fn render_paragraph_md(para: &Paragraph, inherit_means_bullet: bool, out: &mut String) {
+pub(crate) fn render_paragraph_md(
+    para: &Paragraph,
+    inherit_means_bullet: bool,
+    out: &mut MarkdownWriter,
+) {
     use std::fmt::Write as _;
-    let text = render_runs_md(&para.runs);
-    if text.trim().is_empty() {
+    if !runs_have_visible_text(&para.runs) {
         out.push('\n');
         return;
     }
-    let indent = "  ".repeat(para.lvl as usize);
+    for _ in 0..para.lvl {
+        out.push_str("  ");
+    }
     match paragraph_kind(&para.bullet, inherit_means_bullet) {
-        ParaKind::Plain => {
-            let _ = writeln!(out, "{}{}", indent, text);
-        }
-        ParaKind::Bullet => {
-            let _ = writeln!(out, "{}- {}", indent, text);
-        }
+        ParaKind::Plain => {}
+        ParaKind::Bullet => out.push_str("- "),
         // We deliberately emit `1.` for every numbered paragraph rather than
         // tracking the real counter — every markdown renderer auto-renumbers
         // sequential ordered-list items, so the visual output is correct and
         // we don't need to carry per-list state.
-        ParaKind::Number => {
-            let _ = writeln!(out, "{}1. {}", indent, text);
-        }
+        ParaKind::Number => out.push_str("1. "),
     }
+    render_runs_md(&para.runs, out);
+    let _ = writeln!(out);
 }
 
-pub(crate) fn render_runs_md(runs: &[TextRun]) -> String {
-    let mut out = String::new();
+fn runs_have_visible_text(runs: &[TextRun]) -> bool {
+    runs.iter().any(|run| match run {
+        TextRun::Break => false,
+        TextRun::Math { nodes, .. } => !nodes_to_text(nodes).trim().is_empty(),
+        TextRun::Text(text) => !text.text.trim().is_empty(),
+    })
+}
+
+pub(crate) fn render_runs_md(runs: &[TextRun], out: &mut MarkdownWriter) {
     for run in runs {
         match run {
             // Intra-paragraph soft break (<a:br/>) → markdown hard line break
@@ -187,23 +254,32 @@ pub(crate) fn render_runs_md(runs: &[TextRun]) -> String {
                 let leading = &raw[..leading_len];
                 let trailing = &raw[trail_start..];
                 let trimmed = &raw[leading_len..trail_start];
-                let mut s = escape_inline_md(trimmed);
-                if let Some(url) = &t.hyperlink {
-                    s = format!("[{}]({})", s, url);
+                out.push_str(leading);
+                if t.italic == Some(true) {
+                    out.push('*');
                 }
                 if t.bold == Some(true) {
-                    s = format!("**{}**", s);
+                    out.push_str("**");
+                }
+                if t.hyperlink.is_some() {
+                    out.push('[');
+                }
+                write_escaped_inline_md(trimmed, out);
+                if let Some(url) = &t.hyperlink {
+                    out.push_str("](");
+                    out.push_str(url);
+                    out.push(')');
+                }
+                if t.bold == Some(true) {
+                    out.push_str("**");
                 }
                 if t.italic == Some(true) {
-                    s = format!("*{}*", s);
+                    out.push('*');
                 }
-                out.push_str(leading);
-                out.push_str(&s);
                 out.push_str(trailing);
             }
         }
     }
-    out
 }
 
 /// Escape the markdown inline metacharacters that would otherwise be parsed as
@@ -211,14 +287,16 @@ pub(crate) fn render_runs_md(runs: &[TextRun]) -> String {
 /// body text contains so much punctuation that aggressive escaping makes the
 /// output noisier than the structure it's trying to expose. Pipe is handled
 /// separately in `render_table_cell_md` since it only matters inside tables.
-pub(crate) fn escape_inline_md(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('*', "\\*")
-        .replace('_', "\\_")
-        .replace('`', "\\`")
+fn write_escaped_inline_md(value: &str, out: &mut MarkdownWriter) {
+    for character in value.chars() {
+        if matches!(character, '\\' | '*' | '_' | '`') {
+            out.push('\\');
+        }
+        out.push(character);
+    }
 }
 
-pub(crate) fn render_table_md(t: &TableElement, out: &mut String) {
+pub(crate) fn render_table_md(t: &TableElement, out: &mut MarkdownWriter) {
     use std::fmt::Write as _;
     if t.rows.is_empty() {
         return;
@@ -261,7 +339,7 @@ pub(crate) fn render_table_cell_md(cell: &TableCell) -> String {
     buf.trim().replace('|', "\\|")
 }
 
-pub(crate) fn render_chart_md(c: &ChartElement, out: &mut String) {
+pub(crate) fn render_chart_md(c: &ChartElement, out: &mut MarkdownWriter) {
     use std::fmt::Write as _;
     let chart = &c.chart;
     let title = chart.title.as_deref().unwrap_or("(untitled)");
@@ -283,16 +361,31 @@ pub(crate) fn render_chart_md(c: &ChartElement, out: &mut String) {
     out.push('\n');
 }
 
-/// Project a parsed presentation to GitHub-flavoured markdown. Slides are joined
-/// by a `---` rule. Shared by `pptx_to_markdown`, `to_markdown_native`, and
-/// `PptxArchive::to_markdown` so every markdown path stays in lock-step.
+/// Materialized-model oracle retained for compatibility/degraded paths and
+/// sequential-output equivalence tests.
 pub(crate) fn render_presentation_md(pres: &Presentation) -> String {
-    let mut out = String::new();
+    let mut out = MarkdownWriter::new(u64::MAX);
     for (i, slide) in pres.slides.iter().enumerate() {
         if i > 0 {
             out.push_str("\n---\n\n");
         }
         render_slide_md(slide, &mut out);
     }
-    out
+    out.into_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MarkdownWriter;
+
+    #[test]
+    fn writer_counts_utf8_bytes_and_stops_retaining_at_the_first_crossing() {
+        let mut output = MarkdownWriter::new(3);
+        output.push_str("é");
+        output.push_str("é");
+        output.push_str("ignored after crossing");
+
+        assert_eq!(output.observed(), 4);
+        assert_eq!(output.into_string(), "é");
+    }
 }

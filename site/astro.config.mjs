@@ -34,6 +34,9 @@ export default defineConfig({
         '@silurus/ooxml-core/internal/bounded-async-lru-cache': fileURLToPath(
           new URL('../packages/core/src/internal/bounded-async-lru-cache.ts', import.meta.url),
         ),
+        '@silurus/ooxml-core/internal/bounded-raw-part-cache': fileURLToPath(
+          new URL('../packages/core/src/internal/bounded-raw-part-cache.ts', import.meta.url),
+        ),
         '@silurus/ooxml-core/internal/script-preload-accumulator': fileURLToPath(
           new URL('../packages/core/src/internal/script-preload-accumulator.ts', import.meta.url),
         ),
