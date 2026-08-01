@@ -13,6 +13,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
  */
 
 const initMock = vi.fn();
+const resourcePolicy = {
+  maxArchiveEntryBytes: null,
+  maxTotalInflatedBytes: null,
+} as const;
 class FakePptxArchive {
   constructor(_bytes: Uint8Array, _max?: bigint) {}
   parse(): Uint8Array {
@@ -80,7 +84,9 @@ describe('pptx worker.ts — init failure never hangs a request (AR4)', () => {
     const fake = await loadWorker();
 
     fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
-    fake.onmessage?.({ data: { kind: 'parse', id: 7, buffer: new ArrayBuffer(4) } } as MessageEvent);
+    fake.onmessage?.({
+      data: { kind: 'parse', id: 7, buffer: new ArrayBuffer(4), resourcePolicy },
+    } as MessageEvent);
     // Let the awaited (rejected) initPromise settle and the handler run its catch.
     await vi.waitFor(() => {
       expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'error')).toBe(true);
@@ -101,7 +107,9 @@ describe('pptx worker.ts — init failure never hangs a request (AR4)', () => {
     const fake = await loadWorker();
 
     fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
-    fake.onmessage?.({ data: { kind: 'parse', id: 3, buffer: new ArrayBuffer(4) } } as MessageEvent);
+    fake.onmessage?.({
+      data: { kind: 'parse', id: 3, buffer: new ArrayBuffer(4), resourcePolicy },
+    } as MessageEvent);
     await vi.waitFor(() => {
       expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'parsed')).toBe(true);
     });

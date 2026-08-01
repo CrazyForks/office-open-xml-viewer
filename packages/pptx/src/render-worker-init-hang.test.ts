@@ -9,6 +9,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
  */
 
 const initMock = vi.fn();
+const resourcePolicy = {
+  maxArchiveEntryBytes: null,
+  maxTotalInflatedBytes: null,
+} as const;
 class FakePptxArchive {
   constructor(_bytes: Uint8Array, _max?: bigint) {}
   parse(): Uint8Array {
@@ -71,7 +75,9 @@ describe('pptx render-worker.ts — init failure never hangs a request (AR4)', (
     const fake = await loadRenderWorker();
 
     fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
-    fake.onmessage?.({ data: { kind: 'parse', id: 9, buffer: new ArrayBuffer(4) } } as MessageEvent);
+    fake.onmessage?.({
+      data: { kind: 'parse', id: 9, buffer: new ArrayBuffer(4), resourcePolicy },
+    } as MessageEvent);
     await vi.waitFor(() => {
       expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'error')).toBe(true);
     });
@@ -89,7 +95,9 @@ describe('pptx render-worker.ts — init failure never hangs a request (AR4)', (
     const fake = await loadRenderWorker();
 
     fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
-    fake.onmessage?.({ data: { kind: 'parse', id: 2, buffer: new ArrayBuffer(4) } } as MessageEvent);
+    fake.onmessage?.({
+      data: { kind: 'parse', id: 2, buffer: new ArrayBuffer(4), resourcePolicy },
+    } as MessageEvent);
     await vi.waitFor(() => {
       expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'parsedMeta')).toBe(true);
     });
