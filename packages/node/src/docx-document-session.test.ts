@@ -83,6 +83,23 @@ describe('Node bounded DOCX document session', () => {
     }
   });
 
+  it('reports metrics for the owned session when it closes', async () => {
+    const onResourceMetrics = vi.fn();
+    const session = await openDocxDocument(bytes, {
+      factory,
+      currentDate: 0,
+      onResourceMetrics,
+    });
+    expect(onResourceMetrics).not.toHaveBeenCalled();
+    await session.close();
+    expect(onResourceMetrics).toHaveBeenCalledOnce();
+    expect(onResourceMetrics).toHaveBeenCalledWith(expect.objectContaining({
+      format: 'docx',
+      scope: 'session',
+      status: 'ok',
+    }));
+  });
+
   it('normalizes package limits and aborts between page pulls', async () => {
     await expect(openDocxDocument(bytes, {
       factory,

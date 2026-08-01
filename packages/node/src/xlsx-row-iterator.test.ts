@@ -9,9 +9,11 @@ import { OoxmlResourceLimitError } from '@silurus/ooxml-core';
 import * as xlsxWasm from '../../xlsx/src/wasm/xlsx_parser.js';
 import { generateSyntheticXlsx } from '../scripts/generate-synthetic-xlsx.mjs';
 import {
-  iterateXlsxWorksheetRows,
+  openXlsxWorkbook,
   parseXlsx,
   parseSheet,
+  type OpenXlsxWorkbookOptions,
+  type XlsxWorksheetRowChunk,
 } from './xlsx.ts';
 
 let directory = '';
@@ -45,7 +47,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
     const rows: Row[] = [];
     let terminal: Worksheet | undefined;
     let pulls = 0;
-    for await (const chunk of iterateXlsxWorksheetRows(bytes, 0)) {
+    for await (const chunk of streamWorksheetRows(bytes, 0)) {
       pulls++;
       if (chunk.kind === 'rows') rows.push(...chunk.rows);
       else terminal = chunk.worksheet;
@@ -64,7 +66,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
 
   it('honors an exact per-entry boundary and returns the canonical typed error one byte below it', async () => {
     let rowCount = 0;
-    for await (const chunk of iterateXlsxWorksheetRows(bytes, 0, {
+    for await (const chunk of streamWorksheetRows(bytes, 0, {
       resourceLimits: { maxArchiveEntryBytes: worksheetBytes, maxTotalInflatedBytes: null },
     })) {
       if (chunk.kind === 'rows') rowCount += chunk.rows.length;
@@ -73,7 +75,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
 
     let error: unknown;
     try {
-      for await (const _chunk of iterateXlsxWorksheetRows(bytes, 0, {
+      for await (const _chunk of streamWorksheetRows(bytes, 0, {
         resourceLimits: { maxArchiveEntryBytes: worksheetBytes - 1, maxTotalInflatedBytes: null },
       })) { /* drain */ }
     } catch (caught) {
@@ -88,7 +90,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
       XlsxArchive: { prototype: { cancel_sheet_cursor(): void } };
     }).XlsxArchive.prototype;
     const cancel = vi.spyOn(prototype, 'cancel_sheet_cursor');
-    const iterator = iterateXlsxWorksheetRows(bytes, 0);
+    const iterator = streamWorksheetRows(bytes, 0);
     const first = await iterator.next();
     expect(first.value?.kind).toBe('rows');
     await expect(iterator.return()).resolves.toEqual({ done: true, value: undefined });
@@ -97,7 +99,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
 
     // A fresh archive/session can immediately drain after early-return cleanup.
     let rows = 0;
-    for await (const chunk of iterateXlsxWorksheetRows(bytes, 0)) {
+    for await (const chunk of streamWorksheetRows(bytes, 0)) {
       if (chunk.kind === 'rows') rows += chunk.rows.length;
     }
     expect(rows).toBe(2049);
@@ -108,7 +110,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
       XlsxArchive: { prototype: { acknowledge_sheet_cursor_terminal(): void } };
     }).XlsxArchive.prototype;
     const acknowledge = vi.spyOn(prototype, 'acknowledge_sheet_cursor_terminal');
-    const iterator = iterateXlsxWorksheetRows(bytes, 0);
+    const iterator = streamWorksheetRows(bytes, 0);
     try {
       for (;;) {
         const result = await iterator.next();
@@ -129,9 +131,9 @@ describe('Node bounded XLSX worksheet row iterator', () => {
   it('frees the native archive exactly once after normal completion and an ordinary error', async () => {
     const free = vi.spyOn(archivePrototype(), 'free');
     try {
-      for await (const _chunk of iterateXlsxWorksheetRows(bytes, 0)) { /* drain */ }
+      for await (const _chunk of streamWorksheetRows(bytes, 0)) { /* drain */ }
       expect(free).toHaveBeenCalledTimes(1);
-      await expect(iterateXlsxWorksheetRows(bytes, 99).next()).rejects.toThrow(/out of range/);
+      await expect(streamWorksheetRows(bytes, 99).next()).rejects.toThrow(/out of range/);
       expect(free).toHaveBeenCalledTimes(2);
     } finally {
       free.mockRestore();
@@ -144,7 +146,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
     const consumerError = new Error('consumer failed');
     try {
       await expect(async () => {
-        for await (const _chunk of iterateXlsxWorksheetRows(bytes, 0)) throw consumerError;
+        for await (const _chunk of streamWorksheetRows(bytes, 0)) throw consumerError;
       }).rejects.toBe(consumerError);
       expect(cancel).toHaveBeenCalledOnce();
       expect(free).toHaveBeenCalledOnce();
@@ -158,7 +160,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
     const acknowledge = vi.spyOn(archivePrototype(), 'acknowledge_sheet_cursor_terminal');
     const cancel = vi.spyOn(archivePrototype(), 'cancel_sheet_cursor');
     const free = vi.spyOn(archivePrototype(), 'free');
-    const iterator = iterateXlsxWorksheetRows(bytes, 0);
+    const iterator = streamWorksheetRows(bytes, 0);
     try {
       for (;;) {
         const result = await iterator.next();
@@ -182,18 +184,18 @@ describe('Node bounded XLSX worksheet row iterator', () => {
     try {
       const pre = new AbortController();
       pre.abort();
-      await expect(iterateXlsxWorksheetRows(bytes, 0, { signal: pre.signal }).next())
+      await expect(streamWorksheetRows(bytes, 0, { signal: pre.signal }).next())
         .rejects.toMatchObject({ name: 'AbortError' });
-      expect(cancel).toHaveBeenCalledTimes(1);
-      expect(free).toHaveBeenCalledTimes(1);
+      expect(cancel).not.toHaveBeenCalled();
+      expect(free).not.toHaveBeenCalled();
 
       const post = new AbortController();
-      const iterator = iterateXlsxWorksheetRows(bytes, 0, { signal: post.signal });
+      const iterator = streamWorksheetRows(bytes, 0, { signal: post.signal });
       expect((await iterator.next()).value?.kind).toBe('rows');
       post.abort();
       await expect(iterator.next()).rejects.toMatchObject({ name: 'AbortError' });
-      expect(cancel).toHaveBeenCalledTimes(2);
-      expect(free).toHaveBeenCalledTimes(2);
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(free).toHaveBeenCalledOnce();
     } finally {
       cancel.mockRestore();
       free.mockRestore();
@@ -209,12 +211,12 @@ describe('Node bounded XLSX worksheet row iterator', () => {
     try {
       const malformed = vi.spyOn(prototype, 'pull_sheet_cursor')
         .mockImplementationOnce(() => new TextEncoder().encode('{'));
-      await expect(iterateXlsxWorksheetRows(bytes, 0).next()).rejects.toBeInstanceOf(SyntaxError);
+      await expect(streamWorksheetRows(bytes, 0).next()).rejects.toBeInstanceOf(SyntaxError);
       malformed.mockRestore();
 
       const marker = vi.spyOn(prototype, 'sheet_cursor_pull_finished')
         .mockImplementationOnce(() => true);
-      await expect(iterateXlsxWorksheetRows(bytes, 0).next())
+      await expect(streamWorksheetRows(bytes, 0).next())
         .rejects.toThrow(/terminal marker mismatch/);
       marker.mockRestore();
 
@@ -256,7 +258,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
       throw new Error('free failed');
     });
     try {
-      await expect(iterateXlsxWorksheetRows(bytes, 0).next()).rejects.toMatchObject({
+      await expect(streamWorksheetRows(bytes, 0).next()).rejects.toMatchObject({
         name: 'OoxmlResourceLimitError',
         code: 'ooxml-resource-limit',
       });
@@ -273,7 +275,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
     const expected = parseSheet(corruptBytes, 0, 'Synthetic');
     const provisionalRows: Row[] = [];
     let terminal: Worksheet | undefined;
-    for await (const chunk of iterateXlsxWorksheetRows(corruptBytes, 0)) {
+    for await (const chunk of streamWorksheetRows(corruptBytes, 0)) {
       if (chunk.kind === 'rows') provisionalRows.push(...chunk.rows);
       else terminal = chunk.worksheet;
     }
@@ -289,7 +291,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
   it('never routes a full iterator drain through the materializing parse_sheet export', async () => {
     const parseSheetExport = vi.spyOn(xlsxWasm, 'parse_sheet');
     try {
-      for await (const _chunk of iterateXlsxWorksheetRows(bytes, 0)) { /* drain */ }
+      for await (const _chunk of streamWorksheetRows(bytes, 0)) { /* drain */ }
       expect(parseSheetExport).not.toHaveBeenCalled();
     } finally {
       parseSheetExport.mockRestore();
@@ -302,7 +304,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
     const large = await readFile(output);
     let rows = 0;
     let cells = 0;
-    for await (const chunk of iterateXlsxWorksheetRows(large, 0)) {
+    for await (const chunk of streamWorksheetRows(large, 0)) {
       if (chunk.kind !== 'rows') continue;
       rows += chunk.rows.length;
       for (const row of chunk.rows) cells += row.cells.length;
@@ -331,8 +333,29 @@ function archivePrototype(): ArchivePrototype {
 
 async function collectChunks(input: Buffer) {
   const chunks = [];
-  for await (const chunk of iterateXlsxWorksheetRows(input, 0)) chunks.push(chunk);
+  for await (const chunk of streamWorksheetRows(input, 0)) chunks.push(chunk);
   return chunks;
+}
+
+async function* streamWorksheetRows(
+  input: Buffer,
+  sheetIndex: number,
+  options: OpenXlsxWorkbookOptions = {},
+): AsyncGenerator<XlsxWorksheetRowChunk, void, void> {
+  const workbook = await openXlsxWorkbook(input, options);
+  let operationError: unknown;
+  try {
+    yield* workbook.worksheetRows(sheetIndex);
+  } catch (error) {
+    operationError = error;
+    throw error;
+  } finally {
+    try {
+      await workbook.close();
+    } catch (cleanupError) {
+      if (operationError === undefined) throw cleanupError;
+    }
+  }
 }
 
 describe.runIf(process.env.RUN_XLSX_ISSUE_1102 === '1')('Issue #1102 synthetic boundary and memory benchmark', () => {
@@ -347,7 +370,7 @@ describe.runIf(process.env.RUN_XLSX_ISSUE_1102 === '1')('Issue #1102 synthetic b
     expect(generated.worksheetBytes).toBe(target);
     const largeBytes = await readFile(large);
     await expect(async () => {
-      for await (const _chunk of iterateXlsxWorksheetRows(largeBytes, 0)) { /* drain */ }
+      for await (const _chunk of streamWorksheetRows(largeBytes, 0)) { /* drain */ }
     }).rejects.toMatchObject({ code: 'ooxml-resource-limit' });
 
     const child = spawnSync(process.execPath, [

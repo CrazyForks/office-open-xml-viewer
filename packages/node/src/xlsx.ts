@@ -1,9 +1,5 @@
 import type { ParsedWorkbook, Row, Worksheet } from '@silurus/ooxml-xlsx';
-import type {
-  OoxmlResourceLimits,
-  OoxmlResourceMetrics,
-  OoxmlResourceUsageSnapshot,
-} from '@silurus/ooxml-core';
+import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
   BoundedPullSession,
   decodeOoxmlResourceUsage,
@@ -29,6 +25,7 @@ import {
 // @ts-ignore — wasm-pack generated JS without a d.ts entry for the bare module path
 import * as xlsxWasm from '../../xlsx/src/wasm/xlsx_parser.js';
 import { InProcessPullTransport } from './in-process-pull-transport.ts';
+import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import { loadWasmModule, resolveWasm } from './wasm-loader.ts';
 
 let initialized = false;
@@ -54,19 +51,8 @@ interface XlsxArchiveConstructor {
   ): XlsxArchiveHandle;
 }
 
-/** Options for the bounded Node worksheet iterator. */
-export interface XlsxWorksheetRowIteratorOptions {
-  /** Package-level inflated ZIP admission limits. */
-  resourceLimits?: OoxmlResourceLimits;
-  /** @deprecated Use `resourceLimits.maxArchiveEntryBytes`. */
-  maxZipEntryBytes?: number;
-  /** Emit a content-free resource-usage card when iteration finishes. */
-  debug?: boolean;
-  /** Receive the machine-readable session report without enabling console output. */
-  onResourceMetrics?: (metrics: OoxmlResourceMetrics) => void;
-  /** Abort the current pull and cancel the native worksheet cursor. */
-  signal?: AbortSignal;
-}
+/** Options for the bounded Node workbook session. */
+export type OpenXlsxWorkbookOptions = OoxmlNodeSessionOptions;
 
 export type XlsxWorksheetRowChunk =
   | {
@@ -84,6 +70,20 @@ export type XlsxWorksheetRowChunk =
       readonly wireBytes: number;
       readonly usage?: OoxmlResourceUsageSnapshot;
     };
+
+/**
+ * An explicitly-owned Node workbook session. The workbook index and shared
+ * strings are parsed once; worksheet bodies are pulled as bounded row batches
+ * from the retained archive. Only one worksheet stream may be active at a time
+ * because the native archive owns one worksheet cursor.
+ */
+export interface XlsxWorkbookSession {
+  readonly sheetCount: number;
+  readonly sheetNames: ReadonlyArray<string>;
+  readonly resourceUsage: OoxmlResourceUsageSnapshot | undefined;
+  worksheetRows(sheetIndex: number): AsyncGenerator<XlsxWorksheetRowChunk, void, void>;
+  close(): Promise<void>;
+}
 
 function ensureInit(): void {
   if (initialized) return;
@@ -160,20 +160,14 @@ export function parseXlsxAllSheets(
 }
 
 /**
- * Stream one worksheet as bounded complete-row batches. The final yielded value
- * is a row-free worksheet containing the sheet's layout and ancillary model.
- * Every row batch is provisional until a successful terminal worksheet is
- * received. If the terminal worksheet has `parseError`, consumers must discard
- * every previously yielded row batch and use that terminal placeholder.
- * Advancing past that terminal value commits the native operation; returning or
- * throwing from the consumer first cancels it. Existing synchronous parsing
- * helpers intentionally remain materializing compatibility APIs.
+ * Open a bounded XLSX workbook session. Unlike the materializing compatibility
+ * helpers, this retains one archive, parses the workbook index once, and lets
+ * callers consume worksheet rows sequentially without reopening the package.
  */
-export async function* iterateXlsxWorksheetRows(
+export async function openXlsxWorkbook(
   buffer: ArrayBuffer | Uint8Array | Buffer,
-  sheetIndex: number,
-  options: XlsxWorksheetRowIteratorOptions = {},
-): AsyncGenerator<XlsxWorksheetRowChunk, void, void> {
+  options: OpenXlsxWorkbookOptions = {},
+): Promise<XlsxWorkbookSession> {
   const resourceOptions = normalizeLoadResourceOptions(options);
   const metrics = new OoxmlResourceMetricsSession({
     enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
@@ -184,110 +178,245 @@ export async function* iterateXlsxWorksheetRows(
     onMetrics: resourceOptions.onResourceMetrics,
     emitToConsole: resourceOptions.debug,
   });
-  metrics.setSourceBytes(toUint8(buffer).byteLength);
+  const bytes = toUint8(buffer);
+  metrics.setSourceBytes(bytes.byteLength);
+  let archive: XlsxArchiveHandle | undefined;
   try {
-    if (!Number.isSafeInteger(sheetIndex) || sheetIndex < 0) {
-      throw new RangeError('sheetIndex must be a non-negative safe integer');
-    }
+    throwIfAborted(options.signal);
     ensureInit();
     const [maxEntry, maxTotal] = resourcePolicyForWasm(resourceOptions.policy);
     const Archive = (xlsxWasm as unknown as { XlsxArchive: XlsxArchiveConstructor }).XlsxArchive;
-    const archive = createArchive(Archive, toUint8(buffer), maxEntry, maxTotal);
-  let terminalAcknowledged = false;
-  let operationError: unknown;
-  let session: BoundedPullSession<ArrayBuffer, number> | undefined;
-  let pull: WorksheetPullWorker | undefined;
-  let rowBatches = 0;
-  let emittedRows = 0;
-  try {
+    archive = createArchive(Archive, bytes, maxEntry, maxTotal);
     const workbook = JSON.parse(new TextDecoder().decode(archive.parse())) as ParsedWorkbook;
-    metrics.observeUsage(decodeUsage(archive.resource_usage()));
+    const usage = decodeUsage(archive.resource_usage());
+    metrics.observeUsage(usage);
     metrics.checkpoint('workbook index ready');
-    const sheet = workbook.workbook.sheets[sheetIndex];
-    if (!sheet) throw new RangeError(`Sheet index ${sheetIndex} out of range`);
-    const identity = { sessionId: 1, operationId: 1, generation: 1 } as const;
-    pull = new WorksheetPullWorker(() => archive);
-    pull.reserveOpen(identity);
-    await pull.open(sheetIndex, sheet.name, identity);
-    const transport = new InProcessPullTransport<PullSessionResponse<ArrayBuffer, number>>(
-      (command, respond) => pull?.dispatch(
+    return new XlsxWorkbookSessionImpl(archive, workbook, metrics, usage, options.signal);
+  } catch (error) {
+    try {
+      archive?.free();
+    } catch {
+      // Preserve the open/index failure.
+    }
+    const normalized = parseResourceLimitError(error) ?? error;
+    metrics.fail(normalized);
+    throw normalized;
+  }
+}
+
+type ActiveWorksheetOperation = {
+  readonly identity: Readonly<{ sessionId: number; operationId: number; generation: number }>;
+  client?: BoundedPullSession<ArrayBuffer, number>;
+  terminalAcknowledged: boolean;
+  cleanupPromise?: Promise<void>;
+};
+
+class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
+  readonly sheetCount: number;
+  readonly sheetNames: ReadonlyArray<string>;
+
+  private readonly pull: WorksheetPullWorker;
+  private readonly transport: InProcessPullTransport<PullSessionResponse<ArrayBuffer, number>>;
+  private nextOperationId = 1;
+  private active: ActiveWorksheetOperation | undefined;
+  private closed = false;
+  private closePromise: Promise<void> | undefined;
+  private lastUsage: OoxmlResourceUsageSnapshot | undefined;
+  private completedWorksheets = 0;
+  private rowBatches = 0;
+  private emittedRows = 0;
+
+  constructor(
+    private readonly archive: XlsxArchiveHandle,
+    private workbook: ParsedWorkbook | null,
+    private readonly metrics: OoxmlResourceMetricsSession,
+    usage: OoxmlResourceUsageSnapshot | undefined,
+    private readonly signal?: AbortSignal,
+  ) {
+    this.sheetNames = Object.freeze(workbook.workbook.sheets.map((sheet) => sheet.name));
+    this.sheetCount = this.sheetNames.length;
+    this.lastUsage = usage;
+    this.pull = new WorksheetPullWorker(() => this.archive);
+    this.transport = new InProcessPullTransport(
+      (command, respond) => this.pull.dispatchSafely(
         command as PullSessionCommand<number>,
         respond,
       ),
-      () => { void pull?.reset(); },
+      () => undefined,
     );
-    session = new BoundedPullSession(transport, {
-      ...identity,
-      maxByteCredit: XLSX_WORKSHEET_PULL_BYTES,
-    });
+  }
 
-    for (;;) {
-      const chunk = await session.pull(XLSX_WORKSHEET_PULL_BYTES, { signal: options.signal });
-      metrics.observeUsage(chunk.usage);
-      const decoded = JSON.parse(
-        new TextDecoder().decode(new Uint8Array(chunk.payload)),
-      ) as WorksheetWireChunk;
-      if (chunk.done !== (decoded.kind === 'finished')) {
-        throw new Error('worksheet cursor terminal marker mismatch');
-      }
-      if (decoded.kind === 'rows') {
-        // The browser compatibility path resolves these after assembly. Node's
-        // row iterator resolves each bounded batch before handing it over.
-        resolveSharedStringRows(decoded.rows, workbook.sharedStrings);
-        rowBatches += 1;
-        emittedRows += decoded.rows.length;
+  get resourceUsage(): OoxmlResourceUsageSnapshot | undefined {
+    if (this.closed) return this.lastUsage;
+    try {
+      this.lastUsage = decodeUsage(this.archive.resource_usage());
+    } catch {
+      // Keep the last valid diagnostic after a trapped or closing archive.
+    }
+    return this.lastUsage;
+  }
+
+  /**
+   * Stream one worksheet as bounded complete-row batches. The final yielded
+   * value is a row-free worksheet containing layout and ancillary model data.
+   * Row batches remain provisional until the consumer advances past that
+   * terminal value, which acknowledges the native operation.
+   */
+  async *worksheetRows(
+    sheetIndex: number,
+  ): AsyncGenerator<XlsxWorksheetRowChunk, void, void> {
+    if (this.closed) throw new Error('XLSX workbook session is closed');
+    if (this.active) throw new Error('another XLSX worksheet row stream is already active');
+    if (!Number.isSafeInteger(sheetIndex) || sheetIndex < 0) {
+      throw new RangeError('sheetIndex must be a non-negative safe integer');
+    }
+    const sheetName = this.requireSheetName(sheetIndex);
+    throwIfAborted(this.signal);
+
+    const operationId = this.nextOperationId++;
+    const operation: ActiveWorksheetOperation = {
+      identity: { sessionId: operationId, operationId, generation: 1 },
+      terminalAcknowledged: false,
+    };
+    this.active = operation;
+    let operationError: unknown;
+    try {
+      this.pull.reserveOpen(operation.identity);
+      await this.pull.open(sheetIndex, sheetName, operation.identity);
+      const client = new BoundedPullSession(this.transport, {
+        ...operation.identity,
+        maxByteCredit: XLSX_WORKSHEET_PULL_BYTES,
+      });
+      operation.client = client;
+
+      for (;;) {
+        if (this.closed) throw new Error('XLSX workbook session is closed');
+        throwIfAborted(this.signal);
+        const chunk = await client.pull(XLSX_WORKSHEET_PULL_BYTES, { signal: this.signal });
+        this.lastUsage = chunk.usage ?? this.lastUsage;
+        this.metrics.observeUsage(chunk.usage);
+        const decoded = JSON.parse(
+          new TextDecoder().decode(new Uint8Array(chunk.payload)),
+        ) as WorksheetWireChunk;
+        if (chunk.done !== (decoded.kind === 'finished')) {
+          throw new Error('worksheet cursor terminal marker mismatch');
+        }
+        if (decoded.kind === 'rows') {
+          resolveSharedStringRows(decoded.rows, this.requireWorkbook().sharedStrings);
+          this.rowBatches += 1;
+          this.emittedRows += decoded.rows.length;
+          yield {
+            kind: 'rows',
+            rows: decoded.rows,
+            sequence: chunk.sequence,
+            wireBytes: chunk.byteLength,
+            usage: chunk.usage,
+          };
+          await chunk.ack({ signal: this.signal });
+          continue;
+        }
+        decoded.worksheet.rows = [];
         yield {
-          kind: 'rows',
-          rows: decoded.rows,
+          kind: 'finished',
+          worksheet: decoded.worksheet,
           sequence: chunk.sequence,
           wireBytes: chunk.byteLength,
           usage: chunk.usage,
         };
-        await chunk.ack({ signal: options.signal });
-        continue;
+        await chunk.ack({ signal: this.signal });
+        operation.terminalAcknowledged = true;
+        this.completedWorksheets += 1;
+        this.metrics.checkpoint('worksheet stream complete', chunk.usage);
+        return;
       }
-      decoded.worksheet.rows = [];
-      yield {
-        kind: 'finished',
-        worksheet: decoded.worksheet,
-        sequence: chunk.sequence,
-        wireBytes: chunk.byteLength,
-        usage: chunk.usage,
-      };
-      await chunk.ack({ signal: options.signal });
-      terminalAcknowledged = true;
-      return;
-    }
-  } catch (error) {
-    operationError = parseResourceLimitError(error) ?? error;
-    metrics.fail(operationError);
-    await session?.cancel('request-error').catch(() => undefined);
-    throw operationError;
-  } finally {
-    if (session && !terminalAcknowledged) {
-      await session.cancel('closed').catch(() => undefined);
-    }
-    await pull?.reset().catch(() => undefined);
-    try {
-      archive.free();
-    } catch (cleanupError) {
-      if (operationError === undefined) throw cleanupError;
-    }
-    if (operationError === undefined) {
-      metrics.checkpoint(
-        terminalAcknowledged ? 'worksheet stream complete' : 'worksheet stream closed',
-      );
-      metrics.succeed({
-        'row-batches': rowBatches,
-        rows: emittedRows,
-        completed: terminalAcknowledged ? 1 : 0,
-      });
+    } catch (error) {
+      operationError = parseResourceLimitError(error) ?? error;
+      this.metrics.fail(operationError);
+      await this.close().catch(() => undefined);
+      throw operationError;
+    } finally {
+      try {
+        await this.cleanupOperation(operation, operationError === undefined ? 'closed' : 'request-error');
+      } catch (cleanupError) {
+        if (operationError === undefined) {
+          const normalized = parseResourceLimitError(cleanupError) ?? cleanupError;
+          this.metrics.fail(normalized);
+          await this.close().catch(() => undefined);
+          throw normalized;
+        }
+      }
     }
   }
-  } catch (error) {
-    const normalized = parseResourceLimitError(error) ?? error;
-    metrics.fail(normalized);
-    throw normalized;
+
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closed = true;
+    this.closePromise = this.release();
+    return this.closePromise;
+  }
+
+  private cleanupOperation(
+    operation: ActiveWorksheetOperation,
+    reason: 'closed' | 'request-error',
+  ): Promise<void> {
+    if (operation.cleanupPromise) return operation.cleanupPromise;
+    operation.cleanupPromise = (async () => {
+      let cleanupError: unknown;
+      if (operation.client && !operation.terminalAcknowledged) {
+        try {
+          await operation.client.cancel(reason);
+        } catch (error) {
+          cleanupError = parseResourceLimitError(error) ?? error;
+        }
+      }
+      try {
+        await this.pull.reset();
+      } catch (error) {
+        cleanupError ??= parseResourceLimitError(error) ?? error;
+      }
+      if (this.active === operation) this.active = undefined;
+      if (cleanupError !== undefined) throw cleanupError;
+    })();
+    return operation.cleanupPromise;
+  }
+
+  private async release(): Promise<void> {
+    let cleanupError: unknown;
+    if (this.active) {
+      try {
+        await this.cleanupOperation(this.active, 'closed');
+      } catch (error) {
+        cleanupError = parseResourceLimitError(error) ?? error;
+      }
+    }
+    this.transport.terminate();
+    this.workbook = null;
+    try {
+      this.archive.free();
+    } catch (error) {
+      cleanupError ??= parseResourceLimitError(error) ?? error;
+    }
+    if (cleanupError !== undefined) {
+      this.metrics.fail(cleanupError);
+      throw cleanupError;
+    }
+    this.metrics.checkpoint('workbook session closed', this.lastUsage);
+    this.metrics.succeed({
+      worksheets: this.completedWorksheets,
+      'row-batches': this.rowBatches,
+      rows: this.emittedRows,
+    });
+  }
+
+  private requireWorkbook(): ParsedWorkbook {
+    if (!this.workbook) throw new Error('XLSX workbook session is closed');
+    return this.workbook;
+  }
+
+  private requireSheetName(sheetIndex: number): string {
+    const sheet = this.requireWorkbook().workbook.sheets[sheetIndex];
+    if (!sheet) throw new RangeError(`Sheet index ${sheetIndex} out of range`);
+    return sheet.name;
   }
 }
 
@@ -315,4 +444,11 @@ function decodeUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined 
 
 function toUint8(buffer: ArrayBuffer | Uint8Array | Buffer): Uint8Array {
   return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  const error = new Error('XLSX workbook session was aborted');
+  error.name = 'AbortError';
+  throw error;
 }

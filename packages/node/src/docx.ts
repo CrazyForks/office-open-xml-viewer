@@ -1,7 +1,5 @@
 import type { DocxDocumentModel } from '@silurus/ooxml-docx';
 import type {
-  OoxmlResourceMetrics,
-  OoxmlResourceLimits,
   OoxmlResourceUsageSnapshot,
 } from '@silurus/ooxml-core';
 import {
@@ -34,6 +32,7 @@ import {
 // @ts-ignore — wasm-pack generated JS without a d.ts entry for the bare module path
 import * as docxWasm from '../../docx/src/wasm/docx_parser.js';
 import { InProcessPullTransport } from './in-process-pull-transport.ts';
+import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import {
   installImageBitmapShim,
   installOffscreenCanvasShim,
@@ -61,21 +60,11 @@ interface DocxArchiveConstructor {
 }
 
 /** Options for the bounded Node DOCX page session. */
-export interface OpenDocxDocumentOptions {
+export interface OpenDocxDocumentOptions extends OoxmlNodeSessionOptions {
   /** Canvas implementation used for text measurement and page allocation. */
   factory: NodeCanvasFactory;
-  /** Package-level inflated ZIP admission limits. */
-  resourceLimits?: OoxmlResourceLimits;
-  /** @deprecated Use `resourceLimits.maxArchiveEntryBytes`. */
-  maxZipEntryBytes?: number;
-  /** Emit a content-free resource-usage card to the Node console. */
-  debug?: boolean;
-  /** Receive the machine-readable resource report without enabling console output. */
-  onResourceMetrics?: (metrics: OoxmlResourceMetrics) => void;
   /** Stable DATE/TIME field instant captured before pagination. */
   currentDate?: Date | number;
-  /** Abort between parser units or page renders. Synchronous WASM work cannot be preempted. */
-  signal?: AbortSignal;
 }
 
 export interface DocxPageRenderOptions {
@@ -150,6 +139,7 @@ export async function openDocxDocument(
     enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
     format: 'docx',
     mode: 'node',
+    scope: 'session',
     policy: resourceOptions.policy,
     onMetrics: resourceOptions.onResourceMetrics,
     emitToConsole: resourceOptions.debug,
@@ -210,11 +200,11 @@ export async function openDocxDocument(
       options.factory,
       defaultCurrentDateMs,
       usage,
+      metrics,
       options.signal,
     );
     metrics.observeUsage(session.resourceUsage);
     metrics.checkpoint('pagination ready');
-    metrics.succeed({ pages: session.pageCount });
     return session;
   } catch (error) {
     await pull?.reset().catch(() => undefined);
@@ -261,6 +251,7 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
     private readonly factory: NodeCanvasFactory,
     private readonly defaultCurrentDateMs: number,
     usage: OoxmlResourceUsageSnapshot | undefined,
+    private readonly metrics: OoxmlResourceMetricsSession,
     private readonly signal?: AbortSignal,
   ) {
     this.state = { source, services };
@@ -274,8 +265,13 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
 
   get resourceUsage(): OoxmlResourceUsageSnapshot | undefined {
     if (this.closed) return this.lastResourceUsage;
+    return this.refreshResourceUsage();
+  }
+
+  private refreshResourceUsage(): OoxmlResourceUsageSnapshot | undefined {
     try {
       this.lastResourceUsage = decodeOoxmlResourceUsage(this.archive.resource_usage());
+      this.metrics.observeUsage(this.lastResourceUsage);
     } catch {
       // A closed/trapped archive cannot improve the last valid diagnostic
       // checkpoint. Rendering failures remain surfaced by their operation.
@@ -320,6 +316,7 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
       if (normalized instanceof OoxmlResourceLimitError) {
         this.resourceFailure ??= normalized;
       }
+      this.metrics.fail(normalized);
       throw normalized;
     });
   }
@@ -349,6 +346,7 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
 
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
+    this.refreshResourceUsage();
     this.closed = true;
     this.closePromise = this.release();
     return this.closePromise;
@@ -369,8 +367,12 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
     try {
       this.archive.free();
     } catch (error) {
-      throw parseResourceLimitError(error) ?? error;
+      const normalized = parseResourceLimitError(error) ?? error;
+      this.metrics.fail(normalized);
+      throw normalized;
     }
+    this.metrics.checkpoint('document session closed', this.lastResourceUsage);
+    this.metrics.succeed({ pages: this.pageCount });
   }
 
   private requireState(): SessionState {

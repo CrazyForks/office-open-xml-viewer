@@ -1,8 +1,4 @@
-import type {
-  OoxmlResourceLimits,
-  OoxmlResourceMetrics,
-  OoxmlResourceUsageSnapshot,
-} from '@silurus/ooxml-core';
+import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import type { Presentation, Slide } from '@silurus/ooxml-pptx';
 import {
   normalizeLoadResourceOptions,
@@ -24,6 +20,7 @@ import {
 import { SlidePullWorker } from '../../pptx/src/slide-pull-worker.ts';
 import type { PresentationBootstrap } from '../../pptx/src/worker-protocol.ts';
 import { InProcessPullTransport } from './in-process-pull-transport.ts';
+import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import { loadWasmModule, resolveWasm } from './wasm-loader.ts';
 
 let initialized = false;
@@ -43,18 +40,7 @@ interface PptxArchiveConstructor {
 }
 
 /** Options for the bounded Node presentation session. */
-export interface OpenPptxPresentationOptions {
-  /** Package-level inflated ZIP admission limits. */
-  resourceLimits?: OoxmlResourceLimits;
-  /** @deprecated Use `resourceLimits.maxArchiveEntryBytes`. */
-  maxZipEntryBytes?: number;
-  /** Emit a content-free resource-usage card when the session closes. */
-  debug?: boolean;
-  /** Receive the machine-readable session report without enabling console output. */
-  onResourceMetrics?: (metrics: OoxmlResourceMetrics) => void;
-  /** Abort the current slide pull and close the session. */
-  signal?: AbortSignal;
-}
+export type OpenPptxPresentationOptions = OoxmlNodeSessionOptions;
 
 /**
  * One-pass Node session over canonical complete PPTX slide units. The library

@@ -15,12 +15,13 @@ export {
   type OpenDocxDocumentOptions,
 } from './docx';
 export {
-  iterateXlsxWorksheetRows,
+  openXlsxWorkbook,
   parseXlsx,
   parseSheet as parseXlsxSheet,
   parseXlsxAllSheets,
+  type OpenXlsxWorkbookOptions,
+  type XlsxWorkbookSession,
   type XlsxWorksheetRowChunk,
-  type XlsxWorksheetRowIteratorOptions,
 } from './xlsx';
 export {
   renderSlideNode,
@@ -31,6 +32,7 @@ export {
   type NodeCanvasFactory,
   type NodeImageLike,
 } from './render';
+export type { OoxmlNodeSessionOptions } from './session-options';
 export type {
   OoxmlResourceMetrics,
   OoxmlResourceMetricsCheckpoint,
