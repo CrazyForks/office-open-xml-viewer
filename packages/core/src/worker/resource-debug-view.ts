@@ -1,13 +1,16 @@
-import type { OoxmlResourceDebugReport } from './resource-debug.js';
+import type { OoxmlResourceMetrics } from '../types/resource-metrics.js';
 
 /** Deterministic color-free view used by browser CSS and Node ANSI emitters. */
 export function formatOoxmlResourceDebugReport(
-  report: OoxmlResourceDebugReport,
+  report: OoxmlResourceMetrics,
   ansi = false,
 ): string {
   const width = 68;
-  const status = report.status === 'ok' ? 'READY' : 'REJECTED';
-  const title = ` OOXML LOAD  ${report.format.toUpperCase()}  ${status} `;
+  const subject = report.scope === 'session' ? 'SESSION' : 'LOAD';
+  const status = report.status === 'ok'
+    ? report.scope === 'session' ? 'COMPLETE' : 'READY'
+    : 'FAILED';
+  const title = ` OOXML ${subject}  ${report.format.toUpperCase()}  ${status} `;
   const lines: string[] = [topBorder(title, width)];
   lines.push(row(
     `mode ${report.mode.padEnd(8)}  elapsed ${formatDuration(report.elapsedMs)}`,
@@ -35,7 +38,7 @@ export function formatOoxmlResourceDebugReport(
       width,
     ));
   } else {
-    lines.push(row('usage unavailable (failure occurred before package accounting)', width));
+    lines.push(row('usage unavailable for this report', width));
   }
   if (report.checkpoints.length > 0) {
     lines.push(separator(' checkpoints ', width));
@@ -73,7 +76,7 @@ export function formatOoxmlResourceDebugReport(
   return `${color}${text}\u001b[0m`;
 }
 
-export function emitOoxmlResourceDebugReport(report: OoxmlResourceDebugReport): void {
+export function emitOoxmlResourceDebugReport(report: OoxmlResourceMetrics): void {
   const processLike = (globalThis as { process?: { stdout?: { isTTY?: boolean } } }).process;
   if (typeof window === 'undefined') {
     console.log(formatOoxmlResourceDebugReport(report, processLike?.stdout?.isTTY === true));

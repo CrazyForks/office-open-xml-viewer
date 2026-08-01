@@ -509,6 +509,7 @@ interface LoadOptions__emitterCollision1 {
     maxZipEntryBytes?: number;
     resourceLimits?: OoxmlResourceLimits;
     debug?: boolean;
+    onResourceMetrics?: (metrics: OoxmlResourceMetrics) => void;
     workerTimeoutMs?: number;
     math?: MathRenderer;
 }
@@ -660,7 +661,35 @@ export interface OoxmlResourceLimits {
     maxTotalInflatedBytes?: OoxmlResourceLimit;
 }
 export type OoxmlResourceMetric = ExtensibleLiteral<'declared-inflated-bytes' | 'actual-inflated-bytes' | 'entry-count' | 'central-directory-bytes' | 'distinct-inflated-bytes' | 'bytes' | 'depth' | 'projected-bytes'>;
+export interface OoxmlResourceMetrics {
+    readonly schemaVersion: 1;
+    readonly scope: 'load' | 'session';
+    readonly format: OoxmlFormat;
+    readonly mode: 'main' | 'worker' | 'node';
+    readonly status: 'ok' | 'error';
+    readonly sourceBytes?: number;
+    readonly elapsedMs: number;
+    readonly policy: Readonly<OoxmlResourcePolicySnapshot>;
+    readonly usage?: OoxmlResourceUsageSnapshot;
+    readonly checkpoints: readonly OoxmlResourceMetricsCheckpoint[];
+    readonly outcome?: Readonly<Record<string, number>>;
+    readonly error?: Readonly<{
+        readonly code?: string;
+        readonly stage?: string;
+        readonly resource?: string;
+        readonly metric?: string;
+    }>;
+}
+export interface OoxmlResourceMetricsCheckpoint {
+    readonly name: string;
+    readonly elapsedMs: number;
+    readonly usage?: OoxmlResourceUsageSnapshot;
+}
 export type OoxmlResourceName = ExtensibleLiteral<'archive' | 'archive-entry' | 'xml-event' | 'xml-context' | 'xml-tree' | 'worksheet-row' | 'worksheet-shell'>;
+export interface OoxmlResourcePolicySnapshot {
+    readonly maxArchiveEntryBytes: number | null;
+    readonly maxTotalInflatedBytes: number | null;
+}
 export interface OoxmlResourceUsageSnapshot {
     readonly archiveEntryCount: number;
     readonly declaredInflatedBytes: number;

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_OOXML_RESOURCE_LIMITS,
   normalizeLoadResourceOptions,
@@ -137,6 +137,18 @@ describe('normalizeLoadResourceOptions', () => {
     expect(() => normalizeLoadResourceOptions({ debug: 'yes' as never })).toThrow(
       new TypeError('debug must be a boolean when provided'),
     );
+  });
+
+  it('retains a metrics observer independently from console debug', () => {
+    const onResourceMetrics = vi.fn();
+    expect(normalizeLoadResourceOptions({ onResourceMetrics })).toEqual({
+      policy: DEFAULT_OOXML_RESOURCE_LIMITS,
+      debug: false,
+      onResourceMetrics,
+    });
+    expect(() => normalizeLoadResourceOptions({
+      onResourceMetrics: true as never,
+    })).toThrow(new TypeError('onResourceMetrics must be a function when provided'));
   });
 
   it('freezes both the outer options and copied policy', () => {

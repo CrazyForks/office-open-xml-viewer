@@ -1,10 +1,14 @@
 import type { ParsedWorkbook, Row, Worksheet } from '@silurus/ooxml-xlsx';
-import type { OoxmlResourceLimits, OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
+import type {
+  OoxmlResourceLimits,
+  OoxmlResourceMetrics,
+  OoxmlResourceUsageSnapshot,
+} from '@silurus/ooxml-core';
 import {
   BoundedPullSession,
   decodeOoxmlResourceUsage,
   normalizeLoadResourceOptions,
-  OoxmlResourceDebugSession,
+  OoxmlResourceMetricsSession,
   parseResourceLimitError,
   resourcePolicyForWasm,
   type PullSessionCommand,
@@ -56,8 +60,10 @@ export interface XlsxWorksheetRowIteratorOptions {
   resourceLimits?: OoxmlResourceLimits;
   /** @deprecated Use `resourceLimits.maxArchiveEntryBytes`. */
   maxZipEntryBytes?: number;
-  /** Emit a data-safe resource-usage card when iteration finishes. */
+  /** Emit a content-free resource-usage card when iteration finishes. */
   debug?: boolean;
+  /** Receive the machine-readable session report without enabling console output. */
+  onResourceMetrics?: (metrics: OoxmlResourceMetrics) => void;
   /** Abort the current pull and cancel the native worksheet cursor. */
   signal?: AbortSignal;
 }
@@ -169,13 +175,16 @@ export async function* iterateXlsxWorksheetRows(
   options: XlsxWorksheetRowIteratorOptions = {},
 ): AsyncGenerator<XlsxWorksheetRowChunk, void, void> {
   const resourceOptions = normalizeLoadResourceOptions(options);
-  const debug = new OoxmlResourceDebugSession({
-    enabled: resourceOptions.debug,
+  const metrics = new OoxmlResourceMetricsSession({
+    enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
     format: 'xlsx',
     mode: 'node',
+    scope: 'session',
     policy: resourceOptions.policy,
+    onMetrics: resourceOptions.onResourceMetrics,
+    emitToConsole: resourceOptions.debug,
   });
-  debug.setSourceBytes(toUint8(buffer).byteLength);
+  metrics.setSourceBytes(toUint8(buffer).byteLength);
   try {
     if (!Number.isSafeInteger(sheetIndex) || sheetIndex < 0) {
       throw new RangeError('sheetIndex must be a non-negative safe integer');
@@ -192,8 +201,8 @@ export async function* iterateXlsxWorksheetRows(
   let emittedRows = 0;
   try {
     const workbook = JSON.parse(new TextDecoder().decode(archive.parse())) as ParsedWorkbook;
-    debug.observeUsage(decodeUsage(archive.resource_usage()));
-    debug.checkpoint('workbook index ready');
+    metrics.observeUsage(decodeUsage(archive.resource_usage()));
+    metrics.checkpoint('workbook index ready');
     const sheet = workbook.workbook.sheets[sheetIndex];
     if (!sheet) throw new RangeError(`Sheet index ${sheetIndex} out of range`);
     const identity = { sessionId: 1, operationId: 1, generation: 1 } as const;
@@ -214,7 +223,7 @@ export async function* iterateXlsxWorksheetRows(
 
     for (;;) {
       const chunk = await session.pull(XLSX_WORKSHEET_PULL_BYTES, { signal: options.signal });
-      debug.observeUsage(chunk.usage);
+      metrics.observeUsage(chunk.usage);
       const decoded = JSON.parse(
         new TextDecoder().decode(new Uint8Array(chunk.payload)),
       ) as WorksheetWireChunk;
@@ -251,7 +260,7 @@ export async function* iterateXlsxWorksheetRows(
     }
   } catch (error) {
     operationError = parseResourceLimitError(error) ?? error;
-    debug.fail(operationError);
+    metrics.fail(operationError);
     await session?.cancel('request-error').catch(() => undefined);
     throw operationError;
   } finally {
@@ -265,10 +274,10 @@ export async function* iterateXlsxWorksheetRows(
       if (operationError === undefined) throw cleanupError;
     }
     if (operationError === undefined) {
-      debug.checkpoint(
+      metrics.checkpoint(
         terminalAcknowledged ? 'worksheet stream complete' : 'worksheet stream closed',
       );
-      debug.succeed({
+      metrics.succeed({
         'row-batches': rowBatches,
         rows: emittedRows,
         completed: terminalAcknowledged ? 1 : 0,
@@ -277,7 +286,7 @@ export async function* iterateXlsxWorksheetRows(
   }
   } catch (error) {
     const normalized = parseResourceLimitError(error) ?? error;
-    debug.fail(normalized);
+    metrics.fail(normalized);
     throw normalized;
   }
 }

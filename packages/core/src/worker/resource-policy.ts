@@ -21,11 +21,12 @@ export interface NormalizedOoxmlResourcePolicy {
 export interface NormalizedOoxmlResourceOptions {
   readonly policy: Readonly<NormalizedOoxmlResourcePolicy>;
   readonly debug: boolean;
+  readonly onResourceMetrics?: LoadOptions['onResourceMetrics'];
 }
 
 type ResourcePolicyOptions = Pick<
   LoadOptions,
-  'resourceLimits' | 'maxZipEntryBytes' | 'debug'
+  'resourceLimits' | 'maxZipEntryBytes' | 'debug' | 'onResourceMetrics'
 >;
 
 function normalizeLimit(
@@ -93,9 +94,18 @@ export function normalizeLoadResourceOptions(
   if (options.debug !== undefined && typeof options.debug !== 'boolean') {
     throw new TypeError('debug must be a boolean when provided');
   }
+  if (
+    options.onResourceMetrics !== undefined
+    && typeof options.onResourceMetrics !== 'function'
+  ) {
+    throw new TypeError('onResourceMetrics must be a function when provided');
+  }
   return Object.freeze({
     policy: normalizeResourcePolicy(options),
     debug: options.debug ?? false,
+    ...(options.onResourceMetrics
+      ? { onResourceMetrics: options.onResourceMetrics }
+      : {}),
   });
 }
 

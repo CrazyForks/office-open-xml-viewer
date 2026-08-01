@@ -27,7 +27,7 @@ import {
   HARD_MAX_PPTX_CACHED_SLIDES,
   HARD_MAX_PPTX_CACHED_SLIDE_PROJECTION_BYTES,
   normalizeLoadResourceOptions,
-  OoxmlResourceDebugSession,
+  OoxmlResourceMetricsSession,
   parseResourceLimitError,
   PULL_SESSION_PROTOCOL,
   type NormalizedOoxmlResourcePolicy,
@@ -216,11 +216,13 @@ export class PptxPresentation {
   ): Promise<PptxPresentation> {
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
-    const debug = new OoxmlResourceDebugSession({
-      enabled: resourceOptions.debug,
+    const metrics = new OoxmlResourceMetricsSession({
+      enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
       format: 'pptx',
       mode,
       policy: resourceOptions.policy,
+      onMetrics: resourceOptions.onResourceMetrics,
+      emitToConsole: resourceOptions.debug,
     });
     try {
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
@@ -240,8 +242,8 @@ export class PptxPresentation {
     // file without a password, or a legacy-binary / unknown CFB, becomes a typed
     // OoxmlError (whose `instanceof` would not survive the worker boundary).
     buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
-    debug.setSourceBytes(buffer.byteLength);
-    debug.checkpoint('container ready');
+    metrics.setSourceBytes(buffer.byteLength);
+    metrics.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so
     // main-mode bundles never pull in its (renderer-bearing) chunk.
     const worker =
@@ -262,16 +264,16 @@ export class PptxPresentation {
         resourceOptions.policy,
         mode === 'worker' ? !!opts.useGoogleFonts : false,
         opts.workerTimeoutMs,
-        (usage) => debug.observeUsage(usage),
+        (usage) => metrics.observeUsage(usage),
       );
-      debug.checkpoint('presentation preflight ready');
+      metrics.checkpoint('presentation preflight ready');
       if (mode === 'main' && opts.useGoogleFonts && pres._preflight) {
         pres._googleFontFaces = await preloadGoogleFonts(
           pres._preflight.fontPreloadNames,
           PPTX_GOOGLE_FONTS,
         );
       }
-      debug.succeed({ slides: pres.slideCount });
+      metrics.succeed({ slides: pres.slideCount });
       return pres;
     } catch (error) {
       const rejectedPresentation = pres;
@@ -279,7 +281,7 @@ export class PptxPresentation {
       throw error;
     }
     } catch (error) {
-      debug.fail(error);
+      metrics.fail(error);
       throw error;
     }
   }

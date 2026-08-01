@@ -21,6 +21,7 @@ export interface ApiClass {
 }
 
 const RESOURCE_LIMITS = { name: 'resourceLimits', type: 'OoxmlResourceLimits', def: '128 MiB per entry / 256 MiB distinct total', desc: 'Shared DOCX/XLSX/PPTX inflated-byte budgets. maxArchiveEntryBytes caps each package part; maxTotalInflatedBytes counts the largest amount read from every distinct part in the package session, without charging repeat reads twice. Supply positive safe-integer byte counts, or null to disable one configurable budget (internal hard ceilings remain). Violations reject with OoxmlResourceLimitError. These deterministic counters reduce OOM risk but do not measure or guarantee peak memory.' };
+const RESOURCE_METRICS = { name: 'onResourceMetrics', type: '(metrics: OoxmlResourceMetrics) => void', desc: 'Receives the content-free machine-readable report used by the debug card, without enabling console output. Reports the effective policy, timing checkpoints, format/mode, and success or typed failure discriminants; source bytes and observed archive counters are included when available. Browser reports cover the underlying engine factory, not a Viewer\'s first canvas paint; first paint and later lazy work may increase counters or surface a separate render error. Callback exceptions never change load results.' };
 const ZIP = { name: 'maxZipEntryBytes', type: 'number', def: 'resource policy default', desc: 'Deprecated compatibility alias for resourceLimits.maxArchiveEntryBytes. New code should use resourceLimits. Existing positive values retain their per-entry meaning; zero / negative values fall back to the standard default.' };
 const GFONTS = { name: 'useGoogleFonts', type: 'boolean', def: 'false', desc: 'Load metric-compatible webfonts and non-Latin script fallbacks (Noto Arabic / CJK KR·SC·TC·JP / Cyrillic / Hebrew / Thai / Devanagari) from Google Fonts so layout matches Office and non-Latin text never falls back to tofu. Off by default for privacy.' };
 const DPR = { name: 'dpr', type: 'number', def: 'devicePixelRatio', desc: 'Device pixel ratio for the backing store (crispness on HiDPI).' };
@@ -76,6 +77,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'hiddenSlideDim', type: 'Partial<DimOptions>', def: "{ color: '#ffffff', opacity: 0.6 }", desc: 'Overrides for the `dim` overlay, merged over the default white 60% wash. A partial so it stays in sync if DimOptions gains a field.' },
         ZIP,
         RESOURCE_LIMITS,
+        RESOURCE_METRICS,
         MATH,
         VIEWER_MODE,
         ZOOM_MIN_MAX,
@@ -106,7 +108,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'PptxPresentation',
       ctor: 'await PptxPresentation.load(source, options?)',
       note: 'Headless engine — parse once, render any slide into any canvas you supply (scroll views, thumbnail grids, master–detail).',
-      options: [GFONTS, WASM_URL, ZIP, RESOURCE_LIMITS, WORKER_TIMEOUT, MATH, MODE],
+      options: [GFONTS, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, WORKER_TIMEOUT, MATH, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<PptxPresentation>', desc: 'Parse a deck from a URL or ArrayBuffer.' },
         { sig: 'get slideCount(): number', desc: 'Total slides.' },
@@ -145,6 +147,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         GFONTS,
         ZIP,
         RESOURCE_LIMITS,
+        RESOURCE_METRICS,
         MATH,
         DPR,
         MODE,
@@ -178,6 +181,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'showTrackChanges', type: 'boolean', desc: 'Render tracked insertions/deletions with author colours.' },
         ZIP,
         RESOURCE_LIMITS,
+        RESOURCE_METRICS,
         MATH,
         VIEWER_MODE,
         ZOOM_MIN_MAX,
@@ -204,7 +208,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'DocxDocument',
       ctor: 'await DocxDocument.load(source, options?)',
       note: 'Headless engine — render any page into any canvas you supply.',
-      options: [GFONTS, WASM_URL, ZIP, RESOURCE_LIMITS, WORKER_TIMEOUT, MATH, MODE],
+      options: [GFONTS, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, WORKER_TIMEOUT, MATH, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<DocxDocument>', desc: 'Parse a document from a URL or ArrayBuffer.' },
         { sig: 'get pageCount(): number', desc: 'Total pages.' },
@@ -238,6 +242,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         GFONTS,
         ZIP,
         RESOURCE_LIMITS,
+        RESOURCE_METRICS,
         MATH,
         DPR,
         MODE,
@@ -273,6 +278,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         GFONTS,
         ZIP,
         RESOURCE_LIMITS,
+        RESOURCE_METRICS,
         MATH,
         VIEWER_MODE,
         ON_SCALE_CHANGE,
@@ -309,7 +315,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'XlsxWorkbook',
       ctor: 'await XlsxWorkbook.load(source, options?)',
       note: 'Headless engine — parse once, render any sheet viewport into any canvas you supply.',
-      options: [GFONTS, WASM_URL, ZIP, RESOURCE_LIMITS, WORKER_TIMEOUT, MATH, MODE],
+      options: [GFONTS, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, WORKER_TIMEOUT, MATH, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<XlsxWorkbook>', desc: 'Parse a workbook from a URL or ArrayBuffer.' },
         { sig: 'get sheetNames(): string[]', desc: 'Names of all sheets.' },

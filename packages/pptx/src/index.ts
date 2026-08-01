@@ -37,7 +37,10 @@ export {
   type OoxmlResourceLimitErrorDetails,
   type OoxmlResourceLimits,
   type OoxmlResourceMetric,
+  type OoxmlResourceMetrics,
+  type OoxmlResourceMetricsCheckpoint,
   type OoxmlResourceName,
+  type OoxmlResourcePolicySnapshot,
   type OoxmlResourceUsageSnapshot,
   type OoxmlResourceViolation,
 } from '@silurus/ooxml-core';

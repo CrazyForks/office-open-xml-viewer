@@ -1,5 +1,6 @@
 import type { DocxDocumentModel } from '@silurus/ooxml-docx';
 import type {
+  OoxmlResourceMetrics,
   OoxmlResourceLimits,
   OoxmlResourceUsageSnapshot,
 } from '@silurus/ooxml-core';
@@ -11,7 +12,7 @@ import {
 import {
   decodeOoxmlResourceUsage,
   normalizeLoadResourceOptions,
-  OoxmlResourceDebugSession,
+  OoxmlResourceMetricsSession,
   parseResourceLimitError,
   resourcePolicyForWasm,
   type PullSessionCommand,
@@ -67,8 +68,10 @@ export interface OpenDocxDocumentOptions {
   resourceLimits?: OoxmlResourceLimits;
   /** @deprecated Use `resourceLimits.maxArchiveEntryBytes`. */
   maxZipEntryBytes?: number;
-  /** Emit a data-safe resource-usage card to the Node console. */
+  /** Emit a content-free resource-usage card to the Node console. */
   debug?: boolean;
+  /** Receive the machine-readable resource report without enabling console output. */
+  onResourceMetrics?: (metrics: OoxmlResourceMetrics) => void;
   /** Stable DATE/TIME field instant captured before pagination. */
   currentDate?: Date | number;
   /** Abort between parser units or page renders. Synchronous WASM work cannot be preempted. */
@@ -143,13 +146,15 @@ export async function openDocxDocument(
   options: OpenDocxDocumentOptions,
 ): Promise<DocxDocumentSession> {
   const resourceOptions = normalizeLoadResourceOptions(options ?? {});
-  const debug = new OoxmlResourceDebugSession({
-    enabled: resourceOptions.debug,
+  const metrics = new OoxmlResourceMetricsSession({
+    enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
     format: 'docx',
     mode: 'node',
     policy: resourceOptions.policy,
+    onMetrics: resourceOptions.onResourceMetrics,
+    emitToConsole: resourceOptions.debug,
   });
-  debug.setSourceBytes(toUint8(buffer).byteLength);
+  metrics.setSourceBytes(toUint8(buffer).byteLength);
   const Archive = (docxWasm as unknown as { DocxArchive: DocxArchiveConstructor }).DocxArchive;
   let archive: DocxArchiveHandle | undefined;
   let pull: DocumentPullWorker | undefined;
@@ -160,7 +165,7 @@ export async function openDocxDocument(
     ensureInit();
     const [maxEntry, maxTotal] = resourcePolicyForWasm(resourceOptions.policy);
     archive = new Archive(toUint8(buffer), maxEntry, maxTotal);
-    debug.checkpoint('container ready');
+    metrics.checkpoint('container ready');
     pull = new DocumentPullWorker(() => archive);
     const identity = { sessionId: 1, operationId: 1, generation: 1 } as const;
     pull.open(identity);
@@ -176,12 +181,12 @@ export async function openDocxDocument(
       signal: options.signal,
       onUsage: (checkpoint) => {
         usage = checkpoint;
-        debug.observeUsage(checkpoint);
+        metrics.observeUsage(checkpoint);
       },
     });
     usage ??= decodeDocumentUsage(archive.document_cursor_resource_usage());
-    debug.observeUsage(usage);
-    debug.checkpoint('model streamed');
+    metrics.observeUsage(usage);
+    metrics.checkpoint('model streamed');
     await pull.reset();
     transport.terminate();
 
@@ -207,9 +212,9 @@ export async function openDocxDocument(
       usage,
       options.signal,
     );
-    debug.observeUsage(session.resourceUsage);
-    debug.checkpoint('pagination ready');
-    debug.succeed({ pages: session.pageCount });
+    metrics.observeUsage(session.resourceUsage);
+    metrics.checkpoint('pagination ready');
+    metrics.succeed({ pages: session.pageCount });
     return session;
   } catch (error) {
     await pull?.reset().catch(() => undefined);
@@ -220,7 +225,7 @@ export async function openDocxDocument(
       // Preserve the open/parse/layout failure.
     }
     const normalized = parseResourceLimitError(error) ?? error;
-    debug.fail(normalized);
+    metrics.fail(normalized);
     throw normalized;
   }
 }

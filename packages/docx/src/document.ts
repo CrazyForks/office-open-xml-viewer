@@ -18,7 +18,7 @@ import {
   deserializeWorkerError,
   disposeRejectedLoad,
   normalizeLoadResourceOptions,
-  OoxmlResourceDebugSession,
+  OoxmlResourceMetricsSession,
   PULL_SESSION_PROTOCOL,
   type NormalizedOoxmlResourcePolicy,
 } from '@silurus/ooxml-core/worker';
@@ -167,11 +167,13 @@ export class DocxDocument {
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
-    const debug = new OoxmlResourceDebugSession({
-      enabled: resourceOptions.debug,
+    const metrics = new OoxmlResourceMetricsSession({
+      enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
       format: 'docx',
       mode,
       policy: resourceOptions.policy,
+      onMetrics: resourceOptions.onResourceMetrics,
+      emitToConsole: resourceOptions.debug,
     });
     try {
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
@@ -189,8 +191,8 @@ export class DocxDocument {
     // Container errors remain typed OoxmlError instances here; `instanceof`
     // would not survive the worker boundary.
     buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
-    debug.setSourceBytes(buffer.byteLength);
-    debug.checkpoint('container ready');
+    metrics.setSourceBytes(buffer.byteLength);
+    metrics.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so
     // main-mode bundles never pull in its (renderer-bearing) chunk.
     const worker =
@@ -208,10 +210,10 @@ export class DocxDocument {
         resourceOptions.policy,
         mode === 'worker' ? !!opts.useGoogleFonts : false,
         opts.workerTimeoutMs,
-        (usage) => debug.observeUsage(usage),
+        (usage) => metrics.observeUsage(usage),
       );
       if (mode === 'worker' && doc._mode === 'main') {
-        debug.setMode('main');
+        metrics.setMode('main');
         console.warn(
           "[ooxml] mode: 'worker' fell back to main-thread rendering because this document requires DOM OpenType vertical glyph selection.",
         );
@@ -271,7 +273,7 @@ export class DocxDocument {
         // the same work here so layout failures reject load() in both modes.
         retained.layoutVariants.defaultLayout;
       }
-      if (resourceOptions.debug) {
+      if (resourceOptions.debug || resourceOptions.onResourceMetrics) {
         // This final snapshot includes eager embedded-font extraction performed
         // after the parse response. Telemetry is strictly best-effort: a worker
         // failure or a silent worker may omit the newest counters, but must not
@@ -279,12 +281,12 @@ export class DocxDocument {
         await doc._resourceUsage(
           opts.workerTimeoutMs ?? DEFAULT_RESOURCE_USAGE_PROBE_TIMEOUT_MS,
         ).then(
-          (usage) => debug.observeUsage(usage),
+          (usage) => metrics.observeUsage(usage),
           () => undefined,
         );
       }
-      debug.checkpoint('model and layout ready');
-      debug.succeed({ pages: doc.pageCount });
+      metrics.checkpoint('model and layout ready');
+      metrics.succeed({ pages: doc.pageCount });
       return doc;
     } catch (error) {
       const rejectedDocument = doc;
@@ -292,7 +294,7 @@ export class DocxDocument {
       throw error;
     }
     } catch (error) {
-      debug.fail(error);
+      metrics.fail(error);
       throw error;
     }
   }

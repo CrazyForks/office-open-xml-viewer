@@ -48,6 +48,41 @@ function installLoadHarness(): void {
 }
 
 describe('DocxDocument resource diagnostics', () => {
+  it('returns machine-readable metrics without enabling console debug', async () => {
+    installLoadHarness();
+    const onResourceMetrics = vi.fn();
+    const probe = vi.spyOn(
+      DocxDocument.prototype as unknown as {
+        _resourceUsage(timeoutMs: number): Promise<OoxmlResourceUsageSnapshot>;
+      },
+      '_resourceUsage',
+    ).mockResolvedValue({
+      archiveEntryCount: 5,
+      declaredInflatedBytes: 2_000,
+      largestInflatedEntryBytes: 1_000,
+      distinctInflatedBytes: 1_500,
+      operationInflatedBytes: 1_500,
+    });
+
+    const document = await DocxDocument.load(new ArrayBuffer(123), {
+      onResourceMetrics,
+    });
+
+    expect(probe).toHaveBeenCalledWith(1_000);
+    expect(onResourceMetrics).toHaveBeenCalledOnce();
+    expect(onResourceMetrics).toHaveBeenCalledWith(expect.objectContaining({
+      schemaVersion: 1,
+      scope: 'load',
+      format: 'docx',
+      mode: 'main',
+      status: 'ok',
+      sourceBytes: 123,
+      usage: expect.objectContaining({ largestInflatedEntryBytes: 1_000 }),
+    }));
+    expect(console.log).not.toHaveBeenCalled();
+    document.destroy();
+  });
+
   it('uses workerTimeoutMs and ignores a rejected final usage probe', async () => {
     installLoadHarness();
     const probe = vi.spyOn(

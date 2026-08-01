@@ -31,3 +31,8 @@ export {
   type NodeCanvasFactory,
   type NodeImageLike,
 } from './render';
+export type {
+  OoxmlResourceMetrics,
+  OoxmlResourceMetricsCheckpoint,
+  OoxmlResourcePolicySnapshot,
+} from '@silurus/ooxml-core';

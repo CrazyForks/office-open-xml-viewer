@@ -249,7 +249,7 @@ architecture audit passes.
   and not the default.
 
 Exit: no rejected load leaves an owned worker or transfer alive; debug output is
-snapshot-tested, data-safe, and equivalent across format and execution mode.
+snapshot-tested, content-free, and equivalent across format and execution mode.
 
 ### M7 — Calibration and release-quality verification
 
@@ -344,6 +344,7 @@ export interface OoxmlResourceLimits {
 
 export interface LoadOptions {
   resourceLimits?: OoxmlResourceLimits;
+  onResourceMetrics?: (metrics: OoxmlResourceMetrics) => void;
   debug?: boolean;
 
   /** @deprecated Use resourceLimits.maxArchiveEntryBytes. */
@@ -634,14 +635,21 @@ window. A per-session limit does not claim to bound this combined process peak.
 
 ## Debug reporting
 
-`debug: true` enables measurement reporting but does not change limits or parser
-behavior. Workers send structured usage checkpoints to the main context. The
-main context retains checkpoints quietly and emits one load-complete or
-load-failed card when initial Viewer readiness settles. That card is explicitly
-a load checkpoint, not a final package-session total: lazy sheet, slide, image,
-font, or other part access may increase usage later. Bounded Node DOCX reports
+Measurement and presentation are separate. `onResourceMetrics` receives a
+versioned, machine-readable, content-free report without console output;
+`debug: true` sends the same report to the built-in console renderer. Neither
+changes limits or parser behavior, and observer failures are isolated from load
+semantics. Workers send structured usage checkpoints to the main context. The
+main context retains checkpoints quietly and, after option validation, emits
+one report when the document/workbook/presentation factory succeeds or fails,
+including failed loads for which no engine is returned. Viewer constructors use
+that same engine-load scope: the report does not wait for first canvas paint,
+because render errors are non-fatal in the existing Viewer contract and scroll
+viewers paint asynchronously. The report is therefore not a final package-session
+total: first paint or later lazy sheet, slide, image, font, or other part access
+may increase usage or surface a separate render error. Bounded Node DOCX reports
 after open/pagination; PPTX and XLSX pull sessions report when exhausted or
-closed, so their card covers the consumed session lifetime.
+closed, so their report covers the consumed session lifetime.
 
 The presentation is Ratatui-inspired: bordered blocks, compact rows, gauges,
 and semantic status colors. One pure report model renders as browser console

@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { OoxmlResourceLimitError } from '../errors/ooxml-error.js';
+import { OoxmlError, OoxmlResourceLimitError } from '../errors/ooxml-error.js';
+import { deserializeWorkerError, serializeWorkerError } from './error-wire.js';
 import {
-  OoxmlResourceDebugSession,
+  OoxmlResourceMetricsSession,
 } from './resource-debug.js';
 import { formatOoxmlResourceDebugReport } from './resource-debug-view.js';
+import { WasmTrapError } from './wasm-guard.js';
 
 const policy = {
   maxArchiveEntryBytes: 128 * 1024 * 1024,
@@ -18,17 +20,17 @@ const usage = {
   operationInflatedBytes: 6 * 1024 * 1024,
 } as const;
 
-describe('OoxmlResourceDebugSession', () => {
-  it('emits one data-safe success report with limit-setting metrics', () => {
+describe('OoxmlResourceMetricsSession', () => {
+  it('emits one content-free success report with limit-setting metrics', () => {
     const emit = vi.fn();
     const ticks = [0, 12, 30, 45];
-    const session = new OoxmlResourceDebugSession({
+    const session = new OoxmlResourceMetricsSession({
       enabled: true,
       format: 'docx',
       mode: 'worker',
       policy,
       now: () => ticks.shift() ?? 45,
-      emit,
+      onMetrics: emit,
     });
     session.setSourceBytes(4 * 1024 * 1024);
     session.checkpoint('container ready');
@@ -38,6 +40,8 @@ describe('OoxmlResourceDebugSession', () => {
 
     expect(emit).toHaveBeenCalledTimes(1);
     expect(report).toMatchObject({
+      schemaVersion: 1,
+      scope: 'load',
       format: 'docx',
       mode: 'worker',
       status: 'ok',
@@ -51,15 +55,63 @@ describe('OoxmlResourceDebugSession', () => {
     );
   });
 
-  it('reports only stable failure discriminants, never error text or part paths', () => {
+  it('keeps the application observer and console sink independent', () => {
     const emit = vi.fn();
-    const session = new OoxmlResourceDebugSession({
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const session = new OoxmlResourceMetricsSession({
       enabled: true,
       format: 'xlsx',
       mode: 'main',
       policy,
       now: () => 0,
-      emit,
+      onMetrics: emit,
+      emitToConsole: true,
+    });
+    const report = session.succeed();
+    expect(emit).toHaveBeenCalledWith(report);
+    expect(consoleLog).toHaveBeenCalledTimes(1);
+    consoleLog.mockRestore();
+  });
+
+  it('snapshots shared values before exposing them to application observers', () => {
+    const mutablePolicy = { ...policy, internal: 'must-not-leak' };
+    const mutableUsage = { ...usage, internal: 'must-not-leak' };
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const session = new OoxmlResourceMetricsSession({
+      enabled: true,
+      format: 'xlsx',
+      mode: 'main',
+      policy: mutablePolicy,
+      now: () => 0,
+      onMetrics: (report) => {
+        expect(Object.isFrozen(report.policy)).toBe(true);
+        expect(Object.isFrozen(report.usage)).toBe(true);
+        (report.usage as { archiveEntryCount: number }).archiveEntryCount = 999;
+      },
+      emitToConsole: true,
+    });
+    session.observeUsage(mutableUsage);
+    mutablePolicy.maxArchiveEntryBytes = 1;
+    (mutableUsage as { archiveEntryCount: number }).archiveEntryCount = 1;
+
+    const report = session.succeed();
+    expect(report?.policy.maxArchiveEntryBytes).toBe(policy.maxArchiveEntryBytes);
+    expect(report?.usage?.archiveEntryCount).toBe(usage.archiveEntryCount);
+    expect(report?.policy).not.toHaveProperty('internal');
+    expect(report?.usage).not.toHaveProperty('internal');
+    expect(consoleLog).toHaveBeenCalledTimes(1);
+    consoleLog.mockRestore();
+  });
+
+  it('reports only stable failure discriminants, never error text or part paths', () => {
+    const emit = vi.fn();
+    const session = new OoxmlResourceMetricsSession({
+      enabled: true,
+      format: 'xlsx',
+      mode: 'main',
+      policy,
+      now: () => 0,
+      onMetrics: emit,
     });
     const error = new OoxmlResourceLimitError('secret source and cell text', {
       stage: 'decompression',
@@ -89,16 +141,90 @@ describe('OoxmlResourceDebugSession', () => {
     expect(text).not.toContain('private.png');
   });
 
+  it('does not publish identifiers from unknown errors or invoke hostile accessors', () => {
+    const unknown = new OoxmlResourceMetricsSession({
+      enabled: true,
+      format: 'docx',
+      mode: 'main',
+      policy,
+      now: () => 0,
+      onMetrics: () => undefined,
+    });
+    expect(unknown.fail({
+      code: 'customer-account-123',
+      stage: 'private-workflow',
+    })?.error).toEqual({});
+
+    const hostile = new OoxmlResourceMetricsSession({
+      enabled: true,
+      format: 'docx',
+      mode: 'main',
+      policy,
+      now: () => 0,
+      onMetrics: () => undefined,
+    });
+    const proxy = new Proxy({}, {
+      getPrototypeOf: () => { throw new Error('hostile proxy'); },
+    });
+    expect(() => hostile.fail(proxy)).not.toThrow();
+    expect(hostile.fail(proxy)).toBeUndefined();
+  });
+
+  it('publishes only the stable code from a known typed container error', () => {
+    const session = new OoxmlResourceMetricsSession({
+      enabled: true,
+      format: 'xlsx',
+      mode: 'main',
+      policy,
+      now: () => 0,
+      onMetrics: () => undefined,
+    });
+    expect(session.fail(new OoxmlError('encrypted', 'private message'))?.error).toEqual({
+      code: 'encrypted',
+    });
+  });
+
+  it.each([
+    new WasmTrapError('private direct message'),
+    deserializeWorkerError(serializeWorkerError(new WasmTrapError('private worker message'))),
+  ])('preserves the allowlisted parser-crashed code across realms', (error) => {
+    const session = new OoxmlResourceMetricsSession({
+      enabled: true,
+      format: 'pptx',
+      mode: 'worker',
+      policy,
+      now: () => 0,
+      onMetrics: () => undefined,
+    });
+    expect(session.fail(error)?.error).toEqual({ code: 'parser-crashed' });
+  });
+
+  it('labels Node session reports distinctly from load readiness', () => {
+    const session = new OoxmlResourceMetricsSession({
+      enabled: true,
+      format: 'pptx',
+      mode: 'node',
+      scope: 'session',
+      policy,
+      now: () => 0,
+      onMetrics: () => undefined,
+    });
+    const output = formatOoxmlResourceDebugReport(session.succeed()!);
+    expect(output).toContain('OOXML SESSION  PPTX  COMPLETE');
+    expect(output).toContain('usage unavailable for this report');
+    expect(output).not.toContain('failure occurred');
+  });
+
   it('prefers a terminal violation usage snapshot over an older checkpoint', () => {
     const previous = { ...usage, operationInflatedBytes: 1 };
     const terminal = { ...usage, operationInflatedBytes: 9 };
-    const session = new OoxmlResourceDebugSession({
+    const session = new OoxmlResourceMetricsSession({
       enabled: true,
       format: 'docx',
       mode: 'worker',
       policy,
       now: () => 0,
-      emit: () => undefined,
+      onMetrics: () => undefined,
     });
     session.observeUsage(previous);
     const report = session.fail(new OoxmlResourceLimitError('limit', {
@@ -119,13 +245,13 @@ describe('OoxmlResourceDebugSession', () => {
   });
 
   it('allows effective-mode correction and isolates diagnostic emitter failures', () => {
-    const session = new OoxmlResourceDebugSession({
+    const session = new OoxmlResourceMetricsSession({
       enabled: true,
       format: 'docx',
       mode: 'worker',
       policy,
       now: () => 0,
-      emit: () => { throw new Error('console unavailable'); },
+      onMetrics: () => { throw new Error('telemetry unavailable'); },
     });
     session.setMode('main');
     const report = session.succeed();
@@ -133,16 +259,30 @@ describe('OoxmlResourceDebugSession', () => {
     expect(session.succeed()).toBeUndefined();
   });
 
+  it('does not await or leak an asynchronously rejected application observer', async () => {
+    const session = new OoxmlResourceMetricsSession({
+      enabled: true,
+      format: 'pptx',
+      mode: 'main',
+      policy,
+      now: () => 0,
+      onMetrics: (() => Promise.reject(new Error('telemetry unavailable'))) as () => void,
+    });
+
+    expect(session.succeed()?.status).toBe('ok');
+    await Promise.resolve();
+  });
+
   it('does no work or output when disabled', () => {
     const emit = vi.fn();
     const now = vi.fn(() => 0);
-    const session = new OoxmlResourceDebugSession({
+    const session = new OoxmlResourceMetricsSession({
       enabled: false,
       format: 'pptx',
       mode: 'main',
       policy,
       now,
-      emit,
+      onMetrics: emit,
     });
     session.checkpoint('ignored', usage);
     expect(session.succeed()).toBeUndefined();

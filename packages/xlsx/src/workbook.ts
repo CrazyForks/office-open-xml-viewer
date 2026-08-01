@@ -19,7 +19,7 @@ import {
   BoundedPullSession,
   disposeRejectedLoad,
   normalizeLoadResourceOptions,
-  OoxmlResourceDebugSession,
+  OoxmlResourceMetricsSession,
   normalizeResourcePolicy,
   type NormalizedOoxmlResourcePolicy,
   PULL_SESSION_PROTOCOL,
@@ -155,11 +155,13 @@ export class XlsxWorkbook {
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<XlsxWorkbook> {
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
-    const debug = new OoxmlResourceDebugSession({
-      enabled: resourceOptions.debug,
+    const metrics = new OoxmlResourceMetricsSession({
+      enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
       format: 'xlsx',
       mode,
       policy: resourceOptions.policy,
+      onMetrics: resourceOptions.onResourceMetrics,
+      emitToConsole: resourceOptions.debug,
     });
     try {
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
@@ -181,8 +183,8 @@ export class XlsxWorkbook {
       buffer = source;
     }
     buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
-    debug.setSourceBytes(buffer.byteLength);
-    debug.checkpoint('container ready');
+    metrics.setSourceBytes(buffer.byteLength);
+    metrics.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so
     // main-mode bundles never pull in its (renderer-bearing) chunk.
     const worker =
@@ -196,10 +198,10 @@ export class XlsxWorkbook {
         buffer,
         opts,
         resourceOptions.policy,
-        (usage) => debug.observeUsage(usage),
+        (usage) => metrics.observeUsage(usage),
       );
-      debug.checkpoint('workbook index ready');
-      debug.succeed({ sheets: wb.sheetCount });
+      metrics.checkpoint('workbook index ready');
+      metrics.succeed({ sheets: wb.sheetCount });
       return wb;
     } catch (error) {
       const rejectedWorkbook = wb;
@@ -207,7 +209,7 @@ export class XlsxWorkbook {
       throw error;
     }
     } catch (error) {
-      debug.fail(error);
+      metrics.fail(error);
       throw error;
     }
   }

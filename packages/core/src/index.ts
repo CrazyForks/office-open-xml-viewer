@@ -45,6 +45,11 @@ export type {
   OoxmlResourceLimit,
   OoxmlResourceLimits,
 } from './types/load-options';
+export type {
+  OoxmlResourceMetrics,
+  OoxmlResourceMetricsCheckpoint,
+  OoxmlResourcePolicySnapshot,
+} from './types/resource-metrics';
 // Typed load-time error (PD4 seed): the `load()` factories throw this with a
 // stable `code` for container-level failures detected on the main thread.
 export {

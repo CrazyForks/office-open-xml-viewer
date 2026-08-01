@@ -1,4 +1,5 @@
 import type { MathRenderer } from '../math/mathjax';
+import type { OoxmlResourceMetrics } from './resource-metrics.js';
 
 /** A positive safe-integer byte count, or `null` to disable one public limit. */
 export type OoxmlResourceLimit = number | null;
@@ -92,11 +93,26 @@ export interface LoadOptions {
    */
   resourceLimits?: OoxmlResourceLimits;
   /**
-   * Emit one data-safe resource-usage card after load succeeds or fails.
+   * Emit one content-free resource-usage card after load succeeds or fails.
    * Includes observed archive counters and configured limits, but never source
    * URLs, part names, document text, passwords, or error messages.
    */
   debug?: boolean;
+  /**
+   * Receive the same content-free, machine-readable report that powers the debug
+   * card, without enabling console output. After resource options validate, the
+   * callback runs once when the current load settles, including failed loads for
+   * which no renderer instance is returned. The callback is not awaited;
+   * synchronous exceptions and rejected promises are ignored and never change
+   * load results.
+   *
+   * A browser report covers the underlying document/workbook/presentation
+   * factory. It does not wait for a Viewer's first canvas paint; that paint and
+   * later lazy worksheet, slide, image, or media access may increase counters or
+   * surface a separate render error. Successfully opened packages include the
+   * declared package total and source byte size in the report.
+   */
+  onResourceMetrics?: (metrics: OoxmlResourceMetrics) => void;
   /**
    * Reject the parse request if the parser worker does not answer within this
    * many milliseconds. Opt-in safety net for a wedged or crashed worker that

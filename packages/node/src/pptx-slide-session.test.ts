@@ -63,6 +63,29 @@ describe('Node bounded PPTX presentation session', () => {
     }
   });
 
+  it('reports a cleanup failure exactly once when archive release rejects close', async () => {
+    const prototype = archivePrototype();
+    const originalFree = prototype.free;
+    const cleanupError = new Error('archive cleanup failed');
+    const free = vi.spyOn(prototype, 'free').mockImplementationOnce(function (this: ArchivePrototype) {
+      originalFree.call(this);
+      throw cleanupError;
+    });
+    const onResourceMetrics = vi.fn();
+    try {
+      const session = await openPptxPresentation(bytes, { onResourceMetrics });
+      await expect(session.close()).rejects.toBe(cleanupError);
+      expect(onResourceMetrics).toHaveBeenCalledOnce();
+      expect(onResourceMetrics).toHaveBeenCalledWith(expect.objectContaining({
+        format: 'pptx',
+        scope: 'session',
+        status: 'error',
+      }));
+    } finally {
+      free.mockRestore();
+    }
+  });
+
   it('is one-pass and rejects iteration after ownership has closed', async () => {
     const session = await openPptxPresentation(bytes);
     const iterator = session.slides();

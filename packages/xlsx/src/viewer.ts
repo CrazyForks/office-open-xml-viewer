@@ -851,6 +851,7 @@ export class XlsxViewer implements ZoomableViewer {
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
         resourceLimits: this.opts.resourceLimits,
         debug: this.opts.debug,
+        onResourceMetrics: this.opts.onResourceMetrics,
         workerTimeoutMs: this.opts.workerTimeoutMs,
         wasmUrl: this.opts.wasmUrl,
         math: this.opts.math,

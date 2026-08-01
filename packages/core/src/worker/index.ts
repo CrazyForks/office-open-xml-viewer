@@ -32,11 +32,14 @@ export {
   type NormalizedOoxmlResourcePolicy,
 } from './resource-policy.js';
 export {
-  OoxmlResourceDebugSession,
-  type OoxmlResourceDebugCheckpoint,
-  type OoxmlResourceDebugReport,
-  type OoxmlResourceDebugSessionOptions,
+  OoxmlResourceMetricsSession,
+  type OoxmlResourceMetricsSessionOptions,
 } from './resource-debug.js';
+export type {
+  OoxmlResourceMetrics,
+  OoxmlResourceMetricsCheckpoint,
+  OoxmlResourcePolicySnapshot,
+} from '../types/resource-metrics.js';
 export {
   emitOoxmlResourceDebugReport,
   formatOoxmlResourceDebugReport,
