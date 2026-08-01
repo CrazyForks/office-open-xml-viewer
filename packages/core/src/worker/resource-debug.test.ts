@@ -4,7 +4,10 @@ import { deserializeWorkerError, serializeWorkerError } from './error-wire.js';
 import {
   OoxmlResourceMetricsSession,
 } from './resource-debug.js';
-import { formatOoxmlResourceDebugReport } from './resource-debug-view.js';
+import {
+  emitOoxmlResourceDebugReport,
+  formatOoxmlResourceDebugReport,
+} from './resource-debug-view.js';
 import { WasmTrapError } from './wasm-guard.js';
 
 const policy = {
@@ -71,6 +74,30 @@ describe('OoxmlResourceMetricsSession', () => {
     expect(emit).toHaveBeenCalledWith(report);
     expect(consoleLog).toHaveBeenCalledTimes(1);
     consoleLog.mockRestore();
+  });
+
+  it('uses the console default background and text color in browsers', () => {
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.stubGlobal('window', {});
+    try {
+      const session = new OoxmlResourceMetricsSession({
+        enabled: true,
+        format: 'xlsx',
+        mode: 'main',
+        policy,
+        now: () => 0,
+        onMetrics: () => undefined,
+      });
+      emitOoxmlResourceDebugReport(session.succeed()!);
+      expect(consoleLog).toHaveBeenCalledOnce();
+      expect(consoleLog.mock.calls[0]).toHaveLength(1);
+      const output = consoleLog.mock.calls[0]?.[0];
+      expect(output).not.toContain('%c');
+      expect(output).not.toContain('\u001b[');
+    } finally {
+      vi.unstubAllGlobals();
+      consoleLog.mockRestore();
+    }
   });
 
   it('snapshots shared values before exposing them to application observers', () => {

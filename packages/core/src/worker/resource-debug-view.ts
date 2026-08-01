@@ -1,10 +1,7 @@
 import type { OoxmlResourceMetrics } from '../types/resource-metrics.js';
 
-/** Deterministic color-free view used by browser CSS and Node ANSI emitters. */
-export function formatOoxmlResourceDebugReport(
-  report: OoxmlResourceMetrics,
-  ansi = false,
-): string {
+/** Deterministic, color-free view suitable for any console. */
+export function formatOoxmlResourceDebugReport(report: OoxmlResourceMetrics): string {
   const width = 68;
   const subject = report.scope === 'session' ? 'SESSION' : 'LOAD';
   const status = report.status === 'ok'
@@ -70,23 +67,11 @@ export function formatOoxmlResourceDebugReport(
     lines.push(row(summary || 'unclassified error', width));
   }
   lines.push(`└${'─'.repeat(width)}┘`);
-  const text = lines.join('\n');
-  if (!ansi) return text;
-  const color = report.status === 'ok' ? '\u001b[38;5;42m' : '\u001b[38;5;196m';
-  return `${color}${text}\u001b[0m`;
+  return lines.join('\n');
 }
 
 export function emitOoxmlResourceDebugReport(report: OoxmlResourceMetrics): void {
-  const processLike = (globalThis as { process?: { stdout?: { isTTY?: boolean } } }).process;
-  if (typeof window === 'undefined') {
-    console.log(formatOoxmlResourceDebugReport(report, processLike?.stdout?.isTTY === true));
-    return;
-  }
-  const color = report.status === 'ok' ? '#22c55e' : '#ef4444';
-  console.log(
-    `%c${formatOoxmlResourceDebugReport(report)}`,
-    `color:${color};background:#0b1020;padding:8px 10px;border-radius:6px;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace`,
-  );
+  console.log(formatOoxmlResourceDebugReport(report));
 }
 
 function formatBytes(value: number): string {
