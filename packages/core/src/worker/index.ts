@@ -31,6 +31,7 @@ export {
   type NormalizedOoxmlResourcePolicy,
 } from './resource-policy.js';
 export {
+  HARD_MAX_PPTX_SLIDE_JSON_BYTES,
   HARD_MAX_XLSX_RENDERER_COORDINATE_INDEX_ENTRIES,
   HARD_MAX_XLSX_WORKBOOK_CACHED_CELLS,
   HARD_MAX_XLSX_WORKBOOK_CACHED_ROWS,
@@ -44,6 +45,7 @@ export {
   BoundedPullSession,
   DEFAULT_PULL_CANCEL_GRACE_MS,
   PULL_SESSION_PROTOCOL,
+  PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
   PullSessionHost,
   PullSessionHostCoordinator,
   type PullCancelReason,

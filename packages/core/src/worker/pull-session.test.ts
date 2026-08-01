@@ -4,6 +4,7 @@ import { WorkerBridge, type WorkerLike } from './bridge.js';
 import { serializeWorkerError } from './error-wire.js';
 import {
   BoundedPullSession,
+  PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
   PullSessionHost,
   PullSessionHostCoordinator,
   PULL_SESSION_PROTOCOL,
@@ -136,6 +137,44 @@ describe('BoundedPullSession client', () => {
     await expect(session.pull(0)).rejects.toThrow(/positive/i);
     await expect(session.pull(65)).rejects.toThrow(/maximum/i);
     expect(worker.posted).toEqual([]);
+  });
+
+  it('retries a coded indivisible unit over the real client/host transport', async () => {
+    const { worker, session } = setupClient();
+    const payload = { value: 'complete-unit' };
+    const host = new TestPullSessionHost({
+      ...identity,
+      maxByteCredit: 64,
+      driver: {
+        pull: (credit) => {
+          if (credit < 12) {
+            throw Object.assign(new RangeError('unit requires more byte credit'), {
+              code: PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
+            });
+          }
+          return { payload, byteLength: 12, done: true };
+        },
+        acknowledge: vi.fn(),
+        cancel: vi.fn(),
+      },
+    });
+    worker.onPost = (request) => {
+      void host.dispatch(request, (reply) => worker.respond(reply));
+    };
+
+    await expect(session.pull(8)).rejects.toMatchObject({
+      name: 'RangeError',
+      code: PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
+    });
+    expect(worker.posted).toHaveLength(1);
+    expect(worker.posted[0]).toMatchObject({ kind: 'pull', sequence: 0, byteCredit: 8 });
+
+    const chunk = await session.pull(16);
+    expect(chunk).toMatchObject({ sequence: 0, byteLength: 12, payload });
+    expect(worker.posted[1]).toMatchObject({ kind: 'pull', sequence: 0, byteCredit: 16 });
+    const ack = chunk.ack();
+    await ack;
+    expect(worker.posted.some((item) => item.kind === 'cancel')).toBe(false);
   });
 
   it('waits for correlated ACK acceptance before permitting the next pull', async () => {
