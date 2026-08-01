@@ -11,6 +11,7 @@
     "maxDocxBodyBlockXmlBytes": 33554432,
     "maxDocxBodyChunkJsonBytes": 67108864,
     "maxDocxBootstrapJsonBytes": 67108864,
+    "maxDocxRetainedModelJsonBytes": 134217728,
     "maxPptxSlideXmlBytes": 33554432,
     "maxPptxSlideJsonBytes": 67108864,
     "maxPptxSharedDependencyXmlBytes": 16777216,

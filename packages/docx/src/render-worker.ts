@@ -16,7 +16,12 @@ import {
   dropBitmapCacheByPath,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
-import { resourcePolicyForWasm, serializeWorkerError } from '@silurus/ooxml-core/worker';
+import {
+  PULL_SESSION_PROTOCOL,
+  resourcePolicyForWasm,
+  serializeWorkerError,
+  type PullSessionResponse,
+} from '@silurus/ooxml-core/worker';
 import type { DocxDocumentModel } from './types';
 import { renderLayoutSourceToCanvas, dropColorReplacedCache } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
@@ -24,7 +29,11 @@ import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import { loadDocxLocalFontMetrics } from './local-font-metrics';
-import type { RenderWorkerRequest, RenderWorkerResponse, DocumentMeta } from './worker-protocol';
+import type {
+  RenderWorkerResponse,
+  RenderWorkerWireRequest,
+  DocumentMeta,
+} from './worker-protocol';
 import { layoutSourceModelAdapter } from './layout-source-model-adapter.js';
 import { layoutSourceStoreOf } from './layout/runtime-state.js';
 import {
@@ -33,6 +42,13 @@ import {
 } from './render-worker-layout.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
 import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
+import { materializeDocumentPullSession } from './document-pull-client.js';
+import {
+  createLocalDocumentPullTransport,
+  DocumentPullWorker,
+  isDocumentPullCommand,
+  MaterializedDocumentCursorArchive,
+} from './document-pull-worker.js';
 
 // RB6: self-poison + auto-respawn. A trap during parse (or an in-worker image /
 // embedded-font read) recycles the instance so the next document renders on
@@ -43,11 +59,24 @@ const host = new WasmParserHost<DocxArchive>(init, {
   // wasm-bindgen singleton). `reinit` forces fresh linear memory after a trap.
   reinit,
 });
+const documentPull = new DocumentPullWorker(
+  () => host.archive,
+  (operation) => host.run(() => {
+    const archive = host.archive;
+    if (!archive) throw new Error('No docx loaded');
+    return operation(archive);
+  }),
+);
+let documentGeneration = 0;
+let fallbackPull: DocumentPullWorker | null = null;
 let doc: RetainedRenderWorkerDocumentLayout | null = null;
 let localMetricFontFaces: FontFace[] = [];
 const imageCache = new Map<string, Promise<Blob>>();
 
-const post = (msg: RenderWorkerResponse, transfer?: Transferable[]) =>
+const post = (
+  msg: RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>,
+  transfer?: Transferable[],
+) =>
   (self.postMessage as (m: unknown, t?: Transferable[]) => void)(msg, transfer);
 
 /** In-worker image-byte loader (twin of pptx's render-worker `getImage`). The
@@ -67,8 +96,25 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
   return p;
 }
 
-self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
+self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
   const req = e.data;
+  if (isDocumentPullCommand(req)) {
+    try {
+      if (!fallbackPull) throw new Error('DOCX vertical fallback session is not open');
+      await fallbackPull.dispatch(req, post);
+    } catch (error) {
+      post({
+        protocol: PULL_SESSION_PROTOCOL,
+        kind: 'error',
+        sessionId: req.sessionId,
+        operationId: req.operationId,
+        generation: req.generation,
+        requestId: req.requestId,
+        error: serializeWorkerError(error),
+      });
+    }
+    return;
+  }
   if (req.type === 'init') {
     host.setWasmUrl(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
     return;
@@ -81,6 +127,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       host.run(() => retained.assert_healthy());
     }
     if (req.type === 'parse') {
+      await documentPull.reset();
+      await fallbackPull?.reset();
+      fallbackPull = null;
       doc = null;
       if (localMetricFontFaces.length > 0) {
         unloadLocalFontMetrics(localMetricFontFaces);
@@ -101,30 +150,44 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       dropSvgImageCache(getImage);
       const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
       const bytes = new Uint8Array(req.data);
-      // Construction + `parse()` run under `host.run` so a trap in EITHER poisons
-      // + recycles the instance (and frees the archive). `setArchive` frees any
-      // prior handle first — the re-parse dispose. `parse()` throws on
-      // parse/serialize failure (Result<Vec<u8>, JsValue>); the outer try/catch
-      // converts a graceful failure into an error response. Render mode consumes
-      // the model in-worker, so decode + parse it here (one decode, no
-      // passthrough).
-      const parsedModel = host.run(() => {
+      // Construction and every later cursor call run under `host.run`. Render
+      // mode drains the same pull/ACK state machine locally, so it avoids both a
+      // monolithic Rust model JSON value and an unnecessary Worker transfer.
+      host.run(() => {
         const archive = new DocxArchive(bytes, maxEntry, maxTotal);
         host.setArchive(archive);
-        return JSON.parse(new TextDecoder().decode(archive.parse())) as DocxDocumentModel;
       });
+      documentGeneration += 1;
+      const identity = {
+        sessionId: documentGeneration,
+        operationId: documentGeneration,
+        generation: documentGeneration,
+      };
+      documentPull.open(identity);
+      let parsedModel: DocxDocumentModel;
+      try {
+        parsedModel = await materializeDocumentPullSession(
+          createLocalDocumentPullTransport(documentPull),
+          identity,
+        );
+      } finally {
+        await documentPull.reset().catch(() => undefined);
+      }
       if (documentRequiresDomVerticalGlyphLayout(parsedModel)) {
         // The normalized public model deliberately omits parser-only sidecars
-        // such as unavailable-drawing geometry. Send the untouched parser wire
-        // to the main-thread fallback so its normalization boundary can rebuild
-        // those identity-owned acquisition facts without exposing them through
-        // `DocxDocument.document`.
-        const encoded = new TextEncoder().encode(JSON.stringify(parsedModel));
-        const documentJson = encoded.buffer.slice(
-          encoded.byteOffset,
-          encoded.byteOffset + encoded.byteLength,
-        ) as ArrayBuffer;
-        post({ type: 'mainThreadVerticalFallback', id, documentJson }, [documentJson]);
+        // such as unavailable-drawing geometry. Stream the untouched parser
+        // model to the main-thread normalization boundary one body block at a
+        // time, without exposing those facts through `DocxDocument.document`.
+        const fallbackArchive = new MaterializedDocumentCursorArchive(parsedModel);
+        fallbackPull = new DocumentPullWorker(() => fallbackArchive);
+        documentGeneration += 1;
+        const fallbackIdentity = {
+          sessionId: documentGeneration,
+          operationId: documentGeneration,
+          generation: documentGeneration,
+        };
+        fallbackPull.open(fallbackIdentity);
+        post({ type: 'mainThreadVerticalFallback', id, ...fallbackIdentity });
         return;
       }
       const adapted = layoutSourceModelAdapter(parsedModel);

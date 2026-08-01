@@ -24,6 +24,11 @@ import { buildBookmarkPageMap } from './bookmark-nav.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
 import { DEFAULT_OOXML_RESOURCE_LIMITS } from '@silurus/ooxml-core/worker';
 import { layoutSourceStore } from './layout-source-model-adapter.js';
+import {
+  createLocalDocumentPullTransport,
+  DocumentPullWorker,
+  MaterializedDocumentCursorArchive,
+} from './document-pull-worker.js';
 
 function services(): LayoutServices {
   return Object.freeze({
@@ -176,11 +181,11 @@ describe('render worker canonical layout parity', () => {
   it('switches the effective mode to main when the worker returns a vertical model', async () => {
     const model = realModel();
     model.section.textDirection = 'tbRl';
-    const bytes = new TextEncoder().encode(JSON.stringify(model));
-    const documentJson = bytes.buffer.slice(
-      bytes.byteOffset,
-      bytes.byteOffset + bytes.byteLength,
-    ) as ArrayBuffer;
+    const identity = { sessionId: 1, operationId: 1, generation: 1 };
+    const fallbackArchive = new MaterializedDocumentCursorArchive(model);
+    const fallbackWorker = new DocumentPullWorker(() => fallbackArchive);
+    fallbackWorker.open(identity);
+    const fallbackTransport = createLocalDocumentPullTransport(fallbackWorker);
     const requests: RenderWorkerRequest[] = [];
     const document = Object.create(DocxDocument.prototype) as DocxDocument;
     Object.assign(document, {
@@ -190,8 +195,9 @@ describe('render worker canonical layout parity', () => {
       _bridge: {
         request: async (factory: (id: number) => RenderWorkerRequest) => {
           requests.push(factory(7));
-          return { type: 'mainThreadVerticalFallback', id: 7, documentJson };
+          return { type: 'mainThreadVerticalFallback', id: 7, ...identity };
         },
+        transport: () => fallbackTransport,
       },
     });
     attachDocumentLayoutRuntime(document, 10);
@@ -475,7 +481,8 @@ describe('render worker canonical layout parity', () => {
       meta: { pageCount: 1, comments: [], footnotes: [], endnotes: [], pageSizes: [], bookmarkPages: [] },
     } satisfies RenderWorkerResponse;
     const verticalFallback = {
-      type: 'mainThreadVerticalFallback', id: 1, documentJson: new ArrayBuffer(0),
+      type: 'mainThreadVerticalFallback', id: 1,
+      sessionId: 1, operationId: 1, generation: 1,
     } satisfies RenderWorkerResponse;
     const pageRendered = {
       type: 'pageRendered', id: 2, bitmap: {} as ImageBitmap, runs: [],
@@ -499,7 +506,9 @@ describe('render worker canonical layout parity', () => {
     expect(Object.keys(render).sort()).toEqual(['id', 'opts', 'pageIndex', 'type']);
     expect(Object.keys(collect).sort()).toEqual(['id', 'opts', 'pageIndex', 'type']);
     expect(Object.keys(parsed).sort()).toEqual(['id', 'meta', 'type']);
-    expect(Object.keys(verticalFallback).sort()).toEqual(['documentJson', 'id', 'type']);
+    expect(Object.keys(verticalFallback).sort()).toEqual([
+      'generation', 'id', 'operationId', 'sessionId', 'type',
+    ]);
     expect(Object.keys(pageRendered).sort()).toEqual(['bitmap', 'id', 'runs', 'type']);
     expect(Object.keys(runsCollected).sort()).toEqual(['id', 'runs', 'type']);
     expect(Object.keys(error).sort()).toEqual([

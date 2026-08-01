@@ -48,7 +48,7 @@ impl Zip {
         Ok(())
     }
 
-    fn operation(&mut self) -> Result<&PackageOperation, String> {
+    pub(crate) fn operation(&mut self) -> Result<&PackageOperation, String> {
         if self.operation.is_none() {
             #[cfg(test)]
             {
@@ -65,14 +65,14 @@ impl Zip {
             .expect("operation initialized above"))
     }
 
-    fn finish_operation(&mut self) -> Result<(), String> {
+    pub(crate) fn finish_operation(&mut self) -> Result<(), String> {
         let Some(mut operation) = self.operation.take() else {
             return Ok(());
         };
         operation.finish()
     }
 
-    fn cancel_operation(&mut self) {
+    pub(crate) fn cancel_operation(&mut self) {
         if let Some(mut operation) = self.operation.take() {
             let _ = operation.cancel();
         }
@@ -1136,138 +1136,260 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     )
 }
 
-/// Bounded two-pass document-body materializer. The first pass validates the
-/// complete required part and records compact story-order facts; the second
-/// pass reuses `BodyParseCursor` to produce the compatibility `Document` model
-/// one logical block at a time. The public model is unchanged, while peak XML
-/// arena size is bounded by one paragraph/table/section block.
-pub(crate) fn parse_streamed(zip: &mut Zip) -> Result<Document, String> {
-    let mut environment = load_document_parse_environment(zip);
-    let preflight = preflight_document_body(zip, &environment)?;
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(crate) enum StreamedDocumentUnit {
+    Body { body: Vec<BodyElement> },
+    Complete { document: Box<Document> },
+}
 
-    let final_section_fact = preflight
-        .final_body_block_ordinal
-        .and_then(|_| preflight.sections.len().checked_sub(1));
-    let mut resolved_sections = Vec::with_capacity(preflight.sections.len());
-    let mut body_headers = HeadersFooters::default();
-    let mut body_footers = HeadersFooters::default();
-    for (index, fact) in preflight.sections.iter().enumerate() {
-        let headers = load_header_footer_set(
-            zip,
-            &fact.refs.headers,
-            "hdr",
-            &environment.style_map,
-            &mut environment.num_map,
-            &environment.theme,
-        );
-        let footers = load_header_footer_set(
-            zip,
-            &fact.refs.footers,
-            "ftr",
-            &environment.style_map,
-            &mut environment.num_map,
-            &environment.theme,
-        );
-        if Some(index) == final_section_fact {
-            body_headers = headers;
-            body_footers = footers;
-            resolved_sections.push(None);
-        } else {
-            resolved_sections.push(Some(ResolvedSectionHf {
-                headers,
-                footers,
-                title_page: fact.title_page,
-            }));
-        }
-    }
+/// Persistent semantic cursor for the second document pass. It owns exactly
+/// one temporary projected-block arena, the compact preflight facts, and the
+/// cross-block field/section state. Completed body units can therefore cross a
+/// pull boundary without a whole `Document` or monolithic JSON value existing.
+pub(crate) struct DocxBodyCursor {
+    environment: Option<DocumentParseEnvironment>,
+    plan: DocumentBodyPlan,
+    table_sequences: Vec<Option<LogicalTableSequenceContext>>,
+    final_body_block_ordinal: Option<usize>,
+    final_section: Option<SectionProps>,
+    resolved_sections: Vec<Option<ResolvedSectionHf>>,
+    body_headers: HeadersFooters,
+    body_footers: HeadersFooters,
+    projector: DocumentBodyProjector<BufReader<PackageEntryStream>>,
+    semantic: BodyParseCursor,
+    diagnostics: Vec<ParseDiagnostic>,
+    revisions: Vec<crate::types::DocxRevision>,
+    section_cursor: usize,
+    emitted_body_len: usize,
+    pending_cover_break: bool,
+    body_finished: bool,
+    terminal_emitted: bool,
+}
 
-    let mut projector = open_document_body_projector(zip)?;
-    let mut cursor = BodyParseCursor::default();
-    let mut body = Vec::new();
-    let mut diagnostics = Vec::new();
-    let mut revisions = Vec::new();
-    let mut cover_break_positions = Vec::new();
-    let mut section_cursor = 0usize;
+impl DocxBodyCursor {
+    pub(crate) fn start(zip: &mut Zip) -> Result<Self, String> {
+        let mut environment = load_document_parse_environment(zip);
+        let preflight = preflight_document_body(zip, &environment)?;
 
-    while let Some(block) = projector.next_block()? {
-        if block.ordinal >= preflight.table_sequences.len() {
-            return Err("document body changed between bounded passes".to_string());
-        }
-        let xml = std::str::from_utf8(&block.xml)
-            .map_err(|error| format!("{DOCUMENT_PART}: projected block is not UTF-8: {error}"))?;
-        let document = parse_guarded(xml)
-            .map_err(|error| format!("{DOCUMENT_PART}: projected block: {error}"))?;
-        let root = document.root_element();
-        let is_final_body_sect_pr = preflight.final_body_block_ordinal == Some(block.ordinal)
-            && block.local_name == "sectPr";
-
-        let mut section_hf = HashMap::new();
-        for sect_pr in root.descendants().filter(|node| {
-            node.is_element()
-                && is_w_ns(node.tag_name().namespace())
-                && node.tag_name().name() == "sectPr"
-        }) {
-            let resolved = resolved_sections.get(section_cursor).ok_or_else(|| {
-                "document body section facts changed between bounded passes".to_string()
-            })?;
-            if let Some(resolved) = resolved {
-                section_hf.insert(sect_pr.id(), resolved.clone());
+        let final_section_fact = preflight
+            .final_body_block_ordinal
+            .and_then(|_| preflight.sections.len().checked_sub(1));
+        let mut resolved_sections = Vec::with_capacity(preflight.sections.len());
+        let mut body_headers = HeadersFooters::default();
+        let mut body_footers = HeadersFooters::default();
+        for (index, fact) in preflight.sections.iter().enumerate() {
+            let headers = load_header_footer_set(
+                zip,
+                &fact.refs.headers,
+                "hdr",
+                &environment.style_map,
+                &mut environment.num_map,
+                &environment.theme,
+            );
+            let footers = load_header_footer_set(
+                zip,
+                &fact.refs.footers,
+                "ftr",
+                &environment.style_map,
+                &mut environment.num_map,
+                &environment.theme,
+            );
+            if Some(index) == final_section_fact {
+                body_headers = headers;
+                body_footers = footers;
+                resolved_sections.push(None);
+            } else {
+                resolved_sections.push(Some(ResolvedSectionHf {
+                    headers,
+                    footers,
+                    title_page: fact.title_page,
+                }));
             }
-            section_cursor = section_cursor.saturating_add(1);
         }
 
-        let source_body_index = body.len();
-        body.extend(cursor.parse_block(
-            root,
-            is_final_body_sect_pr,
-            &environment.style_map,
-            &mut environment.num_map,
-            &environment.media_map,
-            &environment.chart_map,
-            &environment.rel_map,
-            &environment.theme,
-            &section_hf,
-            TablePositioningContext::Normal,
-            preflight.table_sequences[block.ordinal],
-            source_body_index,
-            Some(&mut diagnostics),
-        ));
-        revisions.extend(collect_revisions(root));
+        Ok(Self {
+            environment: Some(environment),
+            plan: preflight.plan,
+            table_sequences: preflight.table_sequences,
+            final_body_block_ordinal: preflight.final_body_block_ordinal,
+            final_section: Some(preflight.section),
+            resolved_sections,
+            body_headers,
+            body_footers,
+            projector: open_document_body_projector(zip)?,
+            semantic: BodyParseCursor::default(),
+            diagnostics: Vec::new(),
+            revisions: Vec::new(),
+            section_cursor: 0,
+            emitted_body_len: 0,
+            pending_cover_break: false,
+            body_finished: false,
+            terminal_emitted: false,
+        })
+    }
 
-        if preflight
-            .plan
-            .cover_break_after
-            .get(block.ordinal)
-            .copied()
-            .unwrap_or(false)
-        {
-            cover_break_positions.push(body.len());
-            body.push(BodyElement::PageBreak {
-                parity: None,
-                same_paragraph_as_previous: None,
-            });
+    pub(crate) fn next_unit(&mut self, zip: &mut Zip) -> Result<StreamedDocumentUnit, String> {
+        if self.terminal_emitted {
+            return Err("document body cursor is complete".to_string());
+        }
+
+        loop {
+            if self.body_finished {
+                self.terminal_emitted = true;
+                let environment = self
+                    .environment
+                    .take()
+                    .ok_or_else(|| "document body cursor environment is unavailable".to_string())?;
+                let mut section = self
+                    .final_section
+                    .take()
+                    .ok_or_else(|| "document body cursor section is unavailable".to_string())?;
+                section.even_and_odd_headers = environment.even_and_odd_headers;
+                let document = finish_document(
+                    zip,
+                    environment,
+                    section,
+                    Vec::new(),
+                    std::mem::take(&mut self.body_headers),
+                    std::mem::take(&mut self.body_footers),
+                    std::mem::take(&mut self.revisions),
+                    std::mem::take(&mut self.diagnostics),
+                )?;
+                return Ok(StreamedDocumentUnit::Complete {
+                    document: Box::new(document),
+                });
+            }
+
+            let Some(block) = self.projector.next_block()? else {
+                if self.projector.plan()? != self.plan {
+                    return Err("document body changed between bounded passes".to_string());
+                }
+                if self.section_cursor != self.resolved_sections.len() {
+                    return Err(
+                        "document body section facts changed between bounded passes".to_string()
+                    );
+                }
+                self.body_finished = true;
+                if self.pending_cover_break {
+                    self.pending_cover_break = false;
+                    self.emitted_body_len = self.emitted_body_len.saturating_add(1);
+                    return Ok(StreamedDocumentUnit::Body {
+                        body: vec![BodyElement::PageBreak {
+                            parity: None,
+                            same_paragraph_as_previous: None,
+                        }],
+                    });
+                }
+                continue;
+            };
+            if block.ordinal >= self.table_sequences.len() {
+                return Err("document body changed between bounded passes".to_string());
+            }
+            let xml = std::str::from_utf8(&block.xml).map_err(|error| {
+                format!("{DOCUMENT_PART}: projected block is not UTF-8: {error}")
+            })?;
+            let document = parse_guarded(xml)
+                .map_err(|error| format!("{DOCUMENT_PART}: projected block: {error}"))?;
+            let root = document.root_element();
+            let is_final_body_sect_pr = self.final_body_block_ordinal == Some(block.ordinal)
+                && block.local_name == "sectPr";
+
+            let mut section_hf = HashMap::new();
+            for sect_pr in root.descendants().filter(|node| {
+                node.is_element()
+                    && is_w_ns(node.tag_name().namespace())
+                    && node.tag_name().name() == "sectPr"
+            }) {
+                let resolved =
+                    self.resolved_sections
+                        .get(self.section_cursor)
+                        .ok_or_else(|| {
+                            "document body section facts changed between bounded passes".to_string()
+                        })?;
+                if let Some(resolved) = resolved {
+                    section_hf.insert(sect_pr.id(), resolved.clone());
+                }
+                self.section_cursor = self.section_cursor.saturating_add(1);
+            }
+
+            let diagnostics_start = self.diagnostics.len();
+            let environment = self
+                .environment
+                .as_mut()
+                .ok_or_else(|| "document body cursor environment is unavailable".to_string())?;
+            let mut body = self.semantic.parse_block(
+                root,
+                is_final_body_sect_pr,
+                &environment.style_map,
+                &mut environment.num_map,
+                &environment.media_map,
+                &environment.chart_map,
+                &environment.rel_map,
+                &environment.theme,
+                &section_hf,
+                TablePositioningContext::Normal,
+                self.table_sequences[block.ordinal],
+                self.emitted_body_len,
+                Some(&mut self.diagnostics),
+            );
+            self.revisions.extend(collect_revisions(root));
+
+            if self.pending_cover_break && !body.is_empty() {
+                self.pending_cover_break = false;
+                if !matches!(
+                    body.first(),
+                    Some(BodyElement::PageBreak { .. } | BodyElement::SectionBreak { .. })
+                ) {
+                    body.insert(
+                        0,
+                        BodyElement::PageBreak {
+                            parity: None,
+                            same_paragraph_as_previous: None,
+                        },
+                    );
+                    for diagnostic in &mut self.diagnostics[diagnostics_start..] {
+                        if let Some(index) = diagnostic.path.first_mut() {
+                            *index = index.saturating_add(1);
+                        }
+                    }
+                }
+            }
+
+            if self
+                .plan
+                .cover_break_after
+                .get(block.ordinal)
+                .copied()
+                .unwrap_or(false)
+                && !matches!(body.last(), Some(BodyElement::PageBreak { .. }))
+            {
+                self.pending_cover_break = true;
+            }
+            if body.is_empty() {
+                continue;
+            }
+            self.emitted_body_len = self.emitted_body_len.saturating_add(body.len());
+            return Ok(StreamedDocumentUnit::Body { body });
         }
     }
+}
 
-    if projector.plan()? != preflight.plan {
-        return Err("document body changed between bounded passes".to_string());
+/// Compatibility materializer over the canonical bounded cursor. It is allowed
+/// to retain the complete public body, but it no longer has a separate parser or
+/// whole-part XML path.
+pub(crate) fn parse_streamed(zip: &mut Zip) -> Result<Document, String> {
+    let mut cursor = DocxBodyCursor::start(zip)?;
+    let mut body = Vec::new();
+    loop {
+        match cursor.next_unit(zip)? {
+            StreamedDocumentUnit::Body { body: elements } => body.extend(elements),
+            StreamedDocumentUnit::Complete { mut document } => {
+                document.body = body;
+                return Ok(*document);
+            }
+        }
     }
-    if section_cursor != resolved_sections.len() {
-        return Err("document body section facts changed between bounded passes".to_string());
-    }
-    let body = apply_cover_page_breaks(body, cover_break_positions, Some(&mut diagnostics));
-    let mut section = preflight.section;
-    section.even_and_odd_headers = environment.even_and_odd_headers;
-    finish_document(
-        zip,
-        environment,
-        section,
-        body,
-        body_headers,
-        body_footers,
-        revisions,
-        diagnostics,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -7,6 +7,7 @@ import type {
 } from '@silurus/ooxml-core';
 import type {
   NormalizedOoxmlResourcePolicy,
+  PullSessionIdentity,
   WorkerErrorPayload,
 } from '@silurus/ooxml-core/worker';
 
@@ -1515,10 +1516,7 @@ export type WorkerRequest =
   | { type: 'toMarkdown'; id: number };
 
 export type WorkerResponse =
-  // The model crosses the worker boundary as raw UTF-8 JSON bytes (transferred,
-  // not cloned); the main thread does the single `TextDecoder.decode` +
-  // `JSON.parse` into a `DocxDocumentModel`. See `parse_docx` (Rust) for why.
-  | { type: 'parsed'; id: number; documentJson: ArrayBuffer }
+  | ({ type: 'documentSessionOpened'; id: number } & PullSessionIdentity<number>)
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'markdownRendered'; id: number; markdown: string }
   | ({

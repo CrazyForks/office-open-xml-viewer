@@ -178,8 +178,10 @@ function canonicalLayoutBody(
     if (!parts) return parts;
     return Object.fromEntries((['default', 'first', 'even'] as const).map((kind) => {
       const part = parts[kind];
-      return [kind, part === null ? null : {
-        ...part,
+      return [kind, !part ? null : {
+        ...structuredClone(Object.fromEntries(
+          Object.entries(part).filter(([key]) => key !== 'body'),
+        )),
         body: canonicalLayoutBody(part.body, {
           story, storyInstance: `${instancePrefix}:${kind}`, path: [],
         }, paragraphInputs),
@@ -194,10 +196,14 @@ function canonicalLayoutBody(
       return retained as LayoutParagraphBlock;
     }
     if (element.type === 'table') {
-      const { __tableLayout: _tableLayout, ...table } = element as typeof element & { __tableLayout?: unknown };
+      // Detach one bounded logical table at a time. This replaces the former
+      // whole-document structuredClone while preserving the store's strict
+      // non-aliasing contract with the mutable compatibility model.
+      const detached = structuredClone(element);
+      const { __tableLayout: _tableLayout, ...table } = detached as typeof detached & { __tableLayout?: unknown };
       return {
       ...table,
-      rows: element.rows.map((row, rowIndex) => {
+      rows: detached.rows.map((row, rowIndex) => {
         const { __tableRowLayout: _rowLayout, ...retainedRow } = row as typeof row & { __tableRowLayout?: unknown };
         return {
         ...retainedRow,
@@ -215,10 +221,15 @@ function canonicalLayoutBody(
       }),
     } as unknown as LayoutTableBlock;
     }
-    if (element.type !== 'sectionBreak') return element;
-    const { __sectionPlacement: _sectionPlacement, ...sectionBreak } = element as typeof element & { __sectionPlacement?: unknown };
+    if (element.type !== 'sectionBreak') return structuredClone(element);
+    const {
+      __sectionPlacement: _sectionPlacement,
+      headers: _headers,
+      footers: _footers,
+      ...sectionBreak
+    } = element as typeof element & { __sectionPlacement?: unknown };
     return {
-      ...sectionBreak,
+      ...structuredClone(sectionBreak),
       headers: canonicalParts(element.headers, 'header', `section:${elementIndex}`),
       footers: canonicalParts(element.footers, 'footer', `section:${elementIndex}`),
     } as unknown as LayoutStoryBlock;
@@ -231,7 +242,7 @@ function canonicalSection(
   const { __sectionPlacement: _sectionPlacement, ...retained } = section as typeof section & {
     __sectionPlacement?: unknown;
   };
-  return retained;
+  return structuredClone(retained);
 }
 
 function canonicalFinalParts(
@@ -242,7 +253,9 @@ function canonicalFinalParts(
   return Object.fromEntries((['default', 'first', 'even'] as const).map((kind) => {
     const part = parts[kind];
     return [kind, !part ? null : {
-      ...part,
+      ...structuredClone(Object.fromEntries(
+        Object.entries(part).filter(([key]) => key !== 'body'),
+      )),
       body: canonicalLayoutBody(part.body, { story, storyInstance: kind, path: [] }, paragraphInputs),
     }];
   })) as unknown as HeadersFooters;
@@ -284,9 +297,11 @@ export function layoutSourceModelAdapter(input: DocxDocumentModel): LayoutSource
     }));
   });
 
-  // The private graph is detached before normalization, so no body/story/note
-  // array in the store aliases the public compatibility model.
-  const privateInput = normalizeInternalDocumentModel(structuredClone(publicInput.document));
+  // Paragraph acquisition already snapshots one logical paragraph at a time;
+  // table/story canonicalization below does the same for its bounded unit. Do
+  // not clone the complete compatibility model here: that transiently doubled
+  // every body, story, and resource graph immediately before sealing.
+  const privateInput = publicInput;
   const privateDocument = privateInput.document;
   const privateProjections = privateInput.bodyModelGateway.acquisitionInputs;
   const projections: BodyAcquisitionInputProjections = Object.freeze({
@@ -355,15 +370,15 @@ export function layoutSourceModelAdapter(input: DocxDocumentModel): LayoutSource
     ),
     headers: canonicalFinalParts(privateDocument.headers, 'header', paragraphInputs),
     footers: canonicalFinalParts(privateDocument.footers, 'footer', paragraphInputs),
-    footnotes: footnotes.map((note) => ({
-      ...note,
-      content: canonicalLayoutBody(note.content, {
+    footnotes: footnotes.map(({ content, ...note }) => ({
+      ...structuredClone(note),
+      content: canonicalLayoutBody(content, {
         story: 'footnote', storyInstance: note.id, path: [],
       }, paragraphInputs),
     })),
-    endnotes: endnotes.map((note) => ({
-      ...note,
-      content: canonicalLayoutBody(note.content, {
+    endnotes: endnotes.map(({ content, ...note }) => ({
+      ...structuredClone(note),
+      content: canonicalLayoutBody(content, {
         story: 'endnote', storyInstance: note.id, path: [],
       }, paragraphInputs),
     })),

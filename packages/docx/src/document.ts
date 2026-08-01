@@ -18,6 +18,7 @@ import {
   deserializeWorkerError,
   disposeRejectedLoad,
   normalizeLoadResourceOptions,
+  PULL_SESSION_PROTOCOL,
   type NormalizedOoxmlResourcePolicy,
 } from '@silurus/ooxml-core/worker';
 import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
@@ -45,6 +46,10 @@ import type {
 } from './worker-protocol';
 import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
+import {
+  isDocumentPullResponse,
+  materializeDocumentPullSession,
+} from './document-pull-client.js';
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, and the
@@ -121,9 +126,14 @@ export class DocxDocument {
     this._mode = mode;
     attachDocumentLayoutRuntime(this, defaultCurrentDateMs);
     this._bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this._worker, {
-      correlate: (res) => res.id,
+      correlate: (res) =>
+        'protocol' in res && res.protocol === PULL_SESSION_PROTOCOL
+          ? res.requestId
+          : 'id' in res
+            ? res.id
+            : undefined,
       toError: (res) => {
-        if (res.type !== 'error') return undefined;
+        if ('protocol' in res || res.type !== 'error') return undefined;
         if (res.code === 'ooxml-resource-limit') return deserializeWorkerError(res);
         return Object.assign(new Error(res.message), {
           name: res.errorName ?? 'Error',
@@ -267,11 +277,16 @@ export class DocxDocument {
       [buffer],
       { timeoutMs },
     );
+    if ('protocol' in res) {
+      throw new Error('DOCX parse open returned a pull-protocol response');
+    }
     if (this._mode === 'worker') {
       if (res.type === 'mainThreadVerticalFallback') {
-        const parsed = JSON.parse(
-          new TextDecoder().decode(new Uint8Array(res.documentJson)),
-        ) as DocxDocumentModel;
+        const parsed = await materializeDocumentPullSession(
+          this._bridge.transport(isDocumentPullResponse),
+          res,
+          timeoutMs,
+        );
         const adapted = layoutSourceModelAdapter(parsed);
         this._source = adapted.source;
         this._document = adapted.document;
@@ -281,12 +296,12 @@ export class DocxDocument {
         this._meta = (res as Extract<RenderWorkerResponse, { type: 'parsedMeta' }>).meta;
       }
     } else {
-      // The model arrives as transferred UTF-8 JSON bytes; decode + parse once
-      // here (the only serialization on the parse-mode path).
-      const { documentJson } = res as Extract<WorkerResponse, { type: 'parsed' }>;
-      const parsed = JSON.parse(
-        new TextDecoder().decode(new Uint8Array(documentJson)),
-      ) as DocxDocumentModel;
+      const identity = res as Extract<WorkerResponse, { type: 'documentSessionOpened' }>;
+      const parsed = await materializeDocumentPullSession(
+        this._bridge.transport(isDocumentPullResponse),
+        identity,
+        timeoutMs,
+      );
       const adapted = layoutSourceModelAdapter(parsed);
       this._source = adapted.source;
       this._document = adapted.document;

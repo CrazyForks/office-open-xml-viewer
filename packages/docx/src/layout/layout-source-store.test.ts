@@ -220,6 +220,29 @@ describe('LayoutSourceStore', () => {
     expect(Object.isFrozen(adapted.source.paintResources.descriptors)).toBe(true);
   });
 
+  it('does not freeze or alias nested compatibility-model content', () => {
+    const raw = documentWithUnavailableDrawing();
+    const paragraph = raw.body[0] as DocParagraph;
+    paragraph.runs = [{
+      type: 'text', text: 'before', fontFamily: 'Arial', fontSize: 10,
+      bold: false, italic: false,
+    }] as unknown as DocParagraph['runs'];
+    const adapted = layoutSourceModelAdapter(raw);
+    const retained = adapted.source.blocks.resolve({
+      story: 'body', storyInstance: 'body', path: [0],
+    });
+    if (retained.type !== 'paragraph') throw new Error('Expected paragraph fixture');
+
+    const publicParagraph = adapted.document.body[0] as DocParagraph;
+    expect(Object.isFrozen(publicParagraph)).toBe(false);
+    expect(Object.isFrozen(publicParagraph.runs[0]!)).toBe(false);
+    (publicParagraph.runs[0] as Extract<DocParagraph['runs'][number], { type: 'text' }>).text = 'after';
+    publicParagraph.alignment = 'right';
+
+    expect(retained.alignment).not.toBe('right');
+    expect(retained.runs[0]).toMatchObject({ type: 'text', text: 'before' });
+  });
+
   it('resolves exact nested and story block sources and rejects non-root story lookup', () => {
     const paragraph = (text: string) => ({
       type: 'paragraph', alignment: 'left', indentLeft: 0, indentRight: 0,

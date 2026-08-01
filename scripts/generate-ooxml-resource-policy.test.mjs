@@ -18,6 +18,7 @@ function fixture(policy = {
     maxDocxBodyBlockXmlBytes: 320,
     maxDocxBodyChunkJsonBytes: 640,
     maxDocxBootstrapJsonBytes: 640,
+    maxDocxRetainedModelJsonBytes: 1280,
     maxPptxSlideXmlBytes: 320,
     maxPptxSlideJsonBytes: 640,
     maxPptxSharedDependencyXmlBytes: 160,
@@ -152,6 +153,7 @@ test('rejects invalid or internally inconsistent policy values', (context) => {
       maxDocxBodyBlockXmlBytes: 320,
       maxDocxBodyChunkJsonBytes: 640,
       maxDocxBootstrapJsonBytes: 640,
+      maxDocxRetainedModelJsonBytes: 1280,
       maxPptxSlideXmlBytes: 320,
       maxPptxSlideJsonBytes: 640,
       maxPptxSharedDependencyXmlBytes: 160,
@@ -217,6 +219,21 @@ for (const [name, smallerKey, largerKey] of [
     );
   });
 }
+
+test('rejects a retained DOCX projection smaller than one document unit', (context) => {
+  const root = fixture();
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const policyPath = path.join(root, 'packages/ooxml-common/resource-policy.json');
+  const policy = JSON.parse(readFileSync(policyPath, 'utf8'));
+  policy.hardCeilings.maxDocxRetainedModelJsonBytes =
+    policy.hardCeilings.maxDocxBodyChunkJsonBytes - 1;
+  writeFileSync(policyPath, `${JSON.stringify(policy, null, 2)}\n`);
+
+  assert.throws(
+    () => synchronizeResourcePolicy({ root, write: true }),
+    /maxDocxRetainedModelJsonBytes must not be smaller than a DOCX document unit/,
+  );
+});
 
 test('accepts CRLF-normalized generated files on Windows-style checkouts', (context) => {
   const root = fixture();
