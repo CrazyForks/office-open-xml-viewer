@@ -44,6 +44,7 @@ use master::*;
 #[cfg(test)]
 thread_local! {
     static LAYOUT_MASTER_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static COMMENT_AUTHORS_LOAD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Increment the D4 parse counter (no-op unless `cfg(test)`). Call immediately
@@ -52,6 +53,12 @@ thread_local! {
 fn note_layout_master_parse() {
     #[cfg(test)]
     LAYOUT_MASTER_PARSE_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+#[inline(always)]
+fn note_comment_authors_load() {
+    #[cfg(test)]
+    COMMENT_AUTHORS_LOAD_COUNT.with(|c| c.set(c.get() + 1));
 }
 
 // ===========================
@@ -655,6 +662,7 @@ fn parse_slide(
     index: usize,
     rels: &HashMap<String, String>,
     smartart_drawings: &HashMap<String, String>,
+    comment_authors: &mut Option<HashMap<String, String>>,
     zip: &mut PptxZip,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
     // Destructure the per-slide master bundle into the local names the rest of
@@ -864,7 +872,7 @@ fn parse_slide(
 
     // ── Notes slide & comments (Phase 2 surfacing only — no rendering) ────
     let notes = load_notes_slide(zip, rels);
-    let comments = load_pptx_comments(zip, rels);
+    let comments = load_pptx_comments(zip, rels, comment_authors);
 
     Ok(Slide {
         index,
@@ -945,7 +953,11 @@ fn load_notes_slide(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Option
 /// Resolve and parse the slide's `comments` relationship (legacy
 /// `<p:cmLst>` format). Modern threaded comments live in a different
 /// namespace and are not yet supported.
-fn load_pptx_comments(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Vec<PptxComment> {
+fn load_pptx_comments(
+    zip: &mut PptxZip,
+    rels: &HashMap<String, String>,
+    authors: &mut Option<HashMap<String, String>>,
+) -> Vec<PptxComment> {
     let Some(target) = rels.values().find(|t| t.contains("comments/")) else {
         return Vec::new();
     };
@@ -961,23 +973,17 @@ fn load_pptx_comments(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Vec<
         return Vec::new();
     };
 
-    // commentAuthors.xml is a top-level part — look it up directly.
-    let author_xml = read_zip_str(zip, "ppt/commentAuthors.xml").ok();
-    let mut authors: HashMap<String, String> = HashMap::new();
-    if let Some(ax) = author_xml {
-        if let Ok(adoc) = parse_guarded(&ax) {
-            for a in adoc
-                .descendants()
-                .filter(|n| n.is_element() && n.tag_name().name() == "cmAuthor")
-            {
-                let id = a.attribute("id").unwrap_or("").to_string();
-                let name = a.attribute("name").unwrap_or("").to_string();
-                if !id.is_empty() && !name.is_empty() {
-                    authors.insert(id, name);
-                }
-            }
-        }
+    // Preserve the legacy observation point: commentAuthors.xml is irrelevant
+    // until a referenced comments part has itself been read and parsed. Cache
+    // the owned id → name map after that point so later commented slides reuse
+    // it without retaining a roxmltree Document.
+    if authors.is_none() {
+        note_comment_authors_load();
+        let author_xml = read_zip_str(zip, "ppt/commentAuthors.xml").ok();
+        *authors = Some(parse_comment_authors(author_xml.as_deref()));
     }
+    let empty_authors = HashMap::new();
+    let authors = authors.as_ref().unwrap_or(&empty_authors);
 
     let mut out = Vec::new();
     for cm in doc
@@ -998,6 +1004,25 @@ fn load_pptx_comments(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Vec<
         out.push(PptxComment { author, date, text });
     }
     out
+}
+
+fn parse_comment_authors(author_xml: Option<&str>) -> HashMap<String, String> {
+    let mut authors: HashMap<String, String> = HashMap::new();
+    if let Some(ax) = author_xml {
+        if let Ok(adoc) = parse_guarded(ax) {
+            for a in adoc
+                .descendants()
+                .filter(|n| n.is_element() && n.tag_name().name() == "cmAuthor")
+            {
+                let id = a.attribute("id").unwrap_or("").to_string();
+                let name = a.attribute("name").unwrap_or("").to_string();
+                if !id.is_empty() && !name.is_empty() {
+                    authors.insert(id, name);
+                }
+            }
+        }
+    }
+    authors
 }
 
 // ===========================
@@ -1124,6 +1149,67 @@ fn extract_entry_with_limits(
 }
 
 fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::error::Error>> {
+    let mut shared = bootstrap_presentation(zip)?;
+    let mut slides = Vec::with_capacity(shared.slide_descriptors.len());
+    for index in 0..shared.slide_descriptors.len() {
+        slides.push(produce_slide_unit(index, &mut shared, zip)?);
+    }
+    shared.finish(slides)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlideDescriptor {
+    index: usize,
+    relationship_id: Option<String>,
+}
+
+struct LayoutSource {
+    xml: Option<String>,
+    rels: HashMap<String, String>,
+    dir: String,
+    master_path: Option<String>,
+}
+
+/// Owned presentation-wide bootstrap state. XML trees are intentionally not
+/// retained: shared package parts are stored as owned strings or parsed models
+/// so individual slides can be produced in any order without self-references.
+struct PresentationShared {
+    slide_width: i64,
+    slide_height: i64,
+    slide_descriptors: Vec<SlideDescriptor>,
+    pres_rels: HashMap<String, String>,
+    theme: HashMap<String, String>,
+    comment_authors: Option<HashMap<String, String>>,
+    pres_master_path: Option<String>,
+    master_cache: HashMap<String, ParsedMaster>,
+    no_master_bundle: Option<ParsedMaster>,
+    layout_cache: HashMap<String, ParsedLayout>,
+    layout_source_cache: HashMap<String, Rc<LayoutSource>>,
+}
+
+impl PresentationShared {
+    fn finish(self, slides: Vec<Slide>) -> Result<Presentation, Box<dyn std::error::Error>> {
+        let default_text_color = self.theme.get("dk1").cloned();
+        let major_font = self.theme.get("+mj-lt").cloned();
+        let minor_font = self.theme.get("+mn-lt").cloned();
+        let hlink_color = self.theme.get("hlink").cloned();
+        let fol_hlink_color = self.theme.get("folHlink").cloned();
+        Ok(Presentation {
+            slide_width: self.slide_width,
+            slide_height: self.slide_height,
+            slides,
+            default_text_color,
+            major_font,
+            minor_font,
+            hlink_color,
+            fol_hlink_color,
+        })
+    }
+}
+
+fn bootstrap_presentation(
+    zip: &mut PptxZip,
+) -> Result<PresentationShared, Box<dyn std::error::Error>> {
     // --- presentation.xml ---
     let pres_xml = read_zip_str(zip, "ppt/presentation.xml")?;
     let pres_doc = parse_guarded(&pres_xml)?;
@@ -1136,11 +1222,15 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
     // Ordered slide relationship identities. Keep one slot per `p:sldId`
     // even when the required `r:id` is malformed or missing, so partial
     // degradation cannot shift slide indices or internal-jump targets.
-    let slide_rids: Vec<Option<String>> = child(pres_root, "sldIdLst")
+    let slide_descriptors: Vec<SlideDescriptor> = child(pres_root, "sldIdLst")
         .map(|lst| {
             children_vec(lst, "sldId")
                 .into_iter()
-                .map(|n| attr_r(&n, "id"))
+                .enumerate()
+                .map(|(index, n)| SlideDescriptor {
+                    index,
+                    relationship_id: attr_r(&n, "id"),
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -1193,63 +1283,76 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
     // master), so every no-override slide on a given layout shares that theme. A
     // slide with a `<p:clrMapOvr>` builds a fresh `ParsedLayout` against its
     // override theme instead (kept out of the cache).
-    let mut layout_cache: HashMap<String, ParsedLayout> = HashMap::new();
+    let layout_cache: HashMap<String, ParsedLayout> = HashMap::new();
 
     // Raw layout sources are independently cached by part path. This prevents
     // slides sharing a layout from re-inflating its XML and relationships while
     // still letting clrMapOvr slides derive a fresh ParsedLayout from the same
     // owned source.
-    struct LayoutSource {
-        xml: Option<String>,
-        rels: HashMap<String, String>,
-        dir: String,
-        master_path: Option<String>,
-    }
-    let mut layout_source_cache: HashMap<String, Rc<LayoutSource>> = HashMap::new();
+    let layout_source_cache: HashMap<String, Rc<LayoutSource>> = HashMap::new();
+    zip.assert_healthy()?;
+    Ok(PresentationShared {
+        slide_width,
+        slide_height,
+        slide_descriptors,
+        pres_rels,
+        theme,
+        comment_authors: None,
+        pres_master_path,
+        master_cache,
+        no_master_bundle,
+        layout_cache,
+        layout_source_cache,
+    })
+}
 
-    // Per-slide inputs. One instance exists at a time: its slide XML and rels
-    // are dropped after model construction. Distinct layout sources and parsed
-    // master/layout results remain cached for sharing across later slides.
-    struct SlideRaw {
-        index: usize,
-        /// ZIP path of the slide part (e.g. `ppt/slides/slide3.xml`). Carried so
-        /// a parse failure in the build loop can name the offending part (RB7).
-        slide_path: String,
-        /// The slide XML, or `Err(detail)` when the part itself could not be
-        /// read (RB7 partial degradation) — the build loop turns that into a
-        /// placeholder slide instead of aborting the whole deck.
-        slide_xml: Result<String, String>,
-        slide_rels: HashMap<String, String>,
-        smartart_drawings: HashMap<String, String>,
-        /// ZIP path of the slide's layout (e.g. `ppt/slideLayouts/slideLayout3.xml`).
-        /// Used as the `layout_cache` key so slides sharing a layout reuse its
-        /// single-pass `ParsedLayout` (D4). `None` when the slide has no layout.
-        layout_path: Option<String>,
-        layout_source: Option<Rc<LayoutSource>>,
-    }
+/// Per-slide owned input, dropped after one model unit is produced.
+struct SlideRaw {
+    index: usize,
+    slide_path: String,
+    slide_xml: Result<String, String>,
+    slide_rels: HashMap<String, String>,
+    smartart_drawings: HashMap<String, String>,
+    layout_path: Option<String>,
+    layout_source: Option<Rc<LayoutSource>>,
+}
 
-    let mut slides = Vec::new();
-
-    for (idx, r_id) in slide_rids.iter().enumerate() {
+/// Produce exactly one slide model for an ordered presentation descriptor.
+/// All public legacy parse paths drain this function in descriptor order.
+fn produce_slide_unit(
+    index: usize,
+    shared: &mut PresentationShared,
+    zip: &mut PptxZip,
+) -> Result<Slide, Box<dyn std::error::Error>> {
+    let descriptor = shared
+        .slide_descriptors
+        .get(index)
+        .ok_or_else(|| format!("slide index {index} is out of bounds"))?
+        .clone();
+    debug_assert_eq!(descriptor.index, index);
+    let PresentationShared {
+        pres_rels,
+        theme,
+        comment_authors,
+        pres_master_path,
+        master_cache,
+        no_master_bundle,
+        layout_cache,
+        layout_source_cache,
+        ..
+    } = shared;
+    let slide = 'produce: {
+        let idx = index;
+        let r_id = &descriptor.relationship_id;
         let Some(r_id) = r_id.as_deref() else {
             let part = format!("ppt/presentation.xml#sldId[{idx}]/@r:id");
-            slides.push(broken_slide(
-                idx,
-                &part,
-                "required slide relationship id is missing",
-            ));
-            continue;
+            break 'produce broken_slide(idx, &part, "required slide relationship id is missing");
         };
         let rel_target = match pres_rels.get(r_id) {
             Some(t) => t.clone(),
             None => {
                 let part = format!("ppt/presentation.xml#sldId[{idx}]/@r:id={r_id}");
-                slides.push(broken_slide(
-                    idx,
-                    &part,
-                    "slide relationship target is missing",
-                ));
-                continue;
+                break 'produce broken_slide(idx, &part, "slide relationship target is missing");
             }
         };
         // Resolve via `resolve_path` (not `format!("ppt/{rel_target}")`) so a
@@ -1335,8 +1438,7 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
         let slide_xml = match &raw.slide_xml {
             Ok(xml) => xml.as_str(),
             Err(detail) => {
-                slides.push(broken_slide(raw.index, &raw.slide_path, detail));
-                continue;
+                break 'produce broken_slide(raw.index, &raw.slide_path, detail);
             }
         };
         // Resolve this slide's ParsedMaster: build (and cache) one for the
@@ -1346,7 +1448,7 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
         let bundle: &ParsedMaster = match master_path {
             Some(mp) if !mp.is_empty() => {
                 if !master_cache.contains_key(mp) {
-                    let b = build_master_bundle(mp, &theme, zip);
+                    let b = build_master_bundle(mp, theme, zip);
                     master_cache.insert(mp.to_owned(), b);
                 }
                 &master_cache[mp]
@@ -1537,6 +1639,7 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
             raw.index,
             &raw.slide_rels,
             &raw.smartart_drawings,
+            comment_authors,
             zip,
         ) {
             Ok(slide) => slide,
@@ -1549,24 +1652,14 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
         // untouched. `broken_slide` already set it, so re-stamping is a no-op there.
         let mut slide = slide;
         slide.part_name = Some(raw.slide_path.clone());
-        slides.push(slide);
-    }
+        break 'produce slide;
+    };
 
-    let default_text_color = theme.get("dk1").cloned();
-    let major_font = theme.get("+mj-lt").cloned();
-    let minor_font = theme.get("+mn-lt").cloned();
-    let hlink_color = theme.get("hlink").cloned();
-    let fol_hlink_color = theme.get("folHlink").cloned();
-    Ok(Presentation {
-        slide_width,
-        slide_height,
-        slides,
-        default_text_color,
-        major_font,
-        minor_font,
-        hlink_color,
-        fol_hlink_color,
-    })
+    // Package-wide resource poison always outranks the compatibility
+    // placeholder paths above. Check immediately before emitting the unit so a
+    // failed `.ok()` / `unwrap_or_default()` read can never become a Slide.
+    zip.assert_healthy()?;
+    Ok(slide)
 }
 
 #[cfg(test)]
@@ -4160,6 +4253,80 @@ mod tests {
             "per-slide D4 parse slope must be 2 (slide + layout-decorative), \
              proving master/layout parses are cached, not per-slide"
         );
+    }
+
+    #[test]
+    fn out_of_order_single_slide_producer_matches_legacy_drain() {
+        let data = build_shared_layout_deck(4);
+        let legacy = parse_presentation_from_bytes(&data).expect("legacy drain parses");
+        let mut zip = PptxZip::new(Cursor::new(data)).expect("archive opens");
+        let produced = zip
+            .run_operation("single-slide-test", |zip| {
+                let mut shared = bootstrap_presentation(zip).map_err(|e| e.to_string())?;
+                // Produce slide 3 first: no earlier slide may be required to warm
+                // the master/layout caches or establish its stable index.
+                produce_slide_unit(3, &mut shared, zip).map_err(|e| e.to_string())
+            })
+            .expect("out-of-order slide parses");
+        assert_eq!(
+            serde_json::to_value(&produced).unwrap(),
+            serde_json::to_value(&legacy.slides[3]).unwrap()
+        );
+    }
+
+    #[test]
+    fn explicit_all_slide_producer_drain_assembles_ordered_presentation() {
+        let data = build_shared_layout_deck(5);
+        let mut zip = PptxZip::new(Cursor::new(data)).expect("archive opens");
+        let produced = zip
+            .run_operation("explicit-drain-test", |zip| {
+                let mut shared = bootstrap_presentation(zip).map_err(|e| e.to_string())?;
+                let mut slides = Vec::with_capacity(shared.slide_descriptors.len());
+                for index in 0..shared.slide_descriptors.len() {
+                    slides.push(
+                        produce_slide_unit(index, &mut shared, zip).map_err(|e| e.to_string())?,
+                    );
+                }
+                shared.finish(slides).map_err(|e| e.to_string())
+            })
+            .expect("explicit drain parses");
+        assert_eq!(
+            (produced.slide_width, produced.slide_height),
+            (9_144_000, 6_858_000)
+        );
+        assert_eq!(produced.default_text_color.as_deref(), Some("000000"));
+        assert_eq!(produced.major_font.as_deref(), Some("Arial"));
+        assert_eq!(produced.minor_font.as_deref(), Some("Arial"));
+        assert_eq!(produced.slides.len(), 5);
+        for (index, slide) in produced.slides.iter().enumerate() {
+            assert_eq!(slide.index, index);
+            assert_eq!(slide.slide_number, index + 1);
+            assert_eq!(
+                slide.part_name.as_deref(),
+                Some(format!("ppt/slides/slide{index}.xml").as_str())
+            );
+            assert!(slide.parse_error.is_none());
+        }
+    }
+
+    #[test]
+    fn out_of_order_production_reuses_shared_master_and_layout_sources() {
+        let data = build_shared_layout_deck(4);
+        let mut zip = PptxZip::new(Cursor::new(data)).expect("archive opens");
+        LAYOUT_MASTER_PARSE_COUNT.with(|c| c.set(0));
+        zip.run_operation("cache-test", |zip| {
+            let mut shared = bootstrap_presentation(zip).map_err(|e| e.to_string())?;
+            for index in [3, 0, 2, 1] {
+                produce_slide_unit(index, &mut shared, zip).map_err(|e| e.to_string())?;
+            }
+            assert_eq!(shared.master_cache.len(), 1);
+            assert_eq!(shared.layout_source_cache.len(), 1);
+            assert_eq!(shared.layout_cache.len(), 1);
+            Ok(())
+        })
+        .expect("out-of-order production succeeds");
+        let count = LAYOUT_MASTER_PARSE_COUNT.with(|c| c.get());
+        assert_eq!(count, 2 + 2 * 4, "shared master/layout parse count");
     }
 
     /// PowerPoint stores equations as `a14:m` inside `mc:AlternateContent`
@@ -7426,6 +7593,59 @@ mod tests {
         output
     }
 
+    fn build_comment_deck(
+        referenced: [bool; 2],
+        comment_xml: [Option<&str>; 2],
+        author_xml: &str,
+    ) -> Vec<u8> {
+        use std::io::{Read, Write};
+        let mut source = zip::ZipArchive::new(Cursor::new(build_three_slide_deck(9, "<unused/>")))
+            .expect("base deck opens");
+        let mut output = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut output));
+            let options = zip::write::SimpleFileOptions::default();
+            for index in 0..source.len() {
+                let mut entry = source.by_index(index).unwrap();
+                let name = entry.name().to_owned();
+                let mut body = Vec::new();
+                entry.read_to_end(&mut body).unwrap();
+                for (slide, is_referenced) in referenced.iter().copied().enumerate() {
+                    if is_referenced
+                        && name == format!("ppt/slides/_rels/slide{}.xml.rels", slide + 1)
+                    {
+                        let xml = String::from_utf8(body).unwrap();
+                        body = xml
+                            .replace(
+                                "</Relationships>",
+                                &format!(
+                                    r#"<Relationship Id="rIdComment" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment{}.xml"/></Relationships>"#,
+                                    slide + 1
+                                ),
+                            )
+                            .into_bytes();
+                    }
+                }
+                writer.start_file(name, options).unwrap();
+                writer.write_all(&body).unwrap();
+            }
+            for (slide, xml) in comment_xml.into_iter().enumerate() {
+                if let Some(xml) = xml {
+                    writer
+                        .start_file(format!("ppt/comments/comment{}.xml", slide + 1), options)
+                        .unwrap();
+                    writer.write_all(xml.as_bytes()).unwrap();
+                }
+            }
+            writer
+                .start_file("ppt/commentAuthors.xml", options)
+                .unwrap();
+            writer.write_all(author_xml.as_bytes()).unwrap();
+            writer.finish().unwrap();
+        }
+        output
+    }
+
     fn build_deck_missing_second_slide_relationship() -> Vec<u8> {
         rewrite_deck_xml(
             build_three_slide_deck(9, "<unused/>"),
@@ -7477,6 +7697,119 @@ mod tests {
             error.starts_with("ppt/presentation.xml#sldId[1]/@r:id:"),
             "stable missing-attribute tag: {error}"
         );
+    }
+
+    #[test]
+    fn out_of_order_producer_keeps_malformed_descriptor_index_stable() {
+        let data = rewrite_deck_xml(
+            build_three_slide_deck(9, "<unused/>"),
+            "ppt/presentation.xml",
+            |xml| {
+                xml.replace(
+                    r#"<p:sldId id="257" r:id="rId2"/>"#,
+                    r#"<p:sldId id="257"/>"#,
+                )
+            },
+        );
+        let mut zip = PptxZip::new(Cursor::new(data)).expect("archive opens");
+        zip.run_operation("descriptor-stability-test", |zip| {
+            let mut shared = bootstrap_presentation(zip).map_err(|e| e.to_string())?;
+            let third = produce_slide_unit(2, &mut shared, zip).map_err(|e| e.to_string())?;
+            let broken = produce_slide_unit(1, &mut shared, zip).map_err(|e| e.to_string())?;
+            let first = produce_slide_unit(0, &mut shared, zip).map_err(|e| e.to_string())?;
+            assert_eq!((first.index, broken.index, third.index), (0, 1, 2));
+            assert_eq!(broken.slide_number, 2);
+            assert!(broken
+                .parse_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("ppt/presentation.xml#sldId[1]/@r:id:")));
+            Ok(())
+        })
+        .expect("malformed descriptor degrades in place");
+    }
+
+    fn valid_comment_xml(text: &str) -> String {
+        format!(
+            r#"<p:cmLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cm authorId="0" dt="2026-01-01T00:00:00Z"><p:pos x="0" y="0"/><p:text>{text}</p:text></p:cm></p:cmLst>"#
+        )
+    }
+
+    fn oversized_comment_authors_xml() -> String {
+        format!(
+            r#"<p:cmAuthorLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" padding="{}"><p:cmAuthor id="0" name="Ada"/></p:cmAuthorLst>"#,
+            "x".repeat(4096)
+        )
+    }
+
+    #[test]
+    fn unreferenced_oversized_comment_authors_is_not_observed_or_poisoned() {
+        const LIMIT: u64 = 2048;
+        let authors = oversized_comment_authors_xml();
+        let mut data = build_comment_deck([false, false], [None, None], &authors);
+        forge_declared_size(&mut data, "ppt/commentAuthors.xml", 1);
+        COMMENT_AUTHORS_LOAD_COUNT.with(|c| c.set(0));
+        let presentation = parse_presentation_from_bytes_with_limits(
+            &data,
+            Some(LIMIT),
+            Some(128 * 1024),
+            "parse",
+        )
+        .expect("an unreferenced author part must remain unobserved");
+        assert_eq!(presentation.slides.len(), 3);
+        assert!(presentation
+            .slides
+            .iter()
+            .all(|slide| slide.comments.is_empty()));
+        assert_eq!(COMMENT_AUTHORS_LOAD_COUNT.with(|c| c.get()), 0);
+    }
+
+    #[test]
+    fn unreadable_comments_do_not_observe_or_poison_comment_authors() {
+        const LIMIT: u64 = 2048;
+        let authors = oversized_comment_authors_xml();
+        for (label, comments) in [("missing", None), ("malformed", Some("<p:cmLst"))] {
+            let mut data = build_comment_deck([true, false], [comments, None], &authors);
+            forge_declared_size(&mut data, "ppt/commentAuthors.xml", 1);
+            COMMENT_AUTHORS_LOAD_COUNT.with(|c| c.set(0));
+            let presentation = parse_presentation_from_bytes_with_limits(
+                &data,
+                Some(LIMIT),
+                Some(128 * 1024),
+                "parse",
+            )
+            .unwrap_or_else(|error| panic!("{label} comments must short-circuit authors: {error}"));
+            assert!(presentation.slides[0].comments.is_empty(), "{label}");
+            assert_eq!(
+                COMMENT_AUTHORS_LOAD_COUNT.with(|c| c.get()),
+                0,
+                "{label} comments must not load authors"
+            );
+        }
+    }
+
+    #[test]
+    fn two_commented_slides_share_one_owned_comment_author_parse() {
+        let first = valid_comment_xml("first");
+        let second = valid_comment_xml("second");
+        let authors = r#"<p:cmAuthorLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cmAuthor id="0" name="Ada"/></p:cmAuthorLst>"#;
+        let data = build_comment_deck(
+            [true, true],
+            [Some(first.as_str()), Some(second.as_str())],
+            authors,
+        );
+        COMMENT_AUTHORS_LOAD_COUNT.with(|c| c.set(0));
+        let presentation = parse_presentation_from_bytes(&data).expect("commented deck parses");
+        assert_eq!(
+            presentation.slides[0].comments[0].author.as_deref(),
+            Some("Ada")
+        );
+        assert_eq!(
+            presentation.slides[1].comments[0].author.as_deref(),
+            Some("Ada")
+        );
+        assert_eq!(presentation.slides[0].comments[0].text, "first");
+        assert_eq!(presentation.slides[1].comments[0].text, "second");
+        assert_eq!(COMMENT_AUTHORS_LOAD_COUNT.with(|c| c.get()), 1);
     }
 
     /// #774 MAJOR: a truncated / corrupt ZIP CONTAINER — the most common way a
@@ -7652,9 +7985,10 @@ mod tests {
             .expect("forged declaration passes package preflight");
         let error = zip
             .run_operation("parse", |zip| {
-                parse_presentation(zip).map_err(|e| e.to_string())
+                let mut shared = bootstrap_presentation(zip).map_err(|e| e.to_string())?;
+                produce_slide_unit(0, &mut shared, zip).map_err(|e| e.to_string())
             })
-            .expect_err("slide-level degradation must not hide a package resource limit");
+            .expect_err("single-slide placeholder degradation must not hide package poison");
         let details: serde_json::Value = serde_json::from_str(
             error
                 .strip_prefix("OOXML_RESOURCE_LIMIT:")
