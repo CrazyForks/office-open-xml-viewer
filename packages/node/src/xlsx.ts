@@ -217,6 +217,7 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
 
   private readonly pull: WorksheetPullWorker;
   private readonly transport: InProcessPullTransport<PullSessionResponse<ArrayBuffer, number>>;
+  private workbook: ParsedWorkbook | null;
   private nextOperationId = 1;
   private active: ActiveWorksheetOperation | undefined;
   private closed = false;
@@ -228,11 +229,12 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
 
   constructor(
     private readonly archive: XlsxArchiveHandle,
-    private workbook: ParsedWorkbook | null,
+    workbook: ParsedWorkbook,
     private readonly metrics: OoxmlResourceMetricsSession,
     usage: OoxmlResourceUsageSnapshot | undefined,
     private readonly signal?: AbortSignal,
   ) {
+    this.workbook = workbook;
     this.sheetNames = Object.freeze(workbook.workbook.sheets.map((sheet) => sheet.name));
     this.sheetCount = this.sheetNames.length;
     this.lastUsage = usage;

@@ -3,11 +3,11 @@
  *
  * The three format parsers (pptx / docx / xlsx) are compiled with
  * `panic = "abort"` (see the workspace `Cargo.toml`): a Rust panic, an
- * `unreachable`, an out-of-memory `memory.grow`, or a stack overflow does not
- * unwind — it *traps*. A WASM trap leaves the module instance's linear memory in
- * an indeterminate state, so **every subsequent exported call on that same
- * instance is unsafe** (it may trap again, or silently return garbage from a
- * half-mutated heap).
+ * `unreachable`, an allocation abort, or a stack overflow can terminate an
+ * export through a WebAssembly trap instead of returning a typed `Result`.
+ * Once that happens the host cannot prove which parser invariants were committed
+ * before the abort, so **every subsequent exported call on that same instance is
+ * unsafe** even though the WebAssembly engine still owns the linear memory.
  *
  * Each format package runs its parser in one long-lived worker that reuses a
  * single WASM instance across many `parse` / `extractImage` / … calls. Without
@@ -21,10 +21,13 @@
  *   - A **graceful error** — the Rust code returned `Result::Err`, surfaced by
  *     wasm-bindgen as a thrown JS string/Error. The instance is *healthy*; the
  *     file was simply unparseable. Pass it through unchanged, keep the instance.
- *   - A **trap** — a `WebAssembly.RuntimeError` (panic / unreachable / stack
- *     overflow) or a `RangeError` (a failed `memory.grow`). The instance is
- *     *poisoned*. Mark it dead, drop the archive handle, and re-init a fresh
- *     module on the next call so the following file parses on clean memory.
+ *   - A **trap-shaped failure** — normally a `WebAssembly.RuntimeError`, with
+ *     implementation-dependent failures sometimes surfaced as another native
+ *     error such as `RangeError`. The instance is *poisoned*. Mark it dead, drop
+ *     the archive handle, and re-init a fresh module on the next call so the
+ *     following file parses on clean memory. This classification is about safe
+ *     recovery; it deliberately does not claim to recover the original Rust
+ *     cause from the JavaScript exception.
  *
  * The recovery is intentionally lazy: {@link WasmParserHost.poison} only flags
  * the instance, and the fresh `init()` runs inside the next {@link
@@ -64,23 +67,27 @@ export class WasmTrapError extends Error {
  * Whether `err` indicates the WASM instance is *poisoned* (its linear memory is
  * no longer trustworthy), as opposed to a graceful parser error.
  *
- * A `panic = "abort"` build turns a Rust panic / `unreachable` / stack overflow
- * into a `WebAssembly.RuntimeError`, and an out-of-memory `memory.grow` into a
- * `RangeError` ("WebAssembly.Memory.grow" / "out of memory" / "Out of memory").
- * Both leave the instance unusable. A `Result::Err(JsValue::from_str(...))`
- * arrives as a thrown *string* or a plain `Error`, which this returns `false`
- * for — the instance survives that.
+ * A `panic = "abort"` build can collapse a Rust panic, allocation abort, explicit
+ * `unreachable`, or stack exhaustion onto the same generic trap surface. The
+ * WebAssembly JavaScript embedding does not provide a portable cause code for
+ * reconstructing which Rust path produced that trap. A
+ * `Result::Err(JsValue::from_str(...))` arrives as a thrown *string* or a plain
+ * `Error`, which this returns `false` for — the instance survives that.
  *
  * The discriminator is the error's TYPE / NAME, never its message substring
- * alone. A genuine trap always carries a trap-shaped constructor: a
+ * alone. Recognised trap-shaped failures include a
  * `WebAssembly.RuntimeError` / `CompileError` / `LinkError` (matched by
  * `instanceof` and by `name`, since the `instanceof` check does not survive a
- * structured-clone across the worker boundary), or a `RangeError` for a failed
- * allocation. A plain `Error` (name `'Error'`) is a GRACEFUL parser error even
- * when its message mentions "out of memory" — e.g. a wrapper that surfaces a
- * lenient degradation as `new Error('...out of memory...')`. Classifying that as
- * a trap would needlessly recycle a healthy instance and drop its open archive,
- * so message-substring sniffing is deliberately NOT done here.
+ * structured-clone across the worker boundary), a native `RangeError`, or the
+ * implementation-defined `InternalError` / `OOMError` names observed at the
+ * WebAssembly boundary. A plain `Error` (name `'Error'`) is a GRACEFUL parser
+ * error even when its message mentions "out of memory" — e.g. a wrapper that
+ * surfaces a lenient degradation as `new Error('...out of memory...')`.
+ * Classifying that as a trap would needlessly recycle a healthy instance and
+ * drop its open archive, so message-substring sniffing is deliberately NOT done
+ * here. Consequently an implementation-defined failure surfaced as an
+ * indistinguishable plain `Error`, or as process termination, cannot be
+ * recognised or recovered by this guard.
  */
 export function isWasmTrap(err: unknown): boolean {
   // `WebAssembly.RuntimeError` is the canonical trap. Guard the reference in
@@ -88,17 +95,24 @@ export function isWasmTrap(err: unknown): boolean {
   const RuntimeError = (globalThis as { WebAssembly?: { RuntimeError?: unknown } }).WebAssembly
     ?.RuntimeError as (new () => Error) | undefined;
   if (RuntimeError && err instanceof RuntimeError) return true;
-  // A failed allocation (`memory.grow` past the maximum) surfaces as a
-  // RangeError rather than a RuntimeError; the instance is equally unusable.
+  // Some engines/wrappers surface a failed WebAssembly boundary as a RangeError.
+  // Treat it as poisoned conservatively, but do not infer OOM from the class:
+  // the JavaScript embedding does not define a portable original-cause code.
   if (err instanceof RangeError) return true;
   // A trap that crossed the worker boundary (structured-clone strips the
-  // prototype) or was re-thrown as a generic Error still carries the trap-shaped
-  // NAME. Match those, but require the name — never a message substring on a
-  // plain `Error`, which would over-match a graceful "out of memory" parser
-  // error and poison a healthy instance.
+  // prototype) or was re-thrown as a generic Error may retain a trap-shaped
+  // NAME. Match the standard names plus implementation-defined stack/OOM names,
+  // but never a message substring on a plain `Error`, which would over-match a
+  // graceful parser error and poison a healthy instance.
   if (err instanceof Error) {
     const name = err.name;
-    if (name === 'RuntimeError' || name === 'CompileError' || name === 'LinkError') return true;
+    if (
+      name === 'RuntimeError'
+      || name === 'CompileError'
+      || name === 'LinkError'
+      || name === 'InternalError'
+      || name === 'OOMError'
+    ) return true;
   }
   return false;
 }

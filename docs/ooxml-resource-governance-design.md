@@ -34,6 +34,16 @@ have one owner. The PR is therefore complementary prior art rather than a patch
 to stack or copy; its currently conflicting format-local wiring is superseded
 by the shared control plane here.
 
+Two proposed public-policy details are intentionally not copied from #1119.
+Archive entry count is protected by a non-configurable hard ceiling rather than
+another user-tuned option, because it is an implementation-complexity guard for
+which ordinary applications have no stable calibration signal. Aggregate
+declared inflated bytes are recorded for diagnostics but do not reject a package:
+central-directory declarations are untrusted, and charging entries that a lazy
+viewer never reads would make the public policy depend on unused media. The
+public aggregate limit therefore uses actual bytes observed across distinct
+visited entries; actual decompressor output remains authoritative.
+
 PR #1124 closes a separate ownership leak: XLSX and PPTX workers survived some
 rejected loads. This branch adopts that behavior through the shared
 `disposeRejectedLoad` helper and applies the same idempotent cleanup contract to
@@ -154,12 +164,13 @@ it bounded.
 - Apply non-configurable retained-model and renderer-index ceilings to that
   compatibility path. Raising archive limits must not expose the Window to an
   unbounded cell/object/index amplification path.
-- Add a Node worksheet-session iterator that yields the same bounded row batches;
-  keep `parseXlsx`, `parseXlsxSheet`, and `parseXlsxAllSheets` as synchronous,
-  materializing compatibility helpers. The browser compatibility adapter owns
-  provisional-row rollback. Lower-level Node iterator consumers see those
-  batches directly and must discard them if the terminal worksheet is a
-  `parseError` placeholder.
+- Add an explicitly owned Node workbook session: `openXlsxWorkbook()` retains
+  the validated index and archive, `worksheetRows()` yields the same bounded row
+  batches, and `close()` releases the session. Keep `parseXlsx`,
+  `parseXlsxSheet`, and `parseXlsxAllSheets` as synchronous, materializing
+  compatibility helpers. The browser compatibility adapter owns provisional-row
+  rollback. Lower-level Node session consumers see those batches directly and
+  must discard them if the terminal worksheet is a `parseError` placeholder.
 
 Exit: synthetic large worksheets cross multiple pulls, render identically, stop
 at deterministic limits, and show a measured reduction in transient peak usage.
@@ -243,8 +254,10 @@ architecture audit passes.
 
 - Normalize options before worker creation, terminate monolithic timed-out work,
   and converge all failure paths on idempotent disposal.
-- Implement `debug: true` checkpoints and one polished final console card using
-  a pure shared presentation model with browser CSS, Node ANSI, and plain output.
+- Implement `debug: true` checkpoints and one polished, color-free final console
+  card using a pure shared presentation model and a shared TUI console emitter.
+  Browser DevTools receive typography-only `%c` styling to preserve the Unicode
+  grid; Node and Worker consoles receive one plain argument.
 - Document Worker mode as stronger lifecycle containment, not a memory sandbox
   and not the default.
 
@@ -396,9 +409,10 @@ UTF-8 string content, and 64 MiB of exact monolithic worksheet JSON. A workbook
 compatibility cache initially admits 500,000 cells and 200,000 rows across
 successfully committed unique sheets. These are logical implementation quotas,
 not heap estimates, and apply only to paths that retain complete worksheets;
-the additive Node row iterator may process more total rows while remaining
-subject to package, per-unit, and in-flight limits. Crossings are typed,
-non-configurable resource errors and are never converted to a degraded sheet.
+the Node workbook session's `worksheetRows()` stream may process more total rows
+while remaining subject to package, per-unit, and in-flight limits. Crossings
+are typed, non-configurable resource errors and are never converted to a
+degraded sheet.
 
 Renderer-derived indexes have an independent initial 250,000-entry ceiling.
 Merge and styled-table ranges can expand into many coordinates even when the
@@ -541,15 +555,13 @@ before dependent sheet rows. `sheetData` is consumed as complete row batches
 while preserving ECMA-376 Part 3 Markup Compatibility processing. The renderer
 or compatibility facade acknowledges each batch before another is produced.
 
-The current bounded row-arena implementation is useful but incomplete: it still
-starts from a fully inflated worksheet string and eventually constructs and
-serializes the complete worksheet model. The target pipeline removes those
-avoidable simultaneous representations. A selected sheet's retained cell model
-may still grow with the number of cells.
-
-Worker Viewer paths can retain bounded row tiles and compact sheet metadata.
-The lower-level `getWorksheet()` compatibility adapter may drain those streams
-and assemble a complete `Worksheet`, with correspondingly unbounded model size.
+The production worksheet projector reads the owned ZIP entry incrementally and
+emits provisional complete-row batches without retaining a full worksheet string
+or XML tree. The lower-level `getWorksheet()` compatibility adapter drains that
+stream into a complete `Worksheet`; its retained rows, cells, string content,
+serialized model, cache, and renderer indexes therefore have separate hard
+ceilings. The explicitly owned Node workbook session can instead consume row
+batches without retaining the complete worksheet model.
 
 ### PPTX
 
@@ -592,7 +604,7 @@ The following remain format-owned:
 - semantic chunk types and batch boundaries;
 - dependency graphs and readiness barriers;
 - retained model/layout stores and eviction policy;
-- DOCX pages, PPTX slides, and XLSX row tiles.
+- DOCX pages, PPTX slides, and XLSX row batches/materialized worksheet caches.
 
 Sharing the control plane must not create a second generic OOXML semantic model.
 
@@ -603,8 +615,10 @@ all formats and modes. Its details use one stable record with extensible
 `resource` and `metric` string axes, rather than a closed public union that must
 change whenever an internal hard quota is added. Known literals retain editor
 completion, while newer worker literals remain decodable by an older host. An
-archive-level entry-count or declared-total violation therefore does not need a
-dummy part name. Shared fields include:
+archive-level entry-count violation therefore does not need a dummy part name.
+The declared package total remains diagnostic rather than a rejection metric
+because declarations are untrusted and lazily unvisited entries must not consume
+an actual-byte policy. Shared fields include:
 
 - stable code and stage;
 - resource/metric identifier;
@@ -618,11 +632,38 @@ Worker serialization reconstructs the real error subclass on the main side.
 Messages and debug reports never include document text, passwords, URLs, sheet
 names, or local filesystem paths.
 
-A residual `WebAssembly.RuntimeError` or allocation-shaped trap remains
+A residual failure that reaches a recognised trap-shaped boundary remains
 `parser-crashed` unless the governor had already proved a specific limit
-violation. The implementation must not promise a reliable `parser-oom`
-classification from `unreachable`, because Rust panic, stack overflow, and
-allocation failure can converge on the same trap surface.
+violation. In the current `panic = "abort"` build, Rust panic, allocation failure,
+explicit `unreachable`, and stack overflow can terminate an export without
+returning a typed `Result`; the WebAssembly JavaScript boundary may expose those
+causes through the same `WebAssembly.RuntimeError` or another
+implementation-dependent native error. The final trap reports that execution
+stopped, not which Rust path caused it, so the discarded cause cannot be
+reconstructed reliably afterward.
+
+A panic hook may emit a debugging message before some Rust panics, but it is a
+console side channel rather than a structured return value. Allocation aborts
+need not pass through it, logging can itself fail while memory is exhausted, and
+message/stack formats vary by toolchain and runtime. Error-class or message
+sniffing must therefore not publish `parser-oom`: misclassifying a parser defect
+as a large-file condition would hide actionable bugs. The stable contract is:
+
+- a governor-observed crossing returns `OoxmlResourceLimitError` before the
+  dangerous operation proceeds;
+- a trap whose cause was not preserved remains `parser-crashed` and poisons the
+  affected WASM instance when it reaches a recognised trap-shaped boundary;
+- a future reliable `parser-oom` would require pre-trap structured cause
+  retention across allocation paths, not post-trap inference.
+
+The [WebAssembly JavaScript Interface error mappings](https://www.w3.org/TR/wasm-js-api-2/#error-condition-mappings-to-javascript)
+permit stack exhaustion or OOM to surface through implementation-defined errors,
+including an indistinguishable plain `Error`, or to terminate the process. The
+guard recognises standard trap shapes plus observed `InternalError` and
+`OOMError` names, but it cannot safely classify a plain `Error` without confusing
+it with a graceful parser `Result::Err`. Conversion to `parser-crashed`, instance
+poisoning, and recovery are therefore guaranteed only for recognised catchable
+trap-shaped failures, not for every engine-level failure.
 
 Canceling or timing out a legacy monolithic synchronous WASM call cannot stop it
 cooperatively: the worker cannot process another message until the call returns.
@@ -647,15 +688,21 @@ that same engine-load scope: the report does not wait for first canvas paint,
 because render errors are non-fatal in the existing Viewer contract and scroll
 viewers paint asynchronously. The report is therefore not a final package-session
 total: first paint or later lazy sheet, slide, image, font, or other part access
-may increase usage or surface a separate render error. Bounded Node DOCX reports
-after open/pagination; PPTX and XLSX pull sessions report when exhausted or
-closed, so their report covers the consumed session lifetime.
+may increase usage or surface a separate render error. Bounded Node DOCX and
+PPTX sessions report successful terminal metrics when their one-pass stream is
+exhausted or the session is explicitly closed. XLSX can consume multiple
+worksheets sequentially, so it reports success only when the reusable workbook
+session is explicitly closed. Open-time and session-operation failures report
+immediately.
 
-The presentation is Ratatui-inspired: bordered blocks, compact rows, gauges,
-and semantic status colors. One pure report model renders as browser console
-CSS, Node ANSI when attached to a TTY, or deterministic plain Unicode. The
-color-free representation is snapshot-tested. Console rendering and resource
-measurement remain separate responsibilities. Reports include the largest
+The presentation is Ratatui-inspired: bordered blocks, compact rows, and gauges.
+One pure report model renders deterministic Unicode. In browser DevTools, a
+shared emitter applies only fixed-width typography, size, line height, disabled
+ligatures, zero letter spacing, and preserved whitespace through `%c`; it never
+sets foreground or background colors. Node and Worker consoles receive one plain
+argument without CSS or ANSI escapes. The complete representation is
+snapshot-tested. Console rendering and resource measurement remain separate
+responsibilities. Reports include the largest
 actual inflated entry specifically so `maxArchiveEntryBytes` can be calibrated,
 alongside distinct session bytes for `maxTotalInflatedBytes`.
 
@@ -692,6 +739,13 @@ terminal, debug telemetry is bounded and non-fatal, and DOCX pull lifecycle
 logic has one state machine. The streamed DOCX path retains the public model and
 the immutable layout source but no third reachable document-scale paragraph
 snapshot graph.
+
+The final pass also aligned the three explicit Node session lifecycles, separated
+#1119's adopted invariants from its intentionally unexposed tuning knobs, and
+narrowed WASM recovery claims to recognised catchable trap-shaped failures.
+Observed implementation-defined `InternalError` and `OOMError` names poison the
+guarded instance without being mislabeled `parser-oom`; indistinguishable plain
+errors and process termination remain outside the recovery guarantee.
 
 Accepted non-blocking risks are explicit: the cloning and destructive
 canonicalizers use different ownership strategies and are kept semantically

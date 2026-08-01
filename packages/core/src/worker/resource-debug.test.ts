@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { OoxmlError, OoxmlResourceLimitError } from '../errors/ooxml-error.js';
+import { BROWSER_CONSOLE_TUI_STYLE } from '../internal/console-tui.js';
 import { deserializeWorkerError, serializeWorkerError } from './error-wire.js';
 import {
   OoxmlResourceMetricsSession,
@@ -76,9 +77,10 @@ describe('OoxmlResourceMetricsSession', () => {
     consoleLog.mockRestore();
   });
 
-  it('uses the console default background and text color in browsers', () => {
+  it('uses typography-only CSS to preserve the TUI grid in browser consoles', () => {
     const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.stubGlobal('window', {});
+    vi.stubGlobal('process', undefined);
     try {
       const session = new OoxmlResourceMetricsSession({
         enabled: true,
@@ -90,10 +92,12 @@ describe('OoxmlResourceMetricsSession', () => {
       });
       emitOoxmlResourceDebugReport(session.succeed()!);
       expect(consoleLog).toHaveBeenCalledOnce();
-      expect(consoleLog.mock.calls[0]).toHaveLength(1);
-      const output = consoleLog.mock.calls[0]?.[0];
-      expect(output).not.toContain('%c');
+      expect(consoleLog.mock.calls[0]).toHaveLength(2);
+      const [output, style] = consoleLog.mock.calls[0] ?? [];
+      expect(output).toContain('%c┌');
       expect(output).not.toContain('\u001b[');
+      expect(style).toBe(BROWSER_CONSOLE_TUI_STYLE);
+      expect(style).not.toMatch(/(?:^|;)\s*(?:color|background)(?:-|:)/);
     } finally {
       vi.unstubAllGlobals();
       consoleLog.mockRestore();

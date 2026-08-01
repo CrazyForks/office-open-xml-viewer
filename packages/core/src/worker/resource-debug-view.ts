@@ -1,4 +1,5 @@
 import type { OoxmlResourceMetrics } from '../types/resource-metrics.js';
+import { emitConsoleTui } from '../internal/console-tui.js';
 
 /** Deterministic, color-free view suitable for any console. */
 export function formatOoxmlResourceDebugReport(report: OoxmlResourceMetrics): string {
@@ -71,7 +72,7 @@ export function formatOoxmlResourceDebugReport(report: OoxmlResourceMetrics): st
 }
 
 export function emitOoxmlResourceDebugReport(report: OoxmlResourceMetrics): void {
-  console.log(formatOoxmlResourceDebugReport(report));
+  emitConsoleTui(formatOoxmlResourceDebugReport(report));
 }
 
 function formatBytes(value: number): string {
