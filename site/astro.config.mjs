@@ -25,6 +25,11 @@ export default defineConfig({
         '@silurus/ooxml-pptx': pkgSrc('pptx'),
         '@silurus/ooxml-xlsx': pkgSrc('xlsx'),
         '@silurus/ooxml-docx': pkgSrc('docx'),
+        // Keep the worker subpath ahead of the package-root prefix alias;
+        // otherwise Vite rewrites it to the invalid `src/index.ts/worker`.
+        '@silurus/ooxml-core/worker': fileURLToPath(
+          new URL('../packages/core/src/worker/index.ts', import.meta.url),
+        ),
         '@silurus/ooxml-core': pkgSrc('core'),
       },
     },
