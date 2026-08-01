@@ -21,7 +21,7 @@ interface EvalCtx {
   col: number;
   anchorRow: number;
   anchorCol: number;
-  cellIndex: Map<string, Cell>;
+  cellIndex: ReadonlyMap<string, Cell>;
   definedNames: Map<string, DefinedName>;
   /** Recursion guard for nested defined-name resolution. */
   depth: number;

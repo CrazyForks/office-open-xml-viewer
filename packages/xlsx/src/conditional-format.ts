@@ -1,5 +1,6 @@
 import type { Worksheet, Cell, CellRange, CfStop, CfValue, Dxf, CfRule, CellFill, Border, DefinedName } from './types.js';
 import { evalFormulaToBool } from './formula.js';
+import { buildCellCoordinateIndex } from './renderer-coordinate-index.js';
 
 // ────────────────────────────────────────────────────────────────
 // Conditional formatting
@@ -25,7 +26,7 @@ export interface CompiledCfRule {
 export interface CfContext {
   compiled: CompiledCfRule[];
   worksheet: Worksheet;
-  cellIndex: Map<string, Cell>;
+  cellIndex: ReadonlyMap<string, Cell>;
   definedNames: Map<string, DefinedName>;
 }
 
@@ -101,14 +102,11 @@ function resolveCfvoValue(cfv: CfValue | CfStop, samples: number[]): number {
   }
 }
 
-export function compileCf(worksheet: Worksheet): CfContext {
+export function compileCf(
+  worksheet: Worksheet,
+  cellIndex: ReadonlyMap<string, Cell> = createCellIndex(worksheet),
+): CfContext {
   const compiled: CompiledCfRule[] = [];
-  const cellIndex = new Map<string, Cell>();
-  for (const row of worksheet.rows) {
-    for (const c of row.cells) {
-      cellIndex.set(`${c.row}:${c.col}`, c);
-    }
-  }
   const definedNames = new Map<string, DefinedName>();
   for (const dn of worksheet.definedNames ?? []) {
     definedNames.set(dn.name, dn);
@@ -166,6 +164,13 @@ export function compileCf(worksheet: Worksheet): CfContext {
     return pa - pb;
   });
   return { compiled, worksheet, cellIndex, definedNames };
+}
+
+function createCellIndex(worksheet: Worksheet): Map<string, Cell> {
+  return buildCellCoordinateIndex(worksheet.rows, {
+    resource: 'worksheet-cell-index',
+    operation: 'index-worksheet-cells',
+  });
 }
 
 function cellIsMatch(num: number, operator: string, args: number[]): boolean {
