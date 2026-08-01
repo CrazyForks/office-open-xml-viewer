@@ -4,6 +4,16 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.74.6 — 2026-08-01
+
+Patch. Prevents PowerPoint slides from becoming vertically compressed in
+continuous-scroll previews after rapid zooming and subsequent scrolling.
+
+- **pptx / vscode:** clear transient preview sizing when recycling a pooled
+  slide canvas, so a canvas reused after a pinch or wheel zoom returns to the
+  renderer's natural aspect ratio instead of retaining a stale preview height.
+  Add regression coverage for zoom-burst recycling and remounting. (#1127)
+
 ## 0.74.5 — 2026-07-31
 
 Patch. Restores inherited PowerPoint placeholder geometry and authored text
