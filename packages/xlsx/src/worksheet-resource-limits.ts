@@ -10,6 +10,11 @@ import {
   OoxmlResourceLimitError,
   type OoxmlResourceUsageSnapshot,
 } from '@silurus/ooxml-core';
+import {
+  cappedAdd,
+  measureStructuralJson,
+  utf8Bytes,
+} from '@silurus/ooxml-core/internal/resource-measurement';
 import type { Row, Worksheet } from './types.js';
 
 export const XLSX_MAX_MATERIALIZED_ROWS = HARD_MAX_XLSX_WORKSHEET_ROWS;
@@ -38,106 +43,6 @@ const ZERO_RESOURCE_USAGE: OoxmlResourceUsageSnapshot = Object.freeze({
   operationInflatedBytes: 0,
 });
 
-function cappedAdd(left: number, right: number, limit: number): number {
-  if (!Number.isSafeInteger(left) || !Number.isSafeInteger(right) || left < 0 || right < 0) {
-    throw new Error('worksheet resource measurement must use non-negative safe integers');
-  }
-  return left > limit - right ? limit + 1 : left + right;
-}
-
-export function utf8Bytes(value: string, limit = Number.MAX_SAFE_INTEGER): number {
-  let bytes = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const unit = value.charCodeAt(index);
-    let width: number;
-    if (unit <= 0x7f) width = 1;
-    else if (unit <= 0x7ff) width = 2;
-    else if (unit >= 0xd800 && unit <= 0xdbff && index + 1 < value.length) {
-      const low = value.charCodeAt(index + 1);
-      if (low >= 0xdc00 && low <= 0xdfff) {
-        width = 4;
-        index += 1;
-      } else width = 3;
-    } else width = 3;
-    bytes = cappedAdd(bytes, width, limit);
-    if (bytes > limit) return bytes;
-  }
-  return bytes;
-}
-
-function jsonStringBytes(value: string, limit: number): number {
-  let bytes = 2;
-  for (let index = 0; index < value.length; index += 1) {
-    const unit = value.charCodeAt(index);
-    let width: number;
-    if (
-      unit === 0x22 || unit === 0x5c || unit === 0x08 || unit === 0x09 ||
-      unit === 0x0a || unit === 0x0c || unit === 0x0d
-    ) width = 2;
-    else if (unit <= 0x1f) width = 6;
-    else if (unit <= 0x7f) width = 1;
-    else if (unit <= 0x7ff) width = 2;
-    else if (unit >= 0xd800 && unit <= 0xdbff && index + 1 < value.length) {
-      const low = value.charCodeAt(index + 1);
-      if (low >= 0xdc00 && low <= 0xdfff) {
-        width = 4;
-        index += 1;
-      } else width = 6;
-    } else if (unit >= 0xd800 && unit <= 0xdfff) width = 6;
-    else width = 3;
-    bytes = cappedAdd(bytes, width, limit);
-    if (bytes > limit) return bytes;
-  }
-  return bytes;
-}
-
-interface ValueMeasurement {
-  jsonBytes: number;
-  ownedUtf8Bytes: number;
-}
-
-function measureValue(value: unknown, limit: number, inArray = false): ValueMeasurement {
-  if (value === null) return { jsonBytes: 4, ownedUtf8Bytes: 0 };
-  if (typeof value === 'string') {
-    return {
-      jsonBytes: jsonStringBytes(value, limit),
-      ownedUtf8Bytes: utf8Bytes(value, limit),
-    };
-  }
-  if (typeof value === 'boolean') return { jsonBytes: value ? 4 : 5, ownedUtf8Bytes: 0 };
-  if (typeof value === 'number') {
-    const serialized = Number.isFinite(value) ? String(Object.is(value, -0) ? 0 : value) : 'null';
-    return { jsonBytes: serialized.length, ownedUtf8Bytes: 0 };
-  }
-  if (Array.isArray(value)) {
-    let jsonBytes = 2;
-    let ownedUtf8Bytes = 0;
-    for (let index = 0; index < value.length; index += 1) {
-      if (index !== 0) jsonBytes = cappedAdd(jsonBytes, 1, limit);
-      const item = measureValue(value[index], limit, true);
-      jsonBytes = cappedAdd(jsonBytes, item.jsonBytes, limit);
-      ownedUtf8Bytes = cappedAdd(ownedUtf8Bytes, item.ownedUtf8Bytes, limit);
-    }
-    return { jsonBytes, ownedUtf8Bytes };
-  }
-  if (typeof value === 'object') {
-    let jsonBytes = 2;
-    let ownedUtf8Bytes = 0;
-    let emitted = 0;
-    for (const [key, entry] of Object.entries(value)) {
-      if (entry === undefined || typeof entry === 'function' || typeof entry === 'symbol') continue;
-      if (emitted++ !== 0) jsonBytes = cappedAdd(jsonBytes, 1, limit);
-      jsonBytes = cappedAdd(jsonBytes, jsonStringBytes(key, limit), limit);
-      jsonBytes = cappedAdd(jsonBytes, 1, limit);
-      const child = measureValue(entry, limit);
-      jsonBytes = cappedAdd(jsonBytes, child.jsonBytes, limit);
-      ownedUtf8Bytes = cappedAdd(ownedUtf8Bytes, child.ownedUtf8Bytes, limit);
-    }
-    return { jsonBytes, ownedUtf8Bytes };
-  }
-  return { jsonBytes: inArray ? 4 : 0, ownedUtf8Bytes: 0 };
-}
-
 export function measureRows(rows: readonly Row[]): WorksheetModelUsage {
   const cells = rows.reduce(
     (total, row) => cappedAdd(total, row.cells.length, XLSX_MAX_MATERIALIZED_CELLS),
@@ -152,10 +57,10 @@ export function measureRows(rows: readonly Row[]): WorksheetModelUsage {
     // so repeated shared-string references are charged once per materialized
     // cell. Ancillary worksheet strings are covered by the exact JSON ceiling.
     ownedUtf8Bytes: rows.reduce((rowTotal, row) => row.cells.reduce((cellTotal, cell) => {
-      const valueBytes = measureValue(
+      const valueBytes = measureStructuralJson(
         cell.value,
         XLSX_MAX_MATERIALIZED_OWNED_UTF8_BYTES,
-      ).ownedUtf8Bytes;
+      ).stringValueUtf8Bytes;
       const formulaBytes = cell.formula === undefined
         ? 0
         : utf8Bytes(cell.formula, XLSX_MAX_MATERIALIZED_OWNED_UTF8_BYTES);
@@ -170,7 +75,7 @@ export function measureRows(rows: readonly Row[]): WorksheetModelUsage {
 
 export function measureWorksheet(worksheet: Worksheet): WorksheetModelUsage & { jsonBytes: number } {
   const model = measureRows(worksheet.rows);
-  const measured = measureValue(worksheet, Math.max(
+  const measured = measureStructuralJson(worksheet, Math.max(
     XLSX_MAX_MATERIALIZED_OWNED_UTF8_BYTES,
     XLSX_MAX_MATERIALIZED_JSON_BYTES,
   ));

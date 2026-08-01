@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { OoxmlResourceLimitError } from '@silurus/ooxml-core';
+import { utf8Bytes } from '@silurus/ooxml-core/internal/resource-measurement';
 import type { Row, Worksheet } from './types.js';
 import {
   XLSX_MAX_CACHED_CELLS,
@@ -13,7 +14,6 @@ import {
   assertWorksheetModelUsage,
   measureRows,
   measureWorksheet,
-  utf8Bytes,
 } from './worksheet-resource-limits.js';
 
 const row = (value: Row['cells'][number]['value'], formula?: string): Row => ({
