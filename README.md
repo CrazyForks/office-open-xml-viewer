@@ -932,6 +932,18 @@ cd packages/pptx/parser && wasm-pack build --target web && cp pkg/pptx_parser_bg
 
   A violation rejects with `OoxmlResourceLimitError` (`code === 'ooxml-resource-limit'`). Its structured `details.violation` reports the resource, metric, limit, observed value, usage snapshot, and part name when a particular part caused the failure. The deprecated `maxZipEntryBytes` option remains as a compatibility alias for `resourceLimits.maxArchiveEntryBytes`; new code should use `resourceLimits`.
 
+  If you are choosing application-specific limits, pass `debug: true` during representative test loads. The library prints one compact, Ratatui-inspired console card with the compressed source size, largest observed inflated entry, distinct inflated total, entry count, configured limits, and timing checkpoints:
+  ```ts
+  new DocxViewer(canvas, {
+    debug: true,
+    resourceLimits: {
+      maxArchiveEntryBytes: 128 * 1024 * 1024,
+      maxTotalInflatedBytes: 256 * 1024 * 1024,
+    },
+  });
+  ```
+  The report is data-safe by construction: it does not include source URLs, package paths, document text, passwords, or raw error messages. Browser viewers report initial readiness; lazy media or later sheet/slide operations can increase the session total afterward. Bounded Node sessions accept the same `debug` flag and report when opening completes (DOCX) or the pull session closes (PPTX/XLSX).
+
   These are deterministic inflated-byte admission limits, not exact JavaScript/WASM memory limits. XML trees, decoded images, document models, and renderer state can require several times the inflated input size, so the defaults reduce risk but cannot promise that an OOM is impossible on every device. Running parse and render work in `mode: 'worker'` can contain many failures away from the main UI thread, but a Worker is not a separate operating-system process or a strict memory sandbox.
 - **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, theme webfonts, Office font metric substitutes (Carlito/Caladea), and the script fallback fonts are **not** loaded from Google Fonts unless you pass `useGoogleFonts: true` to the relevant `Viewer` / `load(...)` options — supported uniformly by `DocxViewer`, `PptxViewer`, and `XlsxViewer`. When enabled, fonts for non-Latin scripts are supplied on demand from Noto families so text does not fall back to tofu: Arabic (Noto Naskh/Sans Arabic), CJK (Noto Sans/Serif KR · SC · TC · JP, picked per document language so shared Han glyphs take the right shapes), Cyrillic (Noto Sans/Serif), Hebrew (Noto Sans/Serif Hebrew, RTL), Thai (Noto Sans Thai) and Devanagari (Noto Sans Devanagari). No font binaries ship in the bundle. Enabling this option causes the end-user's browser to send an HTTP request (IP and User-Agent) to `fonts.googleapis.com`, which may have GDPR implications for your application — consider self-hosting the required fonts via `@font-face` instead.
 - **XML parsing.** Uses `roxmltree`, which does not resolve external entities (XXE-safe by default).

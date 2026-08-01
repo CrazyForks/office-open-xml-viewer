@@ -1,7 +1,8 @@
 # OOXML resource governance and bounded processing
 
-Status: accepted direction for implementation on Draft PR #1120. Values marked
-as candidates remain subject to corpus calibration before the PR is made ready.
+Status: accepted direction for implementation on Draft PR #1120. The standard
+archive defaults were retained after the recorded calibration in
+[`ooxml-resource-default-calibration.md`](ooxml-resource-default-calibration.md).
 
 ## Context
 
@@ -250,8 +251,8 @@ snapshot-tested, data-safe, and equivalent across format and execution mode.
 
 ### M7 — Calibration and release-quality verification
 
-- Measure public and synthetic documents across formats and realistic browser
-  environments, then adopt or revise the candidate defaults.
+- Measure public and synthetic documents across formats and the shared
+  browser/WASM counter path, then adopt or revise the candidate defaults.
 - Run Rust, rebuilt-WASM, focused/full TypeScript, typecheck, build, public API,
   visual, and high-water verification appropriate to the touched surfaces.
 - Publish the limits as admission policy, not as a promise of exact memory use.
@@ -369,15 +370,15 @@ entry and sums those maxima. Re-reading an entry does not consume this public
 budget again. Repeated-inflation work and per-structured-part amplification are
 measured separately and protected by internal operation/unit quotas.
 
-Initial calibration candidates are 128 MiB per archive entry and 256 MiB total.
-They are not memory guarantees and must not be documented as final until the M7
-corpus and browser measurements support them. Adopting defaults below the old
+The calibrated standard defaults are 128 MiB per archive entry and 256 MiB
+total; the evidence and its corpus limitations are recorded separately. They
+are not memory guarantees. Adopting defaults below the old
 512 MiB per-entry default intentionally narrows the set of documents that load
 without overrides: source compatibility is preserved, but behavioral
 compatibility for documents above the new defaults is not.
 
 The approximately 267.7 MiB inflated worksheet reported in Issue #1102 is
-therefore rejected by the candidate per-entry default with a typed, catchable
+therefore rejected by the standard per-entry default with a typed, catchable
 resource error before the browser attempts the historical monolithic model.
 That is the intentional safe default, not a claim that the document is invalid.
 A caller may raise the policy limit after measuring its environment. The
@@ -401,9 +402,9 @@ Merge and styled-table ranges can expand into many coordinates even when the
 worksheet contains few cells, so they are checked by range-area arithmetic
 before allocation. The renderer must also reuse one cell lookup for ordinary
 painting and conditional formatting rather than retaining duplicate keyed maps.
-M7 may revise these candidate values only from recorded browser/WASM evidence.
+These hard values may be revised only from recorded browser/WASM evidence.
 
-The candidates and the hard archive ceilings have one language-neutral source
+The defaults and hard archive ceilings have one language-neutral source
 in `packages/ooxml-common/resource-policy.json`; generated TypeScript and Rust
 constants are checked in CI so browser option normalization, parser-native
 fallbacks, and effective hard caps cannot drift during calibration or later
@@ -633,19 +634,20 @@ window. A per-session limit does not claim to bound this combined process peak.
 
 `debug: true` enables measurement reporting but does not change limits or parser
 behavior. Workers send structured usage checkpoints to the main context. The
-main context retains checkpoints quietly and emits a load-complete or load-failed
-card when initial Viewer readiness settles. That card is explicitly a load
-checkpoint, not a final package-session total: lazy sheet, slide, image, font,
-or other part access may increase usage later. When a later operation fails, or
-when an owned session closes after its usage has changed, one terminal card
-reports the last complete checkpoint. This keeps logging sparse while making
-both initial limit calibration and lazy-lifetime accounting honest.
+main context retains checkpoints quietly and emits one load-complete or
+load-failed card when initial Viewer readiness settles. That card is explicitly
+a load checkpoint, not a final package-session total: lazy sheet, slide, image,
+font, or other part access may increase usage later. Bounded Node DOCX reports
+after open/pagination; PPTX and XLSX pull sessions report when exhausted or
+closed, so their card covers the consumed session lifetime.
 
-The presentation is Ratatui-inspired: bordered blocks, a compact table, gauges,
-and semantic status colors. A shared styled-token view is rendered as browser
-console CSS, Node ANSI when attached to a TTY, or deterministic plain Unicode.
-The pure, color-free representation is snapshot-tested. Console rendering and
-resource measurement remain separate responsibilities.
+The presentation is Ratatui-inspired: bordered blocks, compact rows, gauges,
+and semantic status colors. One pure report model renders as browser console
+CSS, Node ANSI when attached to a TTY, or deterministic plain Unicode. The
+color-free representation is snapshot-tested. Console rendering and resource
+measurement remain separate responsibilities. Reports include the largest
+actual inflated entry specifically so `maxArchiveEntryBytes` can be calibrated,
+alongside distinct session bytes for `maxTotalInflatedBytes`.
 
 ## Verification gates
 
