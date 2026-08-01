@@ -11,6 +11,7 @@ const math = { loadMathJax, mathMLToSvg };
 type Args = {
   scale: number;
   selectionColor: string;
+  debug?: boolean;
 };
 
 const meta: Meta<Args> = {
@@ -141,6 +142,13 @@ export const DebugJson: Story = {
 // ---------------------------------------------------------------------------
 export const FileUpload: Story = {
   name: 'Load from file',
+  args: { debug: true },
+  argTypes: {
+    debug: {
+      control: 'boolean',
+      description: 'Print resource-usage metrics to the browser console',
+    },
+  },
   render(args) {
     const root = document.createElement('div');
     root.style.cssText = 'width:100%;height:100vh;display:flex;flex-direction:column;overflow:hidden;font-family:sans-serif;box-sizing:border-box;';
@@ -170,6 +178,7 @@ export const FileUpload: Story = {
       viewerContainer.innerHTML = '';
       viewer = new XlsxViewer(viewerContainer, {
         cellScale: args.scale,
+        debug: args.debug,
         useGoogleFonts: true,
         math,
         onReady: (names) => { sheetNames = names; status.textContent = `${names.length} sheet(s)`; },

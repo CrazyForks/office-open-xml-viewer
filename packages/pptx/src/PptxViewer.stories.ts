@@ -9,6 +9,7 @@ const math = { loadMathJax, mathMLToSvg };
 
 type Args = {
   width: number;
+  debug?: boolean;
 };
 
 const meta: Meta<Args> = {
@@ -199,7 +200,13 @@ export const DebugJson: Story = {
 // ---------------------------------------------------------------------------
 export const FileUpload: Story = {
   name: 'Load from file',
-  args: { width: 960 },
+  args: { width: 960, debug: true },
+  argTypes: {
+    debug: {
+      control: 'boolean',
+      description: 'Print resource-usage metrics to the browser console',
+    },
+  },
   render(args) {
     const root = document.createElement('div');
     root.style.cssText = 'font-family:sans-serif;padding:16px;';
@@ -249,6 +256,7 @@ export const FileUpload: Story = {
       container.appendChild(canvas);
       viewer = new PptxViewer(canvas, {
         width: args.width,
+        debug: args.debug,
         enableMediaPlayback: true,
         math,
         onSlideChange: (idx, total) => {
