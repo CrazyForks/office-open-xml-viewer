@@ -343,4 +343,17 @@ describe('worker error wire', () => {
     }
     expect(deserializeWorkerError(unsafePart)).not.toBeInstanceOf(OoxmlResourceLimitError);
   });
+
+  it('accepts the Rust wire-safe redaction token as a typed required part', () => {
+    const redacted = structuredClone(serializeWorkerError(new Error(rustError)));
+    if (redacted.resourceLimit) {
+      Object.assign(redacted.resourceLimit.violation, {
+        part: 'untrusted-archive-entry',
+      });
+    }
+    const restored = deserializeWorkerError(redacted);
+    expect(restored).toBeInstanceOf(OoxmlResourceLimitError);
+    expect((restored as OoxmlResourceLimitError).details.violation.part)
+      .toBe('untrusted-archive-entry');
+  });
 });

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { DocParagraph, DocxDocumentModel } from '../types.js';
-import { layoutSourceModelAdapter, layoutSourceStore } from '../layout-source-model-adapter.js';
+import {
+  layoutSourceModelAdapter,
+  layoutSourceModelAdapterFromOwnedModel,
+  layoutSourceStore,
+} from '../layout-source-model-adapter.js';
 import { createLayoutServices } from '../layout-runtime.js';
 import { layoutDocument } from '../document-layout.js';
 import { layoutSourceStoreOf } from './runtime-state.js';
@@ -95,6 +99,45 @@ describe('LayoutSourceStore', () => {
     expect(() => store.acquisition.publicAnchorBridge(
       { story: 'body', storyInstance: 'body', path: [0] }, 99,
     )).toThrow(/unknown paragraph anchor bridge index/i);
+  });
+
+  it('keeps the builder-owned stream adapter semantically equal to the model adapter', () => {
+    const raw = documentWithUnavailableDrawing();
+    const nestedParagraph = raw.body[0]!;
+    raw.body = [{
+      type: 'table', colWidths: [100], layout: 'fixed', alignment: 'left', indent: 0,
+      bidiVisual: false, cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0,
+      cellMarginRight: 0, rows: [{ isHeader: false, cantSplit: false, gridBefore: 0,
+        gridAfter: 0, rowHeight: null, rowHeightRule: 'auto', cells: [{ colSpan: 1,
+          rowSpan: 1, vAlign: 'top', marginTop: null, marginBottom: null,
+          marginLeft: null, marginRight: null, content: [nestedParagraph] }] }],
+    } as unknown as DocxDocumentModel['body'][number]];
+    raw.headers.default = { body: [structuredClone(nestedParagraph)] };
+    raw.footnotes = [{ id: '1', content: [structuredClone(nestedParagraph)] }];
+    const baseline = layoutSourceModelAdapter(structuredClone(raw));
+    const owned = structuredClone(raw);
+    const ownedBody = owned.body;
+    const ownedNestedParagraph = (owned.body[0] as Extract<DocxDocumentModel['body'][number], { type: 'table' }>)
+      .rows[0]!.cells[0]!.content[0]!;
+    const streamed = layoutSourceModelAdapterFromOwnedModel(
+      structuredClone(raw),
+      owned,
+    );
+
+    expect(streamed.document).toEqual(baseline.document);
+    expect(streamed.source.bodyLayoutInput).toEqual(baseline.source.bodyLayoutInput);
+    expect(streamed.source.blocks.body).toEqual(baseline.source.blocks.body);
+    expect(streamed.source.section).toEqual(baseline.source.section);
+    expect(documentFacts(streamed.source)).toEqual(documentFacts(baseline.source));
+    expect(streamed.source.paintResources.descriptors)
+      .toEqual(baseline.source.paintResources.descriptors);
+    expect(streamed.source.blocks.body).toBe(ownedBody);
+    const retainedNestedParagraph = (owned.body[0] as Extract<DocxDocumentModel['body'][number], { type: 'table' }>)
+      .rows[0]!.cells[0]!.content[0]!;
+    expect(retainedNestedParagraph).not.toBe(ownedNestedParagraph);
+    const retainedBodyBlock = streamed.source.blocks.body[0]!;
+    if (retainedBodyBlock.type !== 'table') throw new Error('Expected retained table block');
+    expect(retainedBodyBlock.rows[0]!.cells[0]!.content[0]).toBe(retainedNestedParagraph);
   });
 
   it('owns its eager body input as an immutable data property', () => {

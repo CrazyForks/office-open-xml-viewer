@@ -45,6 +45,7 @@ export type RenderWorkerRequest =
   // wasted work + transfer for pages the user never looks at.
   | { type: 'collectRuns'; id: number; pageIndex: number; opts: WireRenderPageOptions }
   | { type: 'extractImage'; id: number; path: string }
+  | { type: 'resourceUsage'; id: number }
   | { type: 'toMarkdown'; id: number };
 
 export type RenderWorkerWireRequest =

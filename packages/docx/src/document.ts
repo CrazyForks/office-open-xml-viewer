@@ -37,7 +37,6 @@ import {
 import {
   type LayoutSourceStore,
 } from './layout/layout-source-store.js';
-import { layoutSourceModelAdapter } from './layout-source-model-adapter.js';
 import type { DeepReadonly, DocumentLayout } from './layout/types.js';
 import type {
   DocumentMeta,
@@ -49,7 +48,7 @@ import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
 import {
   isDocumentPullResponse,
-  materializeDocumentPullSession,
+  materializeDocumentPullAdapterSession,
 } from './document-pull-client.js';
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
@@ -82,6 +81,11 @@ export interface LoadOptions extends CoreLoadOptions {
 export type RenderPageToBitmapOptions = WireRenderPageOptions & {
   onTextRun?: (run: DocxTextRunInfo) => void;
 };
+
+/** A diagnostic-only round trip must never inherit the load API's unlimited
+ * worker wait. The archive counter getter is synchronous once the worker is
+ * responsive, so one second is ample while still bounding a silent worker. */
+const DEFAULT_RESOURCE_USAGE_PROBE_TIMEOUT_MS = 1_000;
 
 export class DocxDocument {
   private _document: DocxDocumentModel | null = null;
@@ -207,6 +211,7 @@ export class DocxDocument {
         (usage) => debug.observeUsage(usage),
       );
       if (mode === 'worker' && doc._mode === 'main') {
+        debug.setMode('main');
         console.warn(
           "[ooxml] mode: 'worker' fell back to main-thread rendering because this document requires DOM OpenType vertical glyph selection.",
         );
@@ -266,6 +271,18 @@ export class DocxDocument {
         // the same work here so layout failures reject load() in both modes.
         retained.layoutVariants.defaultLayout;
       }
+      if (resourceOptions.debug) {
+        // This final snapshot includes eager embedded-font extraction performed
+        // after the parse response. Telemetry is strictly best-effort: a worker
+        // failure or a silent worker may omit the newest counters, but must not
+        // turn an otherwise successful load into a rejection or an endless wait.
+        await doc._resourceUsage(
+          opts.workerTimeoutMs ?? DEFAULT_RESOURCE_USAGE_PROBE_TIMEOUT_MS,
+        ).then(
+          (usage) => debug.observeUsage(usage),
+          () => undefined,
+        );
+      }
       debug.checkpoint('model and layout ready');
       debug.succeed({ pages: doc.pageCount });
       return doc;
@@ -301,12 +318,11 @@ export class DocxDocument {
     if (this._mode === 'worker') {
       if ('usage' in res && res.usage) onUsage?.(res.usage);
       if (res.type === 'mainThreadVerticalFallback') {
-        const parsed = await materializeDocumentPullSession(
+        const adapted = await materializeDocumentPullAdapterSession(
           this._bridge.transport(isDocumentPullResponse),
           res,
           { timeoutMs, onUsage },
         );
-        const adapted = layoutSourceModelAdapter(parsed);
         this._source = adapted.source;
         this._document = adapted.document;
         this._meta = null;
@@ -316,12 +332,11 @@ export class DocxDocument {
       }
     } else {
       const identity = res as Extract<WorkerResponse, { type: 'documentSessionOpened' }>;
-      const parsed = await materializeDocumentPullSession(
+      const adapted = await materializeDocumentPullAdapterSession(
         this._bridge.transport(isDocumentPullResponse),
         identity,
         { timeoutMs, onUsage },
       );
-      const adapted = layoutSourceModelAdapter(parsed);
       this._source = adapted.source;
       this._document = adapted.document;
     }
@@ -401,6 +416,17 @@ export class DocxDocument {
     );
     const bytes = (res as Extract<WorkerResponse, { type: 'imageExtracted' }>).bytes;
     return new Uint8Array(bytes);
+  }
+
+  private async _resourceUsage(
+    timeoutMs: number,
+  ): Promise<import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot> {
+    const res = await this._bridge.request(
+      (id) => ({ type: 'resourceUsage', id }) satisfies WorkerRequest,
+      undefined,
+      { timeoutMs },
+    );
+    return (res as Extract<WorkerResponse, { type: 'resourceUsage' }>).usage;
   }
 
   /**

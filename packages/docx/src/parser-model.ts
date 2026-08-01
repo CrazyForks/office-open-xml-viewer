@@ -1542,6 +1542,20 @@ export function paragraphAcquisitionInput(
  * parser model is untouched and the returned public model contains only the
  * declared `DocRun` union. */
 export function normalizeInternalDocumentModel(doc: DocxDocumentModel): NormalizedDocumentInput {
+  return normalizeInternalDocumentModelWithOwnership(doc, false);
+}
+
+/** Destructive equivalent for an exclusively builder-owned parser graph. It
+ * preserves the same normalized contract while replacing changed ancestry in
+ * place, avoiding another complete body-index graph at the stream terminal. */
+export function normalizeOwnedInternalDocumentModel(doc: DocxDocumentModel): NormalizedDocumentInput {
+  return normalizeInternalDocumentModelWithOwnership(doc, true);
+}
+
+function normalizeInternalDocumentModelWithOwnership(
+  doc: DocxDocumentModel,
+  consumeOwned: boolean,
+): NormalizedDocumentInput {
   const occurrences: MathOccurrence[] = [];
   const normalizeElement = (
     element: BodyElement,
@@ -1602,8 +1616,12 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
         };
         const textBoxStoryInstance = `${shapeSource.story}:${shapeSource.storyInstance}:${shapeSource.path.join('.')}`;
         let contentChanged = false;
-        const textBoxContent = content.map((block, blockIndex): InternalTextBoxBlock => {
-          if (block.type === 'unsupportedTextBoxBlock') return block;
+        const textBoxContent = (consumeOwned ? content : new Array<InternalTextBoxBlock>(content.length));
+        content.forEach((block, blockIndex): void => {
+          if (block.type === 'unsupportedTextBoxBlock') {
+            textBoxContent[blockIndex] = block;
+            return;
+          }
           const normalized = normalizeElement(
             block,
             'textbox',
@@ -1611,16 +1629,25 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
             [blockIndex],
           ) as Extract<BodyElement, { type: 'paragraph' | 'table' }>;
           if (normalized !== block) contentChanged = true;
-          return normalized;
+          textBoxContent[blockIndex] = normalized;
         });
         if (!contentChanged) {
           runs.push(run);
           return;
         }
         runsChanged = true;
-        runs.push({ ...run, textBoxContent } as DocRun);
+        if (consumeOwned) {
+          shape.textBoxContent = textBoxContent;
+          runs.push(run as DocRun);
+        } else {
+          runs.push({ ...run, textBoxContent } as DocRun);
+        }
       });
-      const paragraph = runsChanged ? { ...element, runs } : element;
+      const paragraph = runsChanged
+        ? (consumeOwned
+            ? Object.assign(element, { runs })
+            : { ...element, runs })
+        : element;
       if (unavailableDrawings.length > 0) {
         unavailableDrawingSidecars.set(
           paragraph,
@@ -1630,6 +1657,14 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
       return paragraph;
     }
     if (element.type === 'table') {
+      if (consumeOwned) {
+        element.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
+          cell.content = normalizeBody(
+            cell.content as BodyElement[], story, storyInstance, [...path, rowIndex, cellIndex],
+          ) as typeof cell.content;
+        }));
+        return element;
+      }
       let tableChanged = false;
       const rows = element.rows.map((row, rowIndex) => {
         let rowChanged = false;
@@ -1678,6 +1713,17 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
     storyInstance: string,
     prefix: number[] = [],
   ): BodyElement[] => {
+    if (consumeOwned) {
+      for (let elementIndex = 0; elementIndex < body.length; elementIndex += 1) {
+        body[elementIndex] = normalizeElement(
+          body[elementIndex]!,
+          story,
+          storyInstance,
+          [...prefix, elementIndex],
+        );
+      }
+      return body;
+    }
     let changed = false;
     const normalized = body.map((element, elementIndex): BodyElement => {
       const next = normalizeElement(
@@ -1715,6 +1761,10 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
     story: 'footnote' | 'endnote',
   ): T[] | undefined => {
     if (!notes) return notes;
+    if (consumeOwned) {
+      for (const note of notes) note.content = normalizeBody(note.content, story, note.id);
+      return notes;
+    }
     let changed = false;
     const normalized = notes.map((note) => {
       const content = normalizeBody(note.content, story, note.id);

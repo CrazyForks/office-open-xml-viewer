@@ -70,6 +70,10 @@ impl Zip {
         self.operation.as_ref().and_then(PackageOperation::usage)
     }
 
+    pub(crate) fn usage(&self) -> ResourceUsage {
+        self.session.usage()
+    }
+
     pub(crate) fn finish_operation(&mut self) -> Result<(), String> {
         let Some(mut operation) = self.operation.take() else {
             return Ok(());
@@ -751,7 +755,7 @@ pub(crate) fn parse_from_bytes_streamed_with_limits(
         Err(error) if error.starts_with("OOXML_RESOURCE_LIMIT:") => return Err(error),
         Err(error) => return Ok(degraded_container_document(error)),
     };
-    zip.run_operation(operation, parse_streamed)
+    zip.run_operation(operation, parse_streamed_compatible)
 }
 
 struct DocumentParseEnvironment {
@@ -1170,12 +1174,39 @@ pub(crate) struct DocxBodyCursor {
     pending_cover_break: bool,
     body_finished: bool,
     terminal_emitted: bool,
+    degraded_theme: ThemeColors,
+}
+
+pub(crate) struct DocumentCursorFailure {
+    error: String,
+    theme: Box<ThemeColors>,
+}
+
+impl DocumentCursorFailure {
+    #[cfg(test)]
+    pub(crate) fn into_error(self) -> String {
+        self.error
+    }
+
+    pub(crate) fn into_degraded_document(self) -> Document {
+        let tagged = if self.error.starts_with("word/document.xml:") {
+            self.error
+        } else {
+            format!("word/document.xml: {}", self.error)
+        };
+        degraded_document(&self.theme, tagged)
+    }
 }
 
 impl DocxBodyCursor {
-    pub(crate) fn start(zip: &mut Zip) -> Result<Self, String> {
+    pub(crate) fn start(zip: &mut Zip) -> Result<Self, DocumentCursorFailure> {
         let mut environment = load_document_parse_environment(zip);
-        let preflight = preflight_document_body(zip, &environment)?;
+        let preflight =
+            preflight_document_body(zip, &environment).map_err(|error| DocumentCursorFailure {
+                error,
+                theme: Box::new(environment.theme.clone()),
+            })?;
+        let degraded_theme = environment.theme.clone();
 
         let final_section_fact = preflight
             .final_body_block_ordinal
@@ -1213,6 +1244,11 @@ impl DocxBodyCursor {
             }
         }
 
+        let projector =
+            open_document_body_projector(zip).map_err(|error| DocumentCursorFailure {
+                error,
+                theme: Box::new(degraded_theme.clone()),
+            })?;
         Ok(Self {
             environment: Some(environment),
             plan: preflight.plan,
@@ -1222,7 +1258,7 @@ impl DocxBodyCursor {
             resolved_sections,
             body_headers,
             body_footers,
-            projector: open_document_body_projector(zip)?,
+            projector,
             semantic: BodyParseCursor::default(),
             diagnostics: Vec::new(),
             revisions: Vec::new(),
@@ -1231,7 +1267,15 @@ impl DocxBodyCursor {
             pending_cover_break: false,
             body_finished: false,
             terminal_emitted: false,
+            degraded_theme,
         })
+    }
+
+    fn failure(&self, error: String) -> DocumentCursorFailure {
+        DocumentCursorFailure {
+            error,
+            theme: Box::new(self.degraded_theme.clone()),
+        }
     }
 
     pub(crate) fn next_unit(&mut self, zip: &mut Zip) -> Result<StreamedDocumentUnit, String> {
@@ -1383,17 +1427,39 @@ impl DocxBodyCursor {
 /// Compatibility materializer over the canonical bounded cursor. It is allowed
 /// to retain the complete public body, but it no longer has a separate parser or
 /// whole-part XML path.
+#[cfg(test)]
 pub(crate) fn parse_streamed(zip: &mut Zip) -> Result<Document, String> {
+    parse_streamed_with_diagnostic(zip).map_err(DocumentCursorFailure::into_error)
+}
+
+fn parse_streamed_with_diagnostic(zip: &mut Zip) -> Result<Document, DocumentCursorFailure> {
     let mut cursor = DocxBodyCursor::start(zip)?;
     let mut body = Vec::new();
     loop {
-        match cursor.next_unit(zip)? {
+        let unit = cursor
+            .next_unit(zip)
+            .map_err(|error| cursor.failure(error))?;
+        match unit {
             StreamedDocumentUnit::Body { body: elements } => body.extend(elements),
             StreamedDocumentUnit::Complete { mut document } => {
                 document.body = body;
                 return Ok(*document);
             }
         }
+    }
+}
+
+/// Materializing compatibility facade over the bounded cursor. A required-part
+/// failure is fatal to the transaction (no provisional body survives) but keeps
+/// the historical `parseError` document route. A poisoned resource session
+/// always wins and remains a typed rejection.
+pub(crate) fn parse_streamed_compatible(zip: &mut Zip) -> Result<Document, String> {
+    match parse_streamed_with_diagnostic(zip) {
+        Ok(document) => Ok(document),
+        Err(failure) => match zip.assert_healthy() {
+            Err(resource_error) => Err(resource_error),
+            Ok(()) => Ok(failure.into_degraded_document()),
+        },
     }
 }
 
@@ -6498,7 +6564,7 @@ fn group_member_hidden(node: roxmltree::Node) -> bool {
 /// a `<mc:Choice Requires="wpc">` must NOT be selected — the Fallback (Word
 /// writes a rendered picture / legacy VML twin) is the only branch we can draw.
 /// Add it here only together with an actual canvas handler.
-fn docx_understands_drawing_ns(ns: &str) -> bool {
+pub(crate) fn docx_understands_drawing_ns(ns: &str) -> bool {
     matches!(
         ns,
         // Microsoft 2014 chartEx (waterfall / boxWhisker / treemap / sunburst …).

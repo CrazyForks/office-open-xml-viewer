@@ -20,9 +20,9 @@ import {
 } from './worksheet-resource-limits.js';
 
 export const XLSX_WORKSHEET_PULL_BYTES = 64 * 1024 * 1024;
-const XLSX_WORKSHEET_PULL_ROWS = 128;
+export const XLSX_WORKSHEET_PULL_ROWS = 128;
 
-interface WorksheetCursorArchive {
+export interface WorksheetCursorArchive {
   open_sheet_cursor(sheetIndex: number, name: string): void;
   pull_sheet_cursor(rowCredit: number): Uint8Array;
   sheet_cursor_pull_finished(): boolean;
@@ -32,7 +32,7 @@ interface WorksheetCursorArchive {
   close_sheet_cursor(): void;
 }
 
-type WorksheetWireChunk =
+export type WorksheetWireChunk =
   | { kind: 'rows'; rows: Row[] }
   | { kind: 'finished'; worksheet: Worksheet };
 

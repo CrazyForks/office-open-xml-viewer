@@ -1,10 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   PullSessionIdentity,
 } from '@silurus/ooxml-core/worker';
 import {
   materializeDocumentPullSession,
+  materializeDocumentPullOwnedModelsSession,
 } from './document-pull-client.js';
+import { layoutSourceModelAdapterFromOwnedModel } from './layout-source-model-adapter.js';
 import {
   createLocalDocumentPullTransport,
   DocumentPullWorker,
@@ -79,13 +81,80 @@ describe('DOCX document pull integration', () => {
     expect(archive.canceled).toBe(false);
   });
 
+  it('builds the public model and immutable layout ownership graph per bounded unit', async () => {
+    const archive = new FakeArchive([
+      { kind: 'body', body: [{ type: 'pageBreak' }] },
+      { kind: 'body', body: [{ type: 'columnBreak' }] },
+      {
+        kind: 'complete',
+        document: {
+          body: [],
+          section: {},
+          headers: { default: null, first: null, even: null },
+          footers: { default: null, first: null, even: null },
+        },
+      },
+    ]);
+    const worker = new DocumentPullWorker(() => archive);
+    worker.open(identity);
+    const nativeStructuredClone = globalThis.structuredClone;
+    const clonedDocumentBodyLengths: number[] = [];
+    const clone = vi.spyOn(globalThis, 'structuredClone').mockImplementation((value) => {
+      if (!!value && typeof value === 'object'
+        && !Array.isArray(value)
+        && Array.isArray((value as { body?: unknown }).body)
+        && 'section' in value) {
+        clonedDocumentBodyLengths.push((value as unknown as { body: unknown[] }).body.length);
+      }
+      return nativeStructuredClone(value);
+    });
+
+    try {
+      const models = await materializeDocumentPullOwnedModelsSession(
+        createLocalDocumentPullTransport(worker),
+        identity,
+      );
+      const ownedBody = models.ownedLayoutDocument.body;
+      const adapted = layoutSourceModelAdapterFromOwnedModel(
+        models.document,
+        models.ownedLayoutDocument,
+      );
+
+      expect(adapted.document.body.map((element) => element.type))
+        .toEqual(['pageBreak', 'columnBreak']);
+      expect(adapted.source.blocks.body.map((element) => element.type))
+        .toEqual(['pageBreak', 'columnBreak']);
+      expect(adapted.source.bodyLayoutInput.sequence)
+        .toEqual([
+          expect.objectContaining({ kind: 'authored-break', break: 'page' }),
+          expect.objectContaining({ kind: 'authored-break', break: 'column' }),
+        ]);
+
+      const retainedFirst = adapted.source.blocks.body[0]!;
+      (adapted.document.body[0] as { type: string }).type = 'columnBreak';
+      expect(retainedFirst.type).toBe('pageBreak');
+      expect(Object.isFrozen(retainedFirst)).toBe(true);
+      expect(adapted.source.blocks.body).toBe(ownedBody);
+
+      // The only body-array clones are the individually transferred units.
+      // In particular, the completed two-element compatibility body is never
+      // passed to structuredClone at the terminal adapter boundary.
+      expect(clonedDocumentBodyLengths).toEqual([0]);
+    } finally {
+      clone.mockRestore();
+    }
+  });
+
   it('cancels producer ownership when consumer validation rejects a unit', async () => {
     const archive = new FakeArchive([{ kind: 'unexpected' }]);
     const worker = new DocumentPullWorker(() => archive);
     worker.open(identity);
 
     await expect(
-      materializeDocumentPullSession(createLocalDocumentPullTransport(worker), identity),
+      materializeDocumentPullOwnedModelsSession(
+        createLocalDocumentPullTransport(worker),
+        identity,
+      ),
     ).rejects.toThrow('unknown shape');
     expect(archive.canceled).toBe(true);
   });
@@ -104,7 +173,7 @@ describe('DOCX document pull integration', () => {
     // Ownership moves into the bounded cursor immediately; the compatibility
     // model returned to the consumer is reconstructed from transferred units.
     expect(source.body).toEqual([]);
-    const document = await materializeDocumentPullSession(
+    const { document } = await materializeDocumentPullOwnedModelsSession(
       createLocalDocumentPullTransport(worker),
       identity,
     );

@@ -18,12 +18,11 @@ import {
   type PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
 import { normalizeDocxDocumentModel } from '../../docx/src/parser-model.ts';
-import { materializeDocumentPullSession } from '../../docx/src/document-pull-client.ts';
+import { materializeDocumentPullAdapterSession } from '../../docx/src/document-pull-client.ts';
 import {
   DocumentPullWorker,
   type DocxDocumentCursorArchive,
 } from '../../docx/src/document-pull-worker.ts';
-import { layoutSourceModelAdapter } from '../../docx/src/layout-source-model-adapter.ts';
 import { createLayoutServices } from '../../docx/src/layout-runtime.ts';
 import { retainRenderWorkerDocumentLayout } from '../../docx/src/render-worker-layout.ts';
 import {
@@ -49,6 +48,7 @@ interface DocxArchiveHandle extends DocxDocumentCursorArchive {
   free(): void;
   extract_image(path: string): Uint8Array;
   document_cursor_resource_usage(): Uint8Array;
+  resource_usage(): Uint8Array;
 }
 
 interface DocxArchiveConstructor {
@@ -172,7 +172,7 @@ export async function openDocxDocument(
       () => undefined,
     );
     let usage: OoxmlResourceUsageSnapshot | undefined;
-    const model = await materializeDocumentPullSession(transport, identity, {
+    const adapted = await materializeDocumentPullAdapterSession(transport, identity, {
       signal: options.signal,
       onUsage: (checkpoint) => {
         usage = checkpoint;
@@ -186,7 +186,6 @@ export async function openDocxDocument(
     transport.terminate();
 
     throwIfAborted(options.signal);
-    const adapted = layoutSourceModelAdapter(model);
     const measurementCanvas = options.factory.createCanvas(1, 1);
     const services = createLayoutServices(adapted.source, {
       measureContext: measurementCanvas.getContext('2d'),
@@ -208,6 +207,7 @@ export async function openDocxDocument(
       usage,
       options.signal,
     );
+    debug.observeUsage(session.resourceUsage);
     debug.checkpoint('pagination ready');
     debug.succeed({ pages: session.pageCount });
     return session;
@@ -226,7 +226,7 @@ export async function openDocxDocument(
 }
 
 type SessionState = Readonly<{
-  source: ReturnType<typeof layoutSourceModelAdapter>['source'];
+  source: Awaited<ReturnType<typeof materializeDocumentPullAdapterSession>>['source'];
   services: ReturnType<typeof createLayoutServices>;
 }>;
 
@@ -235,8 +235,8 @@ type DefaultDocumentLayout =
 
 class DocxDocumentSessionImpl implements DocxDocumentSession {
   readonly pageCount: number;
-  readonly resourceUsage: OoxmlResourceUsageSnapshot | undefined;
   private readonly sizes: ReadonlyArray<Readonly<{ widthPt: number; heightPt: number }>>;
+  private lastResourceUsage: OoxmlResourceUsageSnapshot | undefined;
   private state: SessionState | null;
   private renderTail: Promise<void> = Promise.resolve();
   private pagesStarted = false;
@@ -260,11 +260,22 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
   ) {
     this.state = { source, services };
     this.pageCount = layout.pages.length;
-    this.resourceUsage = usage;
+    this.lastResourceUsage = usage;
     this.sizes = Object.freeze(layout.pages.map((page) => Object.freeze({
       widthPt: page.geometry.widthPt,
       heightPt: page.geometry.heightPt,
     })));
+  }
+
+  get resourceUsage(): OoxmlResourceUsageSnapshot | undefined {
+    if (this.closed) return this.lastResourceUsage;
+    try {
+      this.lastResourceUsage = decodeOoxmlResourceUsage(this.archive.resource_usage());
+    } catch {
+      // A closed/trapped archive cannot improve the last valid diagnostic
+      // checkpoint. Rendering failures remain surfaced by their operation.
+    }
+    return this.lastResourceUsage;
   }
 
   pageSize(pageIndex: number): Readonly<{ widthPt: number; heightPt: number }> {

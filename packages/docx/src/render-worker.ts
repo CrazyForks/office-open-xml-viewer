@@ -18,12 +18,12 @@ import {
 } from '@silurus/ooxml-core';
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
+  decodeOoxmlResourceUsage,
   PULL_SESSION_PROTOCOL,
   resourcePolicyForWasm,
   serializeWorkerError,
   type PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
-import type { DocxDocumentModel } from './types';
 import { renderLayoutSourceToCanvas, dropColorReplacedCache } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
@@ -35,7 +35,7 @@ import type {
   RenderWorkerWireRequest,
   DocumentMeta,
 } from './worker-protocol';
-import { layoutSourceModelAdapter } from './layout-source-model-adapter.js';
+import { layoutSourceModelAdapterFromOwnedModel } from './layout-source-model-adapter.js';
 import { layoutSourceStoreOf } from './layout/runtime-state.js';
 import {
   retainRenderWorkerDocumentLayout,
@@ -43,7 +43,7 @@ import {
 } from './render-worker-layout.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
 import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
-import { materializeDocumentPullSession } from './document-pull-client.js';
+import { materializeDocumentPullOwnedModelsSession } from './document-pull-client.js';
 import {
   createLocalDocumentPullTransport,
   DocumentPullWorker,
@@ -165,10 +165,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         generation: documentGeneration,
       };
       documentPull.open(identity);
-      let parsedModel: DocxDocumentModel;
+      let pulledModels: Awaited<ReturnType<typeof materializeDocumentPullOwnedModelsSession>>;
       let resourceUsage: OoxmlResourceUsageSnapshot | undefined;
       try {
-        parsedModel = await materializeDocumentPullSession(
+        pulledModels = await materializeDocumentPullOwnedModelsSession(
           createLocalDocumentPullTransport(documentPull),
           identity,
           { onUsage: (usage) => { resourceUsage = usage; } },
@@ -176,12 +176,12 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       } finally {
         await documentPull.reset().catch(() => undefined);
       }
-      if (documentRequiresDomVerticalGlyphLayout(parsedModel)) {
+      if (documentRequiresDomVerticalGlyphLayout(pulledModels.document)) {
         // The normalized public model deliberately omits parser-only sidecars
         // such as unavailable-drawing geometry. Stream the untouched parser
         // model to the main-thread normalization boundary one body block at a
         // time, without exposing those facts through `DocxDocument.document`.
-        const fallbackArchive = new MaterializedDocumentCursorArchive(parsedModel);
+        const fallbackArchive = new MaterializedDocumentCursorArchive(pulledModels.document);
         fallbackPull = new DocumentPullWorker(() => fallbackArchive);
         documentGeneration += 1;
         const fallbackIdentity = {
@@ -193,7 +193,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         post({ type: 'mainThreadVerticalFallback', id, ...fallbackIdentity, usage: resourceUsage });
         return;
       }
-      const adapted = layoutSourceModelAdapter(parsedModel);
+      const adapted = layoutSourceModelAdapterFromOwnedModel(
+        pulledModels.document,
+        pulledModels.ownedLayoutDocument,
+      );
       const source = adapted.source;
       const model = adapted.document;
       let googleFaces: FontFace[] = [];
@@ -242,6 +245,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         pageSizes,
         bookmarkPages: [...buildBookmarkPageMap(layout)],
       };
+      const loadedArchive = host.archive;
+      if (!loadedArchive) throw new Error('No docx loaded');
+      resourceUsage = decodeOoxmlResourceUsage(
+        host.run(() => loadedArchive.resource_usage()),
+      );
       post({ type: 'parsedMeta', id, meta, usage: resourceUsage });
       return;
     }
@@ -283,6 +291,13 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       const raw = host.run(() => archive.extract_image(req.path));
       const bytes = new Uint8Array(raw).slice().buffer;
       post({ type: 'imageExtracted', id, bytes }, [bytes]);
+      return;
+    }
+    if (req.type === 'resourceUsage') {
+      const archive = host.archive;
+      if (!archive) throw new Error('No docx loaded');
+      const usage = decodeOoxmlResourceUsage(host.run(() => archive.resource_usage()));
+      post({ type: 'resourceUsage', id, usage });
       return;
     }
     if (req.type === 'toMarkdown') {

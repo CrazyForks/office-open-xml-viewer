@@ -4,6 +4,7 @@ import {
   WasmParserHost,
 } from '@silurus/ooxml-core';
 import {
+  decodeOoxmlResourceUsage,
   PULL_SESSION_PROTOCOL,
   resourcePolicyForWasm,
   serializeWorkerError,
@@ -117,6 +118,12 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       const out = host.run(() => archive.extract_image(req.path).buffer as ArrayBuffer);
       const res: WorkerResponse = { type: 'imageExtracted', id, bytes: out };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [out]);
+      return;
+    }
+    if (req.type === 'resourceUsage') {
+      if (!archive) throw new Error('No docx loaded');
+      const usage = decodeOoxmlResourceUsage(host.run(() => archive.resource_usage()));
+      post({ type: 'resourceUsage', id, usage });
       return;
     }
     if (req.type === 'toMarkdown') {

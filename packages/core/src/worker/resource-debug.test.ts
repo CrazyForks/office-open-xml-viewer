@@ -89,6 +89,50 @@ describe('OoxmlResourceDebugSession', () => {
     expect(text).not.toContain('private.png');
   });
 
+  it('prefers a terminal violation usage snapshot over an older checkpoint', () => {
+    const previous = { ...usage, operationInflatedBytes: 1 };
+    const terminal = { ...usage, operationInflatedBytes: 9 };
+    const session = new OoxmlResourceDebugSession({
+      enabled: true,
+      format: 'docx',
+      mode: 'worker',
+      policy,
+      now: () => 0,
+      emit: () => undefined,
+    });
+    session.observeUsage(previous);
+    const report = session.fail(new OoxmlResourceLimitError('limit', {
+      stage: 'decompression',
+      violation: {
+        format: 'docx',
+        operation: 'parse',
+        resource: 'archive-entry',
+        metric: 'actual-inflated-bytes',
+        part: 'word/document.xml',
+        limit: 8,
+        observed: 9,
+        configurable: true,
+        usage: terminal,
+      },
+    }));
+    expect(report?.usage).toEqual(terminal);
+  });
+
+  it('allows effective-mode correction and isolates diagnostic emitter failures', () => {
+    const session = new OoxmlResourceDebugSession({
+      enabled: true,
+      format: 'docx',
+      mode: 'worker',
+      policy,
+      now: () => 0,
+      emit: () => { throw new Error('console unavailable'); },
+    });
+    session.setMode('main');
+    const report = session.succeed();
+    expect(report?.mode).toBe('main');
+    expect(session.succeed()).toBeUndefined();
+  });
+
   it('does no work or output when disabled', () => {
     const emit = vi.fn();
     const now = vi.fn(() => 0);

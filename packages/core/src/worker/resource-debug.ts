@@ -46,11 +46,20 @@ export class OoxmlResourceDebugSession {
   private readonly checkpoints: OoxmlResourceDebugCheckpoint[] = [];
   private sourceBytes?: number;
   private lastUsage?: OoxmlResourceUsageSnapshot;
+  private mode: OoxmlResourceDebugReport['mode'];
   private finished = false;
 
   constructor(private readonly options: OoxmlResourceDebugSessionOptions) {
     this.now = options.now ?? defaultNow;
     this.startedAt = this.now();
+    this.mode = options.mode;
+  }
+
+  /** Record the realm that ultimately owns layout/rendering after capability
+   * negotiation. This is intentionally mutable only until the report closes. */
+  setMode(mode: OoxmlResourceDebugReport['mode']): void {
+    if (!this.options.enabled || this.finished) return;
+    this.mode = mode;
   }
 
   setSourceBytes(bytes: number): void {
@@ -93,10 +102,12 @@ export class OoxmlResourceDebugSession {
     const failureUsage = error instanceof OoxmlResourceLimitError
       ? error.details.violation.usage
       : undefined;
-    const finalUsage = this.lastUsage ?? failureUsage;
+    // A typed violation is the authoritative terminal checkpoint. A previous
+    // successful pull necessarily predates it and must not hide its counters.
+    const finalUsage = failureUsage ?? this.lastUsage;
     const report: OoxmlResourceDebugReport = Object.freeze({
       format: this.options.format,
-      mode: this.options.mode,
+      mode: this.mode,
       status,
       ...(this.sourceBytes === undefined ? {} : { sourceBytes: this.sourceBytes }),
       elapsedMs: elapsed(this.startedAt, this.now()),
@@ -106,7 +117,14 @@ export class OoxmlResourceDebugSession {
       ...(outcome ? { outcome: safeOutcome(outcome) } : {}),
       ...(status === 'error' ? { error: safeError(error) } : {}),
     });
-    (this.options.emit ?? emitOoxmlResourceDebugReport)(report);
+    // Diagnostics must never change library semantics. A hostile/replaced
+    // console or an application-provided observer cannot turn a successful
+    // load into a failure or mask the original load error.
+    try {
+      (this.options.emit ?? emitOoxmlResourceDebugReport)(report);
+    } catch {
+      // Best-effort diagnostics only.
+    }
     return report;
   }
 }

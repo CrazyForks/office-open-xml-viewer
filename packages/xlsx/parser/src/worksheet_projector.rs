@@ -4,7 +4,7 @@
 //! complete streaming boundary: XML/MCE preprocessing, hard parser ceilings,
 //! bounded row batches, and the compatibility materializer used by `lib.rs`.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 #[cfg(test)]
 use std::io::Cursor;
@@ -15,14 +15,14 @@ use std::rc::Rc;
 
 use ooxml_common::bounded_xml::{
     self, BoundedXmlError, BoundedXmlReadError, BoundedXmlReader, MceScope as StreamedMceScope,
-    NamespaceContext as StreamedNamespaceContext,
+    NamespaceContext as StreamedNamespaceContext, MCE_NS,
 };
 use ooxml_common::depth::{parse_guarded, MAX_XML_DEPTH};
 use ooxml_common::ns::is_x_ns;
 use ooxml_common::package_session::{PackageEntryStream, PackageLimitReporter};
 use ooxml_common::resource::HardResourceLimitKind;
 use quick_xml::events::Event;
-use quick_xml::{NsReader, XmlVersion};
+use quick_xml::NsReader;
 
 use crate::{
     attr_bool, parse_row_cells, resolve_implicit_ordinal, xlsx_understands_ns, Row, SharedString,
@@ -49,8 +49,6 @@ pub(super) struct StreamedSheetData {
     pub(super) rows: Vec<Row>,
     pub(super) row_heights: BTreeMap<u32, f64>,
 }
-
-const MCE_NS: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 
 /// Hidden safety ceiling for one lexical XML event. `quick_xml` otherwise keeps
 /// extending the caller-owned event buffer until it finds the token delimiter,
@@ -305,252 +303,6 @@ fn worksheet_is_application_defined_extension_element(
     namespace.is_some_and(|namespace| is_x_ns(Some(namespace))) && local_name == "extLst"
 }
 
-fn streamed_mce_qnames(
-    value: &str,
-    context: &StreamedNamespaceContext,
-    attribute_name: &str,
-    base_context_bytes: usize,
-    derived_bytes: &mut usize,
-    part: Option<&str>,
-) -> Result<Vec<(String, String)>, WorksheetProjectorError> {
-    value
-        .split_whitespace()
-        .map(|name| -> Result<_, WorksheetProjectorError> {
-            let (prefix, local_name) = name.split_once(':').ok_or_else(|| {
-                format!("worksheet MCE {attribute_name} name must be namespace-qualified: {name}")
-            })?;
-            if prefix.is_empty() || local_name.is_empty() || local_name.contains(':') {
-                return Err(format!(
-                    "worksheet MCE {attribute_name} contains invalid QName: {name}"
-                )
-                .into());
-            }
-            let namespace = context.namespace_for_prefix(prefix).ok_or_else(|| {
-                format!("worksheet MCE {attribute_name} uses unbound namespace prefix: {prefix}")
-            })?;
-            charge_streamed_context(
-                base_context_bytes,
-                derived_bytes,
-                namespace.len().saturating_add(local_name.len()),
-                part,
-            )?;
-            Ok((namespace.to_string(), local_name.to_string()))
-        })
-        .collect()
-}
-
-fn streamed_mce_prefixes(
-    value: &str,
-    context: &StreamedNamespaceContext,
-    attribute_name: &str,
-    base_context_bytes: usize,
-    derived_bytes: &mut usize,
-    part: Option<&str>,
-) -> Result<Vec<String>, WorksheetProjectorError> {
-    value
-        .split_whitespace()
-        .map(|prefix| {
-            let namespace = context.namespace_for_prefix(prefix).ok_or_else(|| {
-                format!("worksheet MCE {attribute_name} uses unbound namespace prefix: {prefix}")
-            })?;
-            if namespace == MCE_NS {
-                return Err(format!(
-                    "worksheet MCE {attribute_name} must not name the Markup Compatibility namespace"
-                )
-                .into());
-            }
-            charge_streamed_context(base_context_bytes, derived_bytes, namespace.len(), part)?;
-            Ok(namespace.to_string())
-        })
-        .collect()
-}
-
-struct StreamedMceAttributes {
-    scope: Rc<StreamedMceScope>,
-    must_understand: Vec<String>,
-}
-
-fn streamed_mce_attributes<R>(
-    reader: &NsReader<R>,
-    element: &quick_xml::events::BytesStart<'_>,
-    inherited: &Rc<StreamedMceScope>,
-    context: &StreamedNamespaceContext,
-    part: Option<&str>,
-) -> Result<StreamedMceAttributes, WorksheetProjectorError> {
-    let mut ignorable = HashSet::new();
-    let mut process_content = HashSet::new();
-    let mut must_understand = Vec::new();
-    let mut declared_process_content = Vec::new();
-    let base_context_bytes = context
-        .active_bytes()
-        .saturating_add(inherited.active_bytes());
-    let mut derived_bytes = 0usize;
-    for attribute in element.attributes() {
-        let attribute = attribute.map_err(|e| format!("worksheet MCE attribute: {e}"))?;
-        let (namespace, local_name) = reader.resolver().resolve_attribute(attribute.key);
-        if !bounded_xml::resolved_namespace_is(&namespace, |namespace| namespace == MCE_NS) {
-            continue;
-        }
-        let value = attribute
-            .normalized_value(XmlVersion::Implicit1_0)
-            .map_err(|e| format!("worksheet MCE attribute value: {e}"))?
-            .into_owned();
-        match local_name.as_ref() {
-            b"Ignorable" => {
-                ignorable.extend(streamed_mce_prefixes(
-                    &value,
-                    context,
-                    "Ignorable",
-                    base_context_bytes,
-                    &mut derived_bytes,
-                    part,
-                )?);
-            }
-            b"ProcessContent" => {
-                declared_process_content.extend(streamed_mce_qnames(
-                    &value,
-                    context,
-                    "ProcessContent",
-                    base_context_bytes,
-                    &mut derived_bytes,
-                    part,
-                )?);
-            }
-            b"MustUnderstand" => {
-                must_understand = streamed_mce_prefixes(
-                    &value,
-                    context,
-                    "MustUnderstand",
-                    base_context_bytes,
-                    &mut derived_bytes,
-                    part,
-                )?;
-            }
-            _ => {}
-        }
-    }
-    for (namespace, local_name) in declared_process_content {
-        if namespace == MCE_NS
-            || !(ignorable.contains(&namespace) || inherited.is_ignorable(&namespace))
-        {
-            return Err(format!(
-                "worksheet MCE ProcessContent namespace must be declared Ignorable: {namespace}"
-            )
-            .into());
-        }
-        process_content.insert((namespace, local_name));
-    }
-    let scope = StreamedMceScope::derive(inherited, ignorable, process_content, derived_bytes);
-    Ok(StreamedMceAttributes {
-        scope,
-        must_understand,
-    })
-}
-
-fn charge_streamed_context(
-    base_context_bytes: usize,
-    derived_bytes: &mut usize,
-    additional_bytes: usize,
-    part: Option<&str>,
-) -> Result<(), WorksheetProjectorError> {
-    let next_derived = derived_bytes
-        .checked_add(additional_bytes)
-        .unwrap_or(usize::MAX);
-    let observed = base_context_bytes.saturating_add(next_derived);
-    if observed > STREAMED_XML_CONTEXT_BYTES {
-        return Err(worksheet_projector_limit(
-            WorksheetProjectorLimitKind::XmlContextBytes,
-            part,
-            STREAMED_XML_CONTEXT_BYTES,
-            observed,
-        ));
-    }
-    *derived_bytes = next_derived;
-    Ok(())
-}
-
-fn check_streamed_must_understand(namespaces: &[String]) -> Result<(), String> {
-    if let Some(namespace) = namespaces
-        .iter()
-        .find(|namespace| !worksheet_understands_ns(namespace))
-    {
-        Err(format!(
-            "worksheet MCE MustUnderstand namespace is not understood: {namespace}"
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-/// Validate the attribute grammar of Part 3 §§7.5–7.7 before selecting an
-/// AlternateContent branch. Namespace declarations are not attributes for
-/// this grammar. `Choice/@Requires` is the sole permitted unqualified
-/// attribute; qualified attributes must be MCE-owned or declared ignorable.
-fn validate_alternate_element_attributes<R>(
-    reader: &NsReader<R>,
-    element: &quick_xml::events::BytesStart<'_>,
-    local_name: &str,
-    scope: &StreamedMceScope,
-) -> Result<(), WorksheetProjectorError> {
-    for attribute in element.attributes() {
-        let attribute = attribute.map_err(|error| format!("worksheet MCE attribute: {error}"))?;
-        let raw_name = attribute.key.as_ref();
-        if raw_name == b"xmlns" || raw_name.starts_with(b"xmlns:") {
-            continue;
-        }
-        let qualified = raw_name.contains(&b':');
-        if !qualified {
-            if local_name == "Choice" && raw_name == b"Requires" {
-                continue;
-            }
-            return Err(format!(
-                "worksheet MCE {local_name} has a forbidden unqualified attribute"
-            )
-            .into());
-        }
-        let (namespace, _) = reader.resolver().resolve_attribute(attribute.key);
-        let allowed = match namespace {
-            quick_xml::name::ResolveResult::Bound(namespace) => {
-                let namespace =
-                    std::str::from_utf8(namespace.as_ref()).map_err(|error| error.to_string())?;
-                namespace == MCE_NS || scope.is_ignorable(namespace)
-            }
-            _ => false,
-        };
-        if !allowed {
-            return Err(format!(
-                "worksheet MCE {local_name} qualified attribute namespace is not MCE or ignorable"
-            )
-            .into());
-        }
-    }
-    Ok(())
-}
-
-fn streamed_processes_content(scope: &StreamedMceScope, namespace: &str, local_name: &str) -> bool {
-    scope.processes_content(namespace, local_name)
-}
-
-fn ensure_unwrapped_element_has_no_xml_context_attributes<R>(
-    reader: &NsReader<R>,
-    element: &quick_xml::events::BytesStart<'_>,
-) -> Result<(), String> {
-    const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
-    for attribute in element.attributes() {
-        let attribute = attribute.map_err(|e| format!("worksheet MCE attribute: {e}"))?;
-        let (namespace, local_name) = reader.resolver().resolve_attribute(attribute.key);
-        if bounded_xml::resolved_namespace_is(&namespace, |namespace| namespace == XML_NS)
-            && matches!(local_name.as_ref(), b"base" | b"lang" | b"space")
-        {
-            return Err(
-                "worksheet MCE ProcessContent element cannot carry xml:base, xml:lang, or xml:space"
-                    .to_string(),
-            );
-        }
-    }
-    Ok(())
-}
-
 fn inject_moved_element_namespaces(
     element: &mut quick_xml::events::BytesStart<'static>,
     element_context: &StreamedNamespaceContext,
@@ -567,50 +319,6 @@ fn inject_moved_element_namespaces(
     .map_err(|error| {
         map_bounded_xml_error(error, WorksheetProjectorLimitKind::XmlContextBytes, part)
     })
-}
-
-/// Produce the Part 3 §9.4 step-5 processed attribute set for an ordinary
-/// retained element. Compatibility-control attributes and attributes from an
-/// unsupported ignorable namespace do not belong to the processed infoset.
-/// Application-defined extension elements bypass this function because their
-/// subtree is opaque and must be preserved byte-for-byte modulo XML writing.
-fn strip_processed_mce_attributes<R>(
-    reader: &NsReader<R>,
-    element: &mut quick_xml::events::BytesStart<'static>,
-    scope: &StreamedMceScope,
-) -> Result<(), WorksheetProjectorError> {
-    let name = std::str::from_utf8(element.name().as_ref())
-        .map_err(|error| error.to_string())?
-        .to_string();
-    let mut retained = Vec::new();
-    for attribute in element.attributes() {
-        let attribute = attribute.map_err(|error| format!("worksheet MCE attribute: {error}"))?;
-        let (namespace, local_name) = reader.resolver().resolve_attribute(attribute.key);
-        let compatibility_control = bounded_xml::resolved_namespace_is(&namespace, |namespace| {
-            namespace == MCE_NS
-                && matches!(
-                    local_name.as_ref(),
-                    b"Ignorable" | b"ProcessContent" | b"MustUnderstand"
-                )
-        });
-        let unsupported_ignorable = match namespace {
-            quick_xml::name::ResolveResult::Bound(namespace) => {
-                let namespace =
-                    std::str::from_utf8(namespace.as_ref()).map_err(|error| error.to_string())?;
-                scope.is_ignorable(namespace) && !worksheet_understands_ns(namespace)
-            }
-            _ => false,
-        };
-        if !compatibility_control && !unsupported_ignorable {
-            retained.push(attribute.to_owned());
-        }
-    }
-    let mut processed = quick_xml::events::BytesStart::new(name);
-    for attribute in retained {
-        processed.push_attribute(attribute);
-    }
-    *element = processed;
-    Ok(())
 }
 
 fn append_projected_event(
@@ -630,42 +338,33 @@ fn append_projected_event(
 ///
 /// ECMA-376 Part 3 §9.3 and §7.6 define `Requires` as namespace prefixes:
 /// every prefix must resolve to a namespace understood by this XLSX parser.
-fn streamed_choice_is_understood<R>(
-    _reader: &NsReader<R>,
+fn streamed_choice_is_understood(
     choice: &quick_xml::events::BytesStart<'_>,
     context: &StreamedNamespaceContext,
     part: Option<&str>,
 ) -> Result<bool, String> {
-    let mut requires = None;
-    for attribute in choice.attributes() {
-        let attribute = attribute.map_err(|error| format!("worksheet MCE attribute: {error}"))?;
-        if attribute.key.as_ref() == b"Requires" {
-            requires = Some(
-                attribute
-                    .normalized_value(XmlVersion::Implicit1_0)
-                    .map_err(|error| format!("worksheet MCE Requires: {error}"))?
-                    .into_owned(),
-            );
+    use ooxml_common::mce::ChoiceRequiresClassification;
+
+    let classification = bounded_xml::classify_bounded_mce_choice_requires(
+        choice,
+        context,
+        &worksheet_understands_ns,
+        STREAMED_XML_CONTEXT_BYTES,
+        "worksheet",
+    )
+    .map_err(|error| {
+        map_bounded_xml_error(error, WorksheetProjectorLimitKind::XmlContextBytes, part).to_string()
+    })?;
+    match classification {
+        ChoiceRequiresClassification::Understood => Ok(true),
+        ChoiceRequiresClassification::Unsupported => Ok(false),
+        ChoiceRequiresClassification::Missing | ChoiceRequiresClassification::Blank => {
+            Err("worksheet MCE Choice must have a non-empty Requires attribute".to_string())
+        }
+        ChoiceRequiresClassification::Unresolved => {
+            Err("worksheet MCE Choice Requires uses an unbound namespace prefix".to_string())
         }
     }
-    let requires = requires
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            "worksheet MCE Choice must have a non-empty Requires attribute".to_string()
-        })?;
-    let mut derived_bytes = 0;
-    let namespaces = streamed_mce_prefixes(
-        &requires,
-        context,
-        "Choice Requires",
-        context.active_bytes(),
-        &mut derived_bytes,
-        part,
-    )
-    .map_err(|error| error.to_string())?;
-    Ok(namespaces
-        .iter()
-        .all(|namespace| worksheet_understands_ns(namespace)))
 }
 
 /// Append a tiny namespace-preserving wrapper around one raw `<row>`.
@@ -875,16 +574,32 @@ fn classify_streamed_element<R>(
         ));
     }
 
-    let attributes = streamed_mce_attributes(reader, element, &inherited, namespace_context, part)?;
+    let attributes = bounded_xml::derive_mce_attributes(
+        reader,
+        element,
+        &inherited,
+        namespace_context,
+        STREAMED_XML_CONTEXT_BYTES,
+        "worksheet",
+    )
+    .map_err(|error| {
+        map_bounded_xml_error(error, WorksheetProjectorLimitKind::XmlContextBytes, part)
+    })?;
     if is_mc && matches!(local_name, "AlternateContent" | "Choice" | "Fallback") {
-        validate_alternate_element_attributes(reader, element, local_name, &attributes.scope)?;
+        bounded_xml::validate_mce_alternate_element_attributes(
+            reader,
+            element,
+            local_name,
+            &attributes.scope,
+            "worksheet",
+        )?;
     }
     if parent_is_alternate_content {
         if !is_mc || !matches!(local_name, "Choice" | "Fallback") {
             let ignored = namespace.is_some_and(|namespace| {
                 attributes.scope.is_ignorable(namespace)
                     && !worksheet_understands_ns(namespace)
-                    && !streamed_processes_content(&attributes.scope, namespace, local_name)
+                    && !attributes.scope.processes_content(namespace, local_name)
             });
             if ignored {
                 return Ok((StreamedElementKind::Ignored, attributes.scope));
@@ -913,8 +628,7 @@ fn classify_streamed_element<R>(
                 );
             }
             *seen_choice = true;
-            !*selected_branch
-                && streamed_choice_is_understood(reader, element, namespace_context, part)?
+            !*selected_branch && streamed_choice_is_understood(element, namespace_context, part)?
         } else {
             if !*seen_choice {
                 return Err(WorksheetProjectorError::Xml(
@@ -934,7 +648,11 @@ fn classify_streamed_element<R>(
         };
         if selected {
             *selected_branch = true;
-            check_streamed_must_understand(&attributes.must_understand)?;
+            bounded_xml::validate_mce_must_understand(
+                &attributes.must_understand,
+                &worksheet_understands_ns,
+                "worksheet",
+            )?;
         }
         return Ok((
             StreamedElementKind::AlternateBranch { selected },
@@ -943,7 +661,11 @@ fn classify_streamed_element<R>(
     }
 
     if is_mc && local_name == "AlternateContent" {
-        check_streamed_must_understand(&attributes.must_understand)?;
+        bounded_xml::validate_mce_must_understand(
+            &attributes.must_understand,
+            &worksheet_understands_ns,
+            "worksheet",
+        )?;
         return Ok((
             StreamedElementKind::AlternateContent {
                 selected_branch: false,
@@ -958,15 +680,23 @@ fn classify_streamed_element<R>(
         attributes.scope.is_ignorable(namespace) && !worksheet_understands_ns(namespace)
     });
     if let Some(namespace) = ignored_namespace {
-        if streamed_processes_content(&attributes.scope, namespace, local_name) {
-            ensure_unwrapped_element_has_no_xml_context_attributes(reader, element)?;
-            check_streamed_must_understand(&attributes.must_understand)?;
+        if attributes.scope.processes_content(namespace, local_name) {
+            bounded_xml::validate_mce_process_content_element(reader, element, "worksheet")?;
+            bounded_xml::validate_mce_must_understand(
+                &attributes.must_understand,
+                &worksheet_understands_ns,
+                "worksheet",
+            )?;
             return Ok((StreamedElementKind::Unwrapped, attributes.scope));
         }
         return Ok((StreamedElementKind::Ignored, attributes.scope));
     }
 
-    check_streamed_must_understand(&attributes.must_understand)?;
+    bounded_xml::validate_mce_must_understand(
+        &attributes.must_understand,
+        &worksheet_understands_ns,
+        "worksheet",
+    )?;
     Ok((
         StreamedElementKind::Retained {
             namespace: namespace.map(str::to_string),
@@ -1511,7 +1241,13 @@ where
                     });
                 }
                 if !*opaque {
-                    strip_processed_mce_attributes(reader, &mut start, &scope)?;
+                    bounded_xml::strip_processed_mce_attributes(
+                        reader,
+                        &mut start,
+                        &scope,
+                        &worksheet_understands_ns,
+                        "worksheet",
+                    )?;
                 }
                 role = Some(retained_role);
             }
@@ -1614,7 +1350,13 @@ where
                     )?;
                 }
                 if !*opaque {
-                    strip_processed_mce_attributes(reader, &mut empty, &_scope)?;
+                    bounded_xml::strip_processed_mce_attributes(
+                        reader,
+                        &mut empty,
+                        &_scope,
+                        &worksheet_understands_ns,
+                        "worksheet",
+                    )?;
                 }
                 if role == StreamedHostRole::Row {
                     let element_namespaces = namespace_context.effective_bindings();

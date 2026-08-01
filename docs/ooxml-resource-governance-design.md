@@ -208,9 +208,11 @@ bounded transient retention, and cleanup on rejection, reload, and destroy.
   object identity. It owns canonical `SourceRef`-keyed paragraph, table, and
   story records; resolved section, note, field, and font facts; and immutable
   image/math/paint manifests. A model adapter projects parser-private facts into
-  those records before sealing, while a streamed builder creates the same
-  records directly. The mutable public compatibility model, when requested,
-  lives outside the store and cannot change sealed layout or paint inputs.
+  those records before sealing. The streamed Viewer path separates the public
+  and builder-owned graphs one bounded pull at a time, then destructively
+  canonicalizes the builder-owned graph into the same store without constructing
+  a third complete body graph. The mutable public compatibility model lives
+  outside the store and cannot change sealed layout or paint inputs.
 - Keep pagination after the store is sealed. Sequential section inheritance,
   fields, notes, bookmarks, convergence, total page count, and stable Viewer
   readiness do not permit random page access or final page metadata before the
@@ -667,3 +669,25 @@ alongside distinct session bytes for `maxTotalInflatedBytes`.
 
 The Draft PR is not merged until these gates are satisfied and the user has
 reviewed the result locally.
+
+## M8 review disposition
+
+Fable was unavailable for M8, so the final review used two independent
+GPT-5.6 Sol tracks: architecture/API consistency and OOXML specification/safety.
+Both tracks initially requested changes and approved the implementation only
+after the findings were fixed and re-verified.
+
+The review fixes ensure that nested DOCX content is projected from the Part 3
+MCE processed infoset, ordinary missing or malformed required parts preserve the
+existing degraded-document route, resource-policy failures remain typed and
+terminal, debug telemetry is bounded and non-fatal, and DOCX pull lifecycle
+logic has one state machine. The streamed DOCX path retains the public model and
+the immutable layout source but no third reachable document-scale paragraph
+snapshot graph.
+
+Accepted non-blocking risks are explicit: the cloning and destructive
+canonicalizers use different ownership strategies and are kept semantically
+aligned by equivalence tests; physical collection of an abandoned worker graph
+after vertical-layout fallback is controlled by the JavaScript runtime; and a
+timed-out final debug probe reports the last complete checkpoint rather than
+changing successful load semantics.

@@ -207,7 +207,7 @@ impl DocxArchive {
             return Err(JsValue::from_str("a document cursor is active"));
         }
         let doc = match self.archive.as_mut() {
-            Ok(zip) => zip.run_operation("parse", parser::parse_streamed),
+            Ok(zip) => zip.run_operation("parse", parser::parse_streamed_compatible),
             Err(e) => Ok(parser::degraded_container_document(e.clone())),
         };
         let doc = doc.map_err(docx_parser_js_error)?;
@@ -252,9 +252,20 @@ impl DocxArchive {
                         });
                         Ok(())
                     }
-                    Err(error) => {
-                        zip.cancel_operation();
-                        Err(zip.assert_healthy().err().unwrap_or(error))
+                    Err(failure) => {
+                        if let Err(resource_error) = zip.assert_healthy() {
+                            zip.cancel_operation();
+                            return Err(resource_error);
+                        }
+                        self.document_cursor = Some(DocumentCursorState {
+                            operation_id,
+                            generation,
+                            next_sequence: 0,
+                            accepted_json_bytes: 0,
+                            cursor: None,
+                            degraded_terminal: Some(failure.into_degraded_document()),
+                        });
+                        Ok(())
                     }
                 }
             }
@@ -499,6 +510,18 @@ impl DocxArchive {
             .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
     }
 
+    /// Session-wide archive accounting after parsing or any later lazy part
+    /// extraction. Diagnostic only: this is not an allocator-memory estimate.
+    pub fn resource_usage(&self) -> Result<Vec<u8>, JsValue> {
+        let usage = self
+            .archive
+            .as_ref()
+            .map(parser::Zip::usage)
+            .map_err(|_| JsValue::from_str("docx resource usage is unavailable"))?;
+        serde_json::to_vec(&usage)
+            .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
+    }
+
     /// Fail cached worker operations after this package session was poisoned.
     pub fn assert_healthy(&self) -> Result<(), JsValue> {
         match &self.archive {
@@ -688,6 +711,24 @@ mod tests {
         zip_parts(&[
             ("word/document.xml", document),
             ("word/_rels/document.xml.rels", rels),
+            ("word/media/later.bin", b"later diagnostic bytes"),
+        ])
+    }
+
+    fn malformed_required_document_package() -> Vec<u8> {
+        zip_parts(&[
+            (
+                "word/document.xml",
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>"#,
+            ),
+            (
+                "word/_rels/document.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/></Relationships>"#,
+            ),
+            (
+                "word/theme/theme1.xml",
+                br#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Test"><a:majorFont><a:latin typeface="Diagnostic Major"/></a:majorFont><a:minorFont><a:latin typeface="Diagnostic Minor"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#,
+            ),
         ])
     }
 
@@ -772,6 +813,54 @@ mod tests {
             .run_operation("after-cancel", parser::parse_streamed)
             .unwrap();
         assert_eq!(parsed.body.len(), 2);
+    }
+
+    #[test]
+    fn required_part_failure_is_a_terminal_diagnostic_not_partial_body_success() {
+        let data = malformed_required_document_package();
+        let mut archive = cursor_archive(&data);
+        archive.open_document_cursor_inner(9, 4).unwrap();
+        let bytes = archive
+            .pull_document_chunk_inner(0, 9, 4, u32::MAX as usize)
+            .unwrap();
+        assert!(archive.document_chunk_done().unwrap());
+        let terminal: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(terminal["kind"], "complete");
+        assert!(terminal["document"]["body"].as_array().unwrap().is_empty());
+        assert!(terminal["document"]["parseError"]
+            .as_str()
+            .unwrap()
+            .starts_with("word/document.xml:"));
+        assert_eq!(terminal["document"]["majorFont"], "Diagnostic Major");
+        assert_eq!(terminal["document"]["minorFont"], "Diagnostic Minor");
+        archive.acknowledge_document_chunk_inner(0, 9, 4).unwrap();
+
+        let mut compatibility = cursor_archive(&data);
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&compatibility.parse().unwrap()).unwrap();
+        assert!(parsed["parseError"]
+            .as_str()
+            .unwrap()
+            .starts_with("word/document.xml:"));
+        assert_eq!(parsed["majorFont"], "Diagnostic Major");
+        assert_eq!(parsed["minorFont"], "Diagnostic Minor");
+    }
+
+    #[test]
+    fn session_usage_includes_lazy_parts_read_after_document_parsing() {
+        let data = cursor_test_package();
+        let mut archive = cursor_archive(&data);
+        archive.parse().unwrap();
+        let before: serde_json::Value =
+            serde_json::from_slice(&archive.resource_usage().unwrap()).unwrap();
+        archive.extract_image("word/media/later.bin").unwrap();
+        let after: serde_json::Value =
+            serde_json::from_slice(&archive.resource_usage().unwrap()).unwrap();
+        assert!(
+            after["distinctInflatedBytes"].as_u64().unwrap()
+                > before["distinctInflatedBytes"].as_u64().unwrap()
+        );
+        assert!(after["operationInflatedBytes"].as_u64().unwrap() > 0);
     }
 
     #[test]

@@ -5,9 +5,7 @@
 //! context, bounded event projection, and the namespace-based core of MCE
 //! `Choice` selection.
 
-use crate::mce::{
-    classify_choice_requires, ChoiceRequiresClassification, RequiredNamespaceSupport,
-};
+use crate::mce::ChoiceRequiresClassification;
 use crate::package_session::PackageLimitReporter;
 use crate::resource::{observe_hard_limit, HardResourceLimitKind};
 use quick_xml::events::{BytesStart, Event};
@@ -16,6 +14,8 @@ use quick_xml::{NsReader, Writer, XmlVersion};
 use std::collections::HashSet;
 use std::io::{BufRead, Read};
 use std::rc::Rc;
+
+pub const MCE_NS: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct XmlSourceSpan {
@@ -336,15 +336,321 @@ impl NamespaceContext {
     }
 }
 
-/// Persistent namespace-resolved MCE state. Parsing MCE attributes and deciding
-/// which namespaces a host format understands remain responsibilities of the
-/// consuming format crate.
+/// Persistent namespace-resolved MCE state. Host-schema state machines and the
+/// set of namespaces each format understands remain consuming-format concerns.
 #[derive(Default)]
 pub struct MceScope {
     parent: Option<Rc<MceScope>>,
     ignorable: HashSet<String>,
     process_content: HashSet<(String, String)>,
     active_bytes: usize,
+}
+
+/// Namespace-resolved compatibility-control attributes for one physical XML
+/// element. This is the format-neutral Part 3 §§7.2–7.4 input to a host's MCE
+/// state machine.
+pub struct MceAttributes {
+    pub scope: Rc<MceScope>,
+    pub must_understand: Vec<String>,
+}
+
+/// Parse `mc:Ignorable`, `mc:ProcessContent`, and `mc:MustUnderstand`, resolve
+/// their prefixes/QNames against the active namespace context, validate the
+/// cross-attribute constraints, and derive the persistent scope for children.
+pub fn derive_mce_attributes<R>(
+    reader: &NsReader<R>,
+    element: &BytesStart<'_>,
+    inherited: &Rc<MceScope>,
+    context: &NamespaceContext,
+    context_limit: usize,
+    label: &str,
+) -> Result<MceAttributes, BoundedXmlError> {
+    let mut ignorable = HashSet::new();
+    let mut process_content = HashSet::new();
+    let mut must_understand = Vec::new();
+    let mut declared_process_content = Vec::new();
+    let base_context_bytes = context
+        .active_bytes()
+        .saturating_add(inherited.active_bytes());
+    let mut derived_bytes = 0usize;
+    for attribute in element.attributes() {
+        let attribute = attribute
+            .map_err(|error| BoundedXmlError::Xml(format!("{label} MCE attribute: {error}")))?;
+        let (namespace, local_name) = reader.resolver().resolve_attribute(attribute.key);
+        if !resolved_namespace_is(&namespace, |namespace| namespace == MCE_NS) {
+            continue;
+        }
+        let value = attribute
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|error| BoundedXmlError::Xml(format!("{label} MCE attribute value: {error}")))?
+            .into_owned();
+        match local_name.as_ref() {
+            b"Ignorable" => {
+                ignorable.extend(resolve_mce_prefixes(
+                    &value,
+                    context,
+                    "Ignorable",
+                    base_context_bytes,
+                    &mut derived_bytes,
+                    context_limit,
+                    label,
+                )?);
+            }
+            b"ProcessContent" => {
+                declared_process_content.extend(resolve_mce_qnames(
+                    &value,
+                    context,
+                    "ProcessContent",
+                    base_context_bytes,
+                    &mut derived_bytes,
+                    context_limit,
+                    label,
+                )?);
+            }
+            b"MustUnderstand" => {
+                must_understand = resolve_mce_prefixes(
+                    &value,
+                    context,
+                    "MustUnderstand",
+                    base_context_bytes,
+                    &mut derived_bytes,
+                    context_limit,
+                    label,
+                )?;
+            }
+            _ => {}
+        }
+    }
+    for (namespace, local_name) in declared_process_content {
+        if namespace == MCE_NS
+            || !(ignorable.contains(&namespace) || inherited.is_ignorable(&namespace))
+        {
+            return Err(BoundedXmlError::Xml(format!(
+                "{label} MCE ProcessContent namespace must be declared Ignorable: {namespace}"
+            )));
+        }
+        process_content.insert((namespace, local_name));
+    }
+    Ok(MceAttributes {
+        scope: MceScope::derive(inherited, ignorable, process_content, derived_bytes),
+        must_understand,
+    })
+}
+
+fn resolve_mce_prefixes(
+    value: &str,
+    context: &NamespaceContext,
+    attribute_name: &str,
+    base_context_bytes: usize,
+    derived_bytes: &mut usize,
+    context_limit: usize,
+    label: &str,
+) -> Result<Vec<String>, BoundedXmlError> {
+    value
+        .split_whitespace()
+        .map(|prefix| {
+            let namespace = context.namespace_for_prefix(prefix).ok_or_else(|| {
+                BoundedXmlError::Xml(format!(
+                    "{label} MCE {attribute_name} uses unbound namespace prefix: {prefix}"
+                ))
+            })?;
+            if namespace == MCE_NS {
+                return Err(BoundedXmlError::Xml(format!(
+                    "{label} MCE {attribute_name} must not name the Markup Compatibility namespace"
+                )));
+            }
+            charge_mce_context(
+                base_context_bytes,
+                derived_bytes,
+                namespace.len(),
+                context_limit,
+            )?;
+            Ok(namespace.to_string())
+        })
+        .collect()
+}
+
+fn resolve_mce_qnames(
+    value: &str,
+    context: &NamespaceContext,
+    attribute_name: &str,
+    base_context_bytes: usize,
+    derived_bytes: &mut usize,
+    context_limit: usize,
+    label: &str,
+) -> Result<Vec<(String, String)>, BoundedXmlError> {
+    value
+        .split_whitespace()
+        .map(|name| {
+            let (prefix, local_name) = name.split_once(':').ok_or_else(|| {
+                BoundedXmlError::Xml(format!(
+                    "{label} MCE {attribute_name} name must be namespace-qualified: {name}"
+                ))
+            })?;
+            if prefix.is_empty() || local_name.is_empty() || local_name.contains(':') {
+                return Err(BoundedXmlError::Xml(format!(
+                    "{label} MCE {attribute_name} contains invalid QName: {name}"
+                )));
+            }
+            let namespace = context.namespace_for_prefix(prefix).ok_or_else(|| {
+                BoundedXmlError::Xml(format!(
+                    "{label} MCE {attribute_name} uses unbound namespace prefix: {prefix}"
+                ))
+            })?;
+            charge_mce_context(
+                base_context_bytes,
+                derived_bytes,
+                namespace.len().saturating_add(local_name.len()),
+                context_limit,
+            )?;
+            Ok((namespace.to_string(), local_name.to_string()))
+        })
+        .collect()
+}
+
+fn charge_mce_context(
+    base_context_bytes: usize,
+    derived_bytes: &mut usize,
+    additional_bytes: usize,
+    context_limit: usize,
+) -> Result<(), BoundedXmlError> {
+    let next_derived = derived_bytes
+        .checked_add(additional_bytes)
+        .unwrap_or(usize::MAX);
+    let observed = base_context_bytes.saturating_add(next_derived);
+    if observed > context_limit {
+        return Err(BoundedXmlError::Limit {
+            limit: context_limit,
+            observed,
+        });
+    }
+    *derived_bytes = next_derived;
+    Ok(())
+}
+
+/// Apply Part 3 §9.4 MustUnderstand processing with a host-supplied application
+/// configuration.
+pub fn validate_mce_must_understand(
+    namespaces: &[String],
+    understands: &dyn Fn(&str) -> bool,
+    label: &str,
+) -> Result<(), String> {
+    if let Some(namespace) = namespaces.iter().find(|namespace| !understands(namespace)) {
+        Err(format!(
+            "{label} MCE MustUnderstand namespace is not understood: {namespace}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Validate the Part 3 §§7.5–7.7 attribute grammar shared by
+/// AlternateContent, Choice, and Fallback.
+pub fn validate_mce_alternate_element_attributes<R>(
+    reader: &NsReader<R>,
+    element: &BytesStart<'_>,
+    local_name: &str,
+    scope: &MceScope,
+    label: &str,
+) -> Result<(), String> {
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| format!("{label} MCE attribute: {error}"))?;
+        let raw_name = attribute.key.as_ref();
+        if raw_name == b"xmlns" || raw_name.starts_with(b"xmlns:") {
+            continue;
+        }
+        if !raw_name.contains(&b':') {
+            if local_name == "Choice" && raw_name == b"Requires" {
+                continue;
+            }
+            return Err(format!(
+                "{label} MCE {local_name} has a forbidden unqualified attribute"
+            ));
+        }
+        let (namespace, _) = reader.resolver().resolve_attribute(attribute.key);
+        let allowed = match namespace {
+            ResolveResult::Bound(namespace) => {
+                let namespace =
+                    std::str::from_utf8(namespace.as_ref()).map_err(|error| error.to_string())?;
+                namespace == MCE_NS || scope.is_ignorable(namespace)
+            }
+            _ => false,
+        };
+        if !allowed {
+            return Err(format!(
+                "{label} MCE {local_name} qualified attribute namespace is not MCE or ignorable"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Part 3 §9.2 forbids XML context attributes on an element unwrapped through
+/// ProcessContent because removing that element would change their semantics.
+pub fn validate_mce_process_content_element<R>(
+    reader: &NsReader<R>,
+    element: &BytesStart<'_>,
+    label: &str,
+) -> Result<(), String> {
+    const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| format!("{label} MCE attribute: {error}"))?;
+        let (namespace, local_name) = reader.resolver().resolve_attribute(attribute.key);
+        if resolved_namespace_is(&namespace, |namespace| namespace == XML_NS)
+            && matches!(local_name.as_ref(), b"base" | b"lang" | b"space")
+        {
+            return Err(format!(
+                "{label} MCE ProcessContent element cannot carry xml:base, xml:lang, or xml:space"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Produce the Part 3 §9.4 step-5 attribute set for an ordinary retained
+/// element. Compatibility-control attributes and attributes in unsupported
+/// ignorable namespaces do not belong to the processed infoset. Host-owned
+/// application-defined extension elements must bypass this function because
+/// their complete subtree is opaque to MCE processing.
+pub fn strip_processed_mce_attributes<R>(
+    reader: &NsReader<R>,
+    element: &mut BytesStart<'static>,
+    scope: &MceScope,
+    understands: &dyn Fn(&str) -> bool,
+    label: &str,
+) -> Result<(), String> {
+    let name = std::str::from_utf8(element.name().as_ref())
+        .map_err(|error| error.to_string())?
+        .to_string();
+    let mut retained = Vec::new();
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| format!("{label} MCE attribute: {error}"))?;
+        let (namespace, local_name) = reader.resolver().resolve_attribute(attribute.key);
+        let compatibility_control = resolved_namespace_is(&namespace, |namespace| {
+            namespace == MCE_NS
+                && matches!(
+                    local_name.as_ref(),
+                    b"Ignorable" | b"ProcessContent" | b"MustUnderstand"
+                )
+        });
+        let unsupported_ignorable = match namespace {
+            ResolveResult::Bound(namespace) => {
+                let namespace =
+                    std::str::from_utf8(namespace.as_ref()).map_err(|error| error.to_string())?;
+                scope.is_ignorable(namespace) && !understands(namespace)
+            }
+            _ => false,
+        };
+        if !compatibility_control && !unsupported_ignorable {
+            retained.push(attribute.to_owned());
+        }
+    }
+    let mut processed = BytesStart::new(name);
+    for attribute in retained {
+        processed.push_attribute(attribute);
+    }
+    *element = processed;
+    Ok(())
 }
 
 impl MceScope {
@@ -511,26 +817,77 @@ pub fn classify_mce_choice_requires(
     understands: &dyn Fn(&str) -> bool,
     label: &str,
 ) -> Result<ChoiceRequiresClassification, String> {
+    classify_bounded_mce_choice_requires(choice, context, understands, usize::MAX, label).map_err(
+        |error| match error {
+            BoundedXmlError::Xml(message) => message,
+            BoundedXmlError::Limit { limit, observed } => {
+                format!("{label} MCE context limit exceeded: {observed} > {limit}")
+            }
+        },
+    )
+}
+
+/// Bounded variant of [`classify_mce_choice_requires`] for streaming hosts.
+/// Prefix resolution and the host application-configuration predicate are
+/// shared, while the caller supplies the active context ceiling.
+pub fn classify_bounded_mce_choice_requires(
+    choice: &BytesStart<'_>,
+    context: &NamespaceContext,
+    understands: &dyn Fn(&str) -> bool,
+    context_limit: usize,
+    label: &str,
+) -> Result<ChoiceRequiresClassification, BoundedXmlError> {
     let mut requires = None;
     for attribute in choice.attributes() {
-        let attribute = attribute.map_err(|e| format!("{label} MCE Choice attribute: {e}"))?;
+        let attribute = attribute.map_err(|error| {
+            BoundedXmlError::Xml(format!("{label} MCE Choice attribute: {error}"))
+        })?;
         if attribute.key == QName(b"Requires") {
             requires = Some(
                 attribute
                     .normalized_value(XmlVersion::Implicit1_0)
-                    .map_err(|e| format!("{label} MCE Requires: {e}"))?
+                    .map_err(|error| {
+                        BoundedXmlError::Xml(format!("{label} MCE Requires: {error}"))
+                    })?
                     .into_owned(),
             );
         }
     }
-    Ok(classify_choice_requires(
-        requires.as_deref(),
-        |prefix| match context.namespace_for_prefix(prefix) {
-            None => RequiredNamespaceSupport::Unresolved,
-            Some(namespace) if understands(namespace) => RequiredNamespaceSupport::Understood,
-            Some(_) => RequiredNamespaceSupport::Unsupported,
-        },
-    ))
+    let Some(requires) = requires.as_deref() else {
+        return Ok(ChoiceRequiresClassification::Missing);
+    };
+    if requires.split_whitespace().next().is_none() {
+        return Ok(ChoiceRequiresClassification::Blank);
+    }
+
+    let mut derived_bytes = 0usize;
+    let mut unresolved = false;
+    let mut unsupported = false;
+    for prefix in requires.split_whitespace() {
+        let Some(namespace) = context.namespace_for_prefix(prefix) else {
+            unresolved = true;
+            continue;
+        };
+        if namespace == MCE_NS {
+            return Err(BoundedXmlError::Xml(format!(
+                "{label} MCE Choice Requires must not name the Markup Compatibility namespace"
+            )));
+        }
+        charge_mce_context(
+            context.active_bytes(),
+            &mut derived_bytes,
+            namespace.len(),
+            context_limit,
+        )?;
+        unsupported |= !understands(namespace);
+    }
+    Ok(if unresolved {
+        ChoiceRequiresClassification::Unresolved
+    } else if unsupported {
+        ChoiceRequiresClassification::Unsupported
+    } else {
+        ChoiceRequiresClassification::Understood
+    })
 }
 
 /// Attribute a format-owned hard XML ceiling to its active package operation.
@@ -710,6 +1067,48 @@ mod tests {
         assert!(
             classify_mce_choice_requires(&malformed_attribute, &context, &understands, "test")
                 .is_err()
+        );
+
+        let limit = context
+            .active_bytes()
+            .saturating_add("urn:known".len())
+            .saturating_sub(1);
+        assert!(matches!(
+            classify_bounded_mce_choice_requires(&known, &context, &understands, limit, "test"),
+            Err(BoundedXmlError::Limit { .. })
+        ));
+    }
+
+    #[test]
+    fn mce_attributes_share_namespace_resolution_and_validation() {
+        let xml = format!(
+            r#"<r xmlns:mc="{MCE_NS}" xmlns:f="urn:future" mc:Ignorable="f" mc:ProcessContent="f:wrap" mc:MustUnderstand="f"><child/></r>"#,
+        );
+        let mut reader = NsReader::from_str(&xml);
+        let mut buffer = Vec::new();
+        let (_, event) = reader.read_resolved_event_into(&mut buffer).unwrap();
+        let Event::Start(root) = event else {
+            panic!("fixture root is a start element")
+        };
+        let namespace_root = NamespaceContext::root();
+        let context = NamespaceContext::derive(&root, &namespace_root, 1024, "test").unwrap();
+        let attributes =
+            derive_mce_attributes(&reader, &root, &MceScope::root(), &context, 1024, "test")
+                .unwrap();
+
+        assert!(attributes.scope.is_ignorable("urn:future"));
+        assert!(attributes.scope.processes_content("urn:future", "wrap"));
+        assert_eq!(attributes.must_understand, ["urn:future"]);
+        assert!(validate_mce_must_understand(
+            &attributes.must_understand,
+            &|namespace| namespace == "urn:future",
+            "test"
+        )
+        .is_ok());
+        assert!(
+            validate_mce_must_understand(&attributes.must_understand, &|_| false, "test")
+                .unwrap_err()
+                .contains("MustUnderstand")
         );
     }
 

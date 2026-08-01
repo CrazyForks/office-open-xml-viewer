@@ -5,8 +5,6 @@ import {
   decodeOoxmlResourceUsage,
   normalizeLoadResourceOptions,
   OoxmlResourceDebugSession,
-  PullSessionHost,
-  PullSessionHostCoordinator,
   parseResourceLimitError,
   resourcePolicyForWasm,
   type PullSessionCommand,
@@ -19,15 +17,17 @@ import {
   resolveSharedStringRows,
   resolveSharedStrings,
 } from '../../xlsx/src/shared-strings.ts';
+import {
+  WorksheetPullWorker,
+  XLSX_WORKSHEET_PULL_BYTES,
+  type WorksheetWireChunk,
+} from '../../xlsx/src/worksheet-pull-worker.ts';
 // @ts-ignore — wasm-pack generated JS without a d.ts entry for the bare module path
 import * as xlsxWasm from '../../xlsx/src/wasm/xlsx_parser.js';
 import { InProcessPullTransport } from './in-process-pull-transport.ts';
 import { loadWasmModule, resolveWasm } from './wasm-loader.ts';
 
 let initialized = false;
-
-const XLSX_WORKSHEET_PULL_BYTES = 64 * 1024 * 1024;
-const XLSX_WORKSHEET_BATCH_ROWS = 128;
 
 interface XlsxArchiveHandle {
   free(): void;
@@ -49,10 +49,6 @@ interface XlsxArchiveConstructor {
     maxTotalInflatedBytes?: bigint | null,
   ): XlsxArchiveHandle;
 }
-
-type WorksheetWireChunk =
-  | { kind: 'rows'; rows: Row[] }
-  | { kind: 'finished'; worksheet: Worksheet };
 
 /** Options for the bounded Node worksheet iterator. */
 export interface XlsxWorksheetRowIteratorOptions {
@@ -190,7 +186,8 @@ export async function* iterateXlsxWorksheetRows(
     const archive = createArchive(Archive, toUint8(buffer), maxEntry, maxTotal);
   let terminalAcknowledged = false;
   let operationError: unknown;
-  let session: BoundedPullSession<Uint8Array, number> | undefined;
+  let session: BoundedPullSession<ArrayBuffer, number> | undefined;
+  let pull: WorksheetPullWorker | undefined;
   let rowBatches = 0;
   let emittedRows = 0;
   try {
@@ -199,39 +196,16 @@ export async function* iterateXlsxWorksheetRows(
     debug.checkpoint('workbook index ready');
     const sheet = workbook.workbook.sheets[sheetIndex];
     if (!sheet) throw new RangeError(`Sheet index ${sheetIndex} out of range`);
-    archive.open_sheet_cursor(sheetIndex, sheet.name);
-
     const identity = { sessionId: 1, operationId: 1, generation: 1 } as const;
-    const coordinator = new PullSessionHostCoordinator();
-    let terminalPending = false;
-    const host = new PullSessionHost<Uint8Array, number>({
-      ...identity,
-      maxByteCredit: XLSX_WORKSHEET_PULL_BYTES,
-      coordinator,
-      driver: {
-        pull: () => {
-          const payload = archive.pull_sheet_cursor(XLSX_WORKSHEET_BATCH_ROWS);
-          terminalPending = archive.sheet_cursor_pull_finished();
-          return { payload, byteLength: payload.byteLength, done: terminalPending };
-        },
-        measureChunk: ({ payload }) => payload.byteLength,
-        acknowledge: () => {
-          if (!terminalPending) return;
-          archive.acknowledge_sheet_cursor_terminal();
-          terminalPending = false;
-          terminalAcknowledged = true;
-        },
-        cancel: () => archive.cancel_sheet_cursor(),
-        close: () => archive.close_sheet_cursor(),
-        resourceUsage: () => decodeUsage(archive.sheet_cursor_resource_usage()),
-      },
-    });
-    const transport = new InProcessPullTransport<PullSessionResponse<Uint8Array, number>>(
-      (command, respond) => host.dispatch(
+    pull = new WorksheetPullWorker(() => archive);
+    pull.reserveOpen(identity);
+    await pull.open(sheetIndex, sheet.name, identity);
+    const transport = new InProcessPullTransport<PullSessionResponse<ArrayBuffer, number>>(
+      (command, respond) => pull?.dispatch(
         command as PullSessionCommand<number>,
         respond,
       ),
-      () => archive.close_sheet_cursor(),
+      () => { void pull?.reset(); },
     );
     session = new BoundedPullSession(transport, {
       ...identity,
@@ -241,7 +215,9 @@ export async function* iterateXlsxWorksheetRows(
     for (;;) {
       const chunk = await session.pull(XLSX_WORKSHEET_PULL_BYTES, { signal: options.signal });
       debug.observeUsage(chunk.usage);
-      const decoded = JSON.parse(new TextDecoder().decode(chunk.payload)) as WorksheetWireChunk;
+      const decoded = JSON.parse(
+        new TextDecoder().decode(new Uint8Array(chunk.payload)),
+      ) as WorksheetWireChunk;
       if (chunk.done !== (decoded.kind === 'finished')) {
         throw new Error('worksheet cursor terminal marker mismatch');
       }
@@ -270,6 +246,7 @@ export async function* iterateXlsxWorksheetRows(
         usage: chunk.usage,
       };
       await chunk.ack({ signal: options.signal });
+      terminalAcknowledged = true;
       return;
     }
   } catch (error) {
@@ -281,6 +258,7 @@ export async function* iterateXlsxWorksheetRows(
     if (session && !terminalAcknowledged) {
       await session.cancel('closed').catch(() => undefined);
     }
+    await pull?.reset().catch(() => undefined);
     try {
       archive.free();
     } catch (cleanupError) {

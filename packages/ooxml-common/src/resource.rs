@@ -371,15 +371,28 @@ fn effective_limit(public: Option<u64>, hard: u64) -> (u64, bool) {
 }
 
 fn safe_part(path: &str) -> &str {
+    let bytes = path.as_bytes();
+    let windows_drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
     let safe = !path.is_empty()
         && path.len() <= 1024
         && !path.starts_with('/')
-        && !path.split('/').any(|segment| segment == "..")
+        && !path.starts_with('\\')
+        && !path.contains('\\')
+        && !path.contains('?')
+        && !path.contains('#')
+        && !path.contains("://")
+        && !windows_drive
+        && !path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
         && !path.chars().any(char::is_control);
     if safe {
         path
     } else {
-        "[untrusted archive entry]"
+        // Keep the required part discriminator without reflecting an unsafe
+        // attacker-controlled address. This token satisfies the shared wire
+        // contract's relative OPC-address grammar.
+        "untrusted-archive-entry"
     }
 }
 
@@ -653,6 +666,41 @@ mod tests {
         let later = read_allowance(1, "ppt/media/b.png", 1).unwrap_err();
         assert_eq!(later, first);
         assert!(first.starts_with("OOXML_RESOURCE_LIMIT:"));
+    }
+
+    #[test]
+    fn unsafe_part_names_use_the_wire_safe_redaction_token() {
+        for unsafe_path in [
+            "",
+            "/word/document.xml",
+            "../word/document.xml",
+            "word/../document.xml",
+            "word/./document.xml",
+            "word//document.xml",
+            "word\\document.xml",
+            "C:/word/document.xml",
+            "https://example.invalid/document.xml",
+            "word/document.xml?query",
+            "word/document.xml#fragment",
+            "word/document.xml\nsecret",
+        ] {
+            assert_eq!(safe_part(unsafe_path), "untrusted-archive-entry");
+        }
+        let oversized = "a".repeat(1025);
+        assert_eq!(safe_part(&oversized), "untrusted-archive-entry");
+        assert_eq!(safe_part("word/document.xml"), "word/document.xml");
+
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(4), Some(20));
+        let _scope = governor.scope("parse");
+        let first = observe_inflated(0, "../../private/document.xml", 5, 5).unwrap_err();
+        let replay = read_allowance(1, "word/document.xml", 1).unwrap_err();
+        assert_eq!(replay, first);
+        let envelope: serde_json::Value =
+            serde_json::from_str(first.strip_prefix("OOXML_RESOURCE_LIMIT:").unwrap()).unwrap();
+        assert_eq!(
+            envelope["details"]["violation"]["part"],
+            "untrusted-archive-entry"
+        );
     }
 
     #[test]

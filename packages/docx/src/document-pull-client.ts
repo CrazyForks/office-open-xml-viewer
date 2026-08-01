@@ -9,6 +9,10 @@ import {
   type PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
 import type { BodyElement, DocxDocumentModel } from './types.js';
+import {
+  layoutSourceModelAdapterFromOwnedModel,
+  type LayoutSourceModelAdapter,
+} from './layout-source-model-adapter.js';
 
 export const DOCX_INITIAL_BODY_PULL_BYTES = 1024 * 1024;
 const MAX_DOCUMENT_UNIT_BYTES = Math.max(
@@ -26,6 +30,11 @@ export interface MaterializeDocumentPullOptions {
   readonly onUsage?: (usage: OoxmlResourceUsageSnapshot) => void;
 }
 
+interface DocumentPullAccumulator<TResult> {
+  acceptBody(body: BodyElement[]): void;
+  complete(document: DocxDocumentModel): TResult;
+}
+
 /** Drain one sequential DOCX operation into the backward-compatible public
  * model. Each transferred JSON unit is decoded, accepted, and ACKed before the
  * worker may produce another; no monolithic document JSON crosses realms. */
@@ -34,12 +43,81 @@ export async function materializeDocumentPullSession(
   identity: PullSessionIdentity<number>,
   options: MaterializeDocumentPullOptions = {},
 ): Promise<DocxDocumentModel> {
+  const body: BodyElement[] = [];
+  return drainDocumentPullSession(transport, identity, options, {
+    acceptBody: (unitBody) => { body.push(...unitBody); },
+    complete: (document) => {
+      document.body = body;
+      return document;
+    },
+  });
+}
+
+/** Drain a sequential DOCX operation directly into its two required ownership
+ * graphs: the mutable public compatibility model and the immutable layout
+ * source. The second graph is detached while each bounded body unit is live,
+ * avoiding a full-document clone after the complete public body accumulates. */
+export async function materializeDocumentPullAdapterSession(
+  transport: WorkerBridgeTransport<PullSessionResponse<ArrayBuffer, number>>,
+  identity: PullSessionIdentity<number>,
+  options: MaterializeDocumentPullOptions = {},
+): Promise<LayoutSourceModelAdapter> {
+  const models = await materializeDocumentPullOwnedModelsSession(transport, identity, options);
+  return layoutSourceModelAdapterFromOwnedModel(models.document, models.ownedLayoutDocument);
+}
+
+export interface MaterializedDocumentPullOwnedModels {
+  /** Parser-shaped model retained for public compatibility or worker fallback. */
+  readonly document: DocxDocumentModel;
+  /** Disjoint, builder-owned graph that may be consumed only by the adapter. */
+  readonly ownedLayoutDocument: DocxDocumentModel;
+}
+
+/** Lower-level acquisition boundary for render workers that must inspect the
+ * parser-shaped compatibility graph before deciding whether Window fallback is
+ * required. Callers must either consume `ownedLayoutDocument` with
+ * `layoutSourceModelAdapterFromOwnedModel` or release it. */
+export async function materializeDocumentPullOwnedModelsSession(
+  transport: WorkerBridgeTransport<PullSessionResponse<ArrayBuffer, number>>,
+  identity: PullSessionIdentity<number>,
+  options: MaterializeDocumentPullOptions = {},
+): Promise<MaterializedDocumentPullOwnedModels> {
+  const publicBody: BodyElement[] = [];
+  const ownedLayoutBody: BodyElement[] = [];
+  return drainDocumentPullSession(transport, identity, options, {
+    acceptBody: (body) => {
+      // Clone only the current credit-bounded unit. The parsed instances become
+      // the public model; their detached counterparts become the builder-owned
+      // layout graph and are never exposed to callers.
+      const layoutUnit = structuredClone(body);
+      for (const element of body) publicBody.push(element);
+      for (const element of layoutUnit) ownedLayoutBody.push(element);
+    },
+    complete: (document) => {
+      // The terminal envelope has its own hard byte cap and carries no body.
+      // Detach it before attaching either accumulated graph.
+      const ownedLayoutDocument = structuredClone(document);
+      document.body = publicBody;
+      ownedLayoutDocument.body = ownedLayoutBody;
+      return Object.freeze({ document, ownedLayoutDocument });
+    },
+  });
+}
+
+/** The sole DOCX pull-protocol state machine. Ownership policy is injected by
+ * the accumulator so ACK, validation, usage, cancellation, and transfer cleanup
+ * cannot drift between compatibility and layout-aware materialization paths. */
+async function drainDocumentPullSession<TResult>(
+  transport: WorkerBridgeTransport<PullSessionResponse<ArrayBuffer, number>>,
+  identity: PullSessionIdentity<number>,
+  options: MaterializeDocumentPullOptions,
+  accumulator: DocumentPullAccumulator<TResult>,
+): Promise<TResult> {
   const session = new BoundedPullSession(transport, {
     ...identity,
     maxByteCredit: MAX_DOCUMENT_UNIT_BYTES,
     timeoutMs: options.timeoutMs,
   });
-  const body: BodyElement[] = [];
   try {
     for (;;) {
       const chunk = await pullWithCreditRetry(session, options.signal);
@@ -51,16 +129,16 @@ export async function materializeDocumentPullSession(
           throw new TypeError('DOCX document unit terminal flag does not match its payload');
         }
         if (unit.kind === 'body') {
-          body.push(...unit.body);
+          accumulator.acceptBody(unit.body);
           await chunk.ack({ signal: options.signal });
           continue;
         }
         if (!Array.isArray(unit.document.body) || unit.document.body.length !== 0) {
           throw new TypeError('DOCX terminal document must not duplicate streamed body blocks');
         }
-        unit.document.body = body;
+        const result = accumulator.complete(unit.document);
         await chunk.ack({ signal: options.signal });
-        return unit.document;
+        return result;
       } finally {
         chunk.disposeTransferred();
       }

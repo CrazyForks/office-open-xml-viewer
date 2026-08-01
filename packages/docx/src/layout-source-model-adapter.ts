@@ -7,8 +7,10 @@ import { docDefaultFontSizePt } from './layout/measurement-environment.js';
 import { docxLocalMetricRequests } from './local-font-metrics.js';
 import {
   normalizeInternalDocumentModel,
+  normalizeOwnedInternalDocumentModel,
   tableSourceAcquisitionInput,
   type InternalShapeRun,
+  type NormalizedDocumentInput,
 } from './parser-model.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import {
@@ -91,7 +93,11 @@ function forEachPart(
 function traverseParagraphSources(
   document: DocxDocumentModel,
   projections: BodyAcquisitionInputProjections,
-  retain: (paragraph: DocParagraph, source: SourceRef, input: ReturnType<BodyAcquisitionInputProjections['paragraphAcquisitionInput']>) => void,
+  retain: (
+    paragraph: DocParagraph,
+    source: SourceRef,
+    input: ReturnType<BodyAcquisitionInputProjections['paragraphAcquisitionInput']>,
+  ) => BodyElement | void,
   retainTable: (table: Extract<BodyElement, { type: 'table' }>, source: SourceRef) => void = () => {},
   retainStory: (body: BodyElement[], source: SourceRef) => void = () => {},
 ): void {
@@ -101,7 +107,8 @@ function traverseParagraphSources(
       if (element.type === 'paragraph') {
         const paragraphSource: SourceRef = { ...root, path };
         const retained = projections.paragraphAcquisitionInput(element, paragraphSource);
-        retain(element, paragraphSource, retained);
+        const replacement = retain(element, paragraphSource, retained);
+        if (replacement) body[elementIndex] = replacement;
 
         // Authored acquisition indices include unavailable drawings omitted from
         // the public run union. Advance public identity only for retained runs so
@@ -245,6 +252,16 @@ function canonicalSection(
   return structuredClone(retained);
 }
 
+function canonicalOwnedSection(
+  section: DocxDocumentModel['section'],
+): DocxDocumentModel['section'] {
+  const retained = section as typeof section & {
+    __sectionPlacement?: unknown;
+  };
+  delete retained.__sectionPlacement;
+  return retained;
+}
+
 function canonicalFinalParts(
   parts: HeadersFooters,
   story: 'header' | 'footer',
@@ -261,74 +278,151 @@ function canonicalFinalParts(
   })) as unknown as HeadersFooters;
 }
 
+/** Canonicalize a builder-owned body by replacing one logical block at a time.
+ * Unlike `canonicalLayoutBody`, this path does not need to detach from the
+ * mutable compatibility model: the stream builder already established a
+ * separate ownership graph while each bounded wire unit was live. */
+function canonicalOwnedLayoutBody(
+  body: readonly BodyElement[],
+  root: SourceRef,
+  paragraphInputs: ReadonlyMap<string, ReturnType<BodyAcquisitionInputProjections['paragraphAcquisitionInput']>>,
+  prefix: number[] = [],
+): LayoutStoryBlock[] {
+  const canonicalParts = (
+    parts: HeadersFooters | undefined,
+    story: 'header' | 'footer',
+    instancePrefix: string,
+  ): HeadersFooters | undefined => {
+    if (!parts) return parts;
+    for (const kind of ['default', 'first', 'even'] as const) {
+      const part = parts[kind];
+      if (!part) continue;
+      part.body = canonicalOwnedLayoutBody(part.body, {
+        story, storyInstance: `${instancePrefix}:${kind}`, path: [],
+      }, paragraphInputs) as BodyElement[];
+    }
+    return parts;
+  };
+  // The stream builder owns this array exclusively. Reuse it as the canonical
+  // repository and replace each slot immediately, so the previous node becomes
+  // collectible before the next logical block is converted. A table can still
+  // require one table-sized transient while its nested arrays are projected,
+  // but there is no third document-sized body graph or body-index array.
+  const retainedBody = body as Array<BodyElement | LayoutStoryBlock>;
+  for (let elementIndex = 0; elementIndex < retainedBody.length; elementIndex += 1) {
+    const element = retainedBody[elementIndex] as BodyElement;
+    const path = [...prefix, elementIndex];
+    if (element.type === 'paragraph') {
+      const retained = paragraphInputs.get(sourceKey({ ...root, path }));
+      if (!retained) throw new Error(`Missing canonical paragraph source: ${sourceKey({ ...root, path })}`);
+      retainedBody[elementIndex] = retained as LayoutParagraphBlock;
+      continue;
+    }
+    if (element.type === 'table') {
+      const table = element as typeof element & {
+        __tableLayout?: unknown;
+      };
+      delete table.__tableLayout;
+      table.rows.forEach((row, rowIndex) => {
+        const retainedRow = row as typeof row & {
+            __tableRowLayout?: unknown;
+        };
+        delete retainedRow.__tableRowLayout;
+        retainedRow.cells.forEach((cell, cellIndex) => {
+          const retainedCell = cell as typeof cell & {
+                __tableCellLayout?: unknown;
+          };
+          delete retainedCell.__tableCellLayout;
+          retainedCell.content = canonicalOwnedLayoutBody(
+            retainedCell.content as BodyElement[], root, paragraphInputs,
+            [...path, rowIndex, cellIndex],
+          ) as typeof retainedCell.content;
+        });
+      });
+      retainedBody[elementIndex] = table;
+      continue;
+    }
+    if (element.type !== 'sectionBreak') continue;
+    const sectionBreak = element as typeof element & { __sectionPlacement?: unknown };
+    delete sectionBreak.__sectionPlacement;
+    sectionBreak.headers = canonicalParts(
+      sectionBreak.headers, 'header', `section:${elementIndex}`,
+    );
+    sectionBreak.footers = canonicalParts(
+      sectionBreak.footers, 'footer', `section:${elementIndex}`,
+    );
+  }
+  return retainedBody as LayoutStoryBlock[];
+}
+
+function canonicalOwnedFinalParts(
+  parts: HeadersFooters,
+  story: 'header' | 'footer',
+  paragraphInputs: ReadonlyMap<string, ReturnType<BodyAcquisitionInputProjections['paragraphAcquisitionInput']>>,
+): HeadersFooters {
+  for (const kind of ['default', 'first', 'even'] as const) {
+    const part = parts[kind];
+    if (!part) continue;
+    part.body = canonicalOwnedLayoutBody(
+      part.body, { story, storyInstance: kind, path: [] }, paragraphInputs,
+    ) as BodyElement[];
+  }
+  return parts;
+}
+
 /**
- * The only full-model adapter. It snapshots parser facts once, captures
- * identity-only sidecars by SourceRef, and seals a model-free source store.
+ * Adapt a caller-owned compatibility model. It snapshots parser facts once,
+ * captures identity-only sidecars by SourceRef, and seals a model-free store.
  */
 export function layoutSourceModelAdapter(input: DocxDocumentModel): LayoutSourceModelAdapter {
   const cached = adapters.get(input);
   if (cached) return cached;
 
-  const publicInput = normalizeInternalDocumentModel(compatibleDocumentModel(input));
-  // Acquire while parser sidecars are still attached. A structured clone cannot
-  // carry WeakMap-owned unavailable-drawing facts, so deriving this projection
-  // from the detached compatibility clone would misclassify such paragraphs.
-  const bodyLayoutInput = publicInput.bodyLayoutInput;
-  const paragraphInputs = new Map<string, ReturnType<BodyAcquisitionInputProjections['paragraphAcquisitionInput']>>();
-  const paragraphFacts: LayoutParagraphAcquisitionFact[] = [];
-  traverseParagraphSources(publicInput.document, publicInput.bodyModelGateway.acquisitionInputs, (paragraph, source, retained) => {
-    const key = sourceKey(source);
-    if (paragraphInputs.has(key)) throw new Error(`Duplicate paragraph source: ${key}`);
-    paragraphInputs.set(key, retained);
-    let publicRunIndex = 0;
-    const publicAnchorBridges = retained.runs.map((run, authoredRunIndex) => {
-      if (run.type === 'unavailableDrawing') return null;
-      const publicRun = paragraph.runs[publicRunIndex++];
-      return publicRun
-        ? publicInput.bodyModelGateway.publicAnchorBridge(publicRun, source, authoredRunIndex)
-        : null;
-    });
-    paragraphFacts.push(Object.freeze({
-      source: deepFreezePlainData({ ...source, path: [...source.path] }),
-      publicAnchorBridges: Object.freeze(publicAnchorBridges),
-      numberingMarkerFallbackFontSizePt: paragraph.numbering
-        ? getDefaultFontSize(paragraph)
-        : null,
-    }));
-  });
+  const normalized = normalizeInternalDocumentModel(compatibleDocumentModel(input));
+  return buildLayoutSourceModelAdapter(normalized, normalized, false, input);
+}
 
-  // Paragraph acquisition already snapshots one logical paragraph at a time;
-  // table/story canonicalization below does the same for its bounded unit. Do
-  // not clone the complete compatibility model here: that transiently doubled
-  // every body, story, and resource graph immediately before sealing.
-  const privateInput = publicInput;
+/** Build the compatibility model and immutable source from disjoint graphs.
+ * Both inputs must be exclusively owned by the caller: `publicInput` is
+ * normalized in place and becomes the returned compatibility model, while
+ * `ownedLayoutInput` is consumed into the sealed source and must not be used
+ * afterwards. */
+export function layoutSourceModelAdapterFromOwnedModel(
+  publicInput: DocxDocumentModel,
+  ownedLayoutInput: DocxDocumentModel,
+): LayoutSourceModelAdapter {
+  const cached = adapters.get(publicInput);
+  if (cached) return cached;
+  const normalizedPublic = normalizeOwnedInternalDocumentModel(compatibleDocumentModel(publicInput));
+  const normalizedPrivate = normalizeOwnedInternalDocumentModel(compatibleDocumentModel(ownedLayoutInput));
+  return buildLayoutSourceModelAdapter(normalizedPublic, normalizedPrivate, true, publicInput);
+}
+
+function buildLayoutSourceModelAdapter(
+  publicInput: NormalizedDocumentInput,
+  privateInput: NormalizedDocumentInput,
+  ownsPrivateGraph: boolean,
+  cacheKey: DocxDocumentModel,
+): LayoutSourceModelAdapter {
   const privateDocument = privateInput.document;
   const privateProjections = privateInput.bodyModelGateway.acquisitionInputs;
-  const projections: BodyAcquisitionInputProjections = Object.freeze({
-    ...privateProjections,
-    paragraphAcquisitionInput(_paragraph: ParagraphLayoutSource, source: SourceRef) {
-      const retained = paragraphInputs.get(sourceKey(source));
-      if (!retained) throw new Error(`Unknown paragraph acquisition source: ${sourceKey(source)}`);
-      return retained;
-    },
-  });
-  const tableFacts: LayoutTableAcquisitionFact[] = [];
-  const textBoxStories: { source: SourceRef; body: BodyElement[] }[] = [];
-  traverseParagraphSources(privateDocument, projections, () => {}, (table, source) => {
-    tableFacts.push(Object.freeze({
-      source: deepFreezePlainData({ ...source, path: [...source.path] }),
-      input: tableSourceAcquisitionInput(table),
-    }));
-  }, (body, source) => { textBoxStories.push({ body, source }); });
+  const bodyLayoutInput = privateInput.bodyLayoutInput;
+
+  // Resolve document-wide facts before destructively consuming the private
+  // graph. These projections retain only compact manifests; paragraph source
+  // records themselves are acquired and installed in one traversal below.
   const documentLayoutSettings = resolveDocumentLayoutSettings(privateDocument);
   const resources = projectDocumentSnapshotResources(
     privateDocument,
-    projections,
+    privateProjections,
     privateInput.mathOccurrences,
     (paragraph) => {
     const numbering = paragraph.numbering;
     if (!numbering) throw new Error('Picture-bullet metadata requires numbering');
-    const marker = projections.numberingMarkerShapeInput(numbering, getDefaultFontSize(paragraph));
+    const marker = privateProjections.numberingMarkerShapeInput(
+      numbering,
+      getDefaultFontSize(paragraph),
+    );
     return {
       widthPt: numbering.picBulletWidthPt ?? marker.fontSizePt,
       heightPt: numbering.picBulletHeightPt ?? marker.fontSizePt,
@@ -361,31 +455,76 @@ export function layoutSourceModelAdapter(input: DocxDocumentModel): LayoutSource
     defaultBodyFontSizePt: docDefaultFontSizePt(privateDocument),
   };
 
+  // Acquire while parser sidecars are still attached. On the builder-owned
+  // path each completed paragraph replaces its parser-shaped node immediately;
+  // the index map references those same final nodes instead of retaining a
+  // third document-sized paragraph graph until terminal sealing.
+  const paragraphInputs = new Map<string, ReturnType<BodyAcquisitionInputProjections['paragraphAcquisitionInput']>>();
+  const paragraphFacts: LayoutParagraphAcquisitionFact[] = [];
+  const tableFacts: LayoutTableAcquisitionFact[] = [];
+  const textBoxStories: { source: SourceRef; body: BodyElement[] }[] = [];
+  traverseParagraphSources(privateDocument, privateProjections, (paragraph, source, retained) => {
+    const key = sourceKey(source);
+    if (paragraphInputs.has(key)) throw new Error(`Duplicate paragraph source: ${key}`);
+    paragraphInputs.set(key, retained);
+    let publicRunIndex = 0;
+    const publicAnchorBridges = retained.runs.map((run, authoredRunIndex) => {
+      if (run.type === 'unavailableDrawing') return null;
+      const publicRun = paragraph.runs[publicRunIndex++];
+      return publicRun
+        ? privateInput.bodyModelGateway.publicAnchorBridge(publicRun, source, authoredRunIndex)
+        : null;
+    });
+    paragraphFacts.push(Object.freeze({
+      source: deepFreezePlainData({ ...source, path: [...source.path] }),
+      publicAnchorBridges: Object.freeze(publicAnchorBridges),
+      numberingMarkerFallbackFontSizePt: paragraph.numbering
+        ? getDefaultFontSize(paragraph)
+        : null,
+    }));
+    return ownsPrivateGraph ? retained as BodyElement : undefined;
+  }, (table, source) => {
+    tableFacts.push(Object.freeze({
+      source: deepFreezePlainData({ ...source, path: [...source.path] }),
+      input: tableSourceAcquisitionInput(table),
+    }));
+  }, (body, source) => { textBoxStories.push({ body, source }); });
+  const projections: BodyAcquisitionInputProjections = Object.freeze({
+    ...privateProjections,
+    paragraphAcquisitionInput(_paragraph: ParagraphLayoutSource, source: SourceRef) {
+      const retained = paragraphInputs.get(sourceKey(source));
+      if (!retained) throw new Error(`Unknown paragraph acquisition source: ${sourceKey(source)}`);
+      return retained;
+    },
+  });
+
+  const canonicalizeBody = ownsPrivateGraph ? canonicalOwnedLayoutBody : canonicalLayoutBody;
+  const canonicalizeFinalParts = ownsPrivateGraph ? canonicalOwnedFinalParts : canonicalFinalParts;
   const canonicalDocument = {
     ...privateDocument,
-    body: canonicalLayoutBody(
+    body: canonicalizeBody(
       privateDocument.body,
       { story: 'body', storyInstance: 'body', path: [] },
       paragraphInputs,
     ),
-    headers: canonicalFinalParts(privateDocument.headers, 'header', paragraphInputs),
-    footers: canonicalFinalParts(privateDocument.footers, 'footer', paragraphInputs),
+    headers: canonicalizeFinalParts(privateDocument.headers, 'header', paragraphInputs),
+    footers: canonicalizeFinalParts(privateDocument.footers, 'footer', paragraphInputs),
     footnotes: footnotes.map(({ content, ...note }) => ({
       ...structuredClone(note),
-      content: canonicalLayoutBody(content, {
+      content: canonicalizeBody(content, {
         story: 'footnote', storyInstance: note.id, path: [],
       }, paragraphInputs),
     })),
     endnotes: endnotes.map(({ content, ...note }) => ({
       ...structuredClone(note),
-      content: canonicalLayoutBody(content, {
+      content: canonicalizeBody(content, {
         story: 'endnote', storyInstance: note.id, path: [],
       }, paragraphInputs),
     })),
   } as unknown as DocxDocumentModel;
   const canonicalTextBoxStories = textBoxStories.map(({ source, body }) => ({
     source,
-    body: canonicalLayoutBody(body, source, paragraphInputs),
+    body: canonicalizeBody(body, source, paragraphInputs),
   }));
 
   deepFreezePlainData(paragraphInputs as unknown as object);
@@ -406,7 +545,9 @@ export function layoutSourceModelAdapter(input: DocxDocumentModel): LayoutSource
       footnotes: (canonicalDocument.footnotes ?? []) as unknown as readonly LayoutStoryNote[],
       endnotes: (canonicalDocument.endnotes ?? []) as unknown as readonly LayoutStoryNote[],
     },
-    section: canonicalSection(privateDocument.section),
+    section: ownsPrivateGraph
+      ? canonicalOwnedSection(privateDocument.section)
+      : canonicalSection(privateDocument.section),
     documentLayoutFacts: deepFreezePlainData({
       ...documentLayoutSettings,
       kinsoku: {
@@ -429,7 +570,7 @@ export function layoutSourceModelAdapter(input: DocxDocumentModel): LayoutSource
     fatalParse: fatalParse === null ? null : deepFreezePlainData(fatalParse),
   });
   const adapter = Object.freeze({ document: publicInput.document, source });
-  adapters.set(input, adapter);
+  adapters.set(cacheKey, adapter);
   adapters.set(publicInput.document, adapter);
   return adapter;
 }
