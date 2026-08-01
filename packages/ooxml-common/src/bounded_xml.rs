@@ -12,7 +12,7 @@ use crate::package_session::PackageLimitReporter;
 use crate::resource::{observe_hard_limit, HardResourceLimitKind};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::{QName, ResolveResult};
-use quick_xml::{NsReader, Writer};
+use quick_xml::{NsReader, Writer, XmlVersion};
 use std::collections::HashSet;
 use std::io::{BufRead, Read};
 use std::rc::Rc;
@@ -281,7 +281,7 @@ impl NamespaceContext {
             };
             if let Some(prefix) = prefix {
                 let namespace = attribute
-                    .unescape_value()
+                    .normalized_value(XmlVersion::Implicit1_0)
                     .map_err(|error| BoundedXmlError::Xml(error.to_string()))?
                     .into_owned();
                 declarations.push((prefix, namespace));
@@ -517,7 +517,7 @@ pub fn classify_mce_choice_requires(
         if attribute.key == QName(b"Requires") {
             requires = Some(
                 attribute
-                    .unescape_value()
+                    .normalized_value(XmlVersion::Implicit1_0)
                     .map_err(|e| format!("{label} MCE Requires: {e}"))?
                     .into_owned(),
             );
