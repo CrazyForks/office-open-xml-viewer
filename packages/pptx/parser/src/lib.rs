@@ -1,9 +1,17 @@
 use ooxml_common::depth::parse_guarded;
+use ooxml_common::json_measurement::measure_json;
 use ooxml_common::ns::is_r_ns;
+#[cfg(test)]
+use ooxml_common::package_session::PackageLimitReporter;
 use ooxml_common::package_session::{PackageOperation, PackageSessionHandle};
+use ooxml_common::resource::{
+    HardResourceLimitKind, ResourceUsage, HARD_MAX_PPTX_SLIDE_JSON_BYTES,
+    HARD_MAX_PPTX_SLIDE_XML_BYTES,
+};
 use std::collections::HashMap;
 #[cfg(test)]
 use std::io::Cursor;
+use std::io::Read;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
@@ -45,6 +53,24 @@ use master::*;
 thread_local! {
     static LAYOUT_MASTER_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static COMMENT_AUTHORS_LOAD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PPTX_SLIDE_JSON_LIMIT_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static PPTX_SLIDE_XML_LIMIT_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+fn pptx_slide_json_limit() -> u64 {
+    #[cfg(test)]
+    if let Some(limit) = PPTX_SLIDE_JSON_LIMIT_OVERRIDE.with(std::cell::Cell::get) {
+        return limit;
+    }
+    HARD_MAX_PPTX_SLIDE_JSON_BYTES
+}
+
+fn pptx_slide_xml_limit() -> u64 {
+    #[cfg(test)]
+    if let Some(limit) = PPTX_SLIDE_XML_LIMIT_OVERRIDE.with(std::cell::Cell::get) {
+        return limit;
+    }
+    HARD_MAX_PPTX_SLIDE_XML_BYTES
 }
 
 /// Increment the D4 parse counter (no-op unless `cfg(test)`). Call immediately
@@ -194,10 +220,87 @@ pub struct PptxArchive {
     /// the constructor throwing an opaque error the viewer can't turn into a
     /// placeholder slide.
     archive: Result<PptxZip, String>,
+    presentation: Option<PresentationShared>,
+    prepared_slide: Option<PreparedSlide>,
+    last_slide_usage: Option<ResourceUsage>,
+}
+
+struct PreparedSlide {
+    index: u32,
+    operation_id: u32,
+    generation: u32,
+    bytes: Option<Vec<u8>>,
+    byte_length: usize,
+    journal: Option<SlideCacheJournal>,
+}
+
+#[derive(Default)]
+struct SlideCacheJournal {
+    inserted_master_keys: Vec<String>,
+    inserted_layout_keys: Vec<String>,
+    inserted_layout_source_keys: Vec<String>,
+    had_comment_authors: bool,
+}
+
+impl SlideCacheJournal {
+    fn begin(shared: &PresentationShared) -> Self {
+        Self {
+            had_comment_authors: shared.comment_authors.is_some(),
+            ..Self::default()
+        }
+    }
+
+    fn rollback(self, shared: &mut PresentationShared) {
+        for key in self.inserted_master_keys {
+            shared.master_cache.remove(&key);
+        }
+        for key in self.inserted_layout_keys {
+            shared.layout_cache.remove(&key);
+        }
+        for key in self.inserted_layout_source_keys {
+            shared.layout_source_cache.remove(&key);
+        }
+        if !self.had_comment_authors {
+            shared.comment_authors = None;
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PresentationBootstrap {
+    slide_count: usize,
+    slide_width: i64,
+    slide_height: i64,
+    default_text_color: Option<String>,
+    major_font: Option<String>,
+    minor_font: Option<String>,
+    hlink_color: Option<String>,
+    fol_hlink_color: Option<String>,
+    slides: Vec<BootstrapSlide>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapSlide {
+    index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    part_name: Option<String>,
 }
 
 #[wasm_bindgen]
 impl PptxArchive {
+    fn ensure_presentation(&mut self) -> Result<(), String> {
+        if self.presentation.is_none() {
+            let zip = self
+                .archive
+                .as_mut()
+                .map_err(|error| format!("pptx-parser error: {error}"))?;
+            self.presentation = Some(bootstrap_presentation(zip).map_err(|e| e.to_string())?);
+        }
+        Ok(())
+    }
+
     /// Copy `data` into WASM once and open the ZIP central directory once.
     /// Resource limits are retained by the package session and applied to every
     /// subsequent logical operation.
@@ -224,7 +327,12 @@ impl PptxArchive {
                 return Err(JsValue::from_str(error));
             }
         }
-        Ok(PptxArchive { archive })
+        Ok(PptxArchive {
+            archive,
+            presentation: None,
+            prepared_slide: None,
+            last_slide_usage: None,
+        })
     }
 
     /// Parse the retained archive and return the model as UTF-8 JSON bytes.
@@ -232,15 +340,317 @@ impl PptxArchive {
     /// CONTAINER failed to open (#774) the model is a degraded placeholder
     /// presentation tagged with the container.
     pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
-        let presentation = match self.archive.as_mut() {
-            Ok(zip) => zip.run_operation("parse", |zip| {
-                parse_presentation(zip).map_err(|e| e.to_string())
-            }),
-            Err(e) => Ok(degraded_container_presentation(e.clone())),
+        self.parse_inner().map_err(pptx_parser_js_error)
+    }
+
+    fn parse_inner(&mut self) -> Result<Vec<u8>, String> {
+        if self.prepared_slide.is_some() {
+            return Err("a slide unit is awaiting acknowledgement".to_string());
+        }
+        if let Err(error) = &self.archive {
+            return serde_json::to_vec(&degraded_container_presentation(error.clone()))
+                .map_err(|e| format!("serialize error: {e}"));
+        }
+        let zip = self.archive.as_mut().expect("container open checked above");
+        zip.begin_operation("parse")?;
+        let result = (|| -> Result<Presentation, String> {
+            self.ensure_presentation()?;
+            let mut shared = self.presentation.take().expect("presentation loaded above");
+            let zip = self.archive.as_mut().expect("container open checked above");
+            let mut slides = Vec::with_capacity(shared.slide_descriptors.len());
+            for index in 0..shared.slide_descriptors.len() {
+                slides
+                    .push(produce_slide_unit(index, &mut shared, zip).map_err(|e| e.to_string())?);
+            }
+            shared.finish(slides).map_err(|e| e.to_string())
+        })();
+        let zip = self.archive.as_mut().expect("container open checked above");
+        let presentation = settle_pptx_operation(zip, result)?;
+        serde_json::to_vec(&presentation).map_err(|e| format!("serialize error: {e}"))
+    }
+
+    /// Open presentation metadata without parsing any slide parts. Hidden state,
+    /// notes, and comments remain slide-local because PresentationML stores them
+    /// in `p:sld` and slide relationships (ECMA-376 Part 1 §§19.2-19.3).
+    pub fn presentation_bootstrap(&mut self) -> Result<Vec<u8>, JsValue> {
+        if self.prepared_slide.is_some() {
+            return Err(JsValue::from_str(
+                "a slide unit is awaiting acknowledgement",
+            ));
+        }
+        if self.archive.is_err() {
+            let bootstrap = PresentationBootstrap {
+                slide_count: 1,
+                slide_width: 12_192_000,
+                slide_height: 6_858_000,
+                default_text_color: None,
+                major_font: None,
+                minor_font: None,
+                hlink_color: None,
+                fol_hlink_color: None,
+                slides: vec![BootstrapSlide {
+                    index: 0,
+                    part_name: None,
+                }],
+            };
+            return serde_json::to_vec(&bootstrap)
+                .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")));
+        }
+        let zip = self.archive.as_mut().expect("container checked above");
+        zip.begin_operation("presentation-bootstrap")
+            .map_err(|error| JsValue::from_str(&error))?;
+        let result = (|| -> Result<Vec<u8>, String> {
+            self.ensure_presentation()?;
+            let shared = self
+                .presentation
+                .as_ref()
+                .expect("presentation loaded above");
+            let slides = shared
+                .slide_descriptors
+                .iter()
+                .map(|descriptor| BootstrapSlide {
+                    index: descriptor.index,
+                    part_name: descriptor
+                        .relationship_id
+                        .as_ref()
+                        .and_then(|id| shared.pres_rels.get(id))
+                        .map(|target| resolve_path("ppt", target)),
+                })
+                .collect();
+            let bootstrap = PresentationBootstrap {
+                slide_count: shared.slide_descriptors.len(),
+                slide_width: shared.slide_width,
+                slide_height: shared.slide_height,
+                default_text_color: shared.theme.get("dk1").cloned(),
+                major_font: shared.theme.get("+mj-lt").cloned(),
+                minor_font: shared.theme.get("+mn-lt").cloned(),
+                hlink_color: shared.theme.get("hlink").cloned(),
+                fol_hlink_color: shared.theme.get("folHlink").cloned(),
+                slides,
+            };
+            serde_json::to_vec(&bootstrap).map_err(|e| format!("serialize error: {e}"))
+        })();
+        let zip = self.archive.as_mut().expect("container open checked above");
+        let result = settle_pptx_operation(zip, result);
+        result.map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Prepare or replay one complete random-access slide. The unit is never
+    /// split: insufficient byte credit returns an error while retaining the
+    /// exact prepared bytes for a later retry.
+    pub fn pull_slide(
+        &mut self,
+        slide_index: u32,
+        operation_id: u32,
+        generation: u32,
+        byte_credit: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        self.pull_slide_inner(slide_index, operation_id, generation, byte_credit as usize)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    fn pull_slide_inner(
+        &mut self,
+        slide_index: u32,
+        operation_id: u32,
+        generation: u32,
+        byte_credit: usize,
+    ) -> Result<Vec<u8>, String> {
+        if operation_id == 0 || generation == 0 || byte_credit == 0 {
+            return Err("operation id, generation, and byte credit must be positive".to_string());
+        }
+        if self.prepared_slide.is_some() {
+            if let Ok(zip) = self.archive.as_ref() {
+                if let Err(error) = zip.assert_healthy() {
+                    self.cancel_slide();
+                    return Err(error);
+                }
+            }
+            let prepared = self.prepared_slide.as_ref().expect("checked above");
+            if (prepared.index, prepared.operation_id, prepared.generation)
+                != (slide_index, operation_id, generation)
+            {
+                return Err("another slide unit is awaiting acknowledgement".to_string());
+            }
+            if prepared.bytes.is_none() {
+                return Err("slide unit must be acknowledged before another pull".to_string());
+            }
+            if prepared.byte_length > byte_credit {
+                return Err(format!(
+                    "slide unit requires {} bytes but credit is {byte_credit}",
+                    prepared.byte_length
+                ));
+            }
+            return Ok(self
+                .prepared_slide
+                .as_mut()
+                .expect("prepared checked above")
+                .bytes
+                .take()
+                .expect("prepared bytes checked above"));
+        }
+        if let Err(container_error) = &self.archive {
+            if slide_index != 0 {
+                return Err(format!("slide index {slide_index} is out of bounds"));
+            }
+            let slide = degraded_container_presentation(container_error.clone())
+                .slides
+                .into_iter()
+                .next()
+                .expect("degraded presentation owns one slide");
+            let measured = measure_json(&slide)?.json_bytes;
+            if measured > HARD_MAX_PPTX_SLIDE_JSON_BYTES {
+                return Err("degraded slide exceeds the PPTX slide JSON ceiling".to_string());
+            }
+            let bytes =
+                serde_json::to_vec(&slide).map_err(|error| format!("serialize error: {error}"))?;
+            let byte_length = bytes.len();
+            self.prepared_slide = Some(PreparedSlide {
+                index: slide_index,
+                operation_id,
+                generation,
+                bytes: Some(bytes),
+                byte_length,
+                journal: None,
+            });
+            return self.pull_slide_inner(slide_index, operation_id, generation, byte_credit);
+        }
+        // Bootstrap is a separate committed package operation. A canceled slide
+        // can therefore roll back only slide-local cache insertions without
+        // discarding presentation metadata or retaining uncommitted reads.
+        if self.presentation.is_none() {
+            let zip = self
+                .archive
+                .as_mut()
+                .map_err(|error| format!("pptx-parser error: {error}"))?;
+            zip.begin_operation("presentation-bootstrap")?;
+            let bootstrap = self.ensure_presentation();
+            let zip = self.archive.as_mut().expect("container open checked above");
+            settle_pptx_operation(zip, bootstrap)?;
+        }
+        let zip = self
+            .archive
+            .as_mut()
+            .map_err(|error| format!("pptx-parser error: {error}"))?;
+        zip.begin_operation("slide-cursor")?;
+        let mut journal = SlideCacheJournal::begin(
+            self.presentation
+                .as_ref()
+                .expect("presentation bootstrapped above"),
+        );
+        let result = (|| -> Result<Vec<u8>, String> {
+            self.ensure_presentation()?;
+            let shared = self
+                .presentation
+                .as_mut()
+                .expect("presentation loaded above");
+            let zip = self.archive.as_mut().expect("container open checked above");
+            let slide = produce_slide_unit_with_journal(
+                slide_index as usize,
+                shared,
+                zip,
+                Some(&mut journal),
+            )
+            .map_err(|error| error.to_string())?;
+            zip.assert_healthy()?;
+            serde_json::to_vec(&slide).map_err(|error| format!("serialize error: {error}"))
+        })();
+        let bytes = match result {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let zip = self.archive.as_mut().expect("container open checked above");
+                zip.cancel_operation();
+                journal.rollback(
+                    self.presentation
+                        .as_mut()
+                        .expect("presentation bootstrapped above"),
+                );
+                return Err(zip.assert_healthy().err().unwrap_or(error));
+            }
         };
-        let presentation = presentation.map_err(pptx_parser_js_error)?;
-        serde_json::to_vec(&presentation)
-            .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
+        let byte_length = bytes.len();
+        self.prepared_slide = Some(PreparedSlide {
+            index: slide_index,
+            operation_id,
+            generation,
+            bytes: Some(bytes),
+            byte_length,
+            journal: Some(journal),
+        });
+        self.pull_slide_inner(slide_index, operation_id, generation, byte_credit)
+    }
+
+    pub fn acknowledge_slide(&mut self, operation_id: u32, generation: u32) -> Result<(), JsValue> {
+        self.acknowledge_slide_inner(operation_id, generation)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    fn acknowledge_slide_inner(
+        &mut self,
+        operation_id: u32,
+        generation: u32,
+    ) -> Result<(), String> {
+        let prepared = self
+            .prepared_slide
+            .as_ref()
+            .ok_or_else(|| "no slide unit is awaiting acknowledgement".to_string())?;
+        if (prepared.operation_id, prepared.generation) != (operation_id, generation) {
+            return Err("slide acknowledgement identity is stale or invalid".to_string());
+        }
+        if prepared.bytes.is_some() {
+            return Err("slide unit cannot be acknowledged before delivery".to_string());
+        }
+        if self.archive.is_err() {
+            self.prepared_slide.take();
+            return Ok(());
+        }
+        if let Err(error) = self
+            .archive
+            .as_ref()
+            .map_err(|error| error.clone())?
+            .assert_healthy()
+        {
+            self.cancel_slide();
+            return Err(error);
+        }
+        let zip = self.archive.as_mut().map_err(|error| error.clone())?;
+        self.last_slide_usage = zip.operation.as_ref().and_then(PackageOperation::usage);
+        if let Err(error) = zip.finish_operation() {
+            self.cancel_slide();
+            return Err(error);
+        }
+        self.prepared_slide.take();
+        Ok(())
+    }
+
+    pub fn cancel_slide(&mut self) {
+        if let Some(prepared) = self.prepared_slide.take() {
+            if let (Some(journal), Some(shared)) = (prepared.journal, self.presentation.as_mut()) {
+                journal.rollback(shared);
+            }
+        }
+        if let Ok(zip) = self.archive.as_mut() {
+            self.last_slide_usage = zip.operation.as_ref().and_then(PackageOperation::usage);
+            zip.cancel_operation();
+        }
+    }
+
+    pub fn close_presentation_session(&mut self) {
+        self.cancel_slide();
+        self.presentation.take();
+    }
+
+    pub fn slide_cursor_resource_usage(&self) -> Result<Vec<u8>, JsValue> {
+        let usage = self
+            .archive
+            .as_ref()
+            .ok()
+            .and_then(|zip| zip.operation.as_ref())
+            .and_then(PackageOperation::usage)
+            .or(self.last_slide_usage)
+            .ok_or_else(|| JsValue::from_str("slide cursor usage is unavailable"))?;
+        serde_json::to_vec(&usage)
+            .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
     }
 
     /// Fail cached worker operations after this package session was poisoned.
@@ -334,6 +744,13 @@ impl PptxZip {
             .expect("operation initialized above"))
     }
 
+    #[cfg(test)]
+    fn active_operation(&self) -> Result<&PackageOperation, String> {
+        self.operation
+            .as_ref()
+            .ok_or_else(|| "pptx package operation is not active".to_string())
+    }
+
     fn finish_operation(&mut self) -> Result<(), String> {
         let Some(mut operation) = self.operation.take() else {
             return Ok(());
@@ -382,11 +799,79 @@ impl PptxZip {
     }
 }
 
+fn settle_pptx_operation<T>(zip: &mut PptxZip, result: Result<T, String>) -> Result<T, String> {
+    if let Err(resource_error) = zip.assert_healthy() {
+        zip.cancel_operation();
+        return Err(resource_error);
+    }
+    match result {
+        Ok(value) => match zip.finish_operation() {
+            Ok(()) => Ok(value),
+            Err(error) => {
+                zip.cancel_operation();
+                Err(error)
+            }
+        },
+        Err(error) => {
+            zip.cancel_operation();
+            Err(error)
+        }
+    }
+}
+
 pub(crate) fn read_zip_str(
     zip: &mut PptxZip,
     path: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     zip.operation()?.read_string(path).map_err(Into::into)
+}
+
+/// Read only the primary `ppt/slides/slideN.xml` through a fixed-scratch,
+/// limit+1 bounded buffer. Related parts intentionally continue to use their
+/// existing package-entry bounds in this milestone.
+fn read_primary_slide_xml(zip: &mut PptxZip, path: &str) -> Result<String, String> {
+    const SCRATCH_BYTES: usize = 8 * 1024;
+    let limit_u64 = pptx_slide_xml_limit();
+    let limit = usize::try_from(limit_u64)
+        .map_err(|_| "PPTX slide XML ceiling does not fit this target".to_string())?;
+    let retained_cap = limit
+        .checked_add(1)
+        .ok_or_else(|| "PPTX slide XML ceiling overflow".to_string())?;
+    let operation = zip.operation()?;
+    let mut stream = operation.open_entry(path)?;
+    let reporter = stream.limit_reporter()?;
+    let mut bytes = Vec::with_capacity(retained_cap.min(SCRATCH_BYTES));
+    let mut scratch = [0u8; SCRATCH_BYTES];
+    while bytes.len() < retained_cap {
+        let wanted = (retained_cap - bytes.len()).min(scratch.len());
+        let count = stream
+            .read(&mut scratch[..wanted])
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        let required = bytes.len() + count;
+        if required > bytes.capacity() {
+            let doubled = bytes.capacity().saturating_mul(2).max(SCRATCH_BYTES);
+            let next_capacity = required.max(doubled).min(retained_cap);
+            bytes.reserve_exact(next_capacity - bytes.len());
+        }
+        // Requested capacity grows geometrically and retained payload is clamped
+        // to limit+1 (the allocator may round capacity). At exactly `limit`, the
+        // next loop iteration requests one byte, validating decoder EOF/CRC.
+        bytes.extend_from_slice(&scratch[..count]);
+    }
+    if bytes.len() > limit {
+        reporter.observe_hard_limit(
+            HardResourceLimitKind::PptxSlideXmlBytes,
+            Some(path),
+            limit_u64,
+            limit_u64 + 1,
+        )?;
+        unreachable!("crossing a hard resource limit poisons and returns an error");
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| format!("ZIP entry is not valid UTF-8 ({path}): {error}"))
 }
 
 pub(crate) fn read_zip_bytes(zip: &mut PptxZip, path: &str) -> Result<Vec<u8>, String> {
@@ -1157,6 +1642,37 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
     shared.finish(slides)
 }
 
+#[cfg(test)]
+fn serialize_slide_unit_with_limit(
+    slide: &Slide,
+    reporter: &PackageLimitReporter,
+    limit: u64,
+) -> Result<Vec<u8>, String> {
+    let json_bytes = measure_json(slide)?.json_bytes;
+    reporter.observe_hard_limit(
+        HardResourceLimitKind::PptxSlideJsonBytes,
+        slide.part_name.as_deref(),
+        limit,
+        json_bytes,
+    )?;
+    serde_json::to_vec(slide).map_err(|error| format!("serialize error: {error}"))
+}
+
+#[cfg(test)]
+fn observe_primary_slide_xml(
+    reporter: &PackageLimitReporter,
+    part: &str,
+    observed: u64,
+    limit: u64,
+) -> Result<(), String> {
+    reporter.observe_hard_limit(
+        HardResourceLimitKind::PptxSlideXmlBytes,
+        Some(part),
+        limit,
+        observed,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SlideDescriptor {
     index: usize,
@@ -1188,7 +1704,7 @@ struct PresentationShared {
 }
 
 impl PresentationShared {
-    fn finish(self, slides: Vec<Slide>) -> Result<Presentation, Box<dyn std::error::Error>> {
+    fn finish(&self, slides: Vec<Slide>) -> Result<Presentation, Box<dyn std::error::Error>> {
         let default_text_color = self.theme.get("dk1").cloned();
         let major_font = self.theme.get("+mj-lt").cloned();
         let minor_font = self.theme.get("+mn-lt").cloned();
@@ -1324,6 +1840,18 @@ fn produce_slide_unit(
     shared: &mut PresentationShared,
     zip: &mut PptxZip,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
+    produce_slide_unit_with_journal(index, shared, zip, None)
+}
+
+/// The one canonical slide producer. Cursor callers provide a mutation journal
+/// so only cache entries inserted by the unacknowledged slide can be rolled
+/// back; legacy drains pass `None` and pay no journaling overhead.
+fn produce_slide_unit_with_journal(
+    index: usize,
+    shared: &mut PresentationShared,
+    zip: &mut PptxZip,
+    mut journal: Option<&mut SlideCacheJournal>,
+) -> Result<Slide, Box<dyn std::error::Error>> {
     let descriptor = shared
         .slide_descriptors
         .get(index)
@@ -1372,7 +1900,19 @@ fn produce_slide_unit(
         // RB7: a slide part that can't be read no longer aborts the whole deck.
         // Record the failure and let the build loop emit a placeholder for THIS
         // slide while the others parse normally.
-        let slide_xml = read_zip_str(zip, &slide_path).map_err(|e| e.to_string());
+        // This ceiling measures ONLY the primary `ppt/slides/slideN.xml` bytes.
+        // The bounded reader rejects limit+1 before UTF-8/DOM/model work; layout,
+        // master, chart, notes, comments, and relationship inputs retain their
+        // package-entry bounds in this phase. Ordinary read/CRC/UTF-8 failures
+        // still become this slide's placeholder, while resource poison returns
+        // immediately and cannot be downgraded.
+        let slide_xml = match read_primary_slide_xml(zip, &slide_path) {
+            Ok(xml) => Ok(xml),
+            Err(error) => {
+                zip.assert_healthy()?;
+                Err(error)
+            }
+        };
         let slide_rels_xml = read_zip_str(zip, &rels_path).unwrap_or_default();
         let slide_rels = parse_rels(&slide_rels_xml);
         let smartart_drawings = build_smartart_drawings(&slide_rels_xml, zip);
@@ -1405,6 +1945,9 @@ fn produce_slide_unit(
                         master_path,
                     }),
                 );
+                if let Some(journal) = journal.as_deref_mut() {
+                    journal.inserted_layout_source_keys.push(path.to_owned());
+                }
             }
         }
         let layout_source = layout_path
@@ -1450,6 +1993,9 @@ fn produce_slide_unit(
                 if !master_cache.contains_key(mp) {
                     let b = build_master_bundle(mp, theme, zip);
                     master_cache.insert(mp.to_owned(), b);
+                    if let Some(journal) = journal.as_deref_mut() {
+                        journal.inserted_master_keys.push(mp.to_owned());
+                    }
                 }
                 &master_cache[mp]
             }
@@ -1610,6 +2156,9 @@ fn produce_slide_unit(
                 if !layout_cache.contains_key(lp) {
                     let pl = build_parsed_layout(lx, zip);
                     layout_cache.insert(lp.to_owned(), pl);
+                    if let Some(journal) = journal {
+                        journal.inserted_layout_keys.push(lp.to_owned());
+                    }
                 }
                 None // borrowed from the cache below
             }
@@ -1659,6 +2208,14 @@ fn produce_slide_unit(
     // placeholder paths above. Check immediately before emitting the unit so a
     // failed `.ok()` / `unwrap_or_default()` read can never become a Slide.
     zip.assert_healthy()?;
+    let reporter = zip.operation()?.limit_reporter()?;
+    let json_bytes = measure_json(&slide)?.json_bytes;
+    reporter.observe_hard_limit(
+        HardResourceLimitKind::PptxSlideJsonBytes,
+        slide.part_name.as_deref(),
+        pptx_slide_json_limit(),
+        json_bytes,
+    )?;
     Ok(slide)
 }
 
@@ -1667,11 +2224,42 @@ mod tests {
     use super::*;
     use crate::chart::{parse_chartex, parse_legacy_chart};
     use ooxml_common::math::nodes_to_text;
+    use std::io::Write;
 
     // Local-only sample (redistribution-prohibited, gitignored). Tests that
     // depend on it must skip gracefully on a clean checkout / in CI where the
     // file is absent. See packages/pptx/public/private/.
     const LOCAL_SAMPLE_2: &str = "../public/private/sample-2.pptx";
+
+    struct SlideJsonLimitOverride(Option<u64>);
+
+    impl SlideJsonLimitOverride {
+        fn set(limit: u64) -> Self {
+            let previous = PPTX_SLIDE_JSON_LIMIT_OVERRIDE.replace(Some(limit));
+            Self(previous)
+        }
+    }
+
+    impl Drop for SlideJsonLimitOverride {
+        fn drop(&mut self) {
+            PPTX_SLIDE_JSON_LIMIT_OVERRIDE.set(self.0);
+        }
+    }
+
+    struct SlideXmlLimitOverride(Option<u64>);
+
+    impl SlideXmlLimitOverride {
+        fn set(limit: u64) -> Self {
+            let previous = PPTX_SLIDE_XML_LIMIT_OVERRIDE.replace(Some(limit));
+            Self(previous)
+        }
+    }
+
+    impl Drop for SlideXmlLimitOverride {
+        fn drop(&mut self) {
+            PPTX_SLIDE_XML_LIMIT_OVERRIDE.set(self.0);
+        }
+    }
 
     /// Build an empty in-memory zip — enough for parse_* functions that take a
     /// `&mut PptxZip` but whose input declares no `<a:buBlip>` / blipFill parts.
@@ -7472,6 +8060,364 @@ mod tests {
             w.finish().unwrap();
         }
         buf
+    }
+
+    #[test]
+    fn slide_cursor_random_access_credit_replay_ack_and_fixed_oracle() {
+        let data = build_three_slide_deck(usize::MAX, "");
+        let legacy_data = data.clone();
+        let mut archive = PptxArchive::new(data, None, None).unwrap();
+
+        let bootstrap: serde_json::Value =
+            serde_json::from_slice(&archive.presentation_bootstrap().unwrap()).unwrap();
+        assert_eq!(bootstrap["slideCount"], 3);
+        assert_eq!(bootstrap["slideWidth"], 12_192_000);
+        assert_eq!(bootstrap["slides"][2]["partName"], "ppt/slides/slide3.xml");
+        assert!(bootstrap["slides"][0].get("hidden").is_none());
+        assert!(bootstrap["slides"][0].get("notes").is_none());
+
+        let insufficient = archive.pull_slide_inner(2, 7, 3, 1).unwrap_err();
+        assert!(insufficient.contains("requires"));
+        assert!(archive.acknowledge_slide_inner(7, 3).is_err());
+        assert!(archive.prepared_slide.as_ref().unwrap().bytes.is_some());
+        let retained_ptr = archive
+            .prepared_slide
+            .as_ref()
+            .unwrap()
+            .bytes
+            .as_ref()
+            .unwrap()
+            .as_ptr();
+        let bytes = archive
+            .pull_slide_inner(2, 7, 3, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+            .unwrap();
+        assert_eq!(
+            bytes.as_ptr(),
+            retained_ptr,
+            "prepared bytes move; they are not cloned"
+        );
+        const FIXED_SLIDE_3: &str = r#"{"index":2,"slideNumber":3,"partName":"ppt/slides/slide3.xml","background":null,"elements":[{"type":"shape","x":0,"y":0,"width":1000000,"height":1000000,"rotation":0.0,"flipH":false,"flipV":false,"geometry":"rect","fill":null,"stroke":null,"textBody":{"verticalAnchor":"t","paragraphs":[{"alignment":"l","marL":0,"marR":0,"indent":0,"spaceBefore":null,"spaceAfter":null,"spaceLine":null,"lvl":0,"bullet":{"type":"inherit"},"defFontSize":null,"defColor":null,"defBold":null,"defItalic":null,"defFontFamily":null,"tabStops":[],"eaLnBrk":true,"runs":[{"type":"text","text":"slide 3","bold":null,"italic":null,"underline":false,"strikethrough":false,"fontSize":null,"color":null,"fontFamily":null,"fieldType":null}]}],"defaultFontSize":null,"defaultBold":null,"defaultItalic":null,"lIns":91440,"rIns":91440,"tIns":45720,"bIns":45720,"wrap":"square","vert":"horz","autoFit":"none"},"defaultTextColor":null,"custGeom":null,"adj":null,"adj2":null,"adj3":null,"adj4":null,"adj5":null,"adj6":null,"adj7":null,"adj8":null,"shadow":null,"id":"2","name":"T"}]}"#;
+        assert_eq!(bytes, FIXED_SLIDE_3.as_bytes());
+        let legacy: serde_json::Value =
+            serde_json::from_str(&parse_pptx_native(&legacy_data).unwrap()).unwrap();
+        let fixed: serde_json::Value = serde_json::from_str(FIXED_SLIDE_3).unwrap();
+        assert_eq!(legacy["slides"][2], fixed);
+        let mut materializing = PptxArchive::new(legacy_data, None, None).unwrap();
+        materializing.parse().unwrap();
+        assert!(
+            materializing.presentation.is_none(),
+            "legacy parse must drop presentation caches after materialization"
+        );
+        assert!(archive.pull_slide_inner(2, 7, 3, 1024).is_err());
+        assert!(archive.acknowledge_slide_inner(7, 2).is_err());
+        assert!(archive.prepared_slide.is_some(), "stale ACK cannot advance");
+        archive.acknowledge_slide_inner(7, 3).unwrap();
+
+        let before = (
+            archive.presentation.as_ref().unwrap().layout_cache.len(),
+            archive
+                .presentation
+                .as_ref()
+                .unwrap()
+                .layout_source_cache
+                .len(),
+        );
+        let first = archive
+            .pull_slide_inner(0, 8, 3, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&first).unwrap()["index"],
+            0
+        );
+        archive.cancel_slide();
+        let after = (
+            archive.presentation.as_ref().unwrap().layout_cache.len(),
+            archive
+                .presentation
+                .as_ref()
+                .unwrap()
+                .layout_source_cache
+                .len(),
+        );
+        assert_eq!(
+            after, before,
+            "cancellation rolls back uncommitted cache insertions"
+        );
+        archive.cancel_slide();
+        archive.close_presentation_session();
+        archive.close_presentation_session();
+    }
+
+    #[test]
+    fn slide_cursor_journal_preserves_old_cache_and_removes_only_current_insertions() {
+        let mut archive =
+            PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None).unwrap();
+        archive.presentation_bootstrap().unwrap();
+        let shared = archive.presentation.as_mut().unwrap();
+        shared
+            .layout_cache
+            .insert("pre-existing".to_string(), ParsedLayout::default());
+        assert!(!shared
+            .layout_cache
+            .contains_key("ppt/slideLayouts/slideLayout1.xml"));
+
+        archive
+            .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+            .unwrap();
+        archive.cancel_slide();
+        let shared = archive.presentation.as_ref().unwrap();
+        assert!(shared.layout_cache.contains_key("pre-existing"));
+        assert!(!shared
+            .layout_cache
+            .contains_key("ppt/slideLayouts/slideLayout1.xml"));
+        assert!(!shared
+            .layout_source_cache
+            .contains_key("ppt/slideLayouts/slideLayout1.xml"));
+    }
+
+    #[test]
+    fn slide_cursor_rejects_bad_identity_index_and_poison_before_ack() {
+        let data = build_three_slide_deck(usize::MAX, "");
+        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        assert!(archive.pull_slide_inner(0, 0, 1, 1).is_err());
+        assert!(archive.pull_slide_inner(99, 1, 1, 1024).is_err());
+        assert!(archive.prepared_slide.is_none());
+
+        archive
+            .pull_slide_inner(1, 2, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+            .unwrap();
+        let reporter = archive
+            .archive
+            .as_ref()
+            .unwrap()
+            .active_operation()
+            .unwrap()
+            .limit_reporter()
+            .unwrap();
+        reporter
+            .observe_hard_limit(HardResourceLimitKind::PptxSlideJsonBytes, None, 1, 2)
+            .unwrap_err();
+        let error = archive.acknowledge_slide_inner(2, 1).unwrap_err();
+        assert!(error.starts_with("OOXML_RESOURCE_LIMIT:"));
+        assert!(archive.prepared_slide.is_none());
+        assert!(archive.pull_slide_inner(0, 3, 1, 1024).is_err());
+    }
+
+    #[test]
+    fn pptx_slide_typed_hard_limits_accept_exact_and_reject_plus_one() {
+        let slide = parse_presentation_from_bytes(&build_three_slide_deck(usize::MAX, ""))
+            .unwrap()
+            .slides
+            .remove(0);
+        let exact_json = measure_json(&slide).unwrap().json_bytes;
+
+        let mut exact_zip = PptxZip::new(Cursor::new(empty_zip_bytes())).unwrap();
+        exact_zip.begin_operation("exact").unwrap();
+        let exact_reporter = exact_zip
+            .active_operation()
+            .unwrap()
+            .limit_reporter()
+            .unwrap();
+        let serialized =
+            serialize_slide_unit_with_limit(&slide, &exact_reporter, exact_json).unwrap();
+        assert_eq!(serialized.len() as u64, exact_json);
+        observe_primary_slide_xml(&exact_reporter, "ppt/slides/slide1.xml", 17, 17).unwrap();
+
+        let mut over_zip = PptxZip::new(Cursor::new(empty_zip_bytes())).unwrap();
+        over_zip.begin_operation("over").unwrap();
+        let over_reporter = over_zip
+            .active_operation()
+            .unwrap()
+            .limit_reporter()
+            .unwrap();
+        let json_error =
+            serialize_slide_unit_with_limit(&slide, &over_reporter, exact_json - 1).unwrap_err();
+        assert!(json_error.contains("pptx-slide-json"));
+
+        let mut xml_zip = PptxZip::new(Cursor::new(empty_zip_bytes())).unwrap();
+        xml_zip.begin_operation("xml-over").unwrap();
+        let xml_reporter = xml_zip
+            .active_operation()
+            .unwrap()
+            .limit_reporter()
+            .unwrap();
+        let xml_error =
+            observe_primary_slide_xml(&xml_reporter, "ppt/slides/slide1.xml", 18, 17).unwrap_err();
+        assert!(xml_error.contains("pptx-slide-xml"));
+    }
+
+    #[test]
+    fn primary_slide_xml_bounded_reader_accepts_exact_and_poisons_at_plus_one_before_dom() {
+        let data = build_three_slide_deck(usize::MAX, "");
+        let exact = {
+            let mut source = zip::ZipArchive::new(Cursor::new(data.clone())).unwrap();
+            let mut entry = source.by_name("ppt/slides/slide1.xml").unwrap();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            bytes.len() as u64
+        };
+
+        {
+            let _limit = SlideXmlLimitOverride::set(exact);
+            let mut archive = PptxArchive::new(data.clone(), None, None).unwrap();
+            archive.presentation_bootstrap().unwrap();
+            archive
+                .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+                .expect("exact slide XML limit includes the EOF probe");
+            archive.acknowledge_slide_inner(1, 1).unwrap();
+        }
+
+        let limit = exact - 1;
+        let _limit = SlideXmlLimitOverride::set(limit);
+        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        archive.presentation_bootstrap().unwrap();
+        let parses_before = LAYOUT_MASTER_PARSE_COUNT.with(std::cell::Cell::get);
+        let error = archive
+            .pull_slide_inner(0, 2, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+            .unwrap_err();
+        assert!(error.starts_with("OOXML_RESOURCE_LIMIT:"), "{error}");
+        assert!(error.contains("pptx-slide-xml"), "{error}");
+        assert!(
+            error.contains(r#""part":"ppt/slides/slide1.xml""#),
+            "{error}"
+        );
+        assert!(error.contains(&format!(r#""limit":{limit}"#)), "{error}");
+        assert!(error.contains(&format!(r#""observed":{exact}"#)), "{error}");
+        assert!(archive.prepared_slide.is_none());
+        assert!(archive.archive.as_ref().unwrap().assert_healthy().is_err());
+        assert_eq!(
+            LAYOUT_MASTER_PARSE_COUNT.with(std::cell::Cell::get),
+            parses_before,
+            "limit+1 must be rejected before the primary slide reaches its DOM parser"
+        );
+    }
+
+    #[test]
+    fn primary_slide_invalid_utf8_remains_a_local_placeholder() {
+        let original = build_three_slide_deck(usize::MAX, "");
+        let mut source = zip::ZipArchive::new(Cursor::new(original)).unwrap();
+        let mut data = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut data));
+            let options = zip::write::SimpleFileOptions::default();
+            for index in 0..source.len() {
+                let mut entry = source.by_index(index).unwrap();
+                let name = entry.name().to_owned();
+                let mut body = Vec::new();
+                entry.read_to_end(&mut body).unwrap();
+                if name == "ppt/slides/slide1.xml" {
+                    body = vec![0xff];
+                }
+                writer.start_file(name, options).unwrap();
+                writer.write_all(&body).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let presentation = parse_presentation_from_bytes(&data).unwrap();
+        assert!(presentation.slides[0]
+            .parse_error
+            .as_deref()
+            .unwrap()
+            .contains("not valid UTF-8"));
+        assert!(presentation.slides[1].parse_error.is_none());
+        assert!(presentation.slides[2].parse_error.is_none());
+    }
+
+    #[test]
+    fn primary_slide_crc_failure_remains_a_local_placeholder() {
+        let original = build_three_slide_deck(usize::MAX, "");
+        let mut source = zip::ZipArchive::new(Cursor::new(original)).unwrap();
+        let mut data = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut data));
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for index in 0..source.len() {
+                let mut entry = source.by_index(index).unwrap();
+                let name = entry.name().to_owned();
+                let mut body = Vec::new();
+                entry.read_to_end(&mut body).unwrap();
+                writer.start_file(name, options).unwrap();
+                writer.write_all(&body).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let marker = b"slide 2";
+        let offset = data
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .expect("stored primary slide payload marker");
+        data[offset + marker.len() - 1] ^= 1;
+        let presentation = parse_presentation_from_bytes(&data).unwrap();
+        assert!(presentation.slides[0].parse_error.is_none());
+        assert!(presentation.slides[1]
+            .parse_error
+            .as_deref()
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("crc"));
+        assert!(presentation.slides[2].parse_error.is_none());
+    }
+
+    #[test]
+    fn canonical_slide_json_limit_is_shared_by_legacy_and_cursor_materialization() {
+        let data = build_three_slide_deck(usize::MAX, "");
+        let baseline = parse_presentation_from_bytes(&data).unwrap();
+        let exact = measure_json(&baseline.slides[0]).unwrap().json_bytes;
+
+        {
+            let _limit = SlideJsonLimitOverride::set(exact);
+            parse_presentation_from_bytes_with_limits(&data, None, None, "parse-exact")
+                .expect("the exact canonical slide JSON limit is inclusive");
+        }
+
+        let limit = exact - 1;
+        let legacy_error = {
+            let _limit = SlideJsonLimitOverride::set(limit);
+            parse_presentation_from_bytes_with_limits(&data, None, None, "parse-over").unwrap_err()
+        };
+        let cursor_error = {
+            let _limit = SlideJsonLimitOverride::set(limit);
+            let mut archive = PptxArchive::new(data, None, None).unwrap();
+            let error = archive
+                .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+                .unwrap_err();
+            assert!(archive.prepared_slide.is_none());
+            assert!(archive.archive.as_ref().unwrap().assert_healthy().is_err());
+            error
+        };
+        let archive_error = {
+            let _limit = SlideJsonLimitOverride::set(limit);
+            PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None)
+                .unwrap()
+                .parse_inner()
+                .unwrap_err()
+        };
+        for error in [&legacy_error, &archive_error, &cursor_error] {
+            assert!(error.starts_with("OOXML_RESOURCE_LIMIT:"), "{error}");
+            assert!(error.contains("pptx-slide-json"), "{error}");
+            assert!(error.contains(&format!(r#""limit":{limit}"#)), "{error}");
+            assert!(error.contains(&format!(r#""observed":{exact}"#)), "{error}");
+        }
+    }
+
+    #[test]
+    fn corrupt_container_bootstrap_and_slide_preserve_degraded_contract() {
+        let mut archive = PptxArchive::new(vec![1, 2, 3], None, None).unwrap();
+        let bootstrap: serde_json::Value =
+            serde_json::from_slice(&archive.presentation_bootstrap().unwrap()).unwrap();
+        assert_eq!(bootstrap["slideCount"], 1);
+        assert_eq!(bootstrap["slideWidth"], 12_192_000);
+        let bytes = archive.pull_slide_inner(0, 1, 1, 1).unwrap_err();
+        assert!(bytes.contains("requires"));
+        let bytes = archive.pull_slide_inner(0, 1, 1, 1024 * 1024).unwrap();
+        let slide: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(slide["index"], 0);
+        assert!(slide["parseError"]
+            .as_str()
+            .unwrap()
+            .contains("zip container"));
+        archive.acknowledge_slide_inner(1, 1).unwrap();
     }
 
     /// NEUTRALIZATION: a deck whose middle slide part is unparseable still opens;

@@ -8,6 +8,8 @@
     "maxTotalInflatedBytes": 1073741824,
     "maxArchiveEntries": 20000,
     "maxCentralDirectoryBytes": 16777216,
+    "maxPptxSlideXmlBytes": 33554432,
+    "maxPptxSlideJsonBytes": 67108864,
     "maxWorksheetRows": 100000,
     "maxWorksheetCells": 250000,
     "maxWorksheetCellContentUtf8Bytes": 33554432,

@@ -69,6 +69,8 @@ pub enum HardResourceLimitKind {
     XmlEventBytes,
     XmlContextBytes,
     XmlNestingDepth,
+    PptxSlideXmlBytes,
+    PptxSlideJsonBytes,
     WorksheetRowProjectionBytes,
     WorksheetShellProjectionBytes,
     WorksheetModelRows,
@@ -85,6 +87,8 @@ impl HardResourceLimitKind {
             Self::XmlEventBytes => ("parsing", "xml-event", "bytes"),
             Self::XmlContextBytes => ("parsing", "xml-context", "bytes"),
             Self::XmlNestingDepth => ("parsing", "xml-tree", "depth"),
+            Self::PptxSlideXmlBytes => ("parsing", "pptx-slide-xml", "bytes"),
+            Self::PptxSlideJsonBytes => ("serialization", "pptx-slide-json", "bytes"),
             Self::WorksheetRowProjectionBytes => ("parsing", "worksheet-row", "projected-bytes"),
             Self::WorksheetShellProjectionBytes => {
                 ("parsing", "worksheet-shell", "projected-bytes")
