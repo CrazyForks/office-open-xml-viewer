@@ -15,6 +15,9 @@ function fixture(policy = {
     maxTotalInflatedBytes: 1024,
     maxArchiveEntries: 20,
     maxCentralDirectoryBytes: 64,
+    maxDocxBodyBlockXmlBytes: 320,
+    maxDocxBodyChunkJsonBytes: 640,
+    maxDocxBootstrapJsonBytes: 640,
     maxPptxSlideXmlBytes: 320,
     maxPptxSlideJsonBytes: 640,
     maxPptxSharedDependencyXmlBytes: 160,
@@ -65,6 +68,14 @@ test('generates matching TypeScript and Rust constants from one policy source', 
   assert.match(
     readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
     /STANDARD_MAX_TOTAL_INFLATED_BYTES: u64 = 256/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
+    /HARD_MAX_DOCX_BODY_BLOCK_XML_BYTES = 320/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
+    /HARD_MAX_DOCX_BODY_CHUNK_JSON_BYTES: u64 = 640/,
   );
   assert.match(
     readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
@@ -138,6 +149,9 @@ test('rejects invalid or internally inconsistent policy values', (context) => {
       maxTotalInflatedBytes: 1024,
       maxArchiveEntries: 20,
       maxCentralDirectoryBytes: 64,
+      maxDocxBodyBlockXmlBytes: 320,
+      maxDocxBodyChunkJsonBytes: 640,
+      maxDocxBootstrapJsonBytes: 640,
       maxPptxSlideXmlBytes: 320,
       maxPptxSlideJsonBytes: 640,
       maxPptxSharedDependencyXmlBytes: 160,

@@ -1,5 +1,6 @@
 use wasm_bindgen::prelude::*;
 
+mod document_projector;
 mod drawing_compatibility;
 mod markdown;
 mod math;
@@ -23,7 +24,7 @@ pub fn parse_docx(
     max_total_inflated_bytes: Option<u64>,
 ) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
-    let doc = parser::parse_from_bytes_with_limits(
+    let doc = parser::parse_from_bytes_streamed_with_limits(
         data,
         max_archive_entry_bytes,
         max_total_inflated_bytes,
@@ -131,7 +132,7 @@ impl DocxArchive {
     /// (RB7 MAJOR) the model is a degraded placeholder tagged with the container.
     pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
         let doc = match self.archive.as_mut() {
-            Ok(zip) => zip.run_operation("parse", parser::parse),
+            Ok(zip) => zip.run_operation("parse", parser::parse_streamed),
             Err(e) => Ok(parser::degraded_container_document(e.clone())),
         };
         let doc = doc.map_err(docx_parser_js_error)?;

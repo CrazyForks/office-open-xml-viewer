@@ -205,6 +205,7 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "ooxml-common",
+ "quick-xml",
  "roxmltree",
  "serde",
  "serde_json",
