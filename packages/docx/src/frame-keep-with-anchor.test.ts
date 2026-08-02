@@ -96,10 +96,11 @@ function para(opts: { text?: string; fontSize?: number } = {}): BodyElement {
 /** A frame paragraph (`w:framePr`) carrying a single text run. */
 function framePara(
   fp: FramePr,
-  opts: { text?: string; fontSize?: number; footnoteId?: string } = {},
+  opts: { text?: string; fontSize?: number; footnoteId?: string; position?: number } = {},
 ): BodyElement {
   const fontSize = opts.fontSize ?? 20;
   const run = textRun(opts.text ?? 'F', fontSize);
+  if (run.type === 'text' && opts.position !== undefined) run.position = opts.position;
   if (run.type === 'text' && opts.footnoteId !== undefined) {
     run.noteRef = { kind: 'footnote', id: opts.footnoteId };
     run.vertAlign = 'super';
@@ -365,5 +366,34 @@ describe('canonical body layout — text-frame keep-with-anchor (§17.3.1.11)', 
     // The drop cap registers a wrap float on page 1 (following text wraps around
     // it), confirming the register path still runs when no relocation happens.
     expect(pages[0].length).toBe(2);
+  });
+
+  it('keeps anchor text below a lowered drop cap without extending its authored line count', () => {
+    const body = [
+      framePara(
+        frame({ dropCap: 'drop', lines: 2, wrap: 'around' }),
+        { text: 'D', fontSize: 40, position: -5 },
+      ),
+      para({ text: 'あ'.repeat(32), fontSize: 20 }),
+    ];
+    const nodes = bodyLayout(body, section({ pageHeight: 220 }), makeCtx()).pages[0]!.layers.body;
+    const dropCap = nodes.find((node) => node.kind === 'paragraph' && !node.ordinaryFlow);
+    const anchor = nodes.find((node) => node.kind === 'paragraph' && node.ordinaryFlow);
+    expect(dropCap?.kind).toBe('paragraph');
+    expect(anchor?.kind).toBe('paragraph');
+    if (dropCap?.kind !== 'paragraph' || anchor?.kind !== 'paragraph') {
+      throw new Error('Expected retained drop-cap and anchor paragraphs');
+    }
+
+    // `position=-5pt` lowers the retained glyph baseline by 5pt. Word keeps the
+    // frame's §17.3.1.11 two-line height, but starts its anchor band 5pt lower so
+    // the first line after those two lines cannot collide with the glyph.
+    const glyph = dropCap.lines[0]!.placements.find((placement) => placement.kind === 'text');
+    expect(glyph?.kind).toBe('text');
+    if (glyph?.kind !== 'text') throw new Error('Expected drop-cap text placement');
+    expect(Math.max(...glyph.paintOps.map((operation) => operation.offset.yPt)))
+      .toBeCloseTo(5, 6);
+    expect(anchor.lines[0]!.bounds.yPt - dropCap.flowBounds.yPt).toBeCloseTo(5, 6);
+    expect(dropCap.flowBounds.heightPt).toBeCloseTo(40, 6);
   });
 });

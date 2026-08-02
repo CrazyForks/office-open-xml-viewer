@@ -188,12 +188,60 @@ function table(
   } as unknown as DocTable;
 }
 
-function document(body: BodyElement[]): DocxDocumentModel {
+function percentageNestedTable(nestedRowCount = 1): DocTable {
+  const nested = {
+    type: 'table', colWidths: [40, 40],
+    rows: Array.from({ length: nestedRowCount }, (_unused, index) => row([
+      textCell(index === 0 ? 'one' : `left${index}`),
+      textCell(index === 0 ? 'two' : `right${index}`),
+    ])), borders: noBorders,
+    cellMarginTop: 0, cellMarginRight: 0, cellMarginBottom: 0, cellMarginLeft: 0,
+    jc: 'center', layout: 'autofit',
+    __tableLayout: {
+      effectiveStyleId: null,
+      grid: {
+        authored: true,
+        columns: [{ width: '800' }, { width: '800' }],
+        requiredColumnCount: 2,
+      },
+      preferredWidth: { kind: 'pct', value: '4000' },
+      layout: { kind: 'autofit' }, cellSpacing: null, cellMargins: null,
+    },
+  } as unknown as DocTable;
+  return {
+    type: 'table', colWidths: [100, 100],
+    rows: [row([
+      {
+        content: [nested as CellElement], colSpan: 1, vMerge: null,
+        borders: noBorders, background: null, vAlign: 'top', widthPt: null,
+      } as unknown as DocTableCell,
+      textCell('side'),
+    ])],
+    borders: noBorders,
+    cellMarginTop: 0, cellMarginRight: 0, cellMarginBottom: 0, cellMarginLeft: 0,
+    jc: 'center', layout: 'autofit',
+    __tableLayout: {
+      effectiveStyleId: null,
+      grid: {
+        authored: true,
+        columns: [{ width: '2000' }, { width: '2000' }],
+        requiredColumnCount: 2,
+      },
+      preferredWidth: { kind: 'pct', value: '3500' },
+      layout: { kind: 'autofit' }, cellSpacing: null, cellMargins: null,
+    },
+  } as unknown as DocTable;
+}
+
+function document(
+  body: BodyElement[],
+  sectionOverrides: Partial<SectionProps> = {},
+): DocxDocumentModel {
   const section = {
     pageWidth: 240, pageHeight: 400,
     marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
     headerDistance: 4, footerDistance: 4, titlePage: false, evenAndOddHeaders: false,
-    sectionStart: 'nextPage', columns: null,
+    sectionStart: 'nextPage', columns: null, ...sectionOverrides,
   } as SectionProps;
   return {
     section, body,
@@ -250,6 +298,68 @@ function retainedTable(model: DocxDocumentModel): Readonly<{
 }
 
 describe('A4 retained table acceptance', () => {
+  it('resolves a nested percentage table only after its parent cell width is final', () => {
+    // ECMA-376 §17.18.87 measures cell-content minima before fitting the parent
+    // grid. A nested table's fitted preferred width is not content, so feeding
+    // that occurrence width back into the parent would form a circular
+    // constraint and incorrectly widen the first outer column.
+    const acquired = retainedTable(document([
+      percentageNestedTable() as BodyElement,
+    ])).layout;
+
+    expect(acquired.columnWidthsPt).toEqual([77, 77]);
+    const nestedBlock = acquired.rows[0]?.cells[0]?.blocks[0]?.layout;
+    expect(nestedBlock?.kind).toBe('table');
+    if (nestedBlock?.kind !== 'table') throw new Error('Expected nested retained table');
+    expect(nestedBlock.columnWidthsPt.reduce((sum, widthPt) => sum + widthPt, 0))
+      .toBeCloseTo(61.6, 6);
+    expect(nestedBlock.flowBounds.xPt).toBeCloseTo(7.7, 6);
+  });
+
+  it('does not promote a saved nested percentage occurrence to parent content minimum', () => {
+    const outer = percentageNestedTable(2);
+    outer.colWidths = [174.4, 160.75];
+    outer.rows[0]!.cells[0]!.widthPt = 239.4;
+    outer.rows[0]!.cells[1]!.widthPt = 239.4;
+    const nested = outer.rows[0]!.cells[0]!.content[0];
+    if (nested?.type !== 'table') throw new Error('Expected nested source table');
+    nested.colWidths = [67.15, 63.35];
+    nested.rows[0]!.cells[0]!.widthPt = 83.9;
+    nested.rows[0]!.cells[1]!.widthPt = 81.45;
+    nested.rows[0]!.cells[0]!.vMerge = true;
+    nested.rows[1]!.cells[0]!.widthPt = 83.9;
+    nested.rows[1]!.cells[1]!.widthPt = 81.45;
+    nested.rows[1]!.cells[0]!.vMerge = false;
+
+    const acquired = retainedTable(document(
+      [outer as BodyElement],
+      { pageWidth: 612, marginLeft: 72, marginRight: 72 },
+    )).layout;
+
+    expect(acquired.columnWidthsPt[0]).toBeCloseTo(163.8, 6);
+    expect(acquired.columnWidthsPt[1]).toBeCloseTo(163.8, 6);
+  });
+
+  it('keeps page-sliced nested tables in their parent-cell coordinate space', () => {
+    const model = document(
+      [percentageNestedTable(4) as BodyElement],
+      { pageHeight: 50 },
+    );
+    const result = layoutDocument(model, createLayoutServices(model, {
+      measureContext: measuringContext(),
+    }));
+    const nestedFragments = result.pages.flatMap((page) => page.layers.body)
+      .filter((node): node is TableLayout => node.kind === 'table')
+      .flatMap((outer) => outer.rows.flatMap((outerRow) => outerRow.cells[0]?.blocks ?? []))
+      .map((block) => block.layout)
+      .filter((block): block is TableLayout => block.kind === 'table');
+
+    expect(nestedFragments.length).toBeGreaterThan(1);
+    nestedFragments.forEach((nested) => {
+      expect(nested.flowBounds.xPt).toBeCloseTo(7.7, 6);
+    });
+  });
+
   it.each([
     ['fixed', 'autofit'],
     ['autofit', 'fixed'],

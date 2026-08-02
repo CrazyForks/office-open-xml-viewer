@@ -190,6 +190,39 @@ function paginationRowHeight(source: RetainedTableAcquisition, rowIndex: number)
   return Math.max(0, row.heightPt, row.contentHeightPt);
 }
 
+function nestedTableFragmentContext(
+  source: RetainedTableAcquisition,
+  parentCell: TableCellLayoutInput,
+  context: TableFragmentContext,
+  availableHeightPt: number,
+): TableFragmentContext {
+  const retainedCell = source.layout.rows
+    .flatMap((row) => row.cells)
+    .find((cell) => cell.id === parentCell.id);
+  if (!retainedCell) {
+    throw new LayoutInvariantError(
+      'INVALID_REFERENCE',
+      `nested table fragment lost parent cell geometry: ${parentCell.id}`,
+    );
+  }
+  const bounds = Object.freeze({
+    xPt: 0,
+    yPt: 0,
+    widthPt: retainedCell.contentBounds.widthPt,
+    heightPt: Math.max(0, availableHeightPt),
+  });
+  return Object.freeze({
+    ...context,
+    availableHeightPt: bounds.heightPt,
+    placement: Object.freeze({
+      ...context.placement,
+      container: Object.freeze({ ...context.placement.container, bounds }),
+      cursor: Object.freeze({ xPt: 0, yPt: 0 }),
+      availableBounds: bounds,
+    }),
+  });
+}
+
 function paginationRowHeightForOccurrence(
   source: RetainedTableAcquisition,
   row: TableRowLayoutInput,
@@ -300,17 +333,16 @@ function remainingRowAtCursor(
           if (blockOffset === 0 && cellCursor.nestedCursor && block.layout.kind === 'table') {
             const nested = source.nestedById[block.layout.id];
             if (nested) {
-              const remaining = takeTableFragment(nested, cellCursor.nestedCursor, {
-                ...context,
-                availableHeightPt: context.freshPageHeightPt,
-                placement: {
-                  ...context.placement,
-                  availableBounds: {
-                    ...context.placement.availableBounds,
-                    heightPt: context.freshPageHeightPt,
-                  },
-                },
-              });
+              const remaining = takeTableFragment(
+                nested,
+                cellCursor.nestedCursor,
+                nestedTableFragmentContext(
+                  source,
+                  cell,
+                  context,
+                  context.freshPageHeightPt,
+                ),
+              );
               const requiredAnchor = requiredAnchorByCell.get(cell.id);
               if (remaining.nextCursor && requiredAnchor !== undefined
                 && block.sourceBlockIndex < requiredAnchor) {
@@ -729,14 +761,11 @@ function selectCell(
         0,
         availableContentHeightPt - measureTableCellBlockFlowHeightPt(blocks),
       );
-      const nestedResult = takeTableFragment(nested, nestedCursor ?? startTableFragmentCursor(), {
-        ...context,
-        availableHeightPt: remainingPt,
-        placement: {
-          ...context.placement,
-          availableBounds: { ...context.placement.availableBounds, heightPt: remainingPt },
-        },
-      });
+      const nestedResult = takeTableFragment(
+        nested,
+        nestedCursor ?? startTableFragmentCursor(),
+        nestedTableFragmentContext(source, cell, context, remainingPt),
+      );
       if (!nestedResult.fragment) break;
       blocks.push({ layout: nestedResult.fragment, sourceBlockIndex: sourceBlock.sourceBlockIndex });
       range.push({
