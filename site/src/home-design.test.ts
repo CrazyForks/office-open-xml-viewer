@@ -50,4 +50,8 @@ describe('official-site home design', () => {
     expect(home).toContain('font-size: clamp(42px, 12vw, 60px);');
     expect(home).not.toContain('font-size: clamp(56px, 8.6vw, 116px);');
   });
+
+  it('separates the hero copy and icon without a vertical rule', () => {
+    expect(home).not.toMatch(/\.hero-art \{[^}]*border-left/);
+  });
 });
