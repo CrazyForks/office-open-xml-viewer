@@ -4,8 +4,7 @@ import { describe, expect, it } from 'vitest';
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const nav = read('./components/Nav.astro');
 const base = read('./layouts/Base.astro');
-const brandedSurfaces = [
-  nav,
+const footerSurfaces = [
   read('./layouts/FormatPage.astro'),
   read('./pages/index.astro'),
   read('./pages/try.astro'),
@@ -15,8 +14,10 @@ const brandedSurfaces = [
 ];
 
 describe('official-site brand icon', () => {
-  it('uses the library icon in the header and every footer', () => {
-    for (const source of brandedSurfaces) {
+  it('keeps the header typographic and uses the library icon in every footer', () => {
+    expect(nav).not.toContain('<BrandIcon />');
+    expect(nav).not.toContain('nav-mark');
+    for (const source of footerSurfaces) {
       expect(source).toContain('<BrandIcon />');
       expect(source).not.toContain('nav-mark');
     }

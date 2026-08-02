@@ -1,5 +1,4 @@
 ---
-import BrandIcon from './BrandIcon.astro';
 interface Props {
   active?: 'pptx' | 'docx' | 'xlsx' | 'announcements';
 }
@@ -9,7 +8,6 @@ const storybook = `${import.meta.env.BASE_URL}storybook/`.replace(/([^:])\/\/+/g
 <nav class="nav">
   <div class="wrap nav-inner">
     <a class="nav-brand" href="/">
-      <BrandIcon />
       <span class="nav-wordmark">@silurus/ooxml</span>
     </a>
     <div class="nav-links">

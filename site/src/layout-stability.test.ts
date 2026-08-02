@@ -39,8 +39,8 @@ describe('official-site layout stability', () => {
     expect(globalCss).toMatch(/html\s*\{[^}]*scrollbar-gutter:\s*stable;/);
   });
 
-  it('sizes the shared library icon consistently in the header and footer', () => {
-    expect(globalCss).toMatch(/\.brand-icon\s*\{[^}]*width:\s*28px;[^}]*height:\s*28px;/);
+  it('gives the footer library icon a deliberate display size', () => {
+    expect(globalCss).toMatch(/\.brand-icon\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;/);
   });
 
   it('renders the theme label from the pre-paint document theme', () => {
