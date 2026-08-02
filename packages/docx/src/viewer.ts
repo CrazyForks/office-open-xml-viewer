@@ -44,7 +44,19 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
    *  text. Set it to disable clickable links entirely — e.g. in a preview where
    *  navigation must not leave the current view. */
   enableHyperlinks?: boolean;
-  /** Called on parse or render errors. */
+  /**
+   * Receives load failures and asynchronous render failures handled by the
+   * Viewer. Supplying this callback changes load-failure delivery: `load()`
+   * invokes it and resolves; without it, the same load/parse failure rejects
+   * `load()`. Viewer-managed render failures invoke it, or fall back to
+   * `console.error` when omitted.
+   *
+   * Stable cases can be narrowed with `OoxmlError`,
+   * `OoxmlResourceLimitError`, or `OoxmlDecodedImageLimitError` re-exported by
+   * this package. Other failures remain `Error` values; do not parse message
+   * text as an API. A `code` of `parser-crashed` identifies a recognized WASM
+   * trap, not a reliably classified OOM.
+   */
   onError?: (err: Error) => void;
 }
 

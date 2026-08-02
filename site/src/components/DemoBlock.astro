@@ -1,5 +1,6 @@
 ---
 import { Code } from 'astro:components';
+import { codeThemes } from '../lib/code-theme';
 interface Props {
   format: 'pptx' | 'docx' | 'xlsx';
   kind: 'demo' | 'scroll' | 'thumbnails' | 'masterdetail' | 'sheet';
@@ -28,13 +29,14 @@ const file = { pptx: 'sample-1.pptx', docx: 'sample-1.docx', xlsx: 'sample-1.xls
     </div>
 
     <div class="demo-code">
-      <Code code={code} lang="ts" theme="github-dark-default" />
+      <Code code={code} lang="ts" themes={codeThemes} defaultColor={false} />
     </div>
   </div>
 </section>
 
 <style>
   .demo-block { padding: 40px 0; border-top: 1px solid var(--border); }
+  .demo-block:first-child { border-top: 0; }
   .demo-badge {
     font-family: var(--mono);
     font-size: 12px;
@@ -73,9 +75,9 @@ const file = { pptx: 'sample-1.pptx', docx: 'sample-1.docx', xlsx: 'sample-1.xls
     border-radius: 999px; padding: 3px 10px;
   }
 
-  .demo-code { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: #0d1117; }
+  .demo-code { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--code-bg); }
   .demo-code :global(pre) {
-    margin: 0; padding: 18px 18px; background: #0d1117 !important;
+    margin: 0; padding: 18px 18px; background: var(--code-bg) !important;
     font-size: 13px; line-height: 1.6; overflow-x: auto;
     max-height: 520px;
   }

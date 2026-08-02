@@ -17,8 +17,8 @@ const tabs = [
   <p class="demo-badge">In your framework</p>
   <h3 class="demo-title">Mount it in {format === 'xlsx' ? 'a container' : 'a canvas'}</h3>
   <p class="demo-desc">
-    The viewer is a plain TypeScript class — no framework runtime, no peer deps. Create it on mount,
-    call <code>load()</code>, and let it go on unmount.
+    The viewer is a TypeScript class with no framework runtime or peer dependencies. Create it on mount,
+    call <code>load()</code>{format === 'docx' ? '.' : <>, and call <code>destroy()</code> on unmount.</>}
   </p>
   <CodeTabs tabs={tabs} />
 </section>

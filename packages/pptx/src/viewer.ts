@@ -30,7 +30,19 @@ const DEFAULT_HIDDEN_DIM: DimOptions = { color: '#ffffff', opacity: 0.6 };
 export interface PptxViewerOptions extends RenderOptions, LoadOptions {
   /** Called when a slide finishes rendering */
   onSlideChange?: (index: number, total: number) => void;
-  /** Called on parse, render, or embedded-media playback errors. */
+  /**
+   * Receives load failures plus asynchronous render or embedded-media failures
+   * handled by the Viewer. Supplying this callback changes load-failure
+   * delivery: `load()` invokes it and resolves; without it, the same load/parse
+   * failure rejects `load()`. Viewer-managed failures invoke it, or fall back
+   * to `console.error` when omitted.
+   *
+   * Stable cases can be narrowed with `OoxmlError`,
+   * `OoxmlResourceLimitError`, or `OoxmlDecodedImageLimitError` re-exported by
+   * this package. Other failures remain `Error` values; do not parse message
+   * text as an API. A `code` of `parser-crashed` identifies a recognized WASM
+   * trap, not a reliably classified OOM.
+   */
   onError?: (err: Error) => void;
   /** IX9 zoom contract ({@link ZoomableViewer}) — the clamp range for
    *  {@link PptxViewer.setScale} / `zoomIn` / `zoomOut` / `fitWidth` / `fitPage`,

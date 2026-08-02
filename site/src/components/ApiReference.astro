@@ -1,10 +1,63 @@
 ---
+import { Code } from 'astro:components';
 import { apiReference } from '../lib/api-reference';
+import { codeThemes } from '../lib/code-theme';
 interface Props {
   format: 'docx' | 'xlsx' | 'pptx';
 }
 const { format } = Astro.props;
 const classes = apiReference[format];
+const errorExampleConfig = {
+  docx: { Viewer: 'DocxViewer', target: 'canvas', source: 'file' },
+  xlsx: { Viewer: 'XlsxViewer', target: 'container', source: 'file' },
+  pptx: { Viewer: 'PptxViewer', target: 'canvas', source: 'file' },
+}[format];
+const errorExample = `import {
+  ${errorExampleConfig.Viewer},
+  OoxmlDecodedImageLimitError,
+  OoxmlError,
+  OoxmlResourceLimitError,
+} from '@silurus/ooxml/${format}';
+
+const viewer = new ${errorExampleConfig.Viewer}(${errorExampleConfig.target}, {
+  onError(error) {
+    if (error instanceof OoxmlResourceLimitError) {
+      const { limit, observed } = error.details.violation;
+      showTooLargeMessage({ limit, observed });
+      return;
+    }
+    if (error instanceof OoxmlDecodedImageLimitError) {
+      showImageTooLargeMessage(error);
+      return;
+    }
+    if (error instanceof OoxmlError) {
+      handleContainerError(error.code);
+      return;
+    }
+    reportUnexpectedError(error);
+  },
+});
+
+// With onError set, a load failure calls onError and this Promise resolves.
+await viewer.load(${errorExampleConfig.source});`;
+
+interface DescribedItem {
+  desc: string;
+  emphasis?: string;
+}
+
+function descriptionParts(item: DescribedItem): Array<{ text: string; emphasized: boolean }> {
+  if (!item.emphasis) return [{ text: item.desc, emphasized: false }];
+  const start = item.desc.indexOf(item.emphasis);
+  if (start < 0) {
+    throw new Error(`API emphasis must be an exact description substring: ${item.emphasis}`);
+  }
+  return [
+    { text: item.desc.slice(0, start), emphasized: false },
+    { text: item.emphasis, emphasized: true },
+    { text: item.desc.slice(start + item.emphasis.length), emphasized: false },
+  ].filter(({ text }) => text.length > 0);
+}
 ---
 <section class="api" data-reveal>
   <p class="api-badge">API reference</p>
@@ -13,6 +66,53 @@ const classes = apiReference[format];
     Every public option and method, straight from the source. Types omitted for brevity are exported
     from the package — your editor will autocomplete the rest.
   </p>
+
+  <div class="api-errors">
+    <h4>Error handling</h4>
+    <p>
+      <strong>Choose the Viewer delivery style deliberately.</strong> Without <code>onError</code>,
+      a load or parse failure rejects <code>load()</code>. With <code>onError</code>, that failure is
+      delivered to the callback and <code>load()</code> resolves; do not treat resolution alone as
+      proof that a document rendered. Later Viewer-managed render failures go to the same callback,
+      or to <code>console.error</code> when it is omitted. Headless document, workbook and presentation
+      methods have no callback and reject their returned Promise.
+    </p>
+    <div class="api-table-wrap">
+      <table class="api-table api-error-table">
+        <thead><tr><th>Error</th><th>Stable discriminator</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>OoxmlError</code></td>
+            <td><code>error.code</code></td>
+            <td>Container failures: <code>encrypted</code>, <code>invalid-password</code>, <code>unsupported-encryption</code>, <code>legacy-binary-format</code> or <code>not-ooxml</code>.</td>
+          </tr>
+          <tr>
+            <td><code>OoxmlResourceLimitError</code></td>
+            <td><code>ooxml-resource-limit</code></td>
+            <td>A measured package or format resource crossed a configurable limit or hard ceiling. Read <code>details.violation</code> for the resource, metric, limit and observed value.</td>
+          </tr>
+          <tr>
+            <td><code>OoxmlDecodedImageLimitError</code></td>
+            <td><code>ooxml-decoded-image-limit</code></td>
+            <td>A raster image crossed the pixel or active decoded-byte hard ceiling. Read <code>metric</code>, <code>limit</code> and <code>observed</code>.</td>
+          </tr>
+          <tr>
+            <td><code>Error</code></td>
+            <td><code>parser-crashed</code>, when present</td>
+            <td>A recognized WASM trap. It does not identify OOM: panic, allocation failure, stack overflow and other traps may be indistinguishable at this boundary.</td>
+          </tr>
+          <tr>
+            <td><code>Error</code>, <code>TypeError</code> or <code>RangeError</code></td>
+            <td>None</td>
+            <td>Configuration, fetch, parsing, rendering, worker or media failures without a stable typed code. Do not branch on message text.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="api-error-example">
+      <Code code={errorExample} lang="ts" themes={codeThemes} defaultColor={false} />
+    </div>
+  </div>
 
   {classes.map((c) => (
     <div class="api-class">
@@ -32,7 +132,11 @@ const classes = apiReference[format];
                     <td><code>{o.name}</code></td>
                     <td><code class="api-type">{o.type}</code></td>
                     <td>{o.def ? <code>{o.def}</code> : <span class="api-dash">—</span>}</td>
-                    <td>{o.desc}</td>
+                    <td class="api-description">
+                      {descriptionParts(o).map((part) =>
+                        part.emphasized ? <strong>{part.text}</strong> : part.text
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -48,7 +152,11 @@ const classes = apiReference[format];
             {c.methods.map((m) => (
               <tr>
                 <td class="api-sig"><code>{m.sig}</code></td>
-                <td>{m.desc}</td>
+                <td class="api-description">
+                  {descriptionParts(m).map((part) =>
+                    part.emphasized ? <strong>{part.text}</strong> : part.text
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -67,14 +175,22 @@ const classes = apiReference[format];
   .api-title { font-size: 24px; font-weight: 700; margin: 8px 0 8px; }
   .api-desc { color: var(--text-dim); font-size: 16px; max-width: 70ch; margin: 0 0 8px; }
 
+  .api-errors { margin-top: 30px; padding: 26px 28px 28px; border: 1px solid var(--border); background: var(--bg-elev); }
+  .api-errors h4 { margin: 0; font-size: 19px; }
+  .api-errors > p { max-width: 92ch; margin: 10px 0 20px; color: var(--text-dim); font-size: 14.5px; }
+  .api-errors > p code, .api-error-table code { font-family: var(--mono); color: var(--text); font-size: .9em; }
+  .api-error-example { margin-top: 18px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--code-bg); }
+  .api-error-example :global(pre) { margin: 0; padding: 18px; overflow-x: auto; background: var(--code-bg) !important; font-size: 13px; line-height: 1.65; }
+  .api-error-example :global(code) { font-family: var(--mono); }
+
   .api-class { margin-top: 30px; }
   .api-class-name { font-family: var(--mono); font-size: 18px; font-weight: 700; margin: 0; }
   .api-note { color: var(--text-dim); font-size: 14.5px; margin: 8px 0 12px; max-width: 74ch; }
   .api-ctor {
     margin: 0 0 18px; padding: 12px 16px; overflow-x: auto;
-    background: #0d1117; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
   }
-  .api-ctor code { font-family: var(--mono); font-size: 13px; color: var(--accent); }
+  .api-ctor code { font-family: var(--mono); font-size: 13px; color: var(--code-keyword); }
 
   .api-sub {
     font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
@@ -92,5 +208,8 @@ const classes = apiReference[format];
   .api-table code { font-family: var(--mono); font-size: 12.5px; color: var(--text); white-space: nowrap; }
   .api-table .api-type { color: var(--accent-2); white-space: normal; }
   .api-sig code { color: var(--accent); white-space: normal; }
+  .api-description strong { color: var(--text); font-weight: 700; }
   .api-dash { color: var(--text-faint); }
+  .api-error-table td:first-child { min-width: 190px; }
+  .api-error-table td:nth-child(2) { min-width: 180px; }
 </style>

@@ -7,10 +7,14 @@ export interface ApiOption {
   type: string;
   def?: string;
   desc: string;
+  /** Exact, contract-critical substring rendered with semantic emphasis. */
+  emphasis?: string;
 }
 export interface ApiMethod {
   sig: string;
   desc: string;
+  /** Exact, contract-critical substring rendered with semantic emphasis. */
+  emphasis?: string;
 }
 export interface ApiClass {
   name: string;
@@ -20,22 +24,28 @@ export interface ApiClass {
   methods: ApiMethod[];
 }
 
-const RESOURCE_LIMITS = { name: 'resourceLimits', type: 'OoxmlResourceLimits', def: '128 MiB per entry / 256 MiB distinct total', desc: 'Shared DOCX/XLSX/PPTX inflated-byte budgets. maxArchiveEntryBytes caps each package part; maxTotalInflatedBytes counts the largest amount read from every distinct part in the package session, without charging repeat reads twice. Supply positive safe-integer byte counts, or null to disable one configurable budget (internal hard ceilings remain). Violations reject with OoxmlResourceLimitError. These deterministic counters reduce OOM risk but do not measure or guarantee peak memory.' };
-const RESOURCE_METRICS = { name: 'onResourceMetrics', type: '(metrics: OoxmlResourceMetrics) => void', desc: 'Receives the content-free initial-load report used by the debug card, without enabling console output. It reports the configured public policy, timing checkpoints, format/mode, success or typed failure discriminants, source bytes, and observed archive counters when available. It does not wait for a Viewer\'s first paint. On success, call getResourceMetrics() on the engine or Viewer for a fresh snapshot after lazy package work. Callback exceptions never change load results.' };
-const RESOURCE_METRICS_METHOD = { sig: 'getResourceMetrics(): Promise<OoxmlResourceMetrics>', desc: 'Return a fresh, content-free package-usage snapshot, including lazy archive work observed since load. Collection is always active; debug controls only console output.' };
-const DEBUG = { name: 'debug', type: 'boolean', def: 'false', desc: 'Print one content-free, Ratatui-inspired resource report when the measured load or Node session finishes or fails. Browser DevTools use typography-only %c styling to keep Unicode borders and gauges aligned without changing foreground or background colours; Node and Worker consoles receive one plain argument. Use onResourceMetrics instead for production collection.' };
-const ZIP = { name: 'maxZipEntryBytes', type: 'number', def: 'resource policy default', desc: 'Deprecated compatibility alias for resourceLimits.maxArchiveEntryBytes. New code should use resourceLimits. Existing positive values retain their per-entry meaning; zero / negative values fall back to the standard default.' };
-const GFONTS = { name: 'useGoogleFonts', type: 'boolean', def: 'false', desc: 'Load metric-compatible webfonts and non-Latin script fallbacks (Noto Arabic / CJK KR·SC·TC·JP / Cyrillic / Hebrew / Thai / Devanagari) from Google Fonts so layout matches Office and non-Latin text never falls back to tofu. Off by default for privacy.' };
+const RESOURCE_LIMITS = { name: 'resourceLimits', type: 'OoxmlResourceLimits', def: '128 MiB per entry / 256 MiB distinct total', desc: 'Shared DOCX/XLSX/PPTX inflated-byte budgets. maxArchiveEntryBytes caps each package part; maxTotalInflatedBytes counts the largest amount read from every distinct part in the package session, without charging repeat reads twice. Supply positive safe-integer byte counts, or null to disable one configurable budget (internal hard ceilings remain). Violations reject with OoxmlResourceLimitError. These deterministic counters reduce OOM risk but do not measure or guarantee peak memory.', emphasis: 'Violations reject with OoxmlResourceLimitError.' };
+const RESOURCE_METRICS = { name: 'onResourceMetrics', type: '(metrics: OoxmlResourceMetrics) => void', desc: 'Receives the content-free initial-load report used by the debug card, without enabling console output. It reports the configured public policy, timing checkpoints, format/mode, success or typed failure discriminants, source bytes, and observed archive counters when available. It does not wait for a Viewer\'s first paint. On success, call getResourceMetrics() on the engine or Viewer for a fresh snapshot after lazy package work. Callback exceptions never change load results.', emphasis: 'Receives the content-free initial-load report used by the debug card, without enabling console output.' };
+const RESOURCE_METRICS_METHOD = { sig: 'getResourceMetrics(): Promise<OoxmlResourceMetrics>', desc: 'Return a fresh, content-free package-usage snapshot, including lazy archive work observed since load. Collection is always active; debug controls only console output.', emphasis: 'Collection is always active; debug controls only console output.' };
+const DEBUG = { name: 'debug', type: 'boolean', def: 'false', desc: 'Print one content-free, Ratatui-inspired resource report when the measured load or Node session finishes or fails. Browser DevTools use typography-only %c styling to keep Unicode borders and gauges aligned without changing foreground or background colours; Node and Worker consoles receive one plain argument. Use onResourceMetrics instead for production collection.', emphasis: 'Use onResourceMetrics instead for production collection.' };
+const ZIP = { name: 'maxZipEntryBytes', type: 'number', def: 'resource policy default', desc: 'Deprecated compatibility alias for resourceLimits.maxArchiveEntryBytes. New code should use resourceLimits. Existing positive values retain their per-entry meaning; zero / negative values fall back to the standard default.', emphasis: 'Deprecated compatibility alias for resourceLimits.maxArchiveEntryBytes.' };
+const GFONTS = { name: 'useGoogleFonts', type: 'boolean', def: 'false', desc: 'Load metric-compatible webfonts and non-Latin script fallbacks (Noto Arabic / CJK KR·SC·TC·JP / Cyrillic / Hebrew / Thai / Devanagari) from Google Fonts so layout matches Office and non-Latin text never falls back to tofu. Off by default for privacy.', emphasis: 'Off by default for privacy.' };
 const DPR = { name: 'dpr', type: 'number', def: 'devicePixelRatio', desc: 'Device pixel ratio for the backing store (crispness on HiDPI).' };
-const WASM_URL = { name: 'wasmUrl', type: 'string | URL', def: 'bundled asset', desc: 'Override the URL the parser worker fetches the WebAssembly module from. By default each format resolves the `*_parser_bg.wasm` asset that ships next to its bundle (relative to the module URL); set this to serve it from a CDN or a self-hosted path instead (a relative value resolves against the document URL). Pointing it at a mismatched or missing file makes load() reject when the worker instantiates it.' };
-const WORKER_TIMEOUT = { name: 'workerTimeoutMs', type: 'number', def: 'unlimited', desc: 'Reject the parse if the worker does not answer within this many ms — an opt-in safety net for a wedged / crashed worker that would otherwise leave load() pending forever. Unlimited by default (a large document with heavy media can legitimately take tens of seconds). A worker that throws or fails to load already rejects immediately regardless; this only covers the "silent, never-responds" case.' };
-const MATH = { name: 'math', type: 'MathRenderer', def: 'undefined', desc: 'Opt-in OMML equation engine (MathJax + STIX Two Math, ~3 MB). Import it from the separate @silurus/ooxml/math entry — `import { math } from "@silurus/ooxml/math"` — and pass it to render equations. Omit it and equations are skipped, and the engine is left out of your build. When passed, the engine ships as a standalone asset fetched lazily the first time a document contains an equation.' };
-const MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' parses in a worker and renders on the main thread (default). 'worker' also renders inside the worker; the main thread only paints the returned ImageBitmap. This contains parser/renderer state and many failures away from Window, but a Worker is not a separate process or a strict memory sandbox and cannot guarantee recovery from every browser-level OOM. Requires Worker + OffscreenCanvas. Canvas-target render methods are unavailable in 'worker' mode, equations require 'main', and transferring each frame can add latency." };
-const VIEWER_MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' renders on the main thread (default). 'worker' renders the viewer off the main thread and paints transferred ImageBitmaps, improving UI responsiveness and containing parser/renderer state away from Window. It is not a separate process or a strict memory sandbox and cannot guarantee recovery from every browser-level OOM. Scroll, tabs, zoom, selection and find remain available; equations require 'main'. Requires Worker + OffscreenCanvas, and frame transfer can add latency." };
+const WASM_URL = { name: 'wasmUrl', type: 'string | URL', def: 'bundled asset', desc: 'Override the URL the parser worker fetches the WebAssembly module from. By default each format resolves the `*_parser_bg.wasm` asset that ships next to its bundle (relative to the module URL); set this to serve it from a CDN or a self-hosted path instead (a relative value resolves against the document URL). Pointing it at a mismatched or missing file makes load() reject when the worker instantiates it.', emphasis: 'Override the URL the parser worker fetches the WebAssembly module from.' };
+const WORKER_TIMEOUT = { name: 'workerTimeoutMs', type: 'number', def: 'unlimited', desc: 'Reject the parse if the worker does not answer within this many ms — an opt-in safety net for a wedged / crashed worker that would otherwise leave load() pending forever. Unlimited by default (a large document with heavy media can legitimately take tens of seconds). A worker that throws or fails to load already rejects immediately regardless; this only covers the "silent, never-responds" case.', emphasis: 'Reject the parse if the worker does not answer within this many ms' };
+const MATH = { name: 'math', type: 'MathRenderer', def: 'undefined', desc: 'Opt-in OMML equation engine (MathJax + STIX Two Math, ~3 MB). Import it from the separate @silurus/ooxml/math entry — `import { math } from "@silurus/ooxml/math"` — and pass it to render equations. Omit it and equations are skipped, and the engine is left out of your build. When passed, the engine ships as a standalone asset fetched lazily the first time a document contains an equation.', emphasis: 'Opt-in OMML equation engine (MathJax + STIX Two Math, ~3 MB).' };
+const MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' parses in a worker and renders on the main thread (default). 'worker' also renders inside the worker; the main thread only paints the returned ImageBitmap. This contains parser/renderer state and many failures away from Window, but a Worker is not a separate process or a strict memory sandbox and cannot guarantee recovery from every browser-level OOM. Requires Worker + OffscreenCanvas. Canvas-target render methods are unavailable in 'worker' mode, equations require 'main', and transferring each frame can add latency.", emphasis: 'a Worker is not a separate process or a strict memory sandbox and cannot guarantee recovery from every browser-level OOM.' };
+const VIEWER_MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' renders on the main thread (default). 'worker' renders the viewer off the main thread and paints transferred ImageBitmaps, improving UI responsiveness and containing parser/renderer state away from Window. It is not a separate process or a strict memory sandbox and cannot guarantee recovery from every browser-level OOM. Scroll, tabs, zoom, selection and find remain available; equations require 'main'. Requires Worker + OffscreenCanvas, and frame transfer can add latency.", emphasis: 'It is not a separate process or a strict memory sandbox and cannot guarantee recovery from every browser-level OOM.' };
 const ZOOM_MIN_MAX = { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom factor bounds for setScale / fitWidth / fitPage (10%–400%).' };
 const ON_SCALE_CHANGE = { name: 'onScaleChange', type: '(scale: number) => void', desc: 'Called when the zoom factor changes (setScale / fitWidth / fitPage / zoomIn / zoomOut), with the clamped factor (1 = 100%).' };
-const ON_HYPERLINK_CLICK = { name: 'onHyperlinkClick', type: '(target: HyperlinkTarget) => void', desc: "Called when a hyperlink is clicked. `target` is `{ kind: 'external', url }` or `{ kind: 'internal', ref, slideIndex? }`. When supplied, the callback fully owns the click (the default external-open / internal-navigation is not run). External URLs are scheme-sanitized (http / https / mailto / tel only); internal targets resolve to a docx bookmark / pptx slide jump / xlsx defined name or cell." };
-const ENABLE_HYPERLINKS = { name: 'enableHyperlinks', type: 'boolean', def: 'true', desc: "Master switch for hyperlink interactivity. Set `false` to disable it entirely: no hit-testing, no pointer cursor over links, no default navigation, and `onHyperlinkClick` is never called. Links still render exactly as authored but are inert, like plain text." };
+const ON_HYPERLINK_CLICK = { name: 'onHyperlinkClick', type: '(target: HyperlinkTarget) => void', desc: "Called when a hyperlink is clicked. `target` is `{ kind: 'external', url }` or `{ kind: 'internal', ref, slideIndex? }`. When supplied, the callback fully owns the click (the default external-open / internal-navigation is not run). External URLs are scheme-sanitized (http / https / mailto / tel only); internal targets resolve to a docx bookmark / pptx slide jump / xlsx defined name or cell.", emphasis: 'When supplied, the callback fully owns the click (the default external-open / internal-navigation is not run).' };
+const ENABLE_HYPERLINKS = { name: 'enableHyperlinks', type: 'boolean', def: 'true', desc: "Master switch for hyperlink interactivity. Set `false` to disable it entirely: no hit-testing, no pointer cursor over links, no default navigation, and `onHyperlinkClick` is never called. Links still render exactly as authored but are inert, like plain text.", emphasis: 'Set `false` to disable it entirely' };
+const VIEWER_ON_ERROR = {
+  name: 'onError',
+  type: '(err: Error) => void',
+  desc: 'Receives load failures and asynchronous render or media failures handled by the Viewer. When supplied, a load/parse failure is delivered here and load() resolves; without it load() rejects. Viewer-managed render failures are delivered here, or logged with console.error when the callback is omitted. Narrow stable cases with OoxmlError, OoxmlResourceLimitError or OoxmlDecodedImageLimitError; other failures remain Error values and message text is not a stable discriminator.',
+  emphasis: 'When supplied, a load/parse failure is delivered here and load() resolves; without it load() rejects.',
+};
 
 // Shared zoom methods (IX9) — same contract across all three viewers; the return
 // type differs (docx/pptx re-render asynchronously → Promise<void>; xlsx is sync).
@@ -60,6 +70,7 @@ const FIND_HIGHLIGHT_COLORS: ApiOption = {
   type: '{ match?: string; active?: string }',
   def: 'yellow / orange',
   desc: 'CSS backgrounds for ordinary and active find matches. Values are applied verbatim; use an alpha color to keep the canvas text visible through the overlay.',
+  emphasis: 'use an alpha color to keep the canvas text visible through the overlay.',
 };
 
 export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
@@ -88,7 +99,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         ON_HYPERLINK_CLICK,
         ENABLE_HYPERLINKS,
         { name: 'onSlideChange', type: '(index: number, total: number) => void', desc: 'Called after a slide finishes rendering.' },
-        { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
+        VIEWER_ON_ERROR,
       ],
       methods: [
         { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load from a URL or ArrayBuffer and render the first slide.' },
@@ -117,7 +128,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'static load(source, options?): Promise<PptxPresentation>', desc: 'Parse a deck from a URL or ArrayBuffer.' },
         { sig: 'get slideCount(): number', desc: 'Total slides.' },
         { sig: 'renderSlide(canvas, index, opts?: { width?, dpr?, onTextRun?, dim? }): Promise<void>', desc: 'Render one slide into the given canvas at the given width. `onTextRun` receives each rendered segment as `PptxTextRunInfo`, including the source shape’s slide-local `shapeId` when authored, so callers can build a transparent selection overlay or stable shape mapping; `dim` (a DimOptions) paints a translucent wash over the finished slide (hidden-slide dimming). Equations render when a `math` engine was passed to `load`. Unavailable in `mode: "worker"` — use renderSlideToBitmap.' },
-        { sig: 'renderSlideToBitmap(index, opts?: { width?, dpr?, dim? }): Promise<ImageBitmap>', desc: 'Render one slide and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread). `dim` paints a translucent overlay over the slide (hidden-slide dimming). Equations are skipped in `mode: "worker"` (they require `mode: "main"`). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
+        { sig: 'renderSlideToBitmap(index, opts?: { width?, dpr?, dim? }): Promise<ImageBitmap>', desc: 'Render one slide and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread). `dim` paints a translucent overlay over the slide (hidden-slide dimming). Equations are skipped in `mode: "worker"` (they require `mode: "main"`). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.', emphasis: 'The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
         { sig: 'presentSlide(canvas, index, opts?: { width?, dpr?, onTextRun? }): Promise<PresentationHandle>', desc: 'Render a slide and attach canvas-native audio/video playback, returning a handle with play() / pause() / destroy(). Works in both modes — in `mode: "worker"` the base slide and text-run geometry are produced off-thread and the video overlay is composited on the main thread.' },
         { sig: 'getNotes(slideIndex: number): string | null', desc: 'Speaker-notes text for a slide (0-based; ECMA-376 §13.3.5). Returns null when the slide has no notes part or the index is out of range.' },
         { sig: 'get slideWidth(): number', desc: 'Slide width in EMU (0 until loaded).' },
@@ -148,7 +159,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'mediaOverscan', type: 'number', def: '1', desc: 'Slides beyond the real viewport that may keep interactive media handles. Independent from the general overscan used for mounted canvases/text overlays.' },
         ON_HYPERLINK_CLICK,
         ENABLE_HYPERLINKS,
-        { name: 'presentation', type: 'PptxPresentation', def: 'undefined', desc: 'Inject an already-loaded engine to share one parse across panes. When set, load() is unsupported, the engine’s own mode wins, and destroy() does NOT destroy it (the caller owns its lifecycle).' },
+        { name: 'presentation', type: 'PptxPresentation', def: 'undefined', desc: 'Inject an already-loaded engine to share one parse across panes. When set, load() is unsupported, the engine’s own mode wins, and destroy() does NOT destroy it (the caller owns its lifecycle).', emphasis: 'destroy() does NOT destroy it (the caller owns its lifecycle).' },
         GFONTS,
         ZIP,
         RESOURCE_LIMITS,
@@ -158,7 +169,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         DPR,
         MODE,
         { name: 'onVisibleSlideChange', type: '(topIndex: number, total: number) => void', desc: 'Fires when the top-most visible slide changes.' },
-        { name: 'onError', type: '(err: Error) => void', desc: 'Called on load errors and async per-slide render failures (a failed slide is left blank rather than crashing the scroll loop).' },
+        VIEWER_ON_ERROR,
       ],
       methods: [
         { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a deck from a URL or ArrayBuffer and render the first window. Throws when an engine was injected via `presentation`.' },
@@ -197,7 +208,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         ON_HYPERLINK_CLICK,
         ENABLE_HYPERLINKS,
         { name: 'onPageChange', type: '(index: number, total: number) => void', desc: 'Called after a page finishes rendering.' },
-        { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
+        VIEWER_ON_ERROR,
       ],
       methods: [
         { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load from a URL or ArrayBuffer and render the first page.' },
@@ -221,10 +232,10 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       methods: [
         { sig: 'static load(source, options?): Promise<DocxDocument>', desc: 'Parse a document from a URL or ArrayBuffer.' },
         { sig: 'get pageCount(): number', desc: 'Total pages.' },
-        { sig: 'pageSize(pageIndex: number): { widthPt, heightPt }', desc: 'Page size in pt for a page (ECMA-376 §17.6.13 / §17.6.11 — per section, so a mixed portrait/landscape document returns different sizes per page). Available in both modes; index is clamped. `{ 0, 0 }` means "not loaded". Returns a fresh object per call.' },
+        { sig: 'pageSize(pageIndex: number): { widthPt, heightPt }', desc: 'Page size in pt for a page (ECMA-376 §17.6.13 / §17.6.11 — per section, so a mixed portrait/landscape document returns different sizes per page). Available in both modes; index is clamped. `{ 0, 0 }` means "not loaded". Returns a fresh object per call.', emphasis: '`{ 0, 0 }` means "not loaded".' },
         { sig: 'get mode(): "main" | "worker"', desc: 'The render mode this engine was loaded with. An injected engine’s mode decides whether pages render via renderPage (main) or renderPageToBitmap (worker).' },
         { sig: 'renderPage(canvas, index, opts?: { width?, dpr?, showTrackChanges?, onTextRun? }): Promise<void>', desc: 'Render one page into the given canvas. `onTextRun` receives each segment as `DocxTextRunInfo`, including the authored `w14:paraId` as `paragraphId` when present. Unavailable in `mode: "worker"` — use renderPageToBitmap.' },
-        { sig: 'renderPageToBitmap(index, opts?: { width?, dpr?, showTrackChanges?, onTextRun? }): Promise<ImageBitmap>', desc: 'Render one page and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread and returns the same text-run stream beside the bitmap). Equations are skipped in `mode: "worker"` (they require `mode: "main"`). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
+        { sig: 'renderPageToBitmap(index, opts?: { width?, dpr?, showTrackChanges?, onTextRun? }): Promise<ImageBitmap>', desc: 'Render one page and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread and returns the same text-run stream beside the bitmap). Equations are skipped in `mode: "worker"` (they require `mode: "main"`). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.', emphasis: 'The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Release the worker.' },
       ],
@@ -249,7 +260,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         ON_HYPERLINK_CLICK,
         ENABLE_HYPERLINKS,
         { name: 'showTrackChanges', type: 'boolean', desc: 'Render tracked insertions/deletions with author colours (forwarded to each page render).' },
-        { name: 'document', type: 'DocxDocument', def: 'undefined', desc: 'Inject an already-loaded engine to share one parse across panes. When set, load() is unsupported, the engine’s own mode wins, and destroy() does NOT destroy it (the caller owns its lifecycle).' },
+        { name: 'document', type: 'DocxDocument', def: 'undefined', desc: 'Inject an already-loaded engine to share one parse across panes. When set, load() is unsupported, the engine’s own mode wins, and destroy() does NOT destroy it (the caller owns its lifecycle).', emphasis: 'destroy() does NOT destroy it (the caller owns its lifecycle).' },
         GFONTS,
         ZIP,
         RESOURCE_LIMITS,
@@ -259,7 +270,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         DPR,
         MODE,
         { name: 'onVisiblePageChange', type: '(topIndex: number, total: number) => void', desc: 'Fires when the top-most visible page changes.' },
-        { name: 'onError', type: '(err: Error) => void', desc: 'Called on load errors and async per-page render failures (a failed page is left blank rather than crashing the scroll loop).' },
+        VIEWER_ON_ERROR,
       ],
       methods: [
         { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a document from a URL or ArrayBuffer and render the first window. Throws when an engine was injected via `document`.' },
@@ -284,7 +295,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'cellScale', type: 'number', def: '1', desc: 'Scale factor for cell/header dimensions (0.5 = half size).' },
         { name: 'showZoomSlider', type: 'boolean', def: 'true', desc: 'Show the Excel-style zoom slider at the end of the tab bar. Zooming (slider, Ctrl/⌘+wheel, trackpad pinch) is view-only.' },
         { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom slider bounds as scale factors (10%–400%).' },
-        { name: 'resizable', type: 'boolean', def: 'true', desc: 'Allow resizing columns/rows by dragging header borders. View-only — it changes the on-screen view only and never modifies the loaded file. Set false to disable.' },
+        { name: 'resizable', type: 'boolean', def: 'true', desc: 'Allow resizing columns/rows by dragging header borders. View-only — it changes the on-screen view only and never modifies the loaded file. Set false to disable.', emphasis: 'View-only — it changes the on-screen view only and never modifies the loaded file.' },
         { name: 'selectionColor', type: 'string', def: "'#1a73e8'", desc: 'Accent color for the cell-selection rectangle (any CSS color). The fill is the same color at 8% opacity.' },
         FIND_HIGHLIGHT_COLORS,
         { name: 'hiddenSheetMode', type: "'show' | 'skip' | 'dim'", def: "'show'", desc: 'How hidden / very-hidden sheets (`<sheet state>`, §18.2.19) appear in the tab bar. `show` renders a tab like any other; `skip` hides the tab (`display:none`) and makes sequential navigation jump over it; `dim` renders the tab at reduced opacity. Mirrors pptx `hiddenSlideMode`.' },
@@ -301,7 +312,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'onReady', type: '(sheetNames: string[]) => void', desc: 'Called once the workbook is parsed.' },
         { name: 'onSheetChange', type: '(index: number, total: number) => void', desc: 'Called when the active sheet changes; `total` is the sheet count. Read the name via `sheetNames[index]`.' },
         { name: 'onSelectionChange', type: '(sel: CellRange | null) => void', desc: 'Called when the selected range changes; null clears it.' },
-        { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
+        VIEWER_ON_ERROR,
       ],
       methods: [
         { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a workbook from a URL or ArrayBuffer and render the first sheet.' },
@@ -337,7 +348,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get sheetCount(): number', desc: 'Total sheets.' },
         { sig: 'getWorksheet(sheetIndex): Promise<Worksheet>', desc: 'Parse and return one worksheet model. Saved pivot-table facts are exposed read-only via `Worksheet.pivotTables`, with skipped malformed parts reported through `Worksheet.pivotDiagnostics`; saved worksheet cells and styles remain authoritative.' },
         { sig: 'renderViewport(canvas, sheetIndex, viewport, opts?: { width?, height?, dpr?, cellScale?, onTextRun? }): Promise<void>', desc: 'Render a row/col window of a sheet into the given canvas. `onTextRun` receives each text cell as `XlsxTextRunInfo` with required `sheetName` and A1 `cellRef` identity. Equations in shapes render when a `math` engine was passed to `load`. Unavailable in `mode: "worker"` — use renderViewportToBitmap.' },
-        { sig: 'renderViewportToBitmap(sheetIndex, viewport, opts: { width, height, dpr?, cellScale? }): Promise<ImageBitmap>', desc: 'Render a sheet viewport and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread). `width` and `height` are required — a worker has no DOM element to measure. Equations in shapes are skipped in `mode: "worker"` (they require `mode: "main"`). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
+        { sig: 'renderViewportToBitmap(sheetIndex, viewport, opts: { width, height, dpr?, cellScale? }): Promise<ImageBitmap>', desc: 'Render a sheet viewport and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread). `width` and `height` are required — a worker has no DOM element to measure. Equations in shapes are skipped in `mode: "worker"` (they require `mode: "main"`). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.', emphasis: '`width` and `height` are required — a worker has no DOM element to measure.' },
         { sig: 'resolveValidationList(sheetIndex, formula1): Promise<ResolvedList>', desc: 'Resolve a list-type data-validation `formula1` (ECMA-376 §18.3.1.32) into the allowed values to display — inline quoted list, a range reference (each cell’s display string), or `{ kind: \'formula\' }` for named ranges. Read-only.' },
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Release the worker.' },

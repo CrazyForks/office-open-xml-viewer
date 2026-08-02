@@ -1,0 +1,104 @@
+---
+import Base from '../../layouts/Base.astro';
+import Nav from '../../components/Nav.astro';
+import { Code } from 'astro:components';
+import { codeThemes } from '../../lib/code-theme';
+import { announcements, formatAnnouncementDate, type Announcement } from '../../lib/announcements';
+
+export function getStaticPaths() {
+  return announcements.map((announcement) => ({
+    params: { slug: announcement.slug },
+    props: { announcement },
+  }));
+}
+
+const { announcement } = Astro.props as { announcement: Announcement };
+---
+<Base title={`${announcement.title} — @silurus/ooxml`} description={announcement.summary}>
+  <Nav active="announcements" />
+  <main>
+    <header class="article-hero">
+      <div class="wrap article-head">
+        <a class="article-back" href="/announcements">← All announcements</a>
+        <div class="article-meta">
+          <time datetime={announcement.date}>{formatAnnouncementDate(announcement.date)}</time>
+          <span>{announcement.label}</span>
+          {announcement.version && <span class="article-version">{announcement.version}</span>}
+        </div>
+        <h1>{announcement.title}</h1>
+        <p class="article-summary">{announcement.summary}</p>
+      </div>
+    </header>
+
+    <article class="wrap article-grid">
+      <aside>
+        <span>Relevant to</span>
+        <p>{announcement.audience}</p>
+      </aside>
+      <div class="article-body">
+        {announcement.sections.map((section) => (
+          <section class:list={{ 'article-summary-block': section.kind === 'summary' }}>
+            <h2>{section.title}</h2>
+            {section.paragraphs.map((paragraph) => <p>{paragraph}</p>)}
+            {section.bullets && <ul>{section.bullets.map((bullet) => <li>{bullet}</li>)}</ul>}
+            {section.examples?.map((example) => (
+              <div class="article-example">
+                <h3>{example.title}</h3>
+                <Code code={example.code} lang="ts" themes={codeThemes} defaultColor={false} />
+              </div>
+            ))}
+          </section>
+        ))}
+        <div class="article-next">
+          <span>Questions about the change?</span>
+          <a href="https://github.com/yukiyokotani/office-open-xml-viewer/discussions">Start a GitHub discussion ↗</a>
+        </div>
+      </div>
+    </article>
+  </main>
+</Base>
+
+<style>
+  .article-hero { padding: 58px 0 72px; border-bottom: 1px solid var(--border); }
+  .article-head { max-width: 980px; }
+  .article-back { color: var(--text-faint); font-size: 13px; }
+  .article-back:hover { color: var(--text); }
+  .article-meta { display: flex; gap: 12px; margin-top: 72px; font: 11px var(--mono); text-transform: uppercase; letter-spacing: .09em; color: var(--text-faint); }
+  .article-version { color: var(--accent); }
+  h1 { margin-top: 18px; max-width: 16ch; font-size: clamp(42px, 7vw, 78px); letter-spacing: -.055em; }
+  .article-summary { max-width: 70ch; margin: 28px 0 0; color: var(--text-dim); font-size: 19px; }
+  .article-grid { display: grid; grid-template-columns: 240px minmax(0, 720px); gap: 80px; padding-top: 72px; padding-bottom: 120px; }
+  aside { position: sticky; top: 92px; align-self: start; padding-top: 8px; }
+  aside span { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .1em; color: var(--text-faint); }
+  aside p { font-size: 14px; color: var(--text-dim); }
+  .article-body section + section { margin-top: 64px; }
+  .article-body h2 { font-size: 28px; letter-spacing: -.035em; }
+  .article-body h3 { margin-top: 0; font: 600 12px var(--mono); letter-spacing: .02em; color: var(--text-dim); }
+  .article-body p, .article-body li { color: var(--text-dim); font-size: 17px; line-height: 1.75; }
+  .article-body ul { padding-left: 20px; }
+  .article-body li { padding-left: 8px; margin: 10px 0; }
+  .article-body li::marker { color: var(--accent); }
+  .article-summary-block { padding: 28px 30px; border: 1px solid var(--border); background: var(--bg-elev); }
+  .article-summary-block h2 { font-size: 22px; }
+  .article-summary-block p, .article-summary-block li { font-size: 15px; }
+  .article-example { margin-top: 28px; }
+  .article-example :global(pre) {
+    margin: 10px 0 0;
+    padding: 20px;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--code-bg) !important;
+    font-size: 13px;
+    line-height: 1.65;
+  }
+  .article-example :global(code) { font-family: var(--mono); }
+  .article-next { display: flex; justify-content: space-between; gap: 24px; margin-top: 72px; padding: 24px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); font-size: 14px; }
+  .article-next span { color: var(--text-faint); }
+  .article-next a { color: var(--accent); font-weight: 700; }
+  @media (max-width: 760px) {
+    .article-grid { grid-template-columns: 1fr; gap: 28px; }
+    aside { position: static; border-bottom: 1px solid var(--border); }
+    .article-next { flex-direction: column; gap: 6px; }
+  }
+</style>

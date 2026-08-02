@@ -156,7 +156,11 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    *  `renderSlideToBitmap` rejections) and embedded-media fetch/decode/playback
    *  failures. A failed slide is left blank rather than crashing the loop.
    *  Without an `onError`, failures are logged via `console.error` so they are
-   *  never fully silent. */
+   *  never fully silent. Stable cases can be narrowed with `OoxmlError`,
+   *  `OoxmlResourceLimitError`, or `OoxmlDecodedImageLimitError` re-exported by
+   *  this package. Other failures remain `Error` values; a `code` of
+   *  `parser-crashed` identifies a recognized WASM trap, not a reliably
+   *  classified OOM. */
   onError?: (err: Error) => void;
   /**
    * IX1 (design decision — NOT user-confirmed, integrator may veto). Fires on a
@@ -388,7 +392,12 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._wrapper = document.createElement('div');
     this._wrapper.style.cssText = 'position:relative;width:100%;height:100%;overflow:hidden;';
     this._scrollHost = document.createElement('div');
+    // Reserve the classic vertical scrollbar gutter before content overflows.
+    // Together with `_fitWidthPx` reading this scrollport's clientWidth, this
+    // prevents a vertical scrollbar from stealing width after the initial fit
+    // and creating a small, unintended horizontal overflow.
     this._scrollHost.style.cssText = 'position:absolute;inset:0;overflow:auto;';
+    this._scrollHost.style.scrollbarGutter = 'stable';
     // The "desk" behind/between slides. Undefined ⇒ transparent (container shows
     // through); slides keep their own white canvas regardless.
     if (opts.background) this._scrollHost.style.background = opts.background;
@@ -539,7 +548,11 @@ export class PptxScrollViewer implements ZoomableViewer {
    *  container) is treated as unlaid-out — the same deferral as a zero-width box. */
   private _fitWidthPx(): number {
     if (this._opts.width && this._opts.width > 0) return this._opts.width;
-    const cw = this._container.clientWidth || this._scrollHost.clientWidth;
+    // Fit to the real scrollport, not its outer container: a non-overlay vertical
+    // scrollbar reduces scrollHost.clientWidth but leaves container.clientWidth
+    // unchanged. The container is only a fallback for synthetic / not-yet-laid-
+    // out hosts where the absolutely positioned scrollport still reports zero.
+    const cw = this._scrollHost.clientWidth || this._container.clientWidth;
     if (cw <= 0) return 0; // 0 ⇒ defer (design §11 zero-width deferral)
     const { left, right } = this._padH();
     const fit = cw - left - right;

@@ -11,10 +11,6 @@ import { loadMathJax, mathMLToSvg } from '../../../packages/core/src/math/engine
 const math = { loadMathJax, mathMLToSvg };
 
 const VIEWER_GAP = 26;
-// Absolute ScrollViewer scale (96-dpi natural size = 1). A fixed factor keeps
-// the same authored font size visually consistent across portrait/landscape
-// pages and slide aspect ratios; unlike fit-width it does not grow with the host.
-const DEFAULT_SCALE = 0.9;
 const MIN_SCALE = 0.5;
 
 // Disposes the previous viewer and its parser/worker resources when a new file
@@ -99,13 +95,14 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
       mediaOverscan: 1,
       enableZoom: true,
       zoomMin: MIN_SCALE,
+      pageShadow: false,
       useGoogleFonts: true,
       math,
     };
     const viewer = new PptxScrollViewer(host, viewerOptions);
-    // Latch before load so the first painted frame is already at the fixed
-    // physical scale (no width-fit frame followed by a visible resize).
-    viewer.setScale(DEFAULT_SCALE);
+    // Do not force an absolute scale here. ScrollViewer derives its initial
+    // scale from the laid-out container width and keeps that fit on resize, so
+    // a wide slide never opens with horizontal overflow in this workspace.
     try {
       await viewer.load(buffer);
     } catch (error) {
@@ -132,11 +129,14 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
     enableTextSelection: true,
     enableZoom: true,
     zoomMin: MIN_SCALE,
+    pageShadow: false,
     useGoogleFonts: true,
     math,
   };
   const viewer = new DocxScrollViewer(host, viewerOptions);
-  viewer.setScale(DEFAULT_SCALE);
+  // As with PPTX, the viewer-owned width fit is the initial zoom contract for
+  // Try Yours. It can go below zoomMin when necessary to admit a wide page;
+  // zoomMin remains the floor for subsequent user-driven zoom operations.
   try {
     await viewer.load(buffer);
   } catch (error) {

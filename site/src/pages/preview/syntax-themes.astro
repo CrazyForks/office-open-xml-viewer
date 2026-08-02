@@ -1,0 +1,98 @@
+---
+import { Code } from 'astro:components';
+import Base from '../../layouts/Base.astro';
+import Nav from '../../components/Nav.astro';
+import { codeThemes } from '../../lib/code-theme';
+
+const sample = `import { DocxViewer, OoxmlResourceLimitError } from '@silurus/ooxml/docx';
+
+const canvas = document.querySelector<HTMLCanvasElement>('#preview');
+const viewer = new DocxViewer(canvas as HTMLCanvasElement, {
+  mode: 'worker',
+  resourceLimits: {
+    maxArchiveEntryBytes: 128 * 1024 * 1024,
+  },
+});
+
+// Files are parsed locally in the browser.
+try {
+  await viewer.load('/sample.docx');
+} catch (error) {
+  if (error instanceof OoxmlResourceLimitError) {
+    console.warn(error.code, error.observedBytes);
+  }
+}`;
+
+const candidates = [
+  {
+    name: 'Current lime',
+    note: 'Current restrained Vitesse-inspired palette.',
+    themes: codeThemes,
+  },
+  {
+    name: 'GitHub',
+    note: 'Neutral, familiar and clearly separated token roles.',
+    themes: { light: 'github-light', dark: 'github-dark' },
+  },
+  {
+    name: 'One',
+    note: 'Classic editor contrast with stronger keywords and literals.',
+    themes: { light: 'one-light', dark: 'one-dark-pro' },
+  },
+  {
+    name: 'Ayu',
+    note: 'Warm, crisp palette with restrained but distinct accents.',
+    themes: { light: 'ayu-light', dark: 'ayu-dark' },
+  },
+  {
+    name: 'Catppuccin',
+    note: 'More colourful while keeping token groups easy to scan.',
+    themes: { light: 'catppuccin-latte', dark: 'catppuccin-mocha' },
+  },
+  {
+    name: 'Rosé Pine',
+    note: 'Soft base with clearer hue separation than the current palette.',
+    themes: { light: 'rose-pine-dawn', dark: 'rose-pine-moon' },
+  },
+] as const;
+---
+
+<Base title="Syntax theme comparison — @silurus/ooxml">
+  <Nav />
+  <main class="wrap comparison">
+    <header>
+      <p class="eyebrow">Local design review</p>
+      <h1>Syntax themes</h1>
+      <p>Use the header control to compare both site themes. Each sample uses the site’s actual code background.</p>
+    </header>
+
+    <div class="candidate-grid">
+      {candidates.map((candidate) => (
+        <section class="candidate">
+          <div class="candidate-head">
+            <h2>{candidate.name}</h2>
+            <p>{candidate.note}</p>
+          </div>
+          <Code code={sample} lang="ts" themes={candidate.themes as any} defaultColor={false} />
+        </section>
+      ))}
+    </div>
+  </main>
+</Base>
+
+<style>
+  .comparison { padding-top: 72px; padding-bottom: 112px; }
+  header { max-width: 760px; }
+  h1 { margin-top: 18px; font-size: clamp(42px, 7vw, 74px); }
+  header > p:last-child { margin: 20px 0 0; color: var(--text-dim); font-size: 16px; }
+  .candidate-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; margin-top: 56px; }
+  .candidate { min-width: 0; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--code-bg); }
+  .candidate-head { padding: 18px 20px; border-bottom: 1px solid var(--border); background: var(--bg-elev); }
+  .candidate h2 { font-size: 18px; }
+  .candidate-head p { margin: 7px 0 0; color: var(--text-dim); font-size: 13px; }
+  .candidate :global(pre) { margin: 0; padding: 20px; overflow-x: auto; background: var(--code-bg) !important; font-size: 12px; line-height: 1.65; }
+  .candidate :global(code) { font-family: var(--mono); }
+  @media (max-width: 900px) {
+    .candidate-grid { grid-template-columns: 1fr; }
+  }
+</style>
