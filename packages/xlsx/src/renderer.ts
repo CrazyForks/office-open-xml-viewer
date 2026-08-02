@@ -3324,19 +3324,19 @@ function renderHeaders(
   const mirrorX = (x: number, w: number): number => rtl ? rtlMirrorX(x, w, canvasW) : x;
   const cornerX = rtl ? canvasW - hw : 0;  // x-origin of the corner / row-header strip
 
-  // Corner – draw all 4 edges (standalone box)
+  // Corner — draw only the edges that belong to the spreadsheet grid. The
+  // canvas perimeter is deliberately left unpainted: framing the viewer is the
+  // host container's responsibility, so an app-supplied border never doubles
+  // up with renderer chrome.
   ctx.fillStyle = HEADER_BG;
   ctx.fillRect(cornerX, 0, hw, hh);
   ctx.strokeStyle = HEADER_BORDER;
   ctx.lineWidth = 0.5;
   ctx.beginPath();
-  const cornerL = cornerX + crispOffset(cornerX, 0.5, dpr);
-  const cornerT = crispOffset(0, 0.5, dpr);
-  ctx.moveTo(cornerL, 0); ctx.lineTo(cornerL, hh);                    // left
-  ctx.moveTo(cornerX, cornerT); ctx.lineTo(cornerX + hw, cornerT);    // top
-  // perimeter inset (-hp) kept literal: snapping could push it outside the
-  // header box; dpr>=3 edge accepted
-  ctx.moveTo(cornerX + hw - hp, 0); ctx.lineTo(cornerX + hw - hp, hh);  // right
+  const cornerGridX = rtl
+    ? cornerX + crispOffset(cornerX, 0.5, dpr)
+    : cornerX + hw - hp;
+  ctx.moveTo(cornerGridX, 0); ctx.lineTo(cornerGridX, hh);            // row-header / grid divider
   ctx.moveTo(cornerX, hh - hp); ctx.lineTo(cornerX + hw, hh - hp);    // bottom
   ctx.stroke();
 
@@ -3351,7 +3351,8 @@ function renderHeaders(
   // cx+cw-hp — both aligns it with the data column line (the strip used to sit 1
   // device px to the left) AND survives the next cell's fillRect (which starts at
   // cx+cw and never touches cx+hp), so no separate fill/stroke pass is needed.
-  // The top/bottom lines stay as the header-strip perimeter.
+  // The bottom line stays as the grid-facing header boundary. The canvas-top
+  // perimeter is owned by the host and is not painted here.
   const drawColHeader = (col: number, ltrCx: number, cw: number) => {
     const cx = mirrorX(ltrCx, cw);
     ctx.fillStyle = colBg(col);
@@ -3360,10 +3361,8 @@ function renderHeaders(
     ctx.lineWidth = 0.5;
     ctx.beginPath();
     const colSepX = cx + crispOffset(cx, 0.5, dpr);  // column boundary, aligns with data grid
-    const colTopY = crispOffset(0, 0.5, dpr);
     ctx.moveTo(colSepX, 0);           ctx.lineTo(colSepX, hh);       // left = column boundary (aligns with data grid)
     ctx.moveTo(cx, hh - hp);          ctx.lineTo(cx + cw, hh - hp);  // bottom (strip perimeter, inset -hp kept literal)
-    ctx.moveTo(cx, colTopY);          ctx.lineTo(cx + cw, colTopY);  // top (strip perimeter)
     ctx.stroke();
     ctx.fillStyle = HEADER_TEXT;
     ctx.textAlign = 'center';
@@ -3379,7 +3378,8 @@ function renderHeaders(
   // cy+ch-hp — aligns it with the data row line (the strip used to sit 1 device
   // px above) AND survives the next cell's fillRect (which starts at cy+ch and
   // never touches cy+hp), so no separate fill/stroke pass is needed. The
-  // left/right lines stay as the header-strip perimeter.
+  // Only the grid-facing vertical edge remains. The outer vertical canvas edge
+  // is framing chrome and therefore belongs to the host container.
   const drawRowHeader = (row: number, cy: number, ch: number) => {
     const rx = cornerX;  // left edge of the row-header strip (mirrors to the right in RTL)
     ctx.fillStyle = rowBg(row);
@@ -3388,10 +3388,11 @@ function renderHeaders(
     ctx.lineWidth = 0.5;
     ctx.beginPath();
     const rowSepY = cy + crispOffset(cy, 0.5, dpr);   // row boundary, aligns with data grid
-    const rowLeftX = rx + crispOffset(rx, 0.5, dpr);
-    ctx.moveTo(rx + hw - hp, cy);  ctx.lineTo(rx + hw - hp, cy + ch);   // right (strip perimeter, inset -hp kept literal)
+    const rowGridX = rtl
+      ? rx + crispOffset(rx, 0.5, dpr)
+      : rx + hw - hp;
+    ctx.moveTo(rowGridX, cy);      ctx.lineTo(rowGridX, cy + ch);       // row-header / grid divider
     ctx.moveTo(rx, rowSepY);       ctx.lineTo(rx + hw, rowSepY);         // top = row boundary (aligns with data grid)
-    ctx.moveTo(rowLeftX, cy);      ctx.lineTo(rowLeftX, cy + ch);        // left (strip perimeter)
     ctx.stroke();
     ctx.fillStyle = HEADER_TEXT;
     ctx.textBaseline = 'middle';
