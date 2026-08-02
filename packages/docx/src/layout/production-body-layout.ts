@@ -967,9 +967,8 @@ function buildConcreteBodyLayoutKernel(
             });
             return Object.freeze({
               layout: member.fragment,
-              // Word compatibility keeps the anchor below a lowered glyph
-              // without changing the §17.3.1.11 authored exclusion height.
-              // See WORD_LOWERED_DROP_CAP_ANCHOR_LEADING.
+              // The catalogued projection preserves the §17.3.1.11 authored
+              // exclusion height; see WORD_LOWERED_DROP_CAP_ANCHOR_LEADING.
               blockExtentPt: dropCapAnchorLeadingPt,
               lineEndBoundaries: Object.freeze([]),
               placement: Object.freeze({
