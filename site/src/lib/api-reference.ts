@@ -9,6 +9,9 @@ export interface ApiOption {
   desc: string;
   /** Exact, contract-critical substring rendered with semantic emphasis. */
   emphasis?: string;
+  /** Optional route to the longer contract documentation for this option. */
+  detailsHref?: string;
+  detailsLabel?: string;
 }
 export interface ApiMethod {
   sig: string;
@@ -24,11 +27,11 @@ export interface ApiClass {
   methods: ApiMethod[];
 }
 
-const RESOURCE_LIMITS = { name: 'resourceLimits', type: 'OoxmlResourceLimits', def: '128 MiB per entry / 256 MiB distinct total', desc: 'Shared DOCX/XLSX/PPTX inflated-byte budgets. maxArchiveEntryBytes caps each package part; maxTotalInflatedBytes counts the largest amount read from every distinct part in the package session, without charging repeat reads twice. Supply positive safe-integer byte counts, or null to disable one configurable budget (internal hard ceilings remain). Violations reject with OoxmlResourceLimitError. These deterministic counters reduce OOM risk but do not measure or guarantee peak memory.', emphasis: 'Violations reject with OoxmlResourceLimitError.' };
+const RESOURCE_LIMITS = { name: 'resourceLimits', type: 'OoxmlResourceLimits', def: '128 MiB per entry / 256 MiB distinct total', desc: 'Shared DOCX/XLSX/PPTX inflated-byte budgets. maxArchiveEntryBytes caps each package part; maxTotalInflatedBytes counts the largest amount read from every distinct part in the package session, without charging repeat reads twice. Supply positive safe-integer byte counts, or null to disable one configurable budget (internal hard ceilings remain). Violations reject with OoxmlResourceLimitError. These deterministic counters reduce OOM risk but do not measure or guarantee peak memory.', emphasis: 'Violations reject with OoxmlResourceLimitError.', detailsHref: '/errors#ooxml-resource-limit-error', detailsLabel: 'Error fields' };
 const RESOURCE_METRICS = { name: 'onResourceMetrics', type: '(metrics: OoxmlResourceMetrics) => void', desc: 'Receives the content-free initial-load report used by the debug card, without enabling console output. It reports the configured public policy, timing checkpoints, format/mode, success or typed failure discriminants, source bytes, and observed archive counters when available. It does not wait for a Viewer\'s first paint. On success, call getResourceMetrics() on the engine or Viewer for a fresh snapshot after lazy package work. Callback exceptions never change load results.', emphasis: 'Receives the content-free initial-load report used by the debug card, without enabling console output.' };
 const RESOURCE_METRICS_METHOD = { sig: 'getResourceMetrics(): Promise<OoxmlResourceMetrics>', desc: 'Return a fresh, content-free package-usage snapshot, including lazy archive work observed since load. Collection is always active; debug controls only console output.', emphasis: 'Collection is always active; debug controls only console output.' };
 const DEBUG = { name: 'debug', type: 'boolean', def: 'false', desc: 'Print one content-free, Ratatui-inspired resource report when the measured load or Node session finishes or fails. Browser DevTools use typography-only %c styling to keep Unicode borders and gauges aligned without changing foreground or background colours; Node and Worker consoles receive one plain argument. Use onResourceMetrics instead for production collection.', emphasis: 'Use onResourceMetrics instead for production collection.' };
-const ZIP = { name: 'maxZipEntryBytes', type: 'number', def: 'resource policy default', desc: 'Deprecated compatibility alias for resourceLimits.maxArchiveEntryBytes. New code should use resourceLimits. Existing positive values retain their per-entry meaning; zero / negative values fall back to the standard default.', emphasis: 'Deprecated compatibility alias for resourceLimits.maxArchiveEntryBytes.' };
+const ZIP = { name: 'maxZipEntryBytes', type: 'number', def: 'resource policy default', desc: 'Deprecated compatibility alias for resourceLimits.maxArchiveEntryBytes. It is scheduled for removal in a future breaking release; new code should use resourceLimits. Existing positive values retain their per-entry meaning; zero / negative values fall back to the standard default.', emphasis: 'It is scheduled for removal in a future breaking release; new code should use resourceLimits.', detailsHref: '/deprecations#max-zip-entry-bytes', detailsLabel: 'Migration' };
 const GFONTS = { name: 'useGoogleFonts', type: 'boolean', def: 'false', desc: 'Load metric-compatible webfonts and non-Latin script fallbacks (Noto Arabic / CJK KR·SC·TC·JP / Cyrillic / Hebrew / Thai / Devanagari) from Google Fonts so layout matches Office and non-Latin text never falls back to tofu. Off by default for privacy.', emphasis: 'Off by default for privacy.' };
 const DPR = { name: 'dpr', type: 'number', def: 'devicePixelRatio', desc: 'Device pixel ratio for the backing store (crispness on HiDPI).' };
 const WASM_URL = { name: 'wasmUrl', type: 'string | URL', def: 'bundled asset', desc: 'Override the URL the parser worker fetches the WebAssembly module from. By default each format resolves the `*_parser_bg.wasm` asset that ships next to its bundle (relative to the module URL); set this to serve it from a CDN or a self-hosted path instead (a relative value resolves against the document URL). Pointing it at a mismatched or missing file makes load() reject when the worker instantiates it.', emphasis: 'Override the URL the parser worker fetches the WebAssembly module from.' };
@@ -45,6 +48,8 @@ const VIEWER_ON_ERROR = {
   type: '(err: Error) => void',
   desc: 'Receives load failures and asynchronous render or media failures handled by the Viewer. When supplied, a load/parse failure is delivered here and load() resolves; without it load() rejects. Viewer-managed render failures are delivered here, or logged with console.error when the callback is omitted. Narrow stable cases with OoxmlError, OoxmlResourceLimitError or OoxmlDecodedImageLimitError; other failures remain Error values and message text is not a stable discriminator.',
   emphasis: 'When supplied, a load/parse failure is delivered here and load() resolves; without it load() rejects.',
+  detailsHref: '/errors#delivery',
+  detailsLabel: 'Error reference',
 };
 
 // Shared zoom methods (IX9) — same contract across all three viewers; the return
@@ -196,7 +201,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         GFONTS,
         { name: 'enableTextSelection', type: 'boolean', def: 'false', desc: 'Overlay a transparent text layer for native selection & copy.' },
         FIND_HIGHLIGHT_COLORS,
-        { name: 'showTrackChanges', type: 'boolean', desc: 'Render tracked insertions/deletions with author colours.' },
+        { name: 'showTrackChanges', type: 'boolean', def: 'true', desc: 'Intended to show revision markup for tracked insertions and deletions using author colours, insertion underlines and deletion strikethroughs. The current retained paint pipeline does not apply this flag; true and false render identically.', emphasis: 'The current retained paint pipeline does not apply this flag; true and false render identically.' },
         ZIP,
         RESOURCE_LIMITS,
         RESOURCE_METRICS,
@@ -259,7 +264,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         FIND_HIGHLIGHT_COLORS,
         ON_HYPERLINK_CLICK,
         ENABLE_HYPERLINKS,
-        { name: 'showTrackChanges', type: 'boolean', desc: 'Render tracked insertions/deletions with author colours (forwarded to each page render).' },
+        { name: 'showTrackChanges', type: 'boolean', def: 'true', desc: 'Intended to show revision markup for tracked insertions and deletions using author colours, insertion underlines and deletion strikethroughs. The current retained paint pipeline does not apply this flag; true and false render identically.', emphasis: 'The current retained paint pipeline does not apply this flag; true and false render identically.' },
         { name: 'document', type: 'DocxDocument', def: 'undefined', desc: 'Inject an already-loaded engine to share one parse across panes. When set, load() is unsupported, the engine’s own mode wins, and destroy() does NOT destroy it (the caller owns its lifecycle).', emphasis: 'destroy() does NOT destroy it (the caller owns its lifecycle).' },
         GFONTS,
         ZIP,

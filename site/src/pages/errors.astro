@@ -1,0 +1,309 @@
+---
+import { Code } from 'astro:components';
+import Base from '../layouts/Base.astro';
+import Nav from '../components/Nav.astro';
+import { codeThemes } from '../lib/code-theme';
+
+const simpleExample = `import { DocxViewer } from '@silurus/ooxml/docx';
+
+// Start here when you only need to know whether the initial load succeeded.
+const canvas = document.querySelector<HTMLCanvasElement>('#preview') as HTMLCanvasElement;
+const viewer = new DocxViewer(canvas);
+const source = await file.arrayBuffer();
+
+try {
+  await viewer.load(source);
+  showPreview();
+} catch (error) {
+  showPreviewError('This file could not be previewed.');
+  reportError(error); // Keep the original error for diagnostics.
+}`;
+
+const handlerExample = `import {
+  DocxViewer,
+  OoxmlDecodedImageLimitError,
+  OoxmlError,
+  OoxmlResourceLimitError,
+} from '@silurus/ooxml/docx';
+
+export function previewErrorMessage(error: unknown): string {
+  if (error instanceof OoxmlError) {
+    switch (error.code) {
+      case 'encrypted': return 'Enter the password to preview this file.';
+      case 'invalid-password': return 'The password is incorrect.';
+      case 'unsupported-encryption': return 'This encryption method is not supported.';
+      case 'legacy-binary-format': return 'Convert this file to .docx, .xlsx or .pptx first.';
+      case 'not-ooxml': return 'This is not a supported Office Open XML file.';
+    }
+  }
+  if (error instanceof OoxmlResourceLimitError) {
+    return error.details.violation.configurable
+      ? 'This file is larger or more complex than this app allows.'
+      : 'This file exceeds a safety limit and cannot be previewed.';
+  }
+  if (error instanceof OoxmlDecodedImageLimitError) {
+    return 'This file contains an image that is too large to preview.';
+  }
+  return 'This file could not be previewed.';
+}
+
+// Add onError when the Viewer must also report failures that happen after load.
+const canvas = document.querySelector<HTMLCanvasElement>('#preview') as HTMLCanvasElement;
+let initialLoadFailed = false;
+const viewer = new DocxViewer(canvas, {
+  onError(error) {
+    initialLoadFailed = true;
+    showPreviewError(previewErrorMessage(error));
+    reportError(error); // Keep this callback non-throwing.
+  },
+});
+
+// A load failure is delivered above, so this Promise resolves when onError exists.
+initialLoadFailed = false;
+await viewer.load(await file.arrayBuffer());
+if (!initialLoadFailed) showPreview();`;
+---
+
+<Base title="Error handling — @silurus/ooxml">
+  <Nav />
+
+  <header class="error-hero">
+    <div class="wrap">
+      <a class="back" href="/">← Documentation</a>
+      <p class="eyebrow">API reference</p>
+      <h1>Handle failures without guessing.</h1>
+      <p class="lead">Choose one delivery model, branch only on documented fields, and always keep a safe fallback for errors that are not typed.</p>
+    </div>
+  </header>
+
+  <main class="wrap error-main">
+    <section id="start" class="error-section start-section">
+      <div class="section-heading">
+        <p class="section-index">01</p>
+        <div><h2>Start with Promise rejection</h2><p>For a basic file preview, omit <code>onError</code> and catch the rejected <code>load()</code>. Success and failure then follow normal Promise semantics.</p></div>
+      </div>
+      <div class="code-card"><Code code={simpleExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
+      <div class="principles">
+        <p><strong>Use documented fields.</strong><span>Branch on an exported error class or <code>error.code</code>, never the message text.</span></p>
+        <p><strong>Show a product-level message.</strong><span>Do not expose ZIP part names, byte counters or parser diagnostics directly to end users.</span></p>
+        <p><strong>Keep a fallback.</strong><span>Some network, rendering, browser and media failures intentionally remain ordinary JavaScript errors.</span></p>
+      </div>
+    </section>
+
+    <section id="delivery" class="error-section">
+      <div class="section-heading">
+        <p class="section-index">02</p>
+        <div><h2>Choose the delivery model</h2><p>The Viewer changes its initial-load behavior when <code>onError</code> is supplied. Choose deliberately rather than combining both models.</p></div>
+      </div>
+      <div class="delivery-grid">
+        <article class="recommended">
+          <p class="card-label">Simplest · recommended to start</p>
+          <h3>Viewer without <code>onError</code></h3>
+          <p>Initial load and parse failures reject <code>load()</code>, so one <code>try</code>/<code>catch</code> determines whether the preview opened.</p>
+          <p class="caveat">Later Viewer-managed render or media failures cannot reject an already-settled load Promise and are written to <code>console.error</code>.</p>
+        </article>
+        <article>
+          <p class="card-label">Long-lived Viewer</p>
+          <h3>Viewer with <code>onError</code></h3>
+          <p>Use this when your application must receive failures from later page, slide, sheet, image or media work as well as the initial load.</p>
+          <p class="caveat"><strong>A failed initial load calls the callback and <code>load()</code> resolves.</strong> Update application state in the callback; resolution alone is not proof that rendering succeeded.</p>
+        </article>
+        <article>
+          <p class="card-label">Document · workbook · presentation</p>
+          <h3>Headless APIs</h3>
+          <p>Headless methods have no error callback. Loading and later lazy operations reject the Promise returned by that operation.</p>
+          <p class="caveat">Catch each operation that can read a new package part or decode a new resource.</p>
+        </article>
+      </div>
+      <p class="callback-note"><strong>Keep <code>onError</code> non-throwing.</strong> Record the original error and update UI state inside the callback; throwing from the callback replaces or creates another application error.</p>
+    </section>
+
+    <section id="decision-table" class="error-section">
+      <div class="section-heading">
+        <p class="section-index">03</p>
+        <div><h2>Decide what the user should see</h2><p>Handle the narrow, actionable cases first and finish with one generic fallback.</p></div>
+      </div>
+      <div class="error-table-wrap">
+        <table class="error-table action-table">
+          <thead><tr><th>Check</th><th>What it means</th><th>Recommended application response</th></tr></thead>
+          <tbody>
+            <tr><td><a href="#ooxml-error"><code>OoxmlError</code></a></td><td>The container is encrypted, legacy or not OOXML.</td><td>Ask for a password, request conversion, or reject the file according to <code>error.code</code>.</td></tr>
+            <tr><td><a href="#ooxml-resource-limit-error"><code>OoxmlResourceLimitError</code></a></td><td>A measured package or format resource crossed a limit.</td><td>Show “too large or complex to preview.” Only suggest changing configuration when <code>configurable</code> is <code>true</code>.</td></tr>
+            <tr><td><a href="#decoded-image-limit-error"><code>OoxmlDecodedImageLimitError</code></a></td><td>An embedded raster image crossed a non-configurable decode safety ceiling.</td><td>Explain that the document contains an image that is too large to preview.</td></tr>
+            <tr><td><a href="#parser-crashed"><code>code === 'parser-crashed'</code></a></td><td>The WebAssembly parser trapped; the exact underlying cause is unavailable.</td><td>Show a generic processing failure, retain diagnostics, and do not label it as OOM.</td></tr>
+            <tr><td><a href="#untyped-errors">Fallback</a></td><td>A network, browser, configuration, rendering, worker or media failure without a stable typed code.</td><td>Show a generic failure and report the original error. Do not parse its message.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="error-section example-section">
+      <div class="section-heading">
+        <p class="section-index">04</p>
+        <div><h2>Use one translation function</h2><p>Keep library diagnostics separate from the short, stable messages your product shows to its users.</p></div>
+      </div>
+      <div class="code-card"><Code code={handlerExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
+      <p class="format-note">The same error classes are re-exported from the DOCX, XLSX and PPTX entry points. Replace the Viewer and constructor target for the selected format.</p>
+    </section>
+
+    <section id="ooxml-error" class="error-section error-detail">
+      <p class="error-kicker">Container failure</p>
+      <h2><code>OoxmlError</code></h2>
+      <p>This is the actionable container-level error. Use <code>error.code</code>; the human-readable <code>message</code> is diagnostic text and may change.</p>
+      <div class="code-actions">
+        <div><code>encrypted</code><span>No password was supplied.</span><strong>Ask for a password and retry.</strong></div>
+        <div><code>invalid-password</code><span>The supplied password did not decrypt the file.</span><strong>Ask the user to check it and retry.</strong></div>
+        <div><code>unsupported-encryption</code><span>The file uses an encryption scheme the library cannot decrypt.</span><strong>Request an unencrypted or supported copy.</strong></div>
+        <div><code>legacy-binary-format</code><span>The input is <code>.doc</code>, <code>.xls</code> or <code>.ppt</code>, not OOXML.</span><strong>Request conversion to the corresponding modern format.</strong></div>
+        <div><code>not-ooxml</code><span>The bytes are not a recognized OOXML package.</span><strong>Reject the file as unsupported or invalid.</strong></div>
+      </div>
+    </section>
+
+    <section id="ooxml-resource-limit-error" class="error-section error-detail">
+      <p class="error-kicker">Resource governance</p>
+      <h2><code>OoxmlResourceLimitError</code></h2>
+      <p><code>error.code</code> is <code>ooxml-resource-limit</code>. The operation was stopped when a measured value crossed a configured policy or implementation hard ceiling. Read <code>error.details</code> instead of parsing the message.</p>
+      <h3 class="field-heading"><code>error.details</code> and <code>error.details.violation</code></h3>
+      <div class="field-grid">
+        <div><code>details.stage</code><span>Where the failure occurred: container, decompression, parsing, serialization, layout, rendering or worker.</span></div>
+        <div><code>format</code><span><code>docx</code>, <code>xlsx</code> or <code>pptx</code>.</span></div>
+        <div><code>operation</code><span>The library operation that was stopped.</span></div>
+        <div><code>resource</code><span>The measured resource family, such as an archive entry, XML tree or worksheet row.</span></div>
+        <div><code>metric</code><span>How the resource was measured: bytes, count, depth or another documented axis.</span></div>
+        <div><code>limit</code><span>The ceiling for this metric.</span></div>
+        <div><code>observed</code><span>The value seen when the operation was rejected; it is not necessarily a complete-file total.</span></div>
+        <div><code>configurable</code><span><code>true</code> means a public resource setting can change it. <code>false</code> means the hard ceiling cannot be disabled.</span></div>
+        <div><code>usage</code><span>A content-free archive usage snapshot captured at failure time.</span></div>
+        <div><code>part?</code><span>An optional package-part identifier when one is available.</span></div>
+      </div>
+      <div class="usage-block">
+        <h3><code>details.violation.usage</code></h3>
+        <p><code>archiveEntryCount</code>, <code>declaredInflatedBytes</code>, optional <code>largestInflatedEntryBytes</code>, <code>distinctInflatedBytes</code> and <code>operationInflatedBytes</code> describe the work observed up to the failure.</p>
+      </div>
+      <div class="decision-callout">
+        <p><strong>If <code>configurable</code> is true</strong><span>Review the measured metric and your application’s expected files before raising the corresponding <code>resourceLimits</code> value. Do not retry automatically with no limit.</span></p>
+        <p><strong>If <code>configurable</code> is false</strong><span>The current library version will not process this resource. Ask for a smaller or simplified file instead of suggesting a configuration change.</span></p>
+      </div>
+      <p class="note"><strong>The compressed upload size cannot predict the inflated size.</strong> Limits are enforced while package parts are inspected and decompressed. These counters reduce predictable memory risk, but do not measure or guarantee peak JavaScript, Canvas, image-decoder or WebAssembly memory. Worker mode can improve failure containment, but it is not a separate process or strict memory sandbox.</p>
+    </section>
+
+    <section id="decoded-image-limit-error" class="error-section error-detail">
+      <p class="error-kicker">Raster image safety</p>
+      <h2><code>OoxmlDecodedImageLimitError</code></h2>
+      <p><code>error.code</code> is <code>ooxml-decoded-image-limit</code>. Inspect <code>metric</code>, <code>limit</code> and <code>observed</code>. The metric is <code>image-pixels</code> or <code>active-decoded-bytes</code>.</p>
+      <p class="note"><strong>This limit is not configurable.</strong> It prevents dangerous decoded surfaces before or during image work. A browser or device may still impose a lower image or Canvas limit, so ordinary decode failures can occur below this ceiling.</p>
+    </section>
+
+    <section id="parser-crashed" class="error-section error-detail">
+      <p class="error-kicker">WebAssembly trap</p>
+      <h2><code>parser-crashed</code></h2>
+      <p>This code means the library recognized a WebAssembly trap and discarded the affected parser instance. It does not mean “out of memory.”</p>
+      <p>At the current WebAssembly boundary, Rust panic, allocation failure, stack overflow and explicit <code>unreachable</code> can all reach JavaScript as the same <code>WebAssembly.RuntimeError</code>. The runtime exposes the trap only after the original Rust cause has been erased, so the library cannot reliably reconstruct which event occurred.</p>
+      <p class="note">Show a generic “could not process this file” result. Preserve the original error for diagnostics, do not repeatedly retry the same file automatically, and do not report the failure as OOM without independent evidence from the host environment.</p>
+    </section>
+
+    <section id="untyped-errors" class="error-section error-detail">
+      <p class="error-kicker">Fallback</p>
+      <h2>Untyped errors</h2>
+      <p>Configuration, fetch, parser, renderer, worker, browser and media failures may remain ordinary <code>Error</code>, <code>TypeError</code> or <code>RangeError</code> values. This is intentional where the library cannot promise a stable cause classification.</p>
+      <p class="note">Messages are for logs and diagnostics, not control flow. Keep a generic user-facing fallback and report the original error object to your observability system.</p>
+    </section>
+
+    <section class="error-section checklist-section">
+      <p class="error-kicker">Production checklist</p>
+      <h2>Before shipping</h2>
+      <ul class="checklist">
+        <li>Choose Promise rejection or <code>onError</code> intentionally for each Viewer.</li>
+        <li>Catch every headless operation that can load a package part or decode media.</li>
+        <li>Branch only on exported classes and documented <code>code</code> values.</li>
+        <li>Translate technical failures into short product-level messages.</li>
+        <li>Retain the original error for logs, metrics or reporting.</li>
+        <li>Test encrypted, wrong-password, oversized and invalid files in your application.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <div class="footer-brand">
+        <span class="nav-mark"><i></i><i></i><i></i></span>
+        <div><strong>@silurus/ooxml</strong><span>Browser-based OOXML viewer · Rust/WASM + Canvas</span></div>
+      </div>
+      <div class="footer-links"><a href="/">Home</a><a href="/deprecations">Deprecated APIs</a><a href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub</a></div>
+    </div>
+  </footer>
+</Base>
+
+<style>
+  .error-hero { padding: 56px 0 52px; border-bottom: 1px solid var(--border); }
+  .back { color: var(--text-faint); font-size: 13px; }
+  .error-hero .eyebrow { margin-top: 26px; }
+  h1 { max-width: 900px; margin: 12px 0 0; font-size: clamp(38px, 7vw, 72px); letter-spacing: -.035em; }
+  .lead { max-width: 68ch; margin: 18px 0 0; color: var(--text-dim); font-size: 17px; }
+  .error-main { padding-bottom: 72px; }
+  .error-section { padding: 52px 0; border-bottom: 1px solid var(--border); scroll-margin-top: 76px; }
+  .section-heading { display: grid; grid-template-columns: 44px minmax(0, 760px); gap: 18px; margin-bottom: 26px; }
+  .section-heading h2, .error-detail h2, .checklist-section h2 { margin: 0; font-size: clamp(24px, 3vw, 34px); }
+  .section-heading p:last-child { margin: 8px 0 0; color: var(--text-dim); }
+  .section-index { margin: 5px 0 0; color: var(--text-faint); font: 500 11px var(--mono); }
+  .error-section h2 code, .error-section h3 code, .error-section p code, .error-section li code { font-family: var(--mono); font-size: .88em; }
+  .code-card { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--code-bg); }
+  .code-card :global(pre) { margin: 0; padding: 20px; overflow-x: auto; background: var(--code-bg) !important; font-size: 13px; line-height: 1.65; }
+  .code-card :global(code) { font-family: var(--mono); }
+  .principles { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 22px; border-top: 1px solid var(--border); }
+  .principles p { display: grid; align-content: start; gap: 7px; margin: 0; padding: 18px 20px 0 0; border-right: 1px solid var(--border); }
+  .principles p + p { padding-left: 20px; }
+  .principles p:last-child { border-right: 0; }
+  .principles span { color: var(--text-dim); font-size: 14px; }
+  .delivery-grid { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--border); }
+  .delivery-grid article { padding: 24px; border-right: 1px solid var(--border); }
+  .delivery-grid article:last-child { border-right: 0; }
+  .delivery-grid article.recommended { background: var(--bg-elev); }
+  .delivery-grid h3 { margin: 10px 0 12px; font-size: 16px; }
+  .delivery-grid p { margin: 0; color: var(--text-dim); font-size: 14px; }
+  .delivery-grid .card-label { color: var(--accent); font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+  .delivery-grid .caveat { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .callback-note, .format-note { margin: 18px 0 0; color: var(--text-dim); font-size: 14px; }
+  .error-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  .error-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .error-table th { padding: 11px 14px; text-align: left; color: var(--text-dim); background: var(--bg-elev); border-bottom: 1px solid var(--border); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .error-table td { padding: 14px; color: var(--text-dim); border-top: 1px solid var(--border); vertical-align: top; }
+  .error-table tbody tr:first-child td { border-top: 0; }
+  .error-table code { font-family: var(--mono); font-size: 12.5px; color: var(--accent); }
+  .error-table a { text-decoration: underline; text-underline-offset: 3px; }
+  .action-table th:first-child { min-width: 210px; }
+  .error-kicker { margin: 0 0 8px !important; color: var(--accent) !important; font: 600 11px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+  .error-detail > p { max-width: 88ch; margin: 14px 0 0; color: var(--text-dim); }
+  .error-detail h2 + p { margin-top: 0; }
+  .code-actions { margin-top: 24px; border-top: 1px solid var(--border); }
+  .code-actions > div { display: grid; grid-template-columns: 190px 1fr 1fr; gap: 20px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+  .code-actions code, .field-grid code { color: var(--accent); font-family: var(--mono); font-size: 12.5px; }
+  .code-actions span { color: var(--text-dim); font-size: 14px; }
+  .code-actions strong { font-size: 14px; }
+  .field-grid { display: grid; grid-template-columns: repeat(2, 1fr); margin-top: 24px; border-top: 1px solid var(--border); }
+  .field-heading { margin: 24px 0 -10px; font-size: 15px; }
+  .field-grid > div { display: grid; grid-template-columns: 150px 1fr; gap: 16px; padding: 13px 16px 13px 0; border-bottom: 1px solid var(--border); }
+  .field-grid > div:nth-child(odd) { border-right: 1px solid var(--border); }
+  .field-grid > div:nth-child(even) { padding-left: 16px; }
+  .field-grid span { color: var(--text-dim); font-size: 14px; }
+  .usage-block { margin-top: 24px; }
+  .usage-block h3 { margin: 0 0 8px; font-size: 15px; }
+  .usage-block p { max-width: 88ch; margin: 0; color: var(--text-dim); }
+  .decision-callout { display: grid; grid-template-columns: repeat(2, 1fr); margin-top: 24px; border: 1px solid var(--border); }
+  .decision-callout p { display: grid; gap: 7px; margin: 0; padding: 18px; }
+  .decision-callout p + p { border-left: 1px solid var(--border); }
+  .decision-callout span { color: var(--text-dim); font-size: 14px; }
+  .note { margin-top: 22px !important; padding: 18px 20px; border-left: 3px solid var(--accent-2); background: var(--bg-elev); }
+  .checklist { display: grid; gap: 10px; max-width: 82ch; margin: 20px 0 0; padding-left: 22px; color: var(--text-dim); }
+  @media (max-width: 800px) {
+    .principles, .delivery-grid, .field-grid, .decision-callout { grid-template-columns: 1fr; }
+    .principles p, .principles p + p { padding: 16px 0; border-right: 0; border-bottom: 1px solid var(--border); }
+    .principles p:last-child { border-bottom: 0; }
+    .delivery-grid article { border-right: 0; border-bottom: 1px solid var(--border); }
+    .delivery-grid article:last-child { border-bottom: 0; }
+    .field-grid > div:nth-child(odd) { border-right: 0; }
+    .field-grid > div:nth-child(even) { padding-left: 0; }
+    .decision-callout p + p { border-left: 0; border-top: 1px solid var(--border); }
+    .code-actions > div { grid-template-columns: 1fr; gap: 7px; }
+  }
+</style>

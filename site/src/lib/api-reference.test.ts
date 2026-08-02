@@ -37,7 +37,27 @@ describe('official-site API reference', () => {
         expect(onError?.desc, apiClass.name).toContain('OoxmlResourceLimitError');
         expect(onError?.desc, apiClass.name).toContain('OoxmlDecodedImageLimitError');
         expect(onError?.desc, apiClass.name).toContain('message text is not a stable discriminator');
+        expect(onError?.detailsHref, apiClass.name).toBe('/errors#delivery');
       }
+    }
+  });
+
+  it('links resource-limit options to their typed error fields', () => {
+    for (const classes of Object.values(apiReference)) {
+      for (const apiClass of classes) {
+        const resourceLimits = apiClass.options?.find(({ name }) => name === 'resourceLimits');
+        expect(resourceLimits?.detailsHref, apiClass.name).toBe('/errors#ooxml-resource-limit-error');
+      }
+    }
+  });
+
+  it('documents showTrackChanges as optional-by-container with its effective default', () => {
+    const docxClasses = apiReference.docx.filter(({ name }) => name.endsWith('Viewer'));
+    for (const apiClass of docxClasses) {
+      const option = apiClass.options?.find(({ name }) => name === 'showTrackChanges');
+      expect(option?.type, apiClass.name).toBe('boolean');
+      expect(option?.def, apiClass.name).toBe('true');
+      expect(option?.desc, apiClass.name).toContain('true and false render identically');
     }
   });
 });

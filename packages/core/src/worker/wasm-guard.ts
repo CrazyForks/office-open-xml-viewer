@@ -242,7 +242,8 @@ export class WasmParserHost<TArchive = unknown> {
     this._initPromise = invokeWasmInitializer(this._init, input);
   }
 
-  /** @deprecated Use {@link setWasmInput}; inputs are not limited to URLs. */
+  /** @deprecated Use {@link setWasmInput}; inputs are not limited to URLs.
+   * Scheduled for removal in a future breaking release. */
   setWasmUrl(input: WasmInitInput): void {
     this.setWasmInput(input);
   }

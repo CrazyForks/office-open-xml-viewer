@@ -81,7 +81,8 @@ export interface LoadOptions {
    */
   wasmUrl?: string | URL;
   /**
-   * @deprecated Use `resourceLimits.maxArchiveEntryBytes`.
+   * @deprecated Use `resourceLimits.maxArchiveEntryBytes`. Scheduled for
+   * removal in a future breaking release.
    *
    * Existing positive safe-integer values remain an all-entry inflated-byte
    * limit. Zero, negative, and NaN values retain their historical fallback

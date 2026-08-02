@@ -1,45 +1,10 @@
 ---
-import { Code } from 'astro:components';
 import { apiReference } from '../lib/api-reference';
-import { codeThemes } from '../lib/code-theme';
 interface Props {
   format: 'docx' | 'xlsx' | 'pptx';
 }
 const { format } = Astro.props;
 const classes = apiReference[format];
-const errorExampleConfig = {
-  docx: { Viewer: 'DocxViewer', target: 'canvas', source: 'file' },
-  xlsx: { Viewer: 'XlsxViewer', target: 'container', source: 'file' },
-  pptx: { Viewer: 'PptxViewer', target: 'canvas', source: 'file' },
-}[format];
-const errorExample = `import {
-  ${errorExampleConfig.Viewer},
-  OoxmlDecodedImageLimitError,
-  OoxmlError,
-  OoxmlResourceLimitError,
-} from '@silurus/ooxml/${format}';
-
-const viewer = new ${errorExampleConfig.Viewer}(${errorExampleConfig.target}, {
-  onError(error) {
-    if (error instanceof OoxmlResourceLimitError) {
-      const { limit, observed } = error.details.violation;
-      showTooLargeMessage({ limit, observed });
-      return;
-    }
-    if (error instanceof OoxmlDecodedImageLimitError) {
-      showImageTooLargeMessage(error);
-      return;
-    }
-    if (error instanceof OoxmlError) {
-      handleContainerError(error.code);
-      return;
-    }
-    reportUnexpectedError(error);
-  },
-});
-
-// With onError set, a load failure calls onError and this Promise resolves.
-await viewer.load(${errorExampleConfig.source});`;
 
 interface DescribedItem {
   desc: string;
@@ -70,48 +35,10 @@ function descriptionParts(item: DescribedItem): Array<{ text: string; emphasized
   <div class="api-errors">
     <h4>Error handling</h4>
     <p>
-      <strong>Choose the Viewer delivery style deliberately.</strong> Without <code>onError</code>,
-      a load or parse failure rejects <code>load()</code>. With <code>onError</code>, that failure is
-      delivered to the callback and <code>load()</code> resolves; do not treat resolution alone as
-      proof that a document rendered. Later Viewer-managed render failures go to the same callback,
-      or to <code>console.error</code> when it is omitted. Headless document, workbook and presentation
-      methods have no callback and reject their returned Promise.
+      Typed container, resource-limit and decoded-image failures expose stable fields. Other failures
+      remain ordinary JavaScript errors. The callback and Promise delivery rules are part of the public contract.
     </p>
-    <div class="api-table-wrap">
-      <table class="api-table api-error-table">
-        <thead><tr><th>Error</th><th>Stable discriminator</th><th>Meaning</th></tr></thead>
-        <tbody>
-          <tr>
-            <td><code>OoxmlError</code></td>
-            <td><code>error.code</code></td>
-            <td>Container failures: <code>encrypted</code>, <code>invalid-password</code>, <code>unsupported-encryption</code>, <code>legacy-binary-format</code> or <code>not-ooxml</code>.</td>
-          </tr>
-          <tr>
-            <td><code>OoxmlResourceLimitError</code></td>
-            <td><code>ooxml-resource-limit</code></td>
-            <td>A measured package or format resource crossed a configurable limit or hard ceiling. Read <code>details.violation</code> for the resource, metric, limit and observed value.</td>
-          </tr>
-          <tr>
-            <td><code>OoxmlDecodedImageLimitError</code></td>
-            <td><code>ooxml-decoded-image-limit</code></td>
-            <td>A raster image crossed the pixel or active decoded-byte hard ceiling. Read <code>metric</code>, <code>limit</code> and <code>observed</code>.</td>
-          </tr>
-          <tr>
-            <td><code>Error</code></td>
-            <td><code>parser-crashed</code>, when present</td>
-            <td>A recognized WASM trap. It does not identify OOM: panic, allocation failure, stack overflow and other traps may be indistinguishable at this boundary.</td>
-          </tr>
-          <tr>
-            <td><code>Error</code>, <code>TypeError</code> or <code>RangeError</code></td>
-            <td>None</td>
-            <td>Configuration, fetch, parsing, rendering, worker or media failures without a stable typed code. Do not branch on message text.</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    <div class="api-error-example">
-      <Code code={errorExample} lang="ts" themes={codeThemes} defaultColor={false} />
-    </div>
+    <a class="api-detail-link" href="/errors">Open the error reference →</a>
   </div>
 
   {classes.map((c) => (
@@ -135,6 +62,9 @@ function descriptionParts(item: DescribedItem): Array<{ text: string; emphasized
                     <td class="api-description">
                       {descriptionParts(o).map((part) =>
                         part.emphasized ? <strong>{part.text}</strong> : part.text
+                      )}
+                      {o.detailsHref && (
+                        <> <a class="api-detail-link" href={o.detailsHref}>{o.detailsLabel ?? 'Details'} →</a></>
                       )}
                     </td>
                   </tr>
@@ -177,11 +107,8 @@ function descriptionParts(item: DescribedItem): Array<{ text: string; emphasized
 
   .api-errors { margin-top: 30px; padding: 26px 28px 28px; border: 1px solid var(--border); background: var(--bg-elev); }
   .api-errors h4 { margin: 0; font-size: 19px; }
-  .api-errors > p { max-width: 92ch; margin: 10px 0 20px; color: var(--text-dim); font-size: 14.5px; }
-  .api-errors > p code, .api-error-table code { font-family: var(--mono); color: var(--text); font-size: .9em; }
-  .api-error-example { margin-top: 18px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--code-bg); }
-  .api-error-example :global(pre) { margin: 0; padding: 18px; overflow-x: auto; background: var(--code-bg) !important; font-size: 13px; line-height: 1.65; }
-  .api-error-example :global(code) { font-family: var(--mono); }
+  .api-errors > p { max-width: 92ch; margin: 10px 0 14px; color: var(--text-dim); font-size: 14.5px; }
+  .api-detail-link { color: var(--accent); font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
 
   .api-class { margin-top: 30px; }
   .api-class-name { font-family: var(--mono); font-size: 18px; font-weight: 700; margin: 0; }
@@ -210,6 +137,4 @@ function descriptionParts(item: DescribedItem): Array<{ text: string; emphasized
   .api-sig code { color: var(--accent); white-space: normal; }
   .api-description strong { color: var(--text); font-weight: 700; }
   .api-dash { color: var(--text-faint); }
-  .api-error-table td:first-child { min-width: 190px; }
-  .api-error-table td:nth-child(2) { min-width: 180px; }
 </style>

@@ -7,7 +7,8 @@ import type {
 export interface OoxmlNodeSessionOptions {
   /** Package-level inflated ZIP admission limits. */
   resourceLimits?: OoxmlResourceLimits;
-  /** @deprecated Use `resourceLimits.maxArchiveEntryBytes`. */
+  /** @deprecated Use `resourceLimits.maxArchiveEntryBytes`. Scheduled for
+   * removal in a future breaking release. */
   maxZipEntryBytes?: number;
   /** Emit one content-free resource report for the terminal session outcome. */
   debug?: boolean;

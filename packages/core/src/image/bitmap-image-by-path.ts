@@ -218,6 +218,7 @@ function evictOldest(
  *
  * @deprecated Compatibility helper for former sibling caches. New decoded
  * surfaces belong in `getCachedDecodedBitmap` / `getCachedDerivedBitmap`.
+ * Scheduled for removal in a future breaking release.
  */
 export function deferBitmapCloseWhileLeased(
   owner: DecodedBitmapCacheOwner,
@@ -441,5 +442,6 @@ export function dropDecodedBitmapCache(owner: DecodedBitmapCacheOwner): void {
   bitmapCacheByFetch.delete(owner);
 }
 
-/** @deprecated Use {@link dropDecodedBitmapCache}; it also owns derived surfaces. */
+/** @deprecated Use {@link dropDecodedBitmapCache}; it also owns derived
+ * surfaces. Scheduled for removal in a future breaking release. */
 export const dropBitmapCacheByPath = dropDecodedBitmapCache;
