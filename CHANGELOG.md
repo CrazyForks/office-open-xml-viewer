@@ -4,6 +4,59 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.75.0 — 2026-08-03
+
+Minor. Makes bounded resource use, typed limit failures, and observable usage
+part of the public DOCX, XLSX, and PPTX contract while retaining the existing
+Viewer construction and `load()` interfaces. It also publishes a redesigned
+documentation site and restores two specification-driven DOCX layout cases.
+
+- **core / docx / xlsx / pptx:** add one shared `resourceLimits` policy with
+  conservative defaults of 128 MiB for one inflated package part and 256 MiB
+  across distinct parts read during a package session. Proven violations reject
+  with structured `OoxmlResourceLimitError` details; non-configurable hard
+  ceilings continue to guard structural models, caches, renderer indexes, XML
+  content, serialization, and decoded images. The former positive
+  `maxZipEntryBytes` option remains a deprecated compatibility alias. This also
+  incorporates the retained-session budget, poisoning, and actual-inflation
+  invariants proposed in #1119. (#1102, #1120, #1130)
+- **core / diagnostics:** expose content-free `OoxmlResourceMetrics` through
+  `onResourceMetrics` for initial loads and `getResourceMetrics()` for a fresh
+  snapshot after lazy work. `debug: true` prints the same measurements as a
+  single typography-safe console card; collection does not require debug mode.
+  Recognized residual WASM traps remain conservatively classified as
+  `parser-crashed`, because panic, allocation failure, stack overflow, and
+  explicit `unreachable` can lose their distinct causes at the current WASM
+  boundary. (#1102, #1120)
+- **xlsx:** stream worksheet XML as acknowledged, complete-row units instead of
+  retaining a full-part XML tree. Existing materializing APIs remain compatible
+  and are protected by separate model and renderer ceilings. (#1102, #1120)
+- **docx / pptx:** stream bounded document units and slides through shared pull
+  sessions while preserving DOCX's required sequential pagination and compact
+  PPTX bootstrap facts. Raw parts, decoded images, derived images, and slide or
+  page caches now have explicit owners and bounded lifecycles. (#1120, #1130)
+- **node:** publish uniformly owned `openDocxDocument()`,
+  `openXlsxWorkbook()`, and `openPptxPresentation()` sessions with explicit
+  `close()` lifecycles, cancellation, resource policy, and metrics. Streaming
+  iterators reuse one retained package; canvas rendering continues to require a
+  caller-supplied backend. (#1120, #1130)
+- **workers:** destroy partially constructed engines after a rejected load, or
+  terminate the worker directly when no engine exists, across DOCX, XLSX, and
+  PPTX while preserving the original failure. This incorporates and generalizes
+  the leak fix proposed in #1124. (#1120, #1130)
+- **docx:** measure nested AutoFit tables from intrinsic cell content before
+  fitting the parent grid, retain parent-cell coordinates across page slices,
+  and account for downward run-position overflow when advancing drop-cap flow.
+  (ECMA-376 §§17.18.87, 17.3.1.11, 17.3.2.24; #1129)
+- **xlsx:** stop drawing a renderer-owned outside border around the worksheet;
+  host applications can frame the target container without a clipped or doubled
+  edge around the sheet controls. (#1131)
+- **website / docs:** replace the former showcase with a responsive light/dark
+  documentation system, migration announcements, complete error-handling and
+  deprecation references, clearer API descriptions, production resource
+  guidance, and styled inline code. The published Viewer examples and Try Yours
+  surfaces retain local-only file processing. (#1131)
+
 ## 0.74.6 — 2026-08-01
 
 Patch. Prevents PowerPoint slides from becoming vertically compressed in
