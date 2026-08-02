@@ -22,6 +22,7 @@ describe('DocxScrollViewer — skeleton (T1)', () => {
     // wrapper → scrollHost
     const scrollHost = wrapper.children[0];
     expect(scrollHost.style.overflow).toBe('auto');
+    expect(scrollHost.style.scrollbarGutter).toBe('stable');
     // scrollHost → spacer
     const spacer = scrollHost.children[0];
     expect(spacer.style.position).toBe('absolute');
@@ -1841,6 +1842,19 @@ describe('DocxScrollViewer — paddingLeft/paddingRight (horizontal desk gutters
     const widest = 200 * PT_TO_PX * base; // 352
     const spacer = scrollHost.children[0] as FakeEl;
     expect(parseFloat(spacer.style.width)).toBeCloseTo(widest + 12 + 12, 3);
+    v.destroy();
+  });
+
+  it('fits to the scrollbar-reduced scrollport width without horizontal overflow', () => {
+    const { v, container, scrollHost } = setup(232);
+    // A classic vertical scrollbar consumes 17px inside the scrollport while the
+    // outer container remains 232px wide. Re-fit must use 215, yielding page 183
+    // + two 16px gutters = exactly 215px, not the stale outer width.
+    scrollHost.clientWidth = 215;
+    v.resizeForTest();
+    const spacer = scrollHost.children[0] as FakeEl;
+    expect(parseFloat(spacer.style.width)).toBeCloseTo(215, 3);
+    expect(container.clientWidth).toBe(232);
     v.destroy();
   });
 

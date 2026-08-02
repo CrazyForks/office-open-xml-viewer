@@ -1,28 +1,28 @@
 ---
 import Base from './Base.astro';
 import Nav from '../components/Nav.astro';
+import BrandIcon from '../components/BrandIcon.astro';
 interface Props {
   format: 'pptx' | 'docx' | 'xlsx';
   name: string;   // "PowerPoint"
   ext: string;    // ".pptx"
   tagline: string;
-  color: string;  // css var
 }
-const { format, name, ext, tagline, color } = Astro.props;
+const { format, name, ext, tagline } = Astro.props;
 const title = `${name} (${ext}) — @silurus/ooxml`;
 const fileNoun = { docx: 'Word document', xlsx: 'Excel workbook', pptx: 'PowerPoint deck' }[format];
 ---
 <Base title={title}>
   <Nav active={format} />
 
-  <header class="fp-hero" style={`--c:${color}`}>
+  <header class="fp-hero" data-format={format}>
     <div class="wrap">
       <a class="fp-back" href="/">← All formats</a>
-      <p class="eyebrow"><span class="fp-dot"></span> {name}</p>
+      <p class="eyebrow">{name}</p>
       <h1 class="fp-title">{tagline}</h1>
       <p class="fp-lead">
-        Every demo below is the real library rendering a sample {fileNoun} (<code>{ext}</code>) live in
-        your browser — and the exact code that produces it. The same patterns power the Storybook stories.
+        The examples below render a sample {fileNoun} (<code>{ext}</code>) in your browser and show
+        the corresponding TypeScript.
       </p>
     </div>
   </header>
@@ -34,7 +34,7 @@ const fileNoun = { docx: 'Word document', xlsx: 'Excel workbook', pptx: 'PowerPo
   <footer class="footer">
     <div class="wrap footer-inner">
       <div class="footer-brand">
-        <span class="nav-mark"><i></i><i></i><i></i></span>
+        <BrandIcon />
         <div>
           <strong>@silurus/ooxml</strong>
           <span>Browser-based OOXML viewer · Rust/WASM + Canvas</span>
@@ -42,6 +42,7 @@ const fileNoun = { docx: 'Word document', xlsx: 'Excel workbook', pptx: 'PowerPo
       </div>
       <div class="footer-links">
         <a href="/">Home</a>
+        <a href="/announcements">Announcements</a>
         <a href="https://www.npmjs.com/package/@silurus/ooxml">npm</a>
         <a href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub</a>
         <a href="/storybook/">Storybook</a>
@@ -76,8 +77,19 @@ const fileNoun = { docx: 'Word document', xlsx: 'Excel workbook', pptx: 'PowerPo
   .fp-hero { padding: 40px 0 24px; border-bottom: 1px solid var(--border); }
   .fp-back { font-size: 13px; color: var(--text-faint); }
   .fp-back:hover { color: var(--text-dim); }
-  .fp-hero .eyebrow { display: flex; align-items: center; gap: 8px; margin-top: 22px; color: var(--text); font-size: 13px; text-transform: none; letter-spacing: 0; font-weight: 700; }
-  .fp-dot { width: 11px; height: 11px; border-radius: 50%; background: var(--c); box-shadow: 0 0 12px -1px var(--c); }
+  .fp-hero[data-format='docx'] { --format-color: var(--docx); }
+  .fp-hero[data-format='xlsx'] { --format-color: var(--xlsx); }
+  .fp-hero[data-format='pptx'] { --format-color: var(--pptx); }
+  .fp-hero .eyebrow {
+    width: max-content;
+    margin-top: 22px;
+    color: var(--text);
+    font-size: 13px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 700;
+    background: linear-gradient(transparent 62%, var(--format-color) 62%, var(--format-color) 88%, transparent 88%);
+  }
   .fp-ext { font-family: var(--mono); font-size: 12px; color: var(--text-faint); font-weight: 500; }
   .fp-title { font-size: clamp(28px, 5vw, 44px); font-weight: 800; letter-spacing: -0.02em; margin: 10px 0 0; }
   .fp-lead { margin: 16px 0 0; max-width: 70ch; font-size: 17px; color: var(--text-dim); }

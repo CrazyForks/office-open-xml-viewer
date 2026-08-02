@@ -440,18 +440,24 @@ import type {
 } from '@silurus/ooxml-core';
 /**
  * @deprecated Chart series are now the core {@link ChartModel}'s `ChartSeries`.
- * Kept as an alias for backward-compatible imports.
+ * Kept as an alias for backward-compatible imports; scheduled for removal in a
+ * future breaking release.
  */
 export type XlsxChartSeries = CoreChartSeries;
-/** @deprecated Use `ChartSeriesDataLabels` from @silurus/ooxml-core. */
+/** @deprecated Use `ChartSeriesDataLabels` from @silurus/ooxml-core. Scheduled
+ * for removal in a future breaking release. */
 export type SeriesDataLabels = CoreSeriesDataLabels;
-/** @deprecated Use `ChartDataLabelOverride` from @silurus/ooxml-core. */
+/** @deprecated Use `ChartDataLabelOverride` from @silurus/ooxml-core. Scheduled
+ * for removal in a future breaking release. */
 export type DataLabelOverride = CoreDataLabelOverride;
-/** @deprecated Use `ChartDataPointOverride` from @silurus/ooxml-core. */
+/** @deprecated Use `ChartDataPointOverride` from @silurus/ooxml-core. Scheduled
+ * for removal in a future breaking release. */
 export type DataPointOverride = CoreDataPointOverride;
-/** @deprecated Use `ChartErrBars` from @silurus/ooxml-core. */
+/** @deprecated Use `ChartErrBars` from @silurus/ooxml-core. Scheduled for
+ * removal in a future breaking release. */
 export type ErrBars = CoreErrBars;
-/** @deprecated Use `ChartManualLayout` from @silurus/ooxml-core. */
+/** @deprecated Use `ChartManualLayout` from @silurus/ooxml-core. Scheduled for
+ * removal in a future breaking release. */
 export type ManualLayout = CoreManualLayout;
 
 export interface ChartAnchor {

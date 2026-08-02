@@ -1,15 +1,14 @@
 ---
 const cards = [
-  { ic: '🦀', t: 'Rust-grade parsing', d: "Each format's parser is written in Rust and compiled to WebAssembly — fast, memory-safe, and faithful to ECMA-376 / ISO-29500." },
-  { ic: '🎨', t: 'Canvas, not the DOM', d: "Rendered with the Canvas 2D API on the main thread, sharing the document's font set — so text metrics, wrapping, and page breaks match the original document." },
-  { ic: '📐', t: 'Spec-faithful, not guessed', d: 'docGrid snapping, line-spacing rules, theme colour modifiers, chart axis styling — implemented from the spec, never from per-sample heuristics.' },
-  { ic: '🧩', t: 'Headless or batteries-included', d: 'Use the built-in viewers, or drive the headless engine into your own scroll views, thumbnail grids, and master–detail panes.' },
+  { t: 'Rust/WASM parsers', d: 'DOCX, XLSX and PPTX parsing is implemented in Rust and compiled to WebAssembly.' },
+  { t: 'Canvas rendering', d: 'Documents are rendered with the Canvas 2D API. Layout and feature support vary by format and document.' },
+  { t: 'Specification-informed', d: 'The implementation refers to ECMA-376 / ISO 29500 and related Microsoft documentation where relevant.' },
+  { t: 'Document APIs and viewers', d: 'Use built-in viewers or document APIs for custom previews, thumbnails and navigation.' },
 ];
 ---
 <div class="pitch-grid">
   {cards.map((c) => (
     <div class="pitch-card">
-      <div class="pitch-ic">{c.ic}</div>
       <h3>{c.t}</h3>
       <p>{c.d}</p>
     </div>
@@ -17,18 +16,24 @@ const cards = [
 </div>
 
 <style>
-  .pitch-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
+  .pitch-grid { display: grid; grid-template-columns: repeat(12, 1fr); border-top: 1px solid var(--border-bright); }
   .pitch-card {
-    padding: 22px 20px;
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    background: var(--bg-elev);
-    transition: border-color 0.2s, transform 0.2s;
+    grid-column: span 3;
+    min-height: 274px;
+    padding: 18px 22px 28px 0;
+    border-right: 1px solid var(--border);
   }
-  .pitch-card:hover { border-color: var(--border-bright); transform: translateY(-2px); }
-  .pitch-ic { font-size: 24px; }
-  .pitch-card h3 { font-size: 16px; margin: 12px 0 8px; }
-  .pitch-card p { font-size: 14px; color: var(--text-dim); margin: 0; line-height: 1.55; }
-  @media (max-width: 980px) { .pitch-grid { grid-template-columns: repeat(2, 1fr); } }
-  @media (max-width: 520px) { .pitch-grid { grid-template-columns: 1fr; } }
+  .pitch-card + .pitch-card { padding-left: 22px; }
+  .pitch-card:last-child { border-right: 0; }
+  .pitch-card h3 { max-width: 14ch; font-size: 19px; margin: 42px 0 12px; letter-spacing: -.035em; }
+  .pitch-card p { font-size: 13.5px; color: var(--text-dim); margin: 0; line-height: 1.65; }
+  @media (max-width: 900px) {
+    .pitch-card { grid-column: span 6; border-bottom: 1px solid var(--border); }
+    .pitch-card:nth-child(2) { border-right: 0; }
+    .pitch-card:nth-child(3) { padding-left: 0; }
+  }
+  @media (max-width: 520px) {
+    .pitch-card { grid-column: span 12; min-height: auto; padding: 18px 0 28px !important; border-right: 0; }
+    .pitch-card h3 { margin-top: 20px; }
+  }
 </style>

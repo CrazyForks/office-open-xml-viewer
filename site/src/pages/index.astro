@@ -1,196 +1,175 @@
 ---
 import Base from '../layouts/Base.astro';
 import Nav from '../components/Nav.astro';
+import BrandIcon from '../components/BrandIcon.astro';
 import LiveShowcase from '../components/LiveShowcase.astro';
 import Pitch from '../components/Pitch.astro';
-import ResourceGovernance from '../components/ResourceGovernance.astro';
 import Capabilities from '../components/Capabilities.astro';
+import { latestAnnouncements, formatAnnouncementDate } from '../lib/announcements';
 const base = import.meta.env.BASE_URL;
 ---
 <Base>
-  <!-- ── Nav ───────────────────────────────────────────────────── -->
   <Nav />
 
-  <!-- ── Hero ──────────────────────────────────────────────────── -->
   <header class="hero" id="top">
-    <div class="wrap hero-grid">
-      <div class="hero-copy">
-        <p class="eyebrow">Rust · WebAssembly · Canvas 2D</p>
-        <h1 class="hero-title">
-          High-fidelity <span class="grad">Office</span> documents,<br />
-          rendered in the browser.
-        </h1>
-        <p class="hero-lead">
-          <code>@silurus/ooxml</code> parses <strong>.docx</strong>, <strong>.xlsx</strong> and
-          <strong>.pptx</strong> with a Rust/WASM engine and paints them to a Canvas — no server,
-          no native apps, no iframe. Faithful rendering of a wide range of real-world documents,
-          right in the browser.
-        </p>
-        <div class="hero-cta">
-          <a class="btn btn-primary" href="https://www.npmjs.com/package/@silurus/ooxml">npm install @silurus/ooxml</a>
-          <a class="btn btn-ghost" href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub ↗</a>
+    <div class="wrap hero-frame">
+      <div class="hero-overline">
+        <span>Open-source OOXML rendering</span>
+        <span>Rust / WebAssembly / Canvas 2D</span>
+      </div>
+
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow">Rust · WebAssembly · Canvas 2D</p>
+          <h1>Office documents,<br />rendered in the<br /><em>browser.</em></h1>
+          <p class="hero-lead">
+            <code>@silurus/ooxml</code> parses <strong>.docx</strong>, <strong>.xlsx</strong> and
+            <strong>.pptx</strong> with a Rust/WASM engine and renders them to Canvas. Parsing
+            and rendering run in the browser; no server-side document conversion, native
+            application or iframe is required.
+          </p>
+          <div class="hero-cta">
+            <a class="btn btn-primary" href="https://www.npmjs.com/package/@silurus/ooxml">npm install @silurus/ooxml</a>
+            <a class="hero-text-link" href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub ↗</a>
+          </div>
+        </div>
+
+        <div class="hero-art">
+          <img class="hero-icon" src={`${base}icon.png`.replace(/([^:])\/\/+/g, '$1/')} alt="@silurus/ooxml" width="2048" height="2048" />
         </div>
       </div>
-      <div class="hero-art">
-        <div class="hero-art-glow"></div>
-        <img class="hero-icon" src={`${base}icon.png`.replace(/([^:])\/\/+/g, '$1/')} alt="@silurus/ooxml" width="2048" height="2048" />
-      </div>
+
+      <nav class="format-rail" aria-label="Explore formats">
+        <a href="/docx"><strong>DOCX</strong><small>Paginated documents</small></a>
+        <a href="/xlsx"><strong>XLSX</strong><small>Interactive workbooks</small></a>
+        <a href="/pptx"><strong>PPTX</strong><small>Slides &amp; media</small></a>
+        <a href="/try"><strong>Try yours</strong><small>Local files stay local</small></a>
+      </nav>
     </div>
   </header>
 
-  <!-- ── Pitch ─────────────────────────────────────────────────── -->
   <section class="section pitch-section">
     <div class="wrap" data-reveal>
+      <div class="section-intro grid-intro">
+        <p class="eyebrow">About the library</p>
+        <h2 class="section-title">Browser-based OOXML rendering.</h2>
+        <p class="section-lead">Rust/WASM parsers and Canvas renderers for DOCX, XLSX and PPTX, with document APIs and ready-to-use viewers.</p>
+      </div>
       <Pitch />
     </div>
   </section>
 
-  <!-- ── Resource governance ───────────────────────────────────── -->
-  <section class="section resource-section" id="resource-governance">
+  <section class="section showcase-section" id="showcase">
     <div class="wrap" data-reveal>
-      <ResourceGovernance />
-    </div>
-  </section>
-
-  <!-- ── Live showcase (validation: real PPTX viewer) ──────────── -->
-  <section class="section" id="showcase">
-    <div class="wrap" data-reveal>
-      <p class="eyebrow">Live in this page</p>
-      <h2 class="section-title">Not a screenshot — the real renderer.</h2>
-      <p class="section-lead">
-        Each tab below is the actual library running a real document in your browser right now —
-        Rust/WASM parse, Canvas paint. Switch formats, step through pages, scroll the sheet.
-      </p>
+      <div class="grid-intro">
+        <p class="eyebrow">Live in this page</p>
+        <h2 class="section-title">Live renderer examples.</h2>
+        <p class="section-lead">Switch formats, navigate pages or slides, and scroll the sheet.</p>
+      </div>
       <LiveShowcase />
-      <p class="showcase-more">
-        Go deeper — live demos and the code behind them, per format:
-        <a href="/docx">DOCX</a> · <a href="/xlsx">XLSX</a> · <a href="/pptx">PPTX</a>
-      </p>
+      <p class="showcase-more">Format documentation: <a href="/docx">DOCX</a> · <a href="/xlsx">XLSX</a> · <a href="/pptx">PPTX</a></p>
     </div>
   </section>
 
-  <!-- ── Capabilities ──────────────────────────────────────────── -->
   <section class="section" id="capabilities">
     <div class="wrap" data-reveal>
-      <p class="eyebrow">What it renders</p>
-      <h2 class="section-title">Deep format coverage.</h2>
-      <p class="section-lead">
-        A curated slice of what each format supports. The full, exhaustive matrix lives in the
-        <a class="inline-link" href="https://github.com/yukiyokotani/office-open-xml-viewer#feature-support">README</a>.
-        Coverage is broad and growing; very complex or unusual documents may still differ from Office in places.
-      </p>
+      <div class="grid-intro">
+        <p class="eyebrow">What it renders</p>
+        <h2 class="section-title">Format support at a glance.</h2>
+        <p class="section-lead">Selected supported features for each format are listed below. See the <a class="inline-link" href="https://github.com/yukiyokotani/office-open-xml-viewer#feature-support">README</a> for the full matrix; complex documents may still differ from Office.</p>
+      </div>
       <Capabilities />
     </div>
   </section>
 
-  <!-- ── Footer ────────────────────────────────────────────────── -->
-  <footer class="footer">
-    <div class="wrap footer-inner">
-      <div class="footer-brand">
-        <span class="nav-mark"><i></i><i></i><i></i></span>
-        <div>
-          <strong>@silurus/ooxml</strong>
-          <span>Browser-based OOXML viewer · Rust/WASM + Canvas</span>
-        </div>
+  <section class="section news-home" id="announcements">
+    <div class="wrap" data-reveal>
+      <div class="news-head">
+        <div><p class="eyebrow">Announcements</p><h2 class="section-title">Release and migration notices.</h2></div>
+        <a href="/announcements">View all notices ↗</a>
       </div>
-      <div class="footer-links">
-        <a href="https://www.npmjs.com/package/@silurus/ooxml">npm</a>
-        <a href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub</a>
-        <a href="https://marketplace.visualstudio.com/items?itemName=silurus.office-open-xml-viewer">VS Code</a>
-        <a href="/storybook/">Storybook</a>
+      <div class="news-grid">
+        {latestAnnouncements.map((item) => (
+          <a class="news-card" href={`/announcements/${item.slug}`}>
+            <span class="news-meta"><time datetime={item.date}>{formatAnnouncementDate(item.date)}</time>{item.version && <b>{item.version}</b>}</span>
+            <strong>{item.title}</strong>
+            <span class="news-summary">{item.summary}</span>
+            <span class="news-arrow">Read notice ↗</span>
+          </a>
+        ))}
       </div>
     </div>
-    <div class="wrap footer-fine">MIT licensed · Built entirely by Claude through iterative prompting.</div>
+  </section>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <div class="footer-brand"><BrandIcon /><div><strong>@silurus/ooxml</strong><span>Browser-based OOXML viewer · Rust/WASM + Canvas</span></div></div>
+      <div class="footer-links"><a href="/announcements">Announcements</a><a href="https://www.npmjs.com/package/@silurus/ooxml">npm</a><a href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub</a><a href="https://marketplace.visualstudio.com/items?itemName=silurus.office-open-xml-viewer">VS Code</a><a href="/storybook/">Storybook</a></div>
+    </div>
+    <div class="wrap footer-fine">MIT licensed · ECMA-376 / ISO-29500 informed · No document upload required.</div>
   </footer>
 </Base>
 
 <style>
-  .hero {
-    position: relative;
-    padding: 96px 0 84px;
-    border-bottom: 1px solid var(--border);
+  .hero { background: var(--hero-bg); color: var(--hero-text); overflow: hidden; }
+  .hero-frame { padding-top: 30px; }
+  .hero-overline { display: grid; grid-template-columns: repeat(12, 1fr); gap: 18px; padding-bottom: 18px; border-bottom: 1px solid var(--hero-line); font: 500 10px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--hero-faint); }
+  .hero-overline span:first-child { grid-column: 1 / 7; }
+  .hero-overline span:last-child { grid-column: 9 / 13; }
+  .hero-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 18px; min-height: 650px; padding: 60px 0 72px; }
+  .hero-copy { grid-column: 1 / 8; position: relative; z-index: 2; }
+  .hero .eyebrow { color: var(--hero-text); }
+  .hero h1 { margin-top: 24px; font-size: clamp(44px, 6.3vw, 82px); line-height: .94; letter-spacing: -.055em; font-weight: 700; }
+  .hero h1 em {
+    color: var(--hero-text);
+    font-style: normal;
+    background: linear-gradient(transparent 72%, var(--signal) 72%, var(--signal) 91%, transparent 91%);
   }
-  .hero-grid {
-    position: relative;
-    z-index: 1;
-    display: grid;
-    grid-template-columns: 1.05fr 0.95fr;
-    gap: 32px;
-    align-items: center;
+  .hero-lead { max-width: 53ch; margin: 38px 0 0; padding-left: calc((100% + 18px) / 6); color: var(--hero-muted); font-size: 17px; }
+  .hero-lead code, .hero-lead strong { color: var(--hero-text); }
+  .hero-lead code { font-family: var(--mono); font-size: .92em; }
+  .hero-cta { display: flex; align-items: center; gap: 28px; margin: 34px 0 0 calc((100% + 18px) / 6); }
+  .hero .btn-primary { background: var(--signal); color: var(--signal-text); border-color: var(--signal); box-shadow: none; }
+  .hero-text-link { font: 500 13px var(--mono); border-bottom: 1px solid var(--hero-line); }
+  .hero-art { grid-column: 8 / 13; position: relative; min-height: 540px; display: grid; place-items: center; }
+  .hero-icon { display: block; width: min(82%, 410px); height: auto; filter: drop-shadow(0 30px 44px rgba(0,0,0,.2)); }
+  .format-rail { display: grid; grid-template-columns: repeat(12, 1fr); border-top: 1px solid var(--hero-line); }
+  .format-rail a { grid-column: span 3; display: grid; gap: 3px; padding: 18px 18px 22px 0; border-right: 1px solid var(--hero-line); }
+  .format-rail a + a { padding-left: 18px; }.format-rail a:last-child { border-right: 0; }
+  .format-rail strong { font-size: 14px; }.format-rail small { color: var(--hero-muted); font-size: 11px; }
+  .grid-intro { display: block; margin-bottom: 52px; }
+  .grid-intro .section-title { max-width: none; margin: 18px 0 12px; }
+  .grid-intro .section-lead { max-width: 72ch; margin: 0; font-size: 15px; }
+  .pitch-section { padding-top: 128px; }
+  .news-home { background: var(--hero-bg); color: var(--hero-text); }
+  .news-home .eyebrow { color: var(--hero-text); }
+  .news-head { display: block; margin-bottom: 56px; }
+  .news-head .section-title { max-width: none; margin: 18px 0 12px; }
+  .news-head > a { display: inline-block; width: max-content; margin-top: 18px; font: 500 12px var(--mono); border-bottom: 1px solid var(--hero-line); }
+  .news-grid { display: grid; grid-template-columns: repeat(12, 1fr); border-top: 1px solid var(--hero-line); }
+  .news-card { grid-column: span 4; display: flex; flex-direction: column; min-height: 390px; padding: 18px 26px 26px 0; border-right: 1px solid var(--hero-line); }
+  .news-card + .news-card { padding-left: 26px; }.news-card:last-child { border-right: 0; }
+  .news-meta { display: flex; gap: 12px; margin-top: 66px; font: 500 10px var(--mono); text-transform: uppercase; color: var(--hero-muted); }.news-meta b { padding: 1px 4px; background: var(--signal); color: var(--signal-text); }
+  .news-card > strong { margin-top: 15px; font-size: 24px; line-height: 1.16; letter-spacing: -.04em; }
+  .news-summary { margin-top: 16px; color: var(--hero-muted); font-size: 13.5px; line-height: 1.6; }
+  .news-arrow { margin-top: auto; padding-top: 28px; width: max-content; font: 500 11px var(--mono); color: var(--hero-text); border-bottom: 1px solid var(--signal); }
+  .news-card:only-child { grid-column: 1 / 13; min-height: 260px; display: grid; grid-template-columns: repeat(12, 1fr); gap: 18px; border-right: 0; padding-right: 0; }
+  .news-card:only-child .news-meta { grid-column: 1 / 4; grid-row: 1; margin-top: 0; align-self: start; }
+  .news-card:only-child > strong { grid-column: 4 / 10; grid-row: 1; margin-top: 0; font-size: clamp(25px, 3vw, 38px); }
+  .news-card:only-child .news-summary { grid-column: 4 / 10; grid-row: 2; }
+  .news-card:only-child .news-arrow { grid-column: 11 / 13; grid-row: 1; margin: 0; padding: 0; align-self: start; }
+  .showcase-section { background: var(--showcase-bg); }
+  .inline-link, .showcase-more a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+  .showcase-more { margin-top: 20px; color: var(--text-dim); font-size: 14px; }
+  @media (max-width: 900px) {
+    .hero-copy { grid-column: 1 / 9; }.hero-art { grid-column: 8 / 13; opacity: .72; }
+    .news-card, .news-card:only-child { grid-column: span 12; min-height: auto; display: flex; border-right: 0; border-bottom: 1px solid var(--hero-line); padding: 20px 0 28px !important; }
+    .news-meta { margin-top: 30px; }.news-arrow { margin-top: 24px; }
   }
-  .hero-art {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 0;
+  @media (max-width: 680px) {
+    .hero-overline span:first-child { grid-column: 1 / 8; }.hero-overline span:last-child { grid-column: 8 / 13; text-align: right; }
+    .hero-grid { min-height: auto; padding-bottom: 46px; }.hero-copy { grid-column: 1 / 13; }.hero-art { grid-column: 2 / 13; min-height: 390px; margin-top: 20px; }
+    .hero h1 { font-size: clamp(42px, 12vw, 60px); }.hero-lead, .hero-cta { margin-left: 0; padding-left: 0; }
+    .format-rail a { grid-column: span 6; border-bottom: 1px solid var(--hero-line); }.format-rail a:nth-child(2) { border-right: 0; }
   }
-  .hero-icon {
-    position: relative;
-    z-index: 1;
-    width: 78%;
-    max-width: 360px;
-    height: auto;
-    display: block;
-    filter: drop-shadow(0 24px 60px rgba(0, 0, 0, 0.55));
-  }
-  .hero-art-glow {
-    position: absolute;
-    inset: 12%;
-    background: radial-gradient(closest-side, rgba(94, 234, 212, 0.18), rgba(129, 140, 248, 0.12) 55%, transparent 75%);
-    filter: blur(20px);
-  }
-  @media (max-width: 860px) {
-    .hero-grid { grid-template-columns: 1fr; }
-    .hero-art { margin: 8px auto 0; }
-    .hero-icon { width: 56%; max-width: 280px; }
-  }
-  .hero-title {
-    font-size: clamp(34px, 6vw, 68px);
-    font-weight: 800;
-    margin: 18px 0 0;
-    letter-spacing: -0.03em;
-  }
-  .grad {
-    background: linear-gradient(120deg, var(--accent), var(--accent-2) 60%, var(--accent-3));
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-  }
-  .hero-lead {
-    margin: 22px 0 0;
-    max-width: 62ch;
-    font-size: 18px;
-    color: var(--text-dim);
-  }
-  .hero-lead code, .hero-lead strong { color: var(--text); }
-  .hero-lead code { font-family: var(--mono); font-size: 0.92em; }
-  .hero-cta { display: flex; gap: 14px; margin-top: 32px; flex-wrap: wrap; }
-
-  .section-alt { background: linear-gradient(180deg, transparent, rgba(12, 15, 23, 0.6)); }
-  .section-lead code {
-    font-family: var(--mono);
-    font-size: 0.9em;
-    color: var(--text);
-    background: var(--bg-elev-2);
-    padding: 1px 6px;
-    border-radius: 5px;
-  }
-  .code-wrap { margin-top: 28px; }
-
-  .fw-block { margin-top: 56px; }
-  .fw-title { font-size: 24px; font-weight: 700; }
-  .fw-lead {
-    margin-top: 12px;
-    max-width: 70ch;
-    color: var(--text-dim);
-    font-size: 16px;
-  }
-  .fw-lead code { color: var(--text); font-family: var(--mono); font-size: 0.9em; }
-
-  .pitch-section { padding: 64px 0; }
-  .inline-link { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
-  .showcase-more { margin-top: 20px; font-size: 15px; color: var(--text-dim); }
-  .showcase-more a { color: var(--accent); font-weight: 600; }
-  .showcase-more a:hover { text-decoration: underline; }
 </style>

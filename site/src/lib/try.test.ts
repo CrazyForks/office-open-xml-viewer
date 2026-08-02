@@ -169,7 +169,7 @@ afterEach(() => {
 });
 
 describe('Try Yours ScrollViewer integration', () => {
-  it('uses the fixed DOCX physical scale and mounts every selectable page for native Find', async () => {
+  it('lets DOCX fit the preview width and mounts every selectable page for native Find', async () => {
     const hostStage = stage();
     const result = await renderFile(hostStage, file('sample.docx'));
     const viewer = mocks.docx[0];
@@ -180,8 +180,9 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.enableTextSelection).toBe(true);
     expect(viewer.opts.enableZoom).toBe(true);
     expect(viewer.opts.zoomMin).toBe(0.5);
-    expect(viewer.setScaleCalls).toEqual([0.9]);
-    expect(viewer.events.slice(0, 2)).toEqual(['setScale', 'load']);
+    expect(viewer.opts.pageShadow).toBe(false);
+    expect(viewer.setScaleCalls).toEqual([]);
+    expect(viewer.events[0]).toBe('load');
     expect(viewer.opts.overscan).toBe(4);
     expect(viewer.relayout).toHaveBeenCalledTimes(1);
     const renderedStage = hostStage as unknown as FakeElement;
@@ -190,7 +191,7 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(renderedStage.children[0].children).toHaveLength(0);
   });
 
-  it('keeps PPTX selection and media playback while mounting every slide for native Find', async () => {
+  it('lets PPTX fit the preview width while keeping selection, media, and native Find', async () => {
     const result = await renderFile(stage(), file('sample.pptx'));
     const viewer = mocks.pptx[0];
 
@@ -201,8 +202,9 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.enableMediaPlayback).toBe(true);
     expect(viewer.opts.mediaOverscan).toBe(1);
     expect(viewer.opts.zoomMin).toBe(0.5);
-    expect(viewer.setScaleCalls).toEqual([0.9]);
-    expect(viewer.events.slice(0, 2)).toEqual(['setScale', 'load']);
+    expect(viewer.opts.pageShadow).toBe(false);
+    expect(viewer.setScaleCalls).toEqual([]);
+    expect(viewer.events[0]).toBe('load');
     expect(viewer.opts.overscan).toBe(6);
     expect(viewer.relayout).toHaveBeenCalledTimes(1);
   });
@@ -210,13 +212,13 @@ describe('Try Yours ScrollViewer integration', () => {
   it.each([
     { ext: 'docx', instances: mocks.docx },
     { ext: 'pptx', instances: mocks.pptx },
-  ])('keeps the fixed default $ext scale independent from the zoom minimum', async ({
+  ])('does not override the width-derived $ext scale', async ({
     ext,
     instances,
   }) => {
     await renderFile(stage(), file(`narrow.${ext}`));
     expect(instances[0].opts.zoomMin).toBe(0.5);
-    expect(instances[0].setScaleCalls).toEqual([0.9]);
+    expect(instances[0].setScaleCalls).toEqual([]);
   });
 
   it('destroys an XLSX viewer when load fails', async () => {

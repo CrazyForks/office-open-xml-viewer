@@ -16,6 +16,16 @@ afterEach(() => {
  * keydown listener.
  */
 describe('XlsxViewer.destroy() — subtree + listeners + style', () => {
+  it('leaves outer framing to the caller-owned container', () => {
+    installDom();
+    const container = makeContainer();
+    const v = new XlsxViewer(container as unknown as HTMLElement);
+    const wrapper = container.children[0] as FakeEl;
+
+    expect(wrapper.style.border).toBe('');
+    v.destroy();
+  });
+
   it('empties the container (removes the wrapper subtree)', () => {
     installDom();
     const container = makeContainer();

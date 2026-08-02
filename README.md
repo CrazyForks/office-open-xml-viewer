@@ -916,6 +916,67 @@ cd packages/xlsx/parser && wasm-pack build --target web && cp pkg/xlsx_parser_bg
 cd packages/pptx/parser && wasm-pack build --target web && cp pkg/pptx_parser_bg.wasm pkg/pptx_parser.js ../src/wasm/
 ```
 
+## Error handling
+
+Headless APIs (`DocxDocument`, `XlsxWorkbook`, and `PptxPresentation`) report
+load and render failures by rejecting the returned Promise. Viewer APIs also
+support an `onError(error)` callback, with an important delivery rule:
+
+- Without `onError`, a load/parse failure rejects `viewer.load()`.
+- With `onError`, that failure is delivered to the callback and
+  `viewer.load()` resolves. Do not treat resolution alone as proof that the
+  document rendered.
+- Later Viewer-managed render or media failures are delivered to `onError`, or
+  logged with `console.error` when the callback is omitted.
+
+Stable failures can be narrowed without parsing message strings:
+
+- `OoxmlError` — container failures. Its `code` is `encrypted`,
+  `invalid-password`, `unsupported-encryption`, `legacy-binary-format`, or
+  `not-ooxml`.
+- `OoxmlResourceLimitError` (`code === 'ooxml-resource-limit'`) — a measured
+  package or format resource crossed a configurable limit or hard ceiling.
+  `details.violation` contains the resource, metric, limit, observed value, and
+  usage snapshot.
+- `OoxmlDecodedImageLimitError`
+  (`code === 'ooxml-decoded-image-limit'`) — a raster crossed an image pixel or
+  active decoded-byte ceiling. Its `metric`, `limit`, and `observed` properties
+  are stable.
+- An otherwise ordinary `Error` may carry `code === 'parser-crashed'` for a
+  recognized WASM trap. This does not mean “OOM”: panic, allocation failure,
+  stack overflow, and other traps can be indistinguishable at the current WASM
+  boundary.
+
+All other configuration, fetch, parser, renderer, worker, and media failures
+remain `Error`, `TypeError`, or `RangeError` values without a stable code. Their
+messages are diagnostic text, not a programmatic API.
+
+```ts
+import {
+  DocxViewer,
+  OoxmlDecodedImageLimitError,
+  OoxmlError,
+  OoxmlResourceLimitError,
+} from '@silurus/ooxml/docx';
+
+const viewer = new DocxViewer(canvas, {
+  onError(error) {
+    if (error instanceof OoxmlResourceLimitError) {
+      const { limit, observed } = error.details.violation;
+      showTooLargeMessage({ limit, observed });
+    } else if (error instanceof OoxmlDecodedImageLimitError) {
+      showImageTooLargeMessage(error);
+    } else if (error instanceof OoxmlError) {
+      handleContainerError(error.code);
+    } else {
+      reportUnexpectedError(error);
+    }
+  },
+});
+
+await viewer.load(file);
+```
+
 ## Security & Privacy
 
 - **Canvas-only rendering.** Documents are decoded and drawn to an `HTMLCanvasElement`. No script, link, form, or other active content from the source file is executed or injected into the DOM.
@@ -930,7 +991,7 @@ cd packages/pptx/parser && wasm-pack build --target web && cp pkg/pptx_parser_bg
   ```
   `maxArchiveEntryBytes` applies to every XML, text, image, media, and other package part that the parser reads. `maxTotalInflatedBytes` counts the largest amount actually read from each distinct part during the lifetime of the loaded package; reading the same part again does not consume that budget twice. Set an individual field to `null` to disable that configurable budget. Internal hard safety ceilings still apply, so disabling a budget does not make arbitrary archives acceptable. Values other than `null` must be positive safe-integer byte counts.
 
-  A violation rejects with `OoxmlResourceLimitError` (`code === 'ooxml-resource-limit'`). Its structured `details.violation` reports the resource, metric, limit, observed value, usage snapshot, and part name when a particular part caused the failure. The deprecated `maxZipEntryBytes` option remains as a compatibility alias for `resourceLimits.maxArchiveEntryBytes`; new code should use `resourceLimits`.
+  A violation rejects with `OoxmlResourceLimitError` (`code === 'ooxml-resource-limit'`). Its structured `details.violation` reports the resource, metric, limit, observed value, usage snapshot, and part name when a particular part caused the failure. The deprecated `maxZipEntryBytes` option remains as a compatibility alias for `resourceLimits.maxArchiveEntryBytes`, but is scheduled for removal in a future breaking release; new code should use `resourceLimits`.
 
   Applications can collect the same data as a machine-readable `OoxmlResourceMetrics` report without enabling console output. This is useful for choosing limits from representative files in the application's own domain:
   ```ts

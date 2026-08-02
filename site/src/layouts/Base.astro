@@ -10,17 +10,27 @@ const base = import.meta.env.BASE_URL;
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
     <meta name="description" content={description} />
-    <link rel="icon" type="image/svg+xml" href={`${base}favicon.svg`.replace(/([^:])\/\/+/g, '$1/')} />
+    <link rel="icon" type="image/png" href={`${base}icon.png`.replace(/([^:])\/\/+/g, '$1/')} />
     <link rel="apple-touch-icon" href={`${base}icon.png`.replace(/([^:])\/\/+/g, '$1/')} />
-    <meta name="theme-color" content="#07090e" />
+    <meta name="theme-color" content="#edf2f7" />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:image" content={`${base}icon.png`.replace(/([^:])\/\/+/g, '$1/')} />
     <meta name="twitter:card" content="summary" />
+    <script is:inline>
+      (() => {
+        let saved = null;
+        try { saved = localStorage.getItem('ooxml-theme'); } catch { /* storage may be unavailable */ }
+        const theme = saved === 'light' || saved === 'dark'
+          ? saved
+          : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
   </head>
@@ -40,6 +50,25 @@ const base = import.meta.env.BASE_URL;
         { threshold: 0, rootMargin: '0px 0px -12% 0px' }
       );
       document.querySelectorAll('[data-reveal]').forEach((el) => io.observe(el));
+
+      const themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+      const syncThemeControls = () => {
+        const dark = document.documentElement.dataset.theme === 'dark';
+        themeColor?.setAttribute('content', dark ? '#030508' : '#edf2f7');
+        document.querySelectorAll<HTMLButtonElement>('[data-theme-toggle]').forEach((button) => {
+          button.setAttribute('aria-label', `Use ${dark ? 'light' : 'dark'} mode`);
+          button.setAttribute('aria-pressed', String(dark));
+        });
+      };
+      syncThemeControls();
+      document.querySelectorAll<HTMLButtonElement>('[data-theme-toggle]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+          document.documentElement.dataset.theme = next;
+          try { localStorage.setItem('ooxml-theme', next); } catch { /* storage may be unavailable */ }
+          syncThemeControls();
+        });
+      });
     </script>
   </body>
 </html>

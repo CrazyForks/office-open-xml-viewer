@@ -1,5 +1,6 @@
 ---
 import { Code } from 'astro:components';
+import { codeThemes } from '../lib/code-theme';
 
 interface Tab {
   id: string;
@@ -30,7 +31,7 @@ const { tabs, filename } = Astro.props;
   </div>
   {tabs.map((t, i) => (
     <div class="ct-panel" data-ct-panel={t.id} hidden={i !== 0} data-code={t.code}>
-      <Code code={t.code} lang={t.lang as any} theme="github-dark-default" />
+      <Code code={t.code} lang={t.lang as any} themes={codeThemes} defaultColor={false} />
     </div>
   ))}
 </div>
@@ -64,7 +65,7 @@ const { tabs, filename } = Astro.props;
     border: 1px solid var(--border);
     border-radius: 14px;
     overflow: hidden;
-    background: #0d1117;
+    background: var(--code-bg);
   }
   .ct-head {
     display: flex;
@@ -118,7 +119,7 @@ const { tabs, filename } = Astro.props;
   .ct-panel :global(pre) {
     margin: 0;
     padding: 18px 20px;
-    background: #0d1117 !important;
+    background: var(--code-bg) !important;
     font-size: 13.5px;
     line-height: 1.65;
     overflow-x: auto;

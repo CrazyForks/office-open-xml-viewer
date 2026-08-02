@@ -1,25 +1,24 @@
 <div class="rg-grid">
   <div class="rg-copy">
     <p class="eyebrow">Resource governance</p>
-    <h2 class="section-title">Put predictable limits on large files.</h2>
+    <h2 class="section-title">Configure resource limits for large files.</h2>
     <p class="section-lead">
       DOCX, XLSX and PPTX share measured package-expansion limits. The defaults allow
       <strong>128 MiB per part</strong> and <strong>256 MiB across distinct parts read</strong>
-      during a package session. Crossing a limit rejects with a structured
-      <code>OoxmlResourceLimitError</code> before that measured condition is left to an
-      opaque browser crash.
+      during a package session. Reaching either limit rejects with a structured
+      <code>OoxmlResourceLimitError</code>.
     </p>
     <div class="rg-facts">
       <div>
-        <strong>Calibrate with real traffic</strong>
+        <strong>Collect usage metrics</strong>
         <span><code>onResourceMetrics</code> captures the initial load independently of debug logging; <code>getResourceMetrics()</code> returns a fresh snapshot after lazy package access.</span>
       </div>
       <div>
-        <strong>Inspect without instrumentation</strong>
+        <strong>Inspect debug output</strong>
         <span><code>debug: true</code> prints the same report as one aligned console card. The library never transmits or stores it.</span>
       </div>
       <div>
-        <strong>Choose stronger containment</strong>
+        <strong>Use Worker mode</strong>
         <span><code>mode: 'worker'</code> keeps parser and renderer state away from Window. It is opt-in and is not an operating-system process or a strict memory sandbox.</span>
       </div>
     </div>
@@ -27,7 +26,7 @@
       Raster decode is also guarded uniformly: 32 MP per image, 128 MiB of decoded
       ownership per document cache or render pass, and two concurrent decodes. These are
       deterministic admission guards—not exact JavaScript, WASM, canvas or GPU accounting—so
-      they reduce catastrophic-failure risk but cannot guarantee that every device avoids OOM.
+      they limit measured decode work but cannot guarantee that every device avoids OOM.
       Browser-managed SVG/vector storage has no portable decoded-byte metric; its cache is
       count-bounded and owned object URLs are revoked, but it is outside the RGBA counter.
     </p>
@@ -49,10 +48,11 @@
 <style>
   .rg-grid {
     display: grid;
-    grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
-    gap: 48px;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 18px;
     align-items: center;
   }
+  .rg-copy { grid-column: 1 / 8; }
   .rg-copy .section-lead { max-width: 68ch; }
   .rg-copy .section-lead strong { color: var(--text); }
   .rg-copy code, .rg-facts code, .rg-caveat code { font-family: var(--mono); color: var(--text); font-size: 0.9em; }
@@ -69,27 +69,28 @@
   .rg-caveat {
     margin: 22px 0 0;
     padding: 13px 15px;
-    border-left: 2px solid var(--accent-2);
-    background: rgba(129, 140, 248, 0.06);
+    border-left: 3px solid var(--accent-2);
+    background: var(--signal-wash);
     color: var(--text-dim);
     font-size: 13.5px;
   }
   .rg-code {
+    grid-column: 9 / 13;
     margin: 0;
     padding: 24px;
     overflow-x: auto;
-    background: #0d1117;
-    border: 1px solid var(--border-bright);
-    border-radius: 14px;
+    background: var(--code-bg);
+    border: 0;
+    border-radius: 0;
     box-shadow: var(--glow);
   }
-  .rg-code code { font-family: var(--mono); font-size: 12.5px; line-height: 1.8; color: var(--text); }
-  .rg-code .kw { color: var(--accent-2); }
-  .rg-code .num { color: var(--accent-3); }
-  .rg-code .str { color: var(--accent); }
-  .rg-code .cm { color: var(--text-faint); }
+  .rg-code code { font-family: var(--mono); font-size: 12.5px; line-height: 1.8; color: var(--code-fg); }
+  .rg-code .kw { color: var(--code-keyword); }
+  .rg-code .num { color: var(--code-number); }
+  .rg-code .str { color: var(--code-string); }
+  .rg-code .cm { color: var(--code-muted); }
   @media (max-width: 900px) {
-    .rg-grid { grid-template-columns: 1fr; }
+    .rg-copy, .rg-code { grid-column: 1 / 13; }
   }
   @media (max-width: 560px) {
     .rg-facts > div { grid-template-columns: 1fr; gap: 5px; }

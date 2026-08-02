@@ -1,5 +1,6 @@
 ---
 import { apiReference } from '../lib/api-reference';
+import InlineApiDescription from './InlineApiDescription.astro';
 interface Props {
   format: 'docx' | 'xlsx' | 'pptx';
 }
@@ -13,6 +14,15 @@ const classes = apiReference[format];
     Every public option and method, straight from the source. Types omitted for brevity are exported
     from the package — your editor will autocomplete the rest.
   </p>
+
+  <div class="api-errors">
+    <h4>Error handling</h4>
+    <p>
+      Typed container, resource-limit and decoded-image failures expose stable fields. Other failures
+      remain ordinary JavaScript errors. The callback and Promise delivery rules are part of the public contract.
+    </p>
+    <a class="api-detail-link" href="/errors">Open the error reference →</a>
+  </div>
 
   {classes.map((c) => (
     <div class="api-class">
@@ -32,7 +42,12 @@ const classes = apiReference[format];
                     <td><code>{o.name}</code></td>
                     <td><code class="api-type">{o.type}</code></td>
                     <td>{o.def ? <code>{o.def}</code> : <span class="api-dash">—</span>}</td>
-                    <td>{o.desc}</td>
+                    <td class="api-description">
+                      <InlineApiDescription item={o} />
+                      {o.detailsHref && (
+                        <> <a class="api-detail-link" href={o.detailsHref}>{o.detailsLabel ?? 'Details'} →</a></>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -48,7 +63,9 @@ const classes = apiReference[format];
             {c.methods.map((m) => (
               <tr>
                 <td class="api-sig"><code>{m.sig}</code></td>
-                <td>{m.desc}</td>
+                <td class="api-description">
+                  <InlineApiDescription item={m} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -67,14 +84,19 @@ const classes = apiReference[format];
   .api-title { font-size: 24px; font-weight: 700; margin: 8px 0 8px; }
   .api-desc { color: var(--text-dim); font-size: 16px; max-width: 70ch; margin: 0 0 8px; }
 
+  .api-errors { margin-top: 30px; padding: 26px 28px 28px; border: 1px solid var(--border); background: var(--bg-elev); }
+  .api-errors h4 { margin: 0; font-size: 19px; }
+  .api-errors > p { max-width: 92ch; margin: 10px 0 14px; color: var(--text-dim); font-size: 14.5px; }
+  .api-detail-link { color: var(--accent); font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
+
   .api-class { margin-top: 30px; }
   .api-class-name { font-family: var(--mono); font-size: 18px; font-weight: 700; margin: 0; }
   .api-note { color: var(--text-dim); font-size: 14.5px; margin: 8px 0 12px; max-width: 74ch; }
   .api-ctor {
     margin: 0 0 18px; padding: 12px 16px; overflow-x: auto;
-    background: #0d1117; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
   }
-  .api-ctor code { font-family: var(--mono); font-size: 13px; color: var(--accent); }
+  .api-ctor code { font-family: var(--mono); font-size: 13px; color: var(--code-keyword); }
 
   .api-sub {
     font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;

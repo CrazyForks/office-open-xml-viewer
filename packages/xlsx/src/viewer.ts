@@ -138,6 +138,19 @@ export interface XlsxViewerOptions extends LoadOptions {
    * `onReady`).
    */
   onSheetChange?: (index: number, total: number) => void;
+  /**
+   * Receives load failures and asynchronous render failures handled by the
+   * Viewer. Supplying this callback changes load-failure delivery: `load()`
+   * invokes it and resolves; without it, the same load/parse failure rejects
+   * `load()`. Viewer-managed render failures invoke it, or fall back to
+   * `console.error` when omitted.
+   *
+   * Stable cases can be narrowed with `OoxmlError`,
+   * `OoxmlResourceLimitError`, or `OoxmlDecodedImageLimitError` re-exported by
+   * this package. Other failures remain `Error` values; do not parse message
+   * text as an API. A `code` of `parser-crashed` identifies a recognized WASM
+   * trap, not a reliably classified OOM.
+   */
   onError?: (err: Error) => void;
   /** Called when the selected cell range changes. null means no selection. */
   onSelectionChange?: (selection: CellRange | null) => void;
@@ -593,7 +606,7 @@ export class XlsxViewer implements ZoomableViewer {
     this.wrapper = document.createElement('div');
     this.wrapper.style.cssText =
       `position:relative;width:100%;height:100%;` +
-      `border:1px solid #c8ccd0;background:#fff;box-sizing:border-box;font-family:sans-serif;display:flex;flex-direction:column;`;
+      `background:#fff;box-sizing:border-box;font-family:sans-serif;display:flex;flex-direction:column;`;
 
     // The grid region fills the space above the tab bar. The outline gutters
     // (XL4) sit at its top / left edges and {@link canvasArea} is inset by the
