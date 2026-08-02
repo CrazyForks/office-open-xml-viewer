@@ -40,6 +40,11 @@ describe('official-site home design', () => {
     expect(home).not.toMatch(/(?:Live renderer|Browser-based|Format support|Release and)<br \/>/);
   });
 
+  it('places release notices after the product content', () => {
+    expect(home.indexOf('id="announcements"')).toBeGreaterThan(home.indexOf('id="capabilities"'));
+    expect(home.indexOf('id="announcements"')).toBeLessThan(home.indexOf('<footer class="footer">'));
+  });
+
   it('keeps the hero headline at documentation-site scale', () => {
     expect(home).toContain('font-size: clamp(44px, 6.3vw, 82px);');
     expect(home).toContain('font-size: clamp(42px, 12vw, 60px);');
