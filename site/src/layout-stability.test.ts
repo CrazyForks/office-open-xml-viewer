@@ -21,7 +21,7 @@ function lightHexToken(name: string): [number, number, number] {
   return [0, 2, 4].map((start) => Number.parseInt(hex.slice(start, start + 2), 16)) as [number, number, number];
 }
 
-const largeSurfaceTokens = [
+const themedSurfaceTokens = [
   'paper',
   'hero-bg',
   'bg-elev',
@@ -29,10 +29,9 @@ const largeSurfaceTokens = [
   'panel',
   'surface-muted',
   'border',
-  'preview-top',
-  'preview-bottom',
   'code-bg',
 ];
+const previewSurfaceTokens = ['preview-top', 'preview-bottom'];
 
 describe('official-site layout stability', () => {
   it('reserves the root scrollbar gutter across route changes', () => {
@@ -55,6 +54,9 @@ describe('official-site layout stability', () => {
     expect(formatPage).toContain('<p class="eyebrow">{name}</p>');
     expect(formatPage).not.toContain('fp-dot');
     expect(formatPage).not.toContain('color: string');
+    expect(formatPage).toContain(".fp-hero[data-format='docx'] { --format-color: var(--docx); }");
+    expect(formatPage).toContain('background: linear-gradient(transparent 62%, var(--format-color) 62%, var(--format-color) 88%, transparent 88%);');
+    expect(formatPage).not.toContain('text-decoration-color: var(--format-color);');
   });
 
   it('uses the shared subtle shadow for DOCX pages and PPTX slides', () => {
@@ -62,26 +64,35 @@ describe('official-site layout stability', () => {
     expect(globalCss).toMatch(/\.demo-page\s*\{[^}]*box-shadow:\s*var\(--document-shadow\);/);
   });
 
-  it('keeps large dark-theme surfaces neutral so lime remains an accent', () => {
-    for (const token of largeSurfaceTokens) {
-      const channels = darkHexToken(token);
-      expect(Math.max(...channels) - Math.min(...channels), token).toBeLessThanOrEqual(8);
+  it('keeps large dark-theme surfaces restrained and blue-toned', () => {
+    for (const token of [...themedSurfaceTokens, ...previewSurfaceTokens]) {
+      const [red, green, blue] = darkHexToken(token);
+      expect(blue, token).toBeGreaterThan(red);
+      expect(Math.max(red, green, blue) - Math.min(red, green, blue), token).toBeLessThanOrEqual(38);
     }
   });
 
-  it('keeps large light-theme surfaces neutral so lime remains an accent', () => {
-    for (const token of largeSurfaceTokens) {
-      const channels = lightHexToken(token);
-      expect(Math.max(...channels) - Math.min(...channels), token).toBeLessThanOrEqual(8);
+  it('keeps large light-theme surfaces restrained and blue-toned', () => {
+    for (const token of themedSurfaceTokens) {
+      const [red, green, blue] = lightHexToken(token);
+      expect(blue, token).toBeGreaterThan(red);
+      expect(Math.max(red, green, blue) - Math.min(red, green, blue), token).toBeLessThanOrEqual(38);
     }
   });
 
-  it('uses the stronger shared light accent throughout the API table without changing dark mode', () => {
+  it('uses a medium-dark slate preview palette in the light theme', () => {
+    expect(lightHexToken('preview-top')).toEqual([0x6f, 0x7b, 0x87]);
+    expect(lightHexToken('preview-bottom')).toEqual([0x4f, 0x5b, 0x67]);
+    expect(lightHexToken('preview-text')).toEqual([0xf1, 0xf4, 0xf7]);
+    expect(lightHexToken('preview-text-dim')).toEqual([0xd0, 0xd6, 0xdc]);
+  });
+
+  it('uses the shared cyan accent throughout the API table', () => {
     expect(apiReference).toContain('color: var(--accent-2)');
     expect(apiReference).toContain('color: var(--accent)');
-    expect(lightHexToken('signal-ink')).toEqual([0x3b, 0x7e, 0x00]);
-    expect(lightHexToken('accent-2')).toEqual([0x3b, 0x7e, 0x00]);
-    expect(darkHexToken('signal-ink')).toEqual([0xc9, 0xff, 0x43]);
-    expect(darkHexToken('accent-2')).toEqual([0xa9, 0xd3, 0x66]);
+    expect(lightHexToken('signal-ink')).toEqual([0x00, 0x6f, 0x80]);
+    expect(lightHexToken('accent-2')).toEqual([0x0a, 0x6f, 0x96]);
+    expect(darkHexToken('signal-ink')).toEqual([0x39, 0xc6, 0xda]);
+    expect(darkHexToken('accent-2')).toEqual([0x6c, 0xc8, 0xda]);
   });
 });

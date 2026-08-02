@@ -54,4 +54,8 @@ describe('official-site home design', () => {
   it('separates the hero copy and icon without a vertical rule', () => {
     expect(home).not.toMatch(/\.hero-art \{[^}]*border-left/);
   });
+
+  it('lets the live showcase blend into the dark page background', () => {
+    expect(home).toContain('.showcase-section { background: var(--showcase-bg); }');
+  });
 });

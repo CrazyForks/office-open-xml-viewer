@@ -22,6 +22,7 @@ describe('Try Yours parsing progress', () => {
   it('shows an accessible progress circle in the preview while renderFile is pending', () => {
     expect(source).toContain('id="stage-progress" role="status" aria-live="polite" hidden');
     expect(source).toContain('class="try-progress-circle" aria-hidden="true"');
+    expect(source).toMatch(/\.try-stage-progress\s*\{[\s\S]*?color: var\(--preview-text\);/);
     expect(source).toMatch(/stageProgress\.hidden = false;[\s\S]*await renderFile\(stage, file\)/);
   });
 
