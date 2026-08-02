@@ -1,0 +1,32 @@
+---
+import { descriptionTokens, type DescribedItem } from '../lib/api-description';
+
+interface Props {
+  item: DescribedItem;
+}
+
+const tokens = descriptionTokens(Astro.props.item);
+---
+
+<span class="api-description-content">{tokens.map((token) =>
+  token.emphasized ? (
+    <strong>{token.code ? <code>{token.text}</code> : token.text}</strong>
+  ) : token.code ? (
+    <code>{token.text}</code>
+  ) : token.text
+)}</span>
+
+<style>
+  .api-description-content { display: inline; }
+  strong { color: var(--text); font-weight: 700; }
+  code {
+    padding: .08em .34em;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--code-bg);
+    color: var(--code-keyword);
+    font: 500 .9em/1.45 var(--mono);
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+</style>

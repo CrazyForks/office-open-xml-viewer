@@ -1,28 +1,11 @@
 ---
 import { apiReference } from '../lib/api-reference';
+import InlineApiDescription from './InlineApiDescription.astro';
 interface Props {
   format: 'docx' | 'xlsx' | 'pptx';
 }
 const { format } = Astro.props;
 const classes = apiReference[format];
-
-interface DescribedItem {
-  desc: string;
-  emphasis?: string;
-}
-
-function descriptionParts(item: DescribedItem): Array<{ text: string; emphasized: boolean }> {
-  if (!item.emphasis) return [{ text: item.desc, emphasized: false }];
-  const start = item.desc.indexOf(item.emphasis);
-  if (start < 0) {
-    throw new Error(`API emphasis must be an exact description substring: ${item.emphasis}`);
-  }
-  return [
-    { text: item.desc.slice(0, start), emphasized: false },
-    { text: item.emphasis, emphasized: true },
-    { text: item.desc.slice(start + item.emphasis.length), emphasized: false },
-  ].filter(({ text }) => text.length > 0);
-}
 ---
 <section class="api" data-reveal>
   <p class="api-badge">API reference</p>
@@ -60,9 +43,7 @@ function descriptionParts(item: DescribedItem): Array<{ text: string; emphasized
                     <td><code class="api-type">{o.type}</code></td>
                     <td>{o.def ? <code>{o.def}</code> : <span class="api-dash">—</span>}</td>
                     <td class="api-description">
-                      {descriptionParts(o).map((part) =>
-                        part.emphasized ? <strong>{part.text}</strong> : part.text
-                      )}
+                      <InlineApiDescription item={o} />
                       {o.detailsHref && (
                         <> <a class="api-detail-link" href={o.detailsHref}>{o.detailsLabel ?? 'Details'} →</a></>
                       )}
@@ -83,9 +64,7 @@ function descriptionParts(item: DescribedItem): Array<{ text: string; emphasized
               <tr>
                 <td class="api-sig"><code>{m.sig}</code></td>
                 <td class="api-description">
-                  {descriptionParts(m).map((part) =>
-                    part.emphasized ? <strong>{part.text}</strong> : part.text
-                  )}
+                  <InlineApiDescription item={m} />
                 </td>
               </tr>
             ))}
@@ -135,6 +114,5 @@ function descriptionParts(item: DescribedItem): Array<{ text: string; emphasized
   .api-table code { font-family: var(--mono); font-size: 12.5px; color: var(--text); white-space: nowrap; }
   .api-table .api-type { color: var(--accent-2); white-space: normal; }
   .api-sig code { color: var(--accent); white-space: normal; }
-  .api-description strong { color: var(--text); font-weight: 700; }
   .api-dash { color: var(--text-faint); }
 </style>
