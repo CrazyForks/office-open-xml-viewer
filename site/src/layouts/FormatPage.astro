@@ -1,6 +1,7 @@
 ---
 import Base from './Base.astro';
 import Nav from '../components/Nav.astro';
+import BrandIcon from '../components/BrandIcon.astro';
 interface Props {
   format: 'pptx' | 'docx' | 'xlsx';
   name: string;   // "PowerPoint"
@@ -33,7 +34,7 @@ const fileNoun = { docx: 'Word document', xlsx: 'Excel workbook', pptx: 'PowerPo
   <footer class="footer">
     <div class="wrap footer-inner">
       <div class="footer-brand">
-        <span class="nav-mark"><i></i><i></i><i></i></span>
+        <BrandIcon />
         <div>
           <strong>@silurus/ooxml</strong>
           <span>Browser-based OOXML viewer · Rust/WASM + Canvas</span>

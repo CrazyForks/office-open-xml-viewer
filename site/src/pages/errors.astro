@@ -2,6 +2,7 @@
 import { Code } from 'astro:components';
 import Base from '../layouts/Base.astro';
 import Nav from '../components/Nav.astro';
+import BrandIcon from '../components/BrandIcon.astro';
 import { codeThemes } from '../lib/code-theme';
 
 const simpleExample = `import { DocxViewer } from '@silurus/ooxml/docx';
@@ -226,7 +227,7 @@ if (!initialLoadFailed) showPreview();`;
   <footer class="footer">
     <div class="wrap footer-inner">
       <div class="footer-brand">
-        <span class="nav-mark"><i></i><i></i><i></i></span>
+        <BrandIcon />
         <div><strong>@silurus/ooxml</strong><span>Browser-based OOXML viewer · Rust/WASM + Canvas</span></div>
       </div>
       <div class="footer-links"><a href="/">Home</a><a href="/deprecations">Deprecated APIs</a><a href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub</a></div>

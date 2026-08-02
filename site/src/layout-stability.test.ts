@@ -39,8 +39,8 @@ describe('official-site layout stability', () => {
     expect(globalCss).toMatch(/html\s*\{[^}]*scrollbar-gutter:\s*stable;/);
   });
 
-  it('preserves the rounded three-bar brand mark in the header and footer', () => {
-    expect(globalCss).toMatch(/\.nav-mark i\s*\{[^}]*border-radius:\s*2px;/);
+  it('sizes the shared library icon consistently in the header and footer', () => {
+    expect(globalCss).toMatch(/\.brand-icon\s*\{[^}]*width:\s*28px;[^}]*height:\s*28px;/);
   });
 
   it('renders the theme label from the pre-paint document theme', () => {
