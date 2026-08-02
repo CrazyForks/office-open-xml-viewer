@@ -40,7 +40,8 @@ import { layoutTable as layoutRetainedTableInput } from './table.js';
 import { startTableFragmentCursor, takeTableFragment, type PageDependentTableBlockRequest } from './table-pagination.js';
 import { paragraphGapAdjustment } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges } from './paragraph-border-adjacency.js';
-import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameDownwardPaintOverflowPt, type BodyFrameGroup } from './paragraph.js';
+import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, type BodyFrameGroup } from './paragraph.js';
+import { wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, RetainedTableRecord } from './acquisition-context.js';
 import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisition, TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX } from './paragraph-wrap-registry.js';
@@ -938,7 +939,9 @@ function buildConcreteBodyLayoutKernel(
             if (!member) throw new Error('Body frame acquisition omitted its retained member');
             const dropCapAnchorLeadingPt = paragraph === frameGroup.members.at(-1)
               && frameGroup.framePr.dropCap !== 'none'
-              ? retainedFrameDownwardPaintOverflowPt(acquiredGroup)
+              ? wordLoweredDropCapAnchorLeadingPt(
+                  retainedFrameMaximumBaselineLoweringPt(acquiredGroup),
+                )
               : 0;
             const absoluteVertical = paragraph.framePr.vAnchor === 'page'
               || paragraph.framePr.vAnchor === 'margin';
@@ -964,11 +967,8 @@ function buildConcreteBodyLayoutKernel(
             });
             return Object.freeze({
               layout: member.fragment,
-              // §17.3.1.11 fixes a drop cap's exclusion to N anchor lines, while
-              // §17.3.2.24 can lower its glyph without changing that line box.
-              // Advance only the anchor band's leading edge by the retained
-              // downward paint offset; extending the exclusion would wrap N+1
-              // lines and moving the frame would change its authored anchor.
+              // The catalogued projection preserves the §17.3.1.11 authored
+              // exclusion height; see WORD_LOWERED_DROP_CAP_ANCHOR_LEADING.
               blockExtentPt: dropCapAnchorLeadingPt,
               lineEndBoundaries: Object.freeze([]),
               placement: Object.freeze({

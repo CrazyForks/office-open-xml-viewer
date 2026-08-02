@@ -443,7 +443,7 @@ export declare class DocxDocument {
     private _mode;
     private _worker;
     private _bridge;
-    private _imageCache;
+    private readonly _rawParts;
     private _embeddedFontFaces;
     private _googleFontFaces;
     private _localMetricFontFaces;
@@ -454,6 +454,7 @@ export declare class DocxDocument {
     destroy(): void;
     getImage(imagePath: string, mimeType: string): Promise<Blob>;
     getFontBytes(partPath: string): Promise<Uint8Array>;
+    getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     toMarkdown(): Promise<string>;
     get pageCount(): number;
     get mode(): 'main' | 'worker';
@@ -590,6 +591,7 @@ export declare class DocxScrollViewer implements ZoomableViewer {
     private _redrawSlotHighlights;
     private _onResize;
     get topVisiblePage(): number;
+    getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     destroy(): void;
 }
 export declare interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>, LoadOptions {
@@ -719,6 +721,7 @@ export declare class DocxViewer implements ZoomableViewer {
     clearFind(): void;
     private _activateMatch;
     private _redrawHighlights;
+    getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     destroy(): void;
     private _render;
     private _reportRenderError;
@@ -1036,6 +1039,15 @@ export declare interface NumberingInfo {
     picBulletWidthPt?: number;
     picBulletHeightPt?: number;
 }
+export declare type OoxmlDecodedImageLimitMetric = 'image-pixels' | 'active-decoded-bytes';
+export declare class OoxmlDecodedImageLimitError extends RangeError {
+    readonly metric: OoxmlDecodedImageLimitMetric;
+    readonly limit: number;
+    readonly observed: number;
+    readonly code: "ooxml-decoded-image-limit";
+    constructor(metric: OoxmlDecodedImageLimitMetric, limit: number, observed: number);
+}
+export declare function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
 export declare class OoxmlError extends Error {
     readonly code: OoxmlErrorCode;
     constructor(code: OoxmlErrorCode, message: string);

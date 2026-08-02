@@ -21,7 +21,10 @@ export { resolveSharedStrings } from './shared-strings.js';
 // narrow on `err.code`.
 export {
   OoxmlError,
+  OoxmlDecodedImageLimitError,
   OoxmlResourceLimitError,
+  isOoxmlDecodedImageLimitError,
+  type OoxmlDecodedImageLimitMetric,
   type OoxmlErrorCode,
   type OoxmlErrorSource,
   type OoxmlErrorStage,

@@ -1,11 +1,13 @@
 import {
   applyDuotone,
-  deferBitmapCloseWhileLeased,
+  dropCachedDerivedBitmapNamespace,
   getCachedBitmapByPath,
+  getCachedDerivedBitmap,
   getCachedSvgImageByPath,
   imageNaturalSize,
   metafileRasterSize,
   preferVectorBlip,
+  releaseOwnedBitmap,
 } from '@silurus/ooxml-core';
 import type { Duotone } from '@silurus/ooxml-core';
 import type {
@@ -38,25 +40,10 @@ export function imageKey(
   return `${imagePath}${clr}${duo}`;
 }
 
-const colorReplacedByFetch = new WeakMap<DocxFetchImage, Map<string, Promise<ImageBitmap>>>();
-
-function colorReplacedCacheFor(fetchImage: DocxFetchImage): Map<string, Promise<ImageBitmap>> {
-  let cache = colorReplacedByFetch.get(fetchImage);
-  if (!cache) {
-    cache = new Map();
-    colorReplacedByFetch.set(fetchImage, cache);
-  }
-  return cache;
-}
+const DOCX_COLOR_EFFECT_CACHE_NAMESPACE = 'docx-color-effects';
 
 export function dropBrowserImageCache(fetchImage: DocxFetchImage): void {
-  const cache = colorReplacedByFetch.get(fetchImage);
-  if (!cache) return;
-  for (const bitmap of cache.values()) {
-    deferBitmapCloseWhileLeased(fetchImage, bitmap);
-  }
-  cache.clear();
-  colorReplacedByFetch.delete(fetchImage);
+  dropCachedDerivedBitmapNamespace(fetchImage, DOCX_COLOR_EFFECT_CACHE_NAMESPACE);
 }
 
 async function applyColorReplacement(
@@ -98,28 +85,32 @@ export async function decodeRaster(
   });
   if (!base) return null;
   if (!colorReplaceFrom && !duotone) return base;
-  const cache = colorReplacedCacheFor(fetchImage);
   const key = imageKey(imagePath, colorReplaceFrom, duotone);
-  let hit = cache.get(key);
-  if (!hit) {
-    hit = (async () => {
+  return getCachedDerivedBitmap(
+    DOCX_COLOR_EFFECT_CACHE_NAMESPACE,
+    key,
+    fetchImage,
+    async () => {
       let bitmap: ImageBitmap = base;
-      if (colorReplaceFrom) bitmap = await applyColorReplacement(bitmap, colorReplaceFrom);
-      if (duotone) {
-        const { w, h } = imageNaturalSize(bitmap);
-        if (w > 0 && h > 0) {
-          bitmap = await applyDuotone(bitmap, duotone, { width: w, height: h }) as ImageBitmap;
+      try {
+        if (colorReplaceFrom) bitmap = await applyColorReplacement(bitmap, colorReplaceFrom);
+        if (duotone) {
+          const { w, h } = imageNaturalSize(bitmap);
+          if (w > 0 && h > 0) {
+            const source = bitmap;
+            bitmap = await applyDuotone(bitmap, duotone, { width: w, height: h }) as ImageBitmap;
+            // A clrChange surface is only an intermediate when duotone creates a
+            // second surface. It is never cached or drawn, so release it now.
+            if (source !== base && bitmap !== source) releaseOwnedBitmap(source);
+          }
         }
+        return { bitmap, owned: bitmap !== base };
+      } catch (error) {
+        if (bitmap !== base) releaseOwnedBitmap(bitmap);
+        throw error;
       }
-      return bitmap;
-    })();
-    hit.catch(() => cache.delete(key));
-    void hit.then((bitmap) => {
-      if (bitmap === base) cache.delete(key);
-    }).catch(() => {});
-    cache.set(key, hit);
-  }
-  return hit;
+    },
+  );
 }
 
 function imageDecodeRequests(

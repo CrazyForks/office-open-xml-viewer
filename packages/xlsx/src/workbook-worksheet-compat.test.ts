@@ -64,7 +64,6 @@ function makeWorkbook(
   };
   const instance = Object.create(XlsxWorkbook.prototype) as Record<string, unknown>;
   instance._mode = mode;
-  instance.rawData = new ArrayBuffer(1);
   instance.parsedWorkbook = structuredClone(PARSED_WORKBOOK);
   instance.sheetCache = new Map();
   instance.sheetLoads = new Map();

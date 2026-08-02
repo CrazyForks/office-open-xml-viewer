@@ -70,19 +70,22 @@ import {
   graphemeClusterOffsets,
   getCachedSvgImageByPath,
   getCachedBitmapByPath,
+  getCachedDecodedBitmap,
+  getCachedDerivedBitmap,
   getCachedDuotoneBitmapByPath,
   acquireBitmapCacheLease,
   peekCachedBitmapByPath,
-  dropBitmapCacheByPath,
+  dropDecodedBitmapCache,
+  decodeRasterOrMetafile,
   preferVectorBlip,
   cropSourceRect,
   metafileRasterSize,
+  isOoxmlDecodedImageLimitError,
   highlightBox,
   symbolFontToUnicode,
   isSymbolFontFamily,
   drawUnderline,
   intendedSingleLinePx,
-  rasterHeaderExceedsBudget,
   hasTextWarp,
   buildWarpEnvelope,
   warpGlyphTransform,
@@ -1400,7 +1403,8 @@ async function renderBackground(
         ctx.drawImage(bitmap, dx, dy, dw, dh);
       }
       ctx.restore();
-    } catch {
+    } catch (error) {
+      if (isOoxmlDecodedImageLimitError(error)) throw error;
       // Decode failed — the white base painted above remains as the fallback.
     }
     return;
@@ -3896,7 +3900,7 @@ export function renderTextBody(
 type FetchImage = (path: string, mime: string) => Promise<Blob>;
 
 // The decoded raster/metafile bitmap cache now lives in core
-// (`getCachedBitmapByPath` / `peekCachedBitmapByPath` / `dropBitmapCacheByPath`),
+// (`getCachedBitmapByPath` / `peekCachedBitmapByPath` / `dropDecodedBitmapCache`),
 // shared verbatim with docx and xlsx. Re-exported under the historical pptx
 // names so the presentation teardown and the bullet-draw tests keep their import
 // surface; the synchronous picture-bullet draw reads a warmed bitmap through
@@ -3904,7 +3908,7 @@ type FetchImage = (path: string, mime: string) => Promise<Blob>;
 export {
   getCachedBitmapByPath as getCachedBitmap,
   peekCachedBitmapByPath as peekCachedBitmap,
-  dropBitmapCacheByPath as dropImageBitmapCache,
+  dropDecodedBitmapCache as dropImageBitmapCache,
   // Second-layer duotone (§20.1.8.23) recolour cache; dropped alongside the base
   // bitmap cache on deck teardown.
   dropDuotoneBitmapCache,
@@ -4245,45 +4249,44 @@ function paintBeveledFlat(
   return true;
 }
 
-/** Poster bitmaps decoded once per media element; renderSlide's prefetch pass
- *  warms this so the sequential draw loop never waits on the network. Keyed by
- *  element identity (not posterPath), so the bitmap releases when the slide
- *  model is GC'd; the same poster on two elements decodes twice, which is
- *  bounded and fine for the per-slide warm-up this serves. */
-const posterBitmapCache = new WeakMap<MediaElement, Promise<ImageBitmap>>();
+type FetchMedia = (path: string) => Promise<Blob>;
+type PosterFetchImage = (path: string, mimeType: string) => Promise<Blob>;
+const posterFetchImageByMedia = new WeakMap<FetchMedia, PosterFetchImage>();
+
+function posterFetchImage(fetchMedia: FetchMedia): PosterFetchImage {
+  let fetchImage = posterFetchImageByMedia.get(fetchMedia);
+  if (!fetchImage) {
+    fetchImage = async (path, mimeType) => {
+      const blob = await fetchMedia(path);
+      return blob.type === mimeType ? blob : new Blob([blob], { type: mimeType });
+    };
+    posterFetchImageByMedia.set(fetchMedia, fetchImage);
+  }
+  return fetchImage;
+}
 
 // Exported for the RB1 poster decode-bomb neutralization test (asserts an
 // over-budget poster is rejected before `createImageBitmap`). Not part of the
 // public package surface.
 export function getPosterBitmap(
   el: MediaElement,
-  fetchMedia: (path: string) => Promise<Blob>,
+  fetchMedia: FetchMedia,
+  bitmapOwner: PosterFetchImage = posterFetchImage(fetchMedia),
 ): Promise<ImageBitmap> {
-  const hit = posterBitmapCache.get(el);
-  if (hit) return hit;
-  const p = (async () => {
-    const blob = await fetchMedia(el.posterPath);
-    const typed = el.posterMimeType
-      ? new Blob([blob], { type: el.posterMimeType })
-      : blob;
-    // Decode-bomb guard: `el.posterPath`/`posterMimeType` come from the
-    // attacker-controllable `<a:blip>` (shape.rs), and `createImageBitmap` sizes
-    // its decoded RGBA surface from the image HEADER, not the compressed length —
-    // a tiny PNG/JPEG declaring e.g. 60000×60000 forces a multi-GB allocation.
-    // Sniff the pixel dimensions from a 64 KiB header prefix and reject an
-    // over-budget raster BEFORE it reaches createImageBitmap, exactly as
-    // `decodeRasterOrMetafile` (RB1) does for picture blips. A rejection here
-    // makes both callers fall through to their plain media fill (graceful
-    // degradation). The 64 KiB prefix covers a JPEG SOF past EXIF/ICC; an
-    // unrecognized header is not blocked (fail-open).
-    const head = new Uint8Array(await typed.slice(0, 64 * 1024).arrayBuffer());
-    if (rasterHeaderExceedsBudget(head)) {
-      throw new Error('poster raster exceeds the pixel budget');
-    }
-    return createImageBitmap(typed);
-  })();
-  posterBitmapCache.set(el, p);
-  return p;
+  return getCachedDecodedBitmap(
+    'base',
+    el.posterPath,
+    bitmapOwner,
+    async () => {
+      const blob = await fetchMedia(el.posterPath);
+      const mimeType = el.posterMimeType || blob.type || 'application/octet-stream';
+      const typed = blob.type === mimeType ? blob : new Blob([blob], { type: mimeType });
+      return { bitmap: await decodeRasterOrMetafile(typed), owned: true };
+    },
+  ).then((bitmap) => {
+    if (!bitmap) throw new Error('Media poster could not be decoded');
+    return bitmap;
+  });
 }
 
 async function renderPicture(
@@ -4743,7 +4746,8 @@ async function renderPicture(
 
     ctx.restore();
     // bitmap is owned by getCachedBitmapByPath's cache — do not close it here.
-  } catch {
+  } catch (error) {
+    if (isOoxmlDecodedImageLimitError(error)) throw error;
     // silently skip broken images
   }
 }
@@ -4754,6 +4758,7 @@ async function renderMedia(
   scale: number,
   fetchMedia?: (path: string) => Promise<Blob>,
   skipControls?: boolean,
+  bitmapOwner?: PosterFetchImage,
 ) {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
@@ -4765,8 +4770,9 @@ async function renderMedia(
     try {
       // Poster is cached (and prefetched by renderSlide); do not close it here —
       // it is reused across renders of the same slide.
-      poster = await getPosterBitmap(el, fetchMedia);
-    } catch {
+      poster = await getPosterBitmap(el, fetchMedia, bitmapOwner);
+    } catch (error) {
+      if (isOoxmlDecodedImageLimitError(error)) throw error;
       // fall through to plain fill
     }
   }
@@ -5362,9 +5368,19 @@ export async function renderSlide(
   // and its drawImage. Under the lease the eviction still removes the cache
   // entry (bounded size; a later resolve re-decodes), but the close is deferred
   // until this pass ends, so no draw ever receives a closed bitmap.
-  const releaseLease = opts.fetchImage ? acquireBitmapCacheLease(opts.fetchImage) : undefined;
+  const bitmapOwner = opts.fetchImage
+    ?? (opts.fetchMedia ? posterFetchImage(opts.fetchMedia) : undefined);
+  const releaseLease = bitmapOwner ? acquireBitmapCacheLease(bitmapOwner) : undefined;
   try {
-    return await renderSlideLeased(canvas, slide, slideWidth, slideHeight, opts, onTextRun);
+    return await renderSlideLeased(
+      canvas,
+      slide,
+      slideWidth,
+      slideHeight,
+      opts,
+      onTextRun,
+      bitmapOwner,
+    );
   } finally {
     releaseLease?.();
   }
@@ -5379,6 +5395,7 @@ async function renderSlideLeased(
   slideHeight: number,
   opts: SlideRenderOptions = {},
   onTextRun?: TextRunCallback,
+  bitmapOwner?: PosterFetchImage,
 ): Promise<HTMLCanvasElement | OffscreenCanvas> {
   // Cancellation guard. renderSlide is async (it awaits image / equation decode),
   // so rapid navigation can start a newer render of the SAME canvas before this
@@ -5502,7 +5519,7 @@ async function renderSlideLeased(
     } else if (el.type === 'media') {
       const m = el as MediaElement;
       if (m.posterPath && opts.fetchMedia) {
-        void getPosterBitmap(m, opts.fetchMedia).catch(() => undefined);
+        void getPosterBitmap(m, opts.fetchMedia, bitmapOwner).catch(() => undefined);
       }
     }
   }
@@ -5526,7 +5543,10 @@ async function renderSlideLeased(
       await Promise.all(
         [...bulletPaths].map((key) => {
           const [path, mime] = key.split(' ');
-          return getCachedBitmapByPath(path, mime, fetchImage).catch(() => undefined);
+          return getCachedBitmapByPath(path, mime, fetchImage).catch((error) => {
+            if (isOoxmlDecodedImageLimitError(error)) throw error;
+            return undefined;
+          });
         }),
       );
       if (superseded()) return canvas;
@@ -5544,7 +5564,7 @@ async function renderSlideLeased(
     } else if (el.type === 'table') {
       renderTable(ctx, el, scale, slideNumber, rc);
     } else if (el.type === 'media') {
-      await renderMedia(ctx, el, scale, opts.fetchMedia, opts.skipMediaControls);
+      await renderMedia(ctx, el, scale, opts.fetchMedia, opts.skipMediaControls, opts.fetchImage);
     } else if (el.type === 'chart') {
       // OOXML: 1pt = 12700 EMU. The slide renderer's `scale` is px-per-EMU,
       // so PT_TO_EMU * scale gives pixels-per-point at the current display size.

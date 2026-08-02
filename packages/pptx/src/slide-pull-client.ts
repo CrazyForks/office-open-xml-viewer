@@ -2,8 +2,8 @@ import type { OoxmlResourceUsageSnapshot, WorkerBridgeTransport } from '@silurus
 import {
   BoundedPullSession,
   HARD_MAX_PPTX_SLIDE_JSON_BYTES,
-  PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
   PULL_SESSION_PROTOCOL,
+  requiredPullCredit,
   type PullSessionIdentity,
   type PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
@@ -126,26 +126,10 @@ async function pullWithCreditRetry(
   }
 }
 
-const REQUIRED_CREDIT = /^slide unit requires ([0-9]+) bytes but credit is ([0-9]+)$/u;
-
 function requiredCredit(error: unknown): number | undefined {
-  if (
-    !error || typeof error !== 'object' ||
-    (error as { code?: unknown }).code !== PULL_SESSION_INSUFFICIENT_CREDIT_CODE
-  ) {
-    return undefined;
-  }
-  const match = REQUIRED_CREDIT.exec(error instanceof Error ? error.message : String(error));
-  if (!match) return undefined;
-  const required = Number(match[1]);
-  const offered = Number(match[2]);
-  if (
-    !Number.isSafeInteger(required) || required <= offered ||
-    required > HARD_MAX_PPTX_SLIDE_JSON_BYTES ||
-    offered !== PPTX_INITIAL_SLIDE_PULL_BYTES ||
-    String(required) !== match[1] || String(offered) !== match[2]
-  ) {
-    return undefined;
-  }
-  return required;
+  return requiredPullCredit(
+    error,
+    PPTX_INITIAL_SLIDE_PULL_BYTES,
+    HARD_MAX_PPTX_SLIDE_JSON_BYTES,
+  );
 }

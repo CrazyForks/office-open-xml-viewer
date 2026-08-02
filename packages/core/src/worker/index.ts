@@ -12,6 +12,7 @@ export {
   isWasmTrap,
   type WasmTrapErrorCode,
   type WasmInit,
+  type WasmInitOptions,
   type WasmReinit,
   type WasmInitInput,
   type WasmParserHostOptions,
@@ -24,6 +25,17 @@ export {
   type WorkerErrorPayload,
 } from './error-wire.js';
 export {
+  PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
+  PullSessionInsufficientCreditError,
+  isPullSessionInsufficientCreditDetails,
+  isPullSessionInsufficientCreditError,
+  normalizePullSessionInsufficientCreditError,
+  parsePullSessionInsufficientCreditError,
+  requiredPullCredit,
+  type PullSessionInsufficientCreditDetails,
+} from './pull-credit-error.js';
+export { exactTransferableArrayBuffer } from './transfer.js';
+export {
   DEFAULT_OOXML_RESOURCE_LIMITS,
   normalizeLoadResourceOptions,
   normalizeResourcePolicy,
@@ -32,7 +44,9 @@ export {
   type NormalizedOoxmlResourcePolicy,
 } from './resource-policy.js';
 export {
+  OOXML_RESOURCE_METRICS_PROBE_TIMEOUT_MS,
   OoxmlResourceMetricsSession,
+  readLatestOoxmlResourceMetrics,
   type OoxmlResourceMetricsSessionOptions,
 } from './resource-debug.js';
 export type {
@@ -52,8 +66,8 @@ export {
   HARD_MAX_PPTX_CACHED_SLIDES,
   HARD_MAX_PPTX_CACHED_SLIDE_PROJECTION_BYTES,
   HARD_MAX_PPTX_MARKDOWN_BYTES,
-  HARD_MAX_PPTX_RAW_PART_CACHE_BYTES,
-  HARD_MAX_PPTX_RAW_PART_CACHE_ENTRIES,
+  HARD_MAX_RAW_PART_CACHE_BYTES,
+  HARD_MAX_RAW_PART_CACHE_ENTRIES,
   HARD_MAX_PPTX_SLIDE_JSON_BYTES,
   HARD_MAX_PPTX_PREFLIGHT_PROJECTION_BYTES,
   HARD_MAX_XLSX_RENDERER_COORDINATE_INDEX_ENTRIES,
@@ -69,7 +83,6 @@ export {
   BoundedPullSession,
   DEFAULT_PULL_CANCEL_GRACE_MS,
   PULL_SESSION_PROTOCOL,
-  PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
   PullSessionHost,
   PullSessionHostCoordinator,
   type PullCancelReason,

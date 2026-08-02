@@ -62,3 +62,13 @@ Increasing these limits accepts more OOXML input but does not reserve memory or
 make OOM catchable. Lowering them provides earlier rejection but increases false
 rejections. Setting a field to `null` disables only that public admission limit;
 internal non-configurable safety ceilings still apply.
+
+Decoded browser images use separate shared hard guards rather than additional
+public tuning parameters: 32 megapixels / 128 MiB RGBA for one raster, 128 MiB
+of decoded ownership per document cache or active render pass, and two
+simultaneous decodes per document. These values are deliberately conservative
+implementation ceilings. They prevent measured image amplification from being
+silently omitted or left to an uncontrolled allocation, but are not added to the
+archive counters and do not model canvas, GPU, decoder, or process overhead.
+Browser-managed SVG/vector storage is count-bounded separately; it cannot be
+reliably expressed as decoded RGBA bytes or explicitly closed by the library.

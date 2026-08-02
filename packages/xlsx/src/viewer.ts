@@ -1,6 +1,6 @@
 import { XlsxWorkbook } from './workbook.js';
 import type { Hyperlink, ViewportRange, Worksheet, XlsxComment } from './types.js';
-import type { FindHighlightColors, HyperlinkTarget, LoadOptions, FindMatch, FindMatchesOptions, ZoomableViewer } from '@silurus/ooxml-core';
+import type { FindHighlightColors, HyperlinkTarget, LoadOptions, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale, anchoredZoomOffset, openExternalHyperlink, nextZoomStep, prevZoomStep, fitScale } from '@silurus/ooxml-core';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
@@ -3563,6 +3563,12 @@ export class XlsxViewer implements ZoomableViewer {
   /** The underlying <canvas> element the grid is drawn on. */
   get canvasElement(): HTMLCanvasElement {
     return this.canvas;
+  }
+
+  /** Latest content-free resource metrics for the loaded workbook. */
+  async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
+    if (!this.wb) throw new Error('Workbook not loaded');
+    return await this.wb.getResourceMetrics();
   }
 
   /**

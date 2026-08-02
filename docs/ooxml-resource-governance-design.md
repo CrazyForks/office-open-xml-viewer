@@ -438,7 +438,10 @@ configurable.
 Resource accounting belongs to a per-document package session, not to parser
 call sites or renderer-specific helpers.
 
-The session records distinct concepts instead of forcing them into one counter:
+The design distinguishes the following concepts instead of forcing them into one
+counter. The public `OoxmlResourceMetrics` snapshot currently reports source
+bytes and package-governor archive counters; items described as hard guards are
+enforced but are not presented as measured heap usage:
 
 - compressed input bytes observed by the loader;
 - central-directory entry count and declared expanded sizes;
@@ -446,9 +449,17 @@ The session records distinct concepts instead of forcing them into one counter:
 - distinct-entry inflated total used by the public session limit;
 - actual inflated bytes per structured part and indivisible parser unit;
 - actual bytes delivered during each operation, counting repeated reads again;
-- high-water serialized/model bytes where they can be measured explicitly;
-- observed WASM linear-memory pages;
-- image and canvas dimensions/pixels before allocation.
+- hard serialized/model projection ceilings at ownership boundaries;
+- the observable WASM failure boundary (not allocator attribution or a stable
+  public linear-memory counter);
+- hard image dimensions, per-image pixels, active/cached decoded RGBA ownership,
+  and decode concurrency before or around browser decoder allocation.
+
+Those decoded-byte guards cover raster/ImageBitmap surfaces. Browser-managed
+SVG/vector parse and decoded storage has neither a portable byte measure nor an
+explicit close primitive. SVG caches are count-bounded and release their object
+URLs and references, but that residual browser allocation cannot be charged to
+the RGBA ownership counter.
 
 Declared ZIP sizes are attacker-controlled. A selected entry declaration above
 its per-entry limit is sufficient for early rejection, but a declaration below
@@ -686,9 +697,13 @@ one report when the document/workbook/presentation factory succeeds or fails,
 including failed loads for which no engine is returned. Viewer constructors use
 that same engine-load scope: the report does not wait for first canvas paint,
 because render errors are non-fatal in the existing Viewer contract and scroll
-viewers paint asynchronously. The report is therefore not a final package-session
-total: first paint or later lazy sheet, slide, image, font, or other part access
-may increase usage or surface a separate render error. Bounded Node DOCX and
+viewers paint asynchronously. The initial callback report is therefore not a
+final package-session total: first paint or later lazy sheet, slide, image,
+font, or other part access may increase usage or surface a separate render
+error. Every successful browser engine and Viewer exposes the same asynchronous
+`getResourceMetrics()` method; it probes the current package governor and
+returns a new immutable snapshot. Collection for that method is always active,
+while `debug` controls only console presentation. Bounded Node DOCX and
 PPTX sessions report successful terminal metrics when their one-pass stream is
 exhausted or the session is explicitly closed. XLSX can consume multiple
 worksheets sequentially, so it reports success only when the reusable workbook

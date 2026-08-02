@@ -6,6 +6,7 @@ use ooxml_common::ns::is_r_ns;
 #[cfg(test)]
 use ooxml_common::package_session::PackageLimitReporter;
 use ooxml_common::package_session::{PackageOperation, PackageSessionHandle};
+use ooxml_common::pull::insufficient_credit_error;
 use ooxml_common::rels::relationship_part_path;
 use ooxml_common::resource::{
     HardResourceLimitKind, ResourceUsage, HARD_MAX_PPTX_BOOTSTRAP_JSON_BYTES,
@@ -701,10 +702,7 @@ impl PptxArchive {
                 return Err("slide unit must be acknowledged before another pull".to_string());
             }
             if prepared.byte_length > byte_credit {
-                return Err(format!(
-                    "slide unit requires {} bytes but credit is {byte_credit}",
-                    prepared.byte_length
-                ));
+                return Err(insufficient_credit_error(prepared.byte_length, byte_credit));
             }
             return Ok(self
                 .prepared_slide
@@ -884,6 +882,19 @@ impl PptxArchive {
             .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
     }
 
+    /// Session-wide archive accounting after bootstrap, slide parsing, or any
+    /// later lazy image/media extraction. Diagnostic only: this is not an
+    /// allocator-memory estimate.
+    pub fn resource_usage(&self) -> Result<Vec<u8>, JsValue> {
+        let usage = self
+            .archive
+            .as_ref()
+            .map(PptxZip::usage)
+            .map_err(|_| JsValue::from_str("pptx resource usage is unavailable"))?;
+        serde_json::to_vec(&usage)
+            .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
+    }
+
     /// Fail cached worker operations after this package session was poisoned.
     pub fn assert_healthy(&self) -> Result<(), JsValue> {
         match &self.archive {
@@ -1046,6 +1057,10 @@ impl PptxZip {
 
     fn assert_healthy(&self) -> Result<(), String> {
         self.session.assert_healthy()
+    }
+
+    fn usage(&self) -> ResourceUsage {
+        self.session.usage()
     }
 
     fn index_for_name(&self, path: &str) -> Option<()> {
@@ -8667,7 +8682,12 @@ mod tests {
         assert!(bootstrap["slides"][0].get("notes").is_none());
 
         let insufficient = archive.pull_slide_inner(2, 7, 3, 1).unwrap_err();
-        assert!(insufficient.contains("requires"));
+        assert!(
+            insufficient.starts_with("OOXML_INSUFFICIENT_CREDIT:")
+                && insufficient.contains("\"code\":\"ooxml-insufficient-credit\"")
+                && insufficient.contains("\"offeredBytes\":1"),
+            "{insufficient}"
+        );
         assert!(archive.acknowledge_slide_inner(7, 3).is_err());
         assert!(archive.prepared_slide.as_ref().unwrap().bytes.is_some());
         let retained_ptr = archive
@@ -9413,7 +9433,12 @@ mod tests {
         assert_eq!(bootstrap["slideCount"], 1);
         assert_eq!(bootstrap["slideWidth"], 12_192_000);
         let bytes = archive.pull_slide_inner(0, 1, 1, 1).unwrap_err();
-        assert!(bytes.contains("requires"));
+        assert!(
+            bytes.starts_with("OOXML_INSUFFICIENT_CREDIT:")
+                && bytes.contains("\"code\":\"ooxml-insufficient-credit\"")
+                && bytes.contains("\"offeredBytes\":1"),
+            "{bytes}"
+        );
         let bytes = archive.pull_slide_inner(0, 1, 1, 1024 * 1024).unwrap();
         let slide: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(slide["index"], 0);

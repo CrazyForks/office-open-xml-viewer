@@ -14,12 +14,14 @@ import {
   decodeDataUrl,
   preloadGoogleFonts,
   WasmParserHost,
-  dropBitmapCacheByPath,
-  dropDuotoneBitmapCache,
+  dropDecodedBitmapCache,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import {
   decodeOoxmlResourceUsage,
+  HARD_MAX_RAW_PART_CACHE_BYTES,
+  HARD_MAX_RAW_PART_CACHE_ENTRIES,
   resourcePolicyForWasm,
   serializeWorkerError,
   type PullSessionCommand,
@@ -63,16 +65,13 @@ let fontsLoaded: Promise<unknown> = Promise.resolve();
 const sheetCache = new Map<number, Worksheet>();
 const sheetCacheUsage = new Map<number, WorksheetModelUsage>();
 let retainedSheetUsage: WorksheetCacheUsage = { rows: 0, cells: 0 };
-// Synchronous-lookup map for the draw pass, keyed by imageCacheKey(path, duotone).
-// A pure lookup layer — the decoded bitmaps are owned by the shared, per-`getImage`
-// core caches; this is refreshed each frame by prefetchImages and dropped (along
-// with those shared caches) on re-parse.
-const imageCache = new Map<string, CanvasImageSource | null>();
 // Fetched image *bytes* (as Blobs) keyed by zip path. Twin of the docx render
-// worker's `imageCache`; kept separate from the decoded-source `imageCache`
-// above. Cleared on re-parse so a reused worker never serves a stale file's
-// image.
-const imageBlobCache = new Map<string, Promise<Blob>>();
+// worker's raw cache. Cleared on re-parse so a reused worker never serves a
+// stale file's image.
+const rawParts = new BoundedRawPartCache({
+  maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
+  maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
+});
 const worksheetPull = new WorksheetPullWorker(
   () => host.archive,
   (sheetIndex, worksheet, resourceUsage) => {
@@ -117,16 +116,12 @@ const post = (msg: RenderWorkerResponse | PullSessionResponse<ArrayBuffer, numbe
  *  read straight from the retained archive with no main-thread round-trip.
  *  Mime travels on the element, so the caller supplies it. */
 function getImage(path: string, mimeType: string): Promise<Blob> {
-  const hit = imageBlobCache.get(path);
-  if (hit) return hit;
-  const p = (async () => {
+  return rawParts.get(path, mimeType, async () => {
     const loaded = host.archive;
     if (!loaded) throw new Error('Workbook not loaded');
     const bytes = host.run(() => loaded.extract_image(path));
     return new Blob([new Uint8Array(bytes).slice()], { type: mimeType });
-  })();
-  imageBlobCache.set(path, p);
-  return p;
+  });
 }
 
 /** Lazily parse one worksheet directly via WASM and cache it — the worker-side
@@ -168,7 +163,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
     return;
   }
   if (req.type === 'init') {
-    host.setWasmUrl(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
+    host.setWasmInput(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
     return;
   }
   const id = req.id;
@@ -214,11 +209,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
       sheetCache.clear();
       sheetCacheUsage.clear();
       retainedSheetUsage = { rows: 0, cells: 0 };
-      imageCache.clear();
-      dropBitmapCacheByPath(getImage);
-      dropDuotoneBitmapCache(getImage);
+      dropDecodedBitmapCache(getImage);
       dropSvgImageCache(getImage);
-      imageBlobCache.clear();
+      rawParts.clear();
       const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
       // Construction + `parse()` run under `host.run` so a trap in EITHER poisons
       // + recycles the instance (and frees the archive). `setArchive` frees any
@@ -251,7 +244,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
       // Worker-side equivalent of the slim worker.ts `parseSheet` arm, so
       // XlsxWorkbook.getWorksheet / resolveValidationList resolve in worker
       // mode instead of hanging forever. Reuses parseSheetLocally (which parses
-      // from the worker's stored rawData and cache); the main-mode message's
+      // from the worker-owned archive and cache); the main-mode message's
       // `sheetName` field is ignored. Reply shape matches worker.ts.
       if (!workbook) throw new Error('Workbook not loaded');
       const worksheet = parseSheetLocally(req.sheetIndex);
@@ -274,11 +267,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
       applySizeOverrides(ws, sizeOverrides);
       const canvas = new OffscreenCanvas(1, 1); // orchestrator resizes it
       await renderWorksheetViewport(
-        { ws, styles: workbook.styles, imageCache },
+        { ws, styles: workbook.styles },
         canvas,
         req.viewport,
         // Supply the in-worker byte loader so embedded images decode straight
-        // from the retained rawData (no main-thread round-trip).
+        // from the retained archive (no main-thread round-trip).
         { ...renderOpts, fetchImage: getImage },
       );
       const bitmap = canvas.transferToImageBitmap();
@@ -295,6 +288,13 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
       const raw = host.run(() => archive.extract_image(req.path));
       const bytes = new Uint8Array(raw).slice().buffer;
       post({ type: 'imageExtracted', id, bytes }, [bytes]);
+      return;
+    }
+    if (req.type === 'resourceUsage') {
+      const archive = host.archive;
+      if (!archive) throw new Error('Workbook not loaded');
+      const usage = host.run(() => decodeOoxmlResourceUsage(archive.resource_usage()));
+      post({ type: 'resourceUsage', id, usage });
       return;
     }
     if (req.type === 'toMarkdown') {

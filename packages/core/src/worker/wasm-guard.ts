@@ -124,19 +124,22 @@ export function isWasmTrap(err: unknown): boolean {
  * decoded to an `ArrayBuffer`/`BufferSource` by the worker first). Kept wide to
  * match the generated glue's `InitInput` without depending on its exact type.
  */
-export type WasmInitInput = string | URL | ArrayBuffer | ArrayBufferView | Response;
+export type WasmInitInput =
+  | string
+  | URL
+  | Request
+  | ArrayBuffer
+  | ArrayBufferView
+  | WebAssembly.Module
+  | Response;
 
-/** Current wasm-bindgen async initialization options. Passing the module input
- * directly remains supported by generated glue for compatibility, but emits a
- * deprecation warning in browsers. */
-interface WasmInitOptions {
+/** Current wasm-bindgen async initialization options. */
+export interface WasmInitOptions {
   readonly module_or_path: WasmInitInput | Promise<WasmInitInput>;
 }
 
-/** How a {@link WasmParserHost} initialises its WASM module. This intentionally
- * keeps the established callback type; the host adapts its invocation to
- * wasm-bindgen's current object form internally. */
-export type WasmInit = (input: WasmInitInput) => Promise<unknown>;
+/** How a {@link WasmParserHost} initialises its WASM module. */
+export type WasmInit = (options: WasmInitOptions) => Promise<unknown>;
 
 /**
  * How a {@link WasmParserHost} REBUILDS its WASM module after a trap. Mirrors the
@@ -152,16 +155,13 @@ export type WasmInit = (input: WasmInitInput) => Promise<unknown>;
  * MUST use `reinit` (not `init`) on the recovery path — see
  * {@link WasmParserHost.ensureReady}.
  */
-export type WasmReinit = (input: WasmInitInput) => Promise<unknown>;
+export type WasmReinit = (options: WasmInitOptions) => Promise<unknown>;
 
 function invokeWasmInitializer(
   initializer: WasmInit | WasmReinit,
   input: WasmInitInput,
 ): Promise<unknown> {
-  // Generated wasm-bindgen functions accept both forms, but the positional
-  // form is deprecated and logs once per new worker. Keep that glue detail at
-  // this boundary instead of leaking it into each DOCX/XLSX/PPTX worker.
-  return (initializer as unknown as (options: WasmInitOptions) => Promise<unknown>)({
+  return initializer({
     module_or_path: input,
   });
 }
@@ -202,7 +202,7 @@ export interface WasmParserHostOptions<TArchive> {
  * ```ts
  * const host = new WasmParserHost<PptxArchive>(init, { freeArchive: (a) => a.free() });
  * // on the init message:
- * host.setWasmUrl(wasmUrl);
+ * host.setWasmInput(wasmUrl);
  * // on a parse message:
  * await host.ensureReady();               // re-inits transparently if poisoned
  * const model = host.run(() => {          // traps → free handle + WasmTrapError
@@ -236,10 +236,15 @@ export class WasmParserHost<TArchive = unknown> {
   /** Record the WASM URL/input and kick off the first `init`. Called once, on
    *  the worker's `init` message. The object form is required by current
    *  wasm-bindgen glue; its legacy positional form logs a browser warning. */
-  setWasmUrl(input: WasmInitInput): void {
+  setWasmInput(input: WasmInitInput): void {
     this._wasmInput = input;
     this._poisoned = false;
     this._initPromise = invokeWasmInitializer(this._init, input);
+  }
+
+  /** @deprecated Use {@link setWasmInput}; inputs are not limited to URLs. */
+  setWasmUrl(input: WasmInitInput): void {
+    this.setWasmInput(input);
   }
 
   /** The archive handle for the current instance, or null when none is open
@@ -287,7 +292,7 @@ export class WasmParserHost<TArchive = unknown> {
   async ensureReady(): Promise<void> {
     if (this._poisoned) {
       if (this._wasmInput === null) {
-        throw new Error('WasmParserHost: setWasmUrl was never called');
+        throw new Error('WasmParserHost: setWasmInput was never called');
       }
       // Recovery MUST use `reinit`, not `init`: wasm-bindgen's `init` returns the
       // cached (poisoned) instance on every later call, so re-`init`-ing recovers
@@ -306,7 +311,7 @@ export class WasmParserHost<TArchive = unknown> {
       return;
     }
     if (this._initPromise === null) {
-      throw new Error('WasmParserHost: setWasmUrl was never called');
+      throw new Error('WasmParserHost: setWasmInput was never called');
     }
     await this._initPromise;
   }

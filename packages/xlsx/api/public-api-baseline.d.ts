@@ -638,6 +638,15 @@ export interface NumFmt {
     numFmtId: number;
     formatCode: string;
 }
+export type OoxmlDecodedImageLimitMetric = 'image-pixels' | 'active-decoded-bytes';
+export class OoxmlDecodedImageLimitError extends RangeError {
+    readonly metric: OoxmlDecodedImageLimitMetric;
+    readonly limit: number;
+    readonly observed: number;
+    readonly code: "ooxml-decoded-image-limit";
+    constructor(metric: OoxmlDecodedImageLimitMetric, limit: number, observed: number);
+}
+export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
 export class OoxmlError extends Error {
     readonly code: OoxmlErrorCode;
     constructor(code: OoxmlErrorCode, message: string);
@@ -1250,6 +1259,7 @@ export class XlsxViewer implements ZoomableViewer {
     fitPage(): void;
     get sheetNames(): string[];
     get canvasElement(): HTMLCanvasElement;
+    getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     destroy(): void;
     private __privatePresence;
 }
@@ -1279,6 +1289,7 @@ export class XlsxWorkbook {
     sheetVisibility(sheetIndex: number): SheetVisibility;
     isHidden(sheetIndex: number): boolean;
     getWorksheet(sheetIndex: number): Promise<Worksheet>;
+    getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     getImage(imagePath: string, mimeType: string): Promise<Blob>;
     toMarkdown(): Promise<string>;
     resolveValidationList(sheetIndex: number, formula1: string | undefined): Promise<ResolvedList>;

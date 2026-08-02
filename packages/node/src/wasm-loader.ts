@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 
 const initializedWasm = new WeakMap<object, unknown>();
 
@@ -26,5 +27,9 @@ export function wasmMemoryPages(jsModule: object): number | undefined {
  *  `wasm-pack build --out-dir ../src/wasm`. */
 export function resolveWasm(metaUrl: string, relPath: string): string {
   const here = dirname(fileURLToPath(metaUrl));
-  return resolve(here, relPath);
+  const workspacePath = resolve(here, relPath);
+  // Source/workspace execution keeps WASM under each format package. The
+  // published `@silurus/ooxml/node` bundle places the same emitted assets next
+  // to node.mjs, so fall back to that sibling without embedding machine paths.
+  return existsSync(workspacePath) ? workspacePath : resolve(here, basename(relPath));
 }

@@ -21,7 +21,8 @@ export interface ApiClass {
 }
 
 const RESOURCE_LIMITS = { name: 'resourceLimits', type: 'OoxmlResourceLimits', def: '128 MiB per entry / 256 MiB distinct total', desc: 'Shared DOCX/XLSX/PPTX inflated-byte budgets. maxArchiveEntryBytes caps each package part; maxTotalInflatedBytes counts the largest amount read from every distinct part in the package session, without charging repeat reads twice. Supply positive safe-integer byte counts, or null to disable one configurable budget (internal hard ceilings remain). Violations reject with OoxmlResourceLimitError. These deterministic counters reduce OOM risk but do not measure or guarantee peak memory.' };
-const RESOURCE_METRICS = { name: 'onResourceMetrics', type: '(metrics: OoxmlResourceMetrics) => void', desc: 'Receives the content-free machine-readable report used by the debug card, without enabling console output. Reports the effective policy, timing checkpoints, format/mode, and success or typed failure discriminants; source bytes and observed archive counters are included when available. Browser reports cover the underlying engine factory, not a Viewer\'s first canvas paint; first paint and later lazy work may increase counters or surface a separate render error. Callback exceptions never change load results.' };
+const RESOURCE_METRICS = { name: 'onResourceMetrics', type: '(metrics: OoxmlResourceMetrics) => void', desc: 'Receives the content-free initial-load report used by the debug card, without enabling console output. It reports the configured public policy, timing checkpoints, format/mode, success or typed failure discriminants, source bytes, and observed archive counters when available. It does not wait for a Viewer\'s first paint. On success, call getResourceMetrics() on the engine or Viewer for a fresh snapshot after lazy package work. Callback exceptions never change load results.' };
+const RESOURCE_METRICS_METHOD = { sig: 'getResourceMetrics(): Promise<OoxmlResourceMetrics>', desc: 'Return a fresh, content-free package-usage snapshot, including lazy archive work observed since load. Collection is always active; debug controls only console output.' };
 const DEBUG = { name: 'debug', type: 'boolean', def: 'false', desc: 'Print one content-free, Ratatui-inspired resource report when the measured load or Node session finishes or fails. Browser DevTools use typography-only %c styling to keep Unicode borders and gauges aligned without changing foreground or background colours; Node and Worker consoles receive one plain argument. Use onResourceMetrics instead for production collection.' };
 const ZIP = { name: 'maxZipEntryBytes', type: 'number', def: 'resource policy default', desc: 'Deprecated compatibility alias for resourceLimits.maxArchiveEntryBytes. New code should use resourceLimits. Existing positive values retain their per-entry meaning; zero / negative values fall back to the standard default.' };
 const GFONTS = { name: 'useGoogleFonts', type: 'boolean', def: 'false', desc: 'Load metric-compatible webfonts and non-Latin script fallbacks (Noto Arabic / CJK KR·SC·TC·JP / Cyrillic / Hebrew / Thai / Devanagari) from Google Fonts so layout matches Office and non-Latin text never falls back to tofu. Off by default for privacy.' };
@@ -103,6 +104,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get visibleSlideCount(): number', desc: 'Number of non-hidden slides (the absolute slideCount is unchanged).' },
         { sig: 'getNotes(slideIndex: number): string | null', desc: 'Speaker-notes text for a slide (0-based); null when the slide has no notes part or the index is out of range.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas.' },
+        RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Tear down the worker and release resources.' },
       ],
     },
@@ -121,6 +123,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get slideWidth(): number', desc: 'Slide width in EMU (0 until loaded).' },
         { sig: 'get slideHeight(): number', desc: 'Slide height in EMU (0 until loaded).' },
         { sig: 'get mode(): "main" | "worker"', desc: 'The render mode this engine was loaded with. An injected engine’s mode decides whether slides render via renderSlide (main) or renderSlideToBitmap (worker).' },
+        RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Release the worker.' },
       ],
     },
@@ -165,6 +168,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'relayout(): void', desc: 'Force a re-fit + re-mount of the visible window. Called automatically after load / resize / zoom; use it when the container resizes in a way a ResizeObserver cannot observe (e.g. a late web-font load). Idempotent.' },
         { sig: 'get slideCount(): number', desc: 'Total slides (0 until loaded).' },
         { sig: 'get topVisibleSlide(): number', desc: 'Index of the top-most visible slide.' },
+        RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Tear down the DOM subtree. Destroys a self-loaded engine; an injected one is left intact.' },
       ],
     },
@@ -205,6 +209,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get pageCount(): number', desc: 'Total pages (0 until loaded).' },
         { sig: 'get currentPage(): number', desc: 'Current page index.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas.' },
+        RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Tear down the worker and release resources.' },
       ],
     },
@@ -220,6 +225,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get mode(): "main" | "worker"', desc: 'The render mode this engine was loaded with. An injected engine’s mode decides whether pages render via renderPage (main) or renderPageToBitmap (worker).' },
         { sig: 'renderPage(canvas, index, opts?: { width?, dpr?, showTrackChanges?, onTextRun? }): Promise<void>', desc: 'Render one page into the given canvas. `onTextRun` receives each segment as `DocxTextRunInfo`, including the authored `w14:paraId` as `paragraphId` when present. Unavailable in `mode: "worker"` — use renderPageToBitmap.' },
         { sig: 'renderPageToBitmap(index, opts?: { width?, dpr?, showTrackChanges?, onTextRun? }): Promise<ImageBitmap>', desc: 'Render one page and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread and returns the same text-run stream beside the bitmap). Equations are skipped in `mode: "worker"` (they require `mode: "main"`). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
+        RESOURCE_METRICS_METHOD,
+        { sig: 'destroy(): void', desc: 'Release the worker.' },
       ],
     },
     {
@@ -262,6 +269,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'relayout(): void', desc: 'Force a re-fit + re-mount of the visible window. Called automatically after load / resize / zoom; use it when the container resizes in a way a ResizeObserver cannot observe (e.g. a late web-font load). Idempotent.' },
         { sig: 'get pageCount(): number', desc: 'Total pages (0 until loaded).' },
         { sig: 'get topVisiblePage(): number', desc: 'Index of the top-most visible page.' },
+        RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Tear down the DOM subtree. Destroys a self-loaded engine; an injected one is left intact.' },
       ],
     },
@@ -314,6 +322,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'setHiddenSheetMode(mode: "show" | "skip" | "dim"): Promise<void>', desc: 'Switch the hidden-sheet mode at runtime: restyle the tabs and re-render. Entering `skip` while on a hidden sheet advances to the nearest visible sheet.' },
         { sig: 'getCellAt(clientX: number, clientY: number): CellAddress | null', desc: 'Hit-test a viewport coordinate to a cell address.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas the grid is drawn on.' },
+        RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Tear down the worker and release resources.' },
       ],
     },
@@ -330,6 +339,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'renderViewport(canvas, sheetIndex, viewport, opts?: { width?, height?, dpr?, cellScale?, onTextRun? }): Promise<void>', desc: 'Render a row/col window of a sheet into the given canvas. `onTextRun` receives each text cell as `XlsxTextRunInfo` with required `sheetName` and A1 `cellRef` identity. Equations in shapes render when a `math` engine was passed to `load`. Unavailable in `mode: "worker"` — use renderViewportToBitmap.' },
         { sig: 'renderViewportToBitmap(sheetIndex, viewport, opts: { width, height, dpr?, cellScale? }): Promise<ImageBitmap>', desc: 'Render a sheet viewport and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread). `width` and `height` are required — a worker has no DOM element to measure. Equations in shapes are skipped in `mode: "worker"` (they require `mode: "main"`). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
         { sig: 'resolveValidationList(sheetIndex, formula1): Promise<ResolvedList>', desc: 'Resolve a list-type data-validation `formula1` (ECMA-376 §18.3.1.32) into the allowed values to display — inline quoted list, a range reference (each cell’s display string), or `{ kind: \'formula\' }` for named ranges. Read-only.' },
+        RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Release the worker.' },
       ],
     },

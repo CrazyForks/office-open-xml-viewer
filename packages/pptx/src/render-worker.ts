@@ -7,22 +7,22 @@ import {
   type PresentationPreflight,
 } from './presentation-preflight';
 import { PptxSlideRepository } from './slide-repository';
-import { loadPptxSlideFromCursor } from './slide-cursor-operation';
+import { loadPptxSlideFromCursor, readPptxSlideCursorUsage } from './slide-cursor-operation';
 import { SlidePullWorker } from './slide-pull-worker';
 import {
   preloadGoogleFonts,
   decodeDataUrl,
   WasmParserHost,
-  dropBitmapCacheByPath,
-  dropDuotoneBitmapCache,
+  dropDecodedBitmapCache,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
+  decodeOoxmlResourceUsage,
   HARD_MAX_PPTX_CACHED_SLIDES,
   HARD_MAX_PPTX_CACHED_SLIDE_PROJECTION_BYTES,
-  HARD_MAX_PPTX_RAW_PART_CACHE_BYTES,
-  HARD_MAX_PPTX_RAW_PART_CACHE_ENTRIES,
+  HARD_MAX_RAW_PART_CACHE_BYTES,
+  HARD_MAX_RAW_PART_CACHE_ENTRIES,
   resourcePolicyForWasm,
   serializeWorkerError,
 } from '@silurus/ooxml-core/worker';
@@ -60,8 +60,8 @@ let presentationState: PresentationLifecycleState = 'empty';
 let fontsLoaded: Promise<unknown> = Promise.resolve();
 let resourceUsage: OoxmlResourceUsageSnapshot | undefined;
 const rawParts = new BoundedRawPartCache({
-  maxEntries: HARD_MAX_PPTX_RAW_PART_CACHE_ENTRIES,
-  maxBytes: HARD_MAX_PPTX_RAW_PART_CACHE_BYTES,
+  maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
+  maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
 });
 
 function reservePresentationParse(): void {
@@ -129,8 +129,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   generation += 1;
   nextOperationId = 1;
   rawParts.clear();
-  dropBitmapCacheByPath(getImage);
-  dropDuotoneBitmapCache(getImage);
+  dropDecodedBitmapCache(getImage);
   dropSvgImageCache(getImage);
   fontsLoaded = Promise.resolve();
   resourceUsage = undefined;
@@ -176,7 +175,7 @@ function executeArchiveFromNew(
 self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
   const request = event.data;
   if (request.kind === 'init') {
-    host.setWasmUrl(decodeDataUrl(request.wasmUrl) ?? request.wasmUrl);
+    host.setWasmInput(decodeDataUrl(request.wasmUrl) ?? request.wasmUrl);
     return;
   }
 
@@ -258,6 +257,13 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
       const mimeType = findPreflightMimeType(compact, request.path);
       const bytes = await (await getImage(request.path, mimeType)).arrayBuffer();
       post({ kind: 'imageExtracted', id: request.id, bytes }, [bytes]);
+      return;
+    }
+    if (request.kind === 'resourceUsage') {
+      const usage = decodeOoxmlResourceUsage(executeArchive(
+        (archive) => archive.resource_usage(),
+      ));
+      post({ kind: 'resourceUsage', id: request.id, usage });
       return;
     }
 

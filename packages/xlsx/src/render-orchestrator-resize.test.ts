@@ -105,7 +105,6 @@ function deps(): RenderDeps {
   return {
     ws: emptyWorksheet(),
     styles: { fonts: [], fills: [], borders: [], cellXfs: [], numFmts: {} } as unknown as ParsedWorkbook['styles'],
-    imageCache: new Map(),
   };
 }
 

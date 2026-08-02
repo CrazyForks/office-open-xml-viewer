@@ -1,5 +1,5 @@
 import { computeVisibleRange, openExternalHyperlink, PT_TO_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type VisibleRange } from '@silurus/ooxml-core';
-import type { FindHighlightColors, FindMatch, FindMatchesOptions, HyperlinkTarget, ZoomableViewer } from '@silurus/ooxml-core';
+import type { FindHighlightColors, FindMatch, FindMatchesOptions, HyperlinkTarget, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
 import { DocxDocument } from './document';
 import type { LoadOptions } from './document';
 import type { DocxTextRunInfo } from './renderer';
@@ -1730,6 +1730,12 @@ export class DocxScrollViewer implements ZoomableViewer {
     const r = this._range();
     const contentY = (r.offsets[page] ?? 0) + frac * (this._heights[page] || 0);
     return contentY - this._scrollHost.scrollTop;
+  }
+
+  /** Return the owning engine's latest content-free package-usage snapshot. */
+  async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
+    if (!this._doc) throw new Error('Document not loaded');
+    return await this._doc.getResourceMetrics();
   }
 
   /**

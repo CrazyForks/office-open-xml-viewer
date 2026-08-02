@@ -28,7 +28,10 @@ export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core
 // `@silurus/ooxml/pptx` consumers can narrow on `err.code`.
 export {
   OoxmlError,
+  OoxmlDecodedImageLimitError,
   OoxmlResourceLimitError,
+  isOoxmlDecodedImageLimitError,
+  type OoxmlDecodedImageLimitMetric,
   type OoxmlErrorCode,
   type OoxmlErrorSource,
   type OoxmlErrorStage,

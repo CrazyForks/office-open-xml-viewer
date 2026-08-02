@@ -70,7 +70,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
   }
 
   if (req.type === 'init') {
-    host.setWasmUrl(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
+    host.setWasmInput(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
     return;
   }
 

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import {
   WorkerBridge,
   preloadGoogleFonts,
@@ -97,8 +98,7 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     // Fields destroy() clears after terminate(); undefined would throw.
     instance.sheetCache = new Map();
     instance.sheetLoads = new Map();
-    instance.imageCache = new Map();
-    instance.imageBlobCache = new Map();
+    instance.rawParts = new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 });
     instance.googleFontFaces = [];
     instance._fetchImage = () => Promise.resolve(new Blob());
     return { wb: instance as unknown as DestroyProbe, bridge, worker };
@@ -198,14 +198,11 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
 
 /**
  * After #781 the decoded bitmaps are owned by the shared, per-`_fetchImage` core
- * caches (base raster via getCachedBitmapByPath, `<a:duotone>` recolour via
- * getCachedDuotoneBitmapByPath), NOT by the per-instance `imageCache` lookup map.
- * `destroy()` must therefore drop those shared caches — a bare `imageCache.clear()`
- * would drop only lookup references and leak the GPU backing until GC (which is
- * not guaranteed to run promptly for GPU-backed objects). This is the same
- * teardown discipline #779 fixed, expressed through the shared cache the way
- * docx/pptx do. Pins the wiring: after a decode has landed in the shared caches
- * keyed by the instance's `_fetchImage`, destroy() closes those bitmaps.
+ * decoded owner (base raster plus `<a:duotone>` derivatives), not by a
+ * workbook-lifetime lookup map. Viewport lookup is frame-local. `destroy()` must
+ * drop that shared owner so GPU-backed objects are released promptly. This is
+ * the same teardown discipline #779 fixed, expressed through the shared cache
+ * the way docx/pptx do.
  */
 describe('XlsxWorkbook.destroy() — drops the shared image caches (GPU-leak guard)', () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -217,11 +214,10 @@ describe('XlsxWorkbook.destroy() — drops the shared image caches (GPU-leak gua
     instance.bridge = bridge;
     instance.sheetCache = new Map();
     instance.sheetLoads = new Map();
-    instance.imageCache = new Map();
-    instance.imageBlobCache = new Map();
+    instance.rawParts = new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 });
     instance.googleFontFaces = [];
     instance._fetchImage = fetchImage;
-    return instance as unknown as DestroyProbe & { imageCache: Map<string, unknown> };
+    return instance as unknown as DestroyProbe;
   }
 
   /** An offscreen surface for the duotone pixel pass in node (no OffscreenCanvas). */
@@ -241,7 +237,7 @@ describe('XlsxWorkbook.destroy() — drops the shared image caches (GPU-leak gua
     })) as unknown as OffscreenFactory;
   }
 
-  it('closes a base ImageBitmap decoded into the shared cache and empties the lookup map', async () => {
+  it('closes a base ImageBitmap decoded into the shared owner', async () => {
     const close = vi.fn();
     vi.stubGlobal(
       'createImageBitmap',
@@ -253,13 +249,10 @@ describe('XlsxWorkbook.destroy() — drops the shared image caches (GPU-leak gua
     const wb = makeWorkbook(fetchImage);
     // Warm the shared cache the same way prefetchImages does — keyed by _fetchImage.
     await getCachedBitmapByPath('xl/media/image1.png', 'image/png', fetchImage);
-    wb.imageCache.set('xl/media/image1.png', {});
-
     wb.destroy();
     await flush(); // the drop closes through the settled promise (a microtask)
 
     expect(close).toHaveBeenCalledTimes(1); // dropBitmapCacheByPath closed it
-    expect(wb.imageCache.size).toBe(0);
   });
 
   it('closes a duotone recolour decoded into the shared duotone cache', async () => {

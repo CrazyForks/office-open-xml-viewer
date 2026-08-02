@@ -6,7 +6,10 @@ export type OoxmlResourceLimit = number | null;
 
 /** Admission limits for the inflated contents of one OOXML package session. */
 export interface OoxmlResourceLimits {
-  /** Maximum actual inflated bytes for any one archive entry, including media. */
+  /**
+   * Maximum permitted inflated size for any one archive entry, including
+   * media. Enforced against both the ZIP declaration and actual output.
+   */
   maxArchiveEntryBytes?: OoxmlResourceLimit;
   /** Maximum actual inflated bytes across distinct entries in the session. */
   maxTotalInflatedBytes?: OoxmlResourceLimit;
@@ -99,10 +102,10 @@ export interface LoadOptions {
    */
   debug?: boolean;
   /**
-   * Receive the same content-free, machine-readable report that powers the debug
-   * card, without enabling console output. After resource options validate, the
-   * callback runs once when the current load settles, including failed loads for
-   * which no renderer instance is returned. The callback is not awaited;
+   * Receive the initial content-free, machine-readable report that powers the
+   * debug card, without enabling console output. After resource options validate,
+   * the callback runs once when the current load settles, including failed loads
+   * for which no renderer instance is returned. The callback is not awaited;
    * synchronous exceptions and rejected promises are ignored and never change
    * load results.
    *
@@ -110,7 +113,9 @@ export interface LoadOptions {
    * factory. It does not wait for a Viewer's first canvas paint; that paint and
    * later lazy worksheet, slide, image, or media access may increase counters or
    * surface a separate render error. Successfully opened packages include the
-   * declared package total and source byte size in the report.
+   * declared package total and source byte size in the report. On a successful
+   * load, call `getResourceMetrics()` on the returned engine or Viewer for a fresh
+   * snapshot that includes subsequently observed lazy package work.
    */
   onResourceMetrics?: (metrics: OoxmlResourceMetrics) => void;
   /**

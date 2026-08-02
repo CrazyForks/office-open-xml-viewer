@@ -11,6 +11,7 @@ import {
   type FindHighlightColors,
   type FindMatch,
   type FindMatchesOptions,
+  type OoxmlResourceMetrics,
   type ZoomableViewer,
   EMU_PER_PX,
   openExternalHyperlink,
@@ -693,6 +694,12 @@ export class PptxViewer implements ZoomableViewer {
     const e = err instanceof Error ? err : new Error(String(err));
     if (this.opts.onError) this.opts.onError(e);
     else console.error('[ooxml] PptxViewer render failed:', e);
+  }
+
+  /** Latest content-free resource metrics for the loaded presentation. */
+  async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
+    if (!this.engine) throw new Error('Presentation not loaded');
+    return await this.engine.getResourceMetrics();
   }
 
   /**

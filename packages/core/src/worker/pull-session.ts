@@ -5,11 +5,13 @@ import {
   serializeWorkerError,
   type WorkerErrorPayload,
 } from './error-wire.js';
+import {
+  isPullSessionInsufficientCreditError,
+} from './pull-credit-error.js';
+export { PULL_SESSION_INSUFFICIENT_CREDIT_CODE } from './pull-credit-error.js';
 
 export const DEFAULT_PULL_CANCEL_GRACE_MS = 1_000;
 export const PULL_SESSION_PROTOCOL = 'ooxml-pull-v1' as const;
-/** A pull unit exists but cannot be split to fit the offered byte credit. */
-export const PULL_SESSION_INSUFFICIENT_CREDIT_CODE = 'ooxml-insufficient-credit' as const;
 
 export type PullSessionKey = string | number;
 
@@ -170,7 +172,7 @@ export class BoundedPullSession<
       // An indivisible format unit may be retried with more credit using the
       // same sequence and operation identity. Every other failure converges on
       // cancellation because its ownership state is not known to be reusable.
-      if (!isInsufficientCreditError(error) && !this.ending && !this.completed) {
+      if (!isPullSessionInsufficientCreditError(error) && !this.ending && !this.completed) {
         void this.cancel('protocol-error').catch(() => undefined);
       }
       throw error;
@@ -405,11 +407,6 @@ export class BoundedPullSession<
       // Transfer cleanup is best-effort and independent of worker lease state.
     }
   }
-}
-
-function isInsufficientCreditError(error: unknown): boolean {
-  return !!error && typeof error === 'object' &&
-    (error as { code?: unknown }).code === PULL_SESSION_INSUFFICIENT_CREDIT_CODE;
 }
 
 export interface PullSessionHostChunk<TPayload> {

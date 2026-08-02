@@ -106,6 +106,9 @@ export default defineConfig(({ command }) => ({
         // Opt-in math engine (MathJax + STIX Two Math). Separate entry so the
         // ~3 MB asset stays out of the docx/pptx bundles unless imported.
         math:  resolve(__dirname, 'src/math.ts'),
+        // Node-only bounded sessions and server render helpers. Kept as a
+        // separate entry so browser consumers never load Node built-ins.
+        node:  resolve(__dirname, 'src/node.ts'),
       },
       // ESM-only: the published bundle inlines a large math engine; emitting a
       // duplicate CJS copy of every chunk roughly doubled the package size.
@@ -118,6 +121,7 @@ export default defineConfig(({ command }) => ({
           : `${name}.mjs`,
     },
     rollupOptions: {
+      external: [/^node:/, 'skia-canvas'],
       output: {
         assetFileNames: '[name][extname]',
         chunkFileNames: (chunk) =>

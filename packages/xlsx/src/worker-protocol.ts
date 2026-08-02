@@ -74,19 +74,20 @@ export type RenderWorkerRequest =
   // `parseSheet` lets worker-mode XlsxWorkbook.getWorksheet (and the
   // resolveValidationList range path that awaits it) work, mirroring how the
   // pptx render worker handles `extractMedia` for getMedia. The render worker
-  // already holds `rawData` + `workbook` from `parse`, so only `sheetIndex` is
+  // already owns the parsed archive + `workbook` from `parse`, so only `sheetIndex` is
   // load-bearing here; `sheetName` is carried for shape-compat with the
   // main-mode message getWorksheet posts but is ignored (the worker derives the
   // sheet name from its own `workbook`). No `data`: like main-mode `parseSheet`,
-  // the buffer retained at `parse` is reused — never re-sent per sheet.
+  // the archive retained at `parse` is reused — source bytes are never re-sent per sheet.
   | { type: 'parseSheet'; id: number; sheetIndex: number; sheetName?: string }
   | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } & PullSessionIdentity<number>)
   | { type: 'renderViewport'; id: number; sheetIndex: number; viewport: ViewportRange; opts: WireRenderViewportOptions }
   // Worker render mode decodes images in-worker via a getImage closure; this arm
   // exists only for protocol parity with worker.ts (so a stray extractImage
   // never hangs). The render worker reads bytes straight from its retained
-  // rawData.
+  // archive.
   | { type: 'extractImage'; id: number; path: string }
+  | { type: 'resourceUsage'; id: number }
   | { type: 'toMarkdown'; id: number };
 
 export type RenderWorkerResponse =

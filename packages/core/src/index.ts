@@ -146,24 +146,30 @@ export { drawArrowHead, lineEndRetract, retractLineEndpoint } from './shape/arro
 // three renderers to prefer the vector original over the raster fallback.
 // Path-keyed for the lazy byte-on-demand pipeline: fetches SVG bytes via a
 // caller-supplied fetchImage(path, mimeType) and owns the object-URL lifecycle.
-export { getCachedSvgImageByPath, dropSvgImageCache } from './image/svg-image-by-path';
-// Sibling of the SVG cache for raster/metafile blips: a per-document (keyed by
-// `fetchImage`), path-keyed LRU of decoded `ImageBitmap`s shared by all three
-// renderers, so a picture is decoded once per document and reused across
-// re-renders / page revisits instead of re-decoding every frame. `peek…` serves
-// the synchronous picture-bullet draw; `drop…` closes a document's bitmaps on
-// its viewer's `destroy()`.
+export {
+  getCachedSvgImageByPath,
+  dropSvgImageCache,
+  type SvgImageSource,
+} from './image/svg-image-by-path';
+// Shared per-document decoded-raster owner: one weighted LRU, decode gate and
+// render-pass lease covers base blips, media posters, and derived effects across
+// all three renderers. `fetchImage` remains the compatibility owner by default,
+// while the general primitive accepts an explicit document owner object.
 // `acquireBitmapCacheLease` pins a render pass's decoded bitmaps: while held,
 // LRU evictions / drops defer their GPU close to the last release, so a pass
 // resolving more images than the cap never draws a closed bitmap.
-// `deferBitmapCloseWhileLeased` is for sibling PER-DOCUMENT bitmap caches (e.g.
-// docx's a:clrChange recolour layer) so their drops honor the same lease.
 export {
+  dropCachedDerivedBitmapNamespace,
   getCachedBitmapByPath,
+  getCachedDecodedBitmap,
+  getCachedDerivedBitmap,
   peekCachedBitmapByPath,
+  dropDecodedBitmapCache,
+  releaseOwnedBitmap,
   dropBitmapCacheByPath,
   acquireBitmapCacheLease,
   deferBitmapCloseWhileLeased,
+  type DecodedBitmapCacheOwner,
   type CachedBitmapOptions,
 } from './image/bitmap-image-by-path';
 // Shared WMF (Windows Metafile) player + the raster/metafile decoder all three
@@ -184,7 +190,15 @@ export {
 // Raster pixel-dimension budget + header sniff (decode-bomb guard, RB1). Shared
 // caps live in `./image/pixel-budget`; `decodeRasterOrMetafile` uses the sniff to
 // refuse an over-budget PNG/JPEG/GIF/BMP/WEBP before `createImageBitmap`.
-export { MAX_RASTER_DIMENSION, MAX_RASTER_PIXELS } from './image/pixel-budget';
+export {
+  MAX_CONCURRENT_IMAGE_DECODES,
+  MAX_DECODED_IMAGE_BYTES,
+  MAX_RASTER_DIMENSION,
+  MAX_RASTER_PIXELS,
+  OoxmlDecodedImageLimitError,
+  isOoxmlDecodedImageLimitError,
+  type OoxmlDecodedImageLimitMetric,
+} from './image/pixel-budget';
 export {
   sniffRasterDimensions,
   rasterExceedsBudget,
@@ -361,6 +375,7 @@ export {
   isWasmTrap,
   type WasmTrapErrorCode,
   type WasmInit,
+  type WasmInitOptions,
   type WasmReinit,
   type WasmInitInput,
   type WasmParserHostOptions,

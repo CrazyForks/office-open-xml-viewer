@@ -1,6 +1,7 @@
 import { OoxmlResourceLimitError, type OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
   decodeOoxmlResourceUsage,
+  exactTransferableArrayBuffer,
   PULL_SESSION_PROTOCOL,
   PullSessionHost,
   PullSessionHostCoordinator,
@@ -133,10 +134,7 @@ export class WorksheetPullWorker {
               }
             }
             terminalPending = done;
-            const payload =
-              bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-                ? bytes.buffer as ArrayBuffer
-                : bytes.slice().buffer as ArrayBuffer;
+            const payload = exactTransferableArrayBuffer(bytes);
             return { payload, byteLength: payload.byteLength, done, transfer: [payload] };
           },
           measureChunk: ({ payload }) => payload.byteLength,

@@ -66,6 +66,10 @@ describe('PptxSlidePullClient', () => {
             message: `slide unit requires ${required} bytes but credit is ${PPTX_INITIAL_SLIDE_PULL_BYTES}`,
             errorName: 'RangeError',
             code: PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
+            insufficientCredit: {
+              requiredBytes: required,
+              offeredBytes: PPTX_INITIAL_SLIDE_PULL_BYTES,
+            },
           },
         });
       }

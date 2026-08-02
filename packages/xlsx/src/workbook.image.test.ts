@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { XlsxWorkbook } from './workbook';
 import type { WorkerRequest } from './types';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 
 /**
  * `XlsxWorkbook.getImage(path, mime)` routes through the persistent worker via
@@ -30,7 +31,7 @@ describe('XlsxWorkbook.getImage', () => {
     // intersecting the class's private members.
     const instance = Object.create(XlsxWorkbook.prototype) as Record<string, unknown>;
     instance.bridge = { request };
-    instance.imageBlobCache = new Map<string, Promise<Blob>>();
+    instance.rawParts = new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 });
     const wb = instance as unknown as GetImageProbe;
     return { wb, request, instance };
   }

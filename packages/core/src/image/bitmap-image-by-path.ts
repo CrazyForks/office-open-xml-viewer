@@ -32,12 +32,19 @@
 //      — never by holding a raw bitmap reference — so a still-in-flight decode is
 //      closed only once it resolves, and a draw already in progress is never
 //      handed a closed bitmap.
-// `dropBitmapCacheByPath` closes every live bitmap the same way (through the
-// promise), for prompt release on the owning viewer's `destroy()`.
+// `dropDecodedBitmapCache` closes every base and derived surface the same way
+// (through the promise), for prompt release on the owning viewer's `destroy()`.
 
 import { decodeRasterOrMetafile } from './wmf';
+import { closeImageBitmapIfSupported } from './image-bitmap-lifecycle.js';
+import { withDecodedImageSlot } from './decode-gate.js';
+import {
+  MAX_DECODED_IMAGE_BYTES,
+  OoxmlDecodedImageLimitError,
+} from './pixel-budget.js';
 
 type FetchImage = (path: string, mime: string) => Promise<Blob>;
+export type DecodedBitmapCacheOwner = object;
 
 const IMAGE_BITMAP_CACHE_MAX = 256;
 
@@ -51,17 +58,28 @@ const IMAGE_BITMAP_CACHE_MAX = 256;
 // The decode can resolve to `null` for a metafile we can't rasterize (a true
 // EMF, or a WMF with no drawable geometry); the null is cached (avoiding a
 // re-fetch+re-sniff every frame) and the draw sites skip a null bitmap.
-type BitmapCacheEntry = { promise: Promise<ImageBitmap | null>; bitmap?: ImageBitmap | null };
+type BitmapCacheEntry = {
+  promise: Promise<ImageBitmap | null>;
+  /** Resolves only the surface this entry owns; pass-through results resolve null. */
+  ownedPromise: Promise<ImageBitmap | null>;
+  bitmap?: ImageBitmap | null;
+  weight: number;
+};
 
-const bitmapCacheByFetch = new WeakMap<FetchImage, Map<string, BitmapCacheEntry>>();
+interface BitmapCacheState {
+  readonly entries: Map<string, BitmapCacheEntry>;
+  retainedBytes: number;
+}
 
-function bitmapCacheFor(fetchImage: FetchImage): Map<string, BitmapCacheEntry> {
-  let cache = bitmapCacheByFetch.get(fetchImage);
-  if (!cache) {
-    cache = new Map();
-    bitmapCacheByFetch.set(fetchImage, cache);
+const bitmapCacheByFetch = new WeakMap<DecodedBitmapCacheOwner, BitmapCacheState>();
+
+function bitmapCacheFor(owner: DecodedBitmapCacheOwner): BitmapCacheState {
+  let state = bitmapCacheByFetch.get(owner);
+  if (!state) {
+    state = { entries: new Map(), retainedBytes: 0 };
+    bitmapCacheByFetch.set(owner, state);
   }
-  return cache;
+  return state;
 }
 
 // ── Render-pass leases ────────────────────────────────────────────────────────
@@ -89,9 +107,11 @@ interface BitmapCacheLeaseState {
   count: number;
   /** Closes deferred while leased; executed at the last release. */
   deferred: Array<Promise<ImageBitmap | null>>;
+  activeBytes: number;
+  activeBitmaps: WeakSet<ImageBitmap>;
 }
 
-const leasesByFetch = new WeakMap<FetchImage, BitmapCacheLeaseState>();
+const leasesByFetch = new WeakMap<DecodedBitmapCacheOwner, BitmapCacheLeaseState>();
 
 // Every GPU close this module (and the sibling per-document caches routing
 // through {@link deferBitmapCloseWhileLeased}) performs is funneled through
@@ -105,7 +125,13 @@ const closedBitmaps = new WeakSet<ImageBitmap>();
 function closeBitmapOnce(bmp: ImageBitmap | null | undefined): void {
   if (!bmp || closedBitmaps.has(bmp)) return;
   closedBitmaps.add(bmp);
-  bmp.close();
+  closeImageBitmapIfSupported(bmp);
+}
+
+/** Release a document-owned decoded surface once. Browser ImageBitmap exposes
+ * `close()`; Node canvas backends may rely on native GC and omit it. */
+export function releaseOwnedBitmap(bitmap: ImageBitmap | null | undefined): void {
+  closeBitmapOnce(bitmap);
 }
 
 /**
@@ -117,11 +143,11 @@ function closeBitmapOnce(bmp: ImageBitmap | null | undefined): void {
  * (concurrent passes over the same document each take one); the release
  * function is idempotent.
  */
-export function acquireBitmapCacheLease(fetchImage: FetchImage): () => void {
-  let state = leasesByFetch.get(fetchImage);
+export function acquireBitmapCacheLease(owner: DecodedBitmapCacheOwner): () => void {
+  let state = leasesByFetch.get(owner);
   if (!state) {
-    state = { count: 0, deferred: [] };
-    leasesByFetch.set(fetchImage, state);
+    state = { count: 0, deferred: [], activeBytes: 0, activeBitmaps: new WeakSet() };
+    leasesByFetch.set(owner, state);
   }
   const s = state;
   s.count++;
@@ -135,8 +161,50 @@ export function acquireBitmapCacheLease(fetchImage: FetchImage): () => void {
     // bitmap reference) so a still-in-flight decode closes only once it resolves.
     for (const p of s.deferred) p.then((b) => closeBitmapOnce(b)).catch(() => {});
     s.deferred = [];
-    leasesByFetch.delete(fetchImage);
+    s.activeBytes = 0;
+    s.activeBitmaps = new WeakSet();
+    leasesByFetch.delete(owner);
   };
+}
+
+function bitmapWeight(bitmap: ImageBitmap | null): number {
+  if (!bitmap) return 0;
+  const width = Number(bitmap.width);
+  const height = Number(bitmap.height);
+  return Number.isSafeInteger(width) && width > 0
+    && Number.isSafeInteger(height) && height > 0
+    ? width * height * 4
+    : 0;
+}
+
+function registerActiveBitmap(owner: DecodedBitmapCacheOwner, bitmap: ImageBitmap | null): void {
+  if (!bitmap) return;
+  const lease = leasesByFetch.get(owner);
+  if (!lease || lease.count === 0 || lease.activeBitmaps.has(bitmap)) return;
+  const observed = lease.activeBytes + bitmapWeight(bitmap);
+  if (observed > MAX_DECODED_IMAGE_BYTES) {
+    throw new OoxmlDecodedImageLimitError(
+      'active-decoded-bytes',
+      MAX_DECODED_IMAGE_BYTES,
+      observed,
+    );
+  }
+  lease.activeBitmaps.add(bitmap);
+  lease.activeBytes = observed;
+}
+
+function evictOldest(
+  owner: DecodedBitmapCacheOwner,
+  state: BitmapCacheState,
+  protectedKey?: string,
+): boolean {
+  const candidate = [...state.entries].find(([key]) => key !== protectedKey);
+  if (!candidate) return false;
+  const [key, entry] = candidate;
+  state.entries.delete(key);
+  state.retainedBytes -= entry.weight;
+  deferBitmapCloseWhileLeased(owner, entry.ownedPromise);
+  return true;
 }
 
 /**
@@ -144,16 +212,18 @@ export function acquireBitmapCacheLease(fetchImage: FetchImage): () => void {
  * pass currently holds a lease on the document (see
  * {@link acquireBitmapCacheLease}), defer the close to the last lease release so
  * the pass never draws a closed bitmap. Shared by this module's LRU eviction and
- * drop paths and by the sibling per-document caches (core duotone, docx
- * clrChange) whose drops are the only closes they perform. Closes are
+ * drop paths and by every derived namespace sharing the same owner. Closes are
  * deduplicated per bitmap (see {@link closeBitmapOnce}), so two layers that
  * resolve to the same bitmap close it exactly once.
+ *
+ * @deprecated Compatibility helper for former sibling caches. New decoded
+ * surfaces belong in `getCachedDecodedBitmap` / `getCachedDerivedBitmap`.
  */
 export function deferBitmapCloseWhileLeased(
-  fetchImage: FetchImage,
+  owner: DecodedBitmapCacheOwner,
   promise: Promise<ImageBitmap | null>,
 ): void {
-  const lease = leasesByFetch.get(fetchImage);
+  const lease = leasesByFetch.get(owner);
   if (lease && lease.count > 0) {
     lease.deferred.push(promise);
     return;
@@ -176,6 +246,126 @@ export interface CachedBitmapOptions {
   suppressBoundaryFrame?: boolean;
 }
 
+interface ProducedBitmap {
+  readonly bitmap: ImageBitmap | null;
+  /** False when the result is a borrowed pass-through surface. */
+  readonly owned: boolean;
+}
+
+function getCachedOwnedBitmap(
+  key: string,
+  owner: DecodedBitmapCacheOwner,
+  produce: () => Promise<ProducedBitmap>,
+): Promise<ImageBitmap | null> {
+  const state = bitmapCacheFor(owner);
+  const cache = state.entries;
+  const existing = cache.get(key);
+  if (existing) {
+    cache.delete(key);
+    cache.set(key, existing);
+    return existing.promise.then((bitmap) => {
+      registerActiveBitmap(owner, bitmap);
+      return bitmap;
+    });
+  }
+
+  const produced = withDecodedImageSlot(owner, produce);
+  const ownedPromise = produced.then(({ bitmap, owned }) => (owned ? bitmap : null));
+  const promise = produced.then(({ bitmap, owned }) => {
+    try {
+      registerActiveBitmap(owner, bitmap);
+      return bitmap;
+    } catch (error) {
+      if (owned) closeBitmapOnce(bitmap);
+      throw error;
+    }
+  });
+  const entry: BitmapCacheEntry = { promise, ownedPromise, weight: 0 };
+
+  void produced
+    .then(({ bitmap, owned }) => {
+      if (cache.get(key) !== entry) return;
+      entry.bitmap = bitmap;
+      if (!owned) {
+        // A borrowed base bitmap remains owned by its base entry. Keeping a
+        // second entry would outlive base eviction and could serve a closed
+        // surface, so only concurrent in-flight callers share it.
+        cache.delete(key);
+        return;
+      }
+      entry.weight = bitmapWeight(bitmap);
+      state.retainedBytes += entry.weight;
+      while (state.retainedBytes > MAX_DECODED_IMAGE_BYTES) {
+        if (!evictOldest(owner, state, key)) break;
+      }
+    })
+    .catch(() => {});
+  promise.catch(() => {
+    if (cache.get(key) !== entry) return;
+    cache.delete(key);
+    state.retainedBytes -= entry.weight;
+    deferBitmapCloseWhileLeased(owner, ownedPromise);
+  });
+  cache.set(key, entry);
+  while (cache.size > IMAGE_BITMAP_CACHE_MAX) {
+    if (!evictOldest(owner, state, key)) break;
+  }
+  return promise;
+}
+
+const BASE_CACHE_NAMESPACE = 'base';
+const BASE_CACHE_PREFIX = `${BASE_CACHE_NAMESPACE}:`;
+const DERIVED_CACHE_PREFIX = 'derived:';
+
+/** General document-owned decoded-surface primitive. Loader choice is separate
+ * from the owner token; callers sharing a namespace/key dedupe regardless of
+ * whether bytes came from an image or media extraction API. */
+export function getCachedDecodedBitmap(
+  namespace: string,
+  cacheKey: string,
+  owner: DecodedBitmapCacheOwner,
+  create: () => Promise<{ bitmap: ImageBitmap | null; owned: boolean }>,
+): Promise<ImageBitmap | null> {
+  return getCachedOwnedBitmap(`${namespace}:${cacheKey}`, owner, create);
+}
+
+/**
+ * Cache a document-owned derived bitmap under the same weighted LRU,
+ * decode-concurrency gate, render-pass lease and aggregate byte ceiling as its
+ * source bitmap. `create` may return the source bitmap unchanged; such a
+ * borrowed result is shared only while in flight and is never closed here.
+ */
+export function getCachedDerivedBitmap(
+  namespace: string,
+  cacheKey: string,
+  owner: DecodedBitmapCacheOwner,
+  create: () => Promise<{ bitmap: ImageBitmap | null; owned: boolean }>,
+): Promise<ImageBitmap | null> {
+  return getCachedDecodedBitmap(
+    `${DERIVED_CACHE_PREFIX}${namespace}`,
+    cacheKey,
+    owner,
+    create,
+  );
+}
+
+/** Drop one derived-surface namespace without disturbing base blips or sibling
+ * transformations. Used by format teardown methods retained for compatibility. */
+export function dropCachedDerivedBitmapNamespace(
+  owner: DecodedBitmapCacheOwner,
+  namespace: string,
+): void {
+  const state = bitmapCacheByFetch.get(owner);
+  if (!state) return;
+  const prefix = `${DERIVED_CACHE_PREFIX}${namespace}:`;
+  for (const [key, entry] of state.entries) {
+    if (!key.startsWith(prefix)) continue;
+    state.entries.delete(key);
+    state.retainedBytes -= entry.weight;
+    deferBitmapCloseWhileLeased(owner, entry.ownedPromise);
+  }
+}
+
 /**
  * Decode a raster-or-metafile blip at `imagePath` to an `ImageBitmap`, cached per
  * document (keyed by `fetchImage`) then by path. The bytes are fetched lazily
@@ -190,10 +380,10 @@ export interface CachedBitmapOptions {
  * the picture instead of crashing — the `null` is cached too, so the draw skips
  * it without a re-fetch+re-sniff every frame.
  *
- * LRU(256); evicted bitmaps are `.close()`d (through their promise) to release
- * their GPU backing. The returned promise rejects (and the entry self-evicts, so
- * the next call retries fresh) only on a transient fetch/decode failure —
- * callers should fall back to a raster/skip representation on rejection.
+ * The cache is bounded by count and decoded RGBA weight. Decodes are also
+ * concurrency-limited, and one render-pass lease cannot accumulate more than
+ * the shared active decoded-byte ceiling. Quota crossings reject with
+ * `OoxmlDecodedImageLimitError`; they are never converted to a silent omission.
  */
 export function getCachedBitmapByPath(
   imagePath: string,
@@ -202,43 +392,20 @@ export function getCachedBitmapByPath(
   opts: CachedBitmapOptions = {},
 ): Promise<ImageBitmap | null> {
   const { widthPt = 0, heightPt = 0, suppressBoundaryFrame = false } = opts;
-  const cache = bitmapCacheFor(fetchImage);
-  const existing = cache.get(imagePath);
-  if (existing) {
-    // Refresh LRU position.
-    cache.delete(imagePath);
-    cache.set(imagePath, existing);
-    return existing.promise;
-  }
-  const promise = fetchImage(imagePath, mimeType).then((b) =>
-    decodeRasterOrMetafile(b, { widthPt, heightPt, suppressBoundaryFrame }),
+  return getCachedDecodedBitmap(
+    BASE_CACHE_NAMESPACE,
+    imagePath,
+    fetchImage,
+    async () => {
+      const blob = await fetchImage(imagePath, mimeType);
+      const bitmap = await decodeRasterOrMetafile(blob, {
+        widthPt,
+        heightPt,
+        suppressBoundaryFrame,
+      });
+      return { bitmap, owned: true };
+    },
   );
-  const entry: BitmapCacheEntry = { promise };
-  // Record the resolved bitmap on the entry so the synchronous bullet draw
-  // (peekCachedBitmapByPath) can read it after the warm pass awaits this promise.
-  // A `null` (unsupported metafile) is recorded too, so the draw skips it. The
-  // `.catch(() => {})` swallows a decode rejection on THIS side-chain (the real
-  // caller still sees it via the returned `promise`): without it a failed decode
-  // — e.g. an empty/undecodable blob — would surface as an unhandled rejection.
-  // On failure `entry.bitmap` simply stays undefined (treated as "not ready").
-  void promise
-    .then((bmp) => {
-      entry.bitmap = bmp;
-    })
-    .catch(() => {});
-  // Don't poison the cache on a transient decode failure.
-  promise.catch(() => cache.delete(imagePath));
-  cache.set(imagePath, entry);
-  if (cache.size > IMAGE_BITMAP_CACHE_MAX) {
-    const oldestKey = cache.keys().next().value as string;
-    const oldest = cache.get(oldestKey);
-    cache.delete(oldestKey);
-    // Close through the promise — deferred while a render-pass lease is active,
-    // so an in-flight pass that already recorded this bitmap never draws it
-    // closed (the entry is gone either way; the next resolve re-decodes).
-    if (oldest) deferBitmapCloseWhileLeased(fetchImage, oldest.promise);
-  }
-  return promise;
 }
 
 /**
@@ -252,22 +419,27 @@ export function peekCachedBitmapByPath(
   imagePath: string,
   fetchImage: FetchImage,
 ): ImageBitmap | null | undefined {
-  return bitmapCacheByFetch.get(fetchImage)?.get(imagePath)?.bitmap;
+  return bitmapCacheByFetch.get(fetchImage)?.entries.get(`${BASE_CACHE_PREFIX}${imagePath}`)?.bitmap;
 }
 
 /**
- * Close every decoded bitmap for one document's `fetchImage` and forget the
- * document. Call from the owning viewer's `destroy()` so GPU-backed ImageBitmaps
- * are released promptly rather than waiting for GC. A no-op when the document
- * decoded no raster blips. When a render pass currently holds a lease (see
+ * Close every base and derived decoded bitmap for one document owner and forget
+ * that owner. Call from viewer/session teardown so GPU-backed ImageBitmaps are
+ * released promptly rather than waiting for GC. When a render pass holds a lease (see
  * {@link acquireBitmapCacheLease} — e.g. a destroy or re-parse racing an
  * in-flight render), the cache is forgotten immediately but the GPU closes are
  * deferred to the last lease release, so the pass never draws a closed bitmap.
  */
-export function dropBitmapCacheByPath(fetchImage: FetchImage): void {
-  const cache = bitmapCacheByFetch.get(fetchImage);
-  if (!cache) return;
-  for (const entry of cache.values()) deferBitmapCloseWhileLeased(fetchImage, entry.promise);
-  cache.clear();
-  bitmapCacheByFetch.delete(fetchImage);
+export function dropDecodedBitmapCache(owner: DecodedBitmapCacheOwner): void {
+  const state = bitmapCacheByFetch.get(owner);
+  if (!state) return;
+  for (const entry of state.entries.values()) {
+    deferBitmapCloseWhileLeased(owner, entry.ownedPromise);
+  }
+  state.entries.clear();
+  state.retainedBytes = 0;
+  bitmapCacheByFetch.delete(owner);
 }
+
+/** @deprecated Use {@link dropDecodedBitmapCache}; it also owns derived surfaces. */
+export const dropBitmapCacheByPath = dropDecodedBitmapCache;

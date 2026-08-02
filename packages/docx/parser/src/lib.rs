@@ -1,5 +1,6 @@
 use ooxml_common::json_measurement::measure_json;
 use ooxml_common::package_session::PackageLimitReporter;
+use ooxml_common::pull::insufficient_credit_error;
 use ooxml_common::resource::{
     HardResourceLimitKind, ResourceUsage, HARD_MAX_DOCX_BODY_CHUNK_JSON_BYTES,
     HARD_MAX_DOCX_BOOTSTRAP_JSON_BYTES, HARD_MAX_DOCX_RETAINED_MODEL_JSON_BYTES,
@@ -320,10 +321,7 @@ impl DocxArchive {
                 return Err("document unit must be acknowledged before another pull".to_string());
             }
             if prepared.byte_length > byte_credit {
-                return Err(format!(
-                    "document unit requires {} bytes but credit is {byte_credit}",
-                    prepared.byte_length
-                ));
+                return Err(insufficient_credit_error(prepared.byte_length, byte_credit));
             }
             return Ok(prepared
                 .bytes
@@ -752,7 +750,12 @@ mod tests {
         archive.open_document_cursor_inner(7, 3).unwrap();
 
         let too_small = archive.pull_document_chunk_inner(0, 7, 3, 1).unwrap_err();
-        assert!(too_small.contains("requires"), "{too_small}");
+        assert!(
+            too_small.starts_with("OOXML_INSUFFICIENT_CREDIT:")
+                && too_small.contains("\"code\":\"ooxml-insufficient-credit\"")
+                && too_small.contains("\"offeredBytes\":1"),
+            "{too_small}"
+        );
         let exact = archive
             .prepared_document_chunk
             .as_ref()

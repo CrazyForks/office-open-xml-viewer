@@ -55,7 +55,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
   }
 
   if (req.type === 'init') {
-    host.setWasmUrl(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
+    host.setWasmInput(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
     return;
   }
 
@@ -151,6 +151,13 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       const out = host.run(() => archive.extract_image(req.path).buffer as ArrayBuffer);
       const res: WorkerResponse = { type: 'imageExtracted', id, bytes: out };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [out]);
+      return;
+    }
+
+    if (req.type === 'resourceUsage') {
+      if (!archive) throw new Error('No xlsx loaded');
+      const usage = host.run(() => decodeOoxmlResourceUsage(archive.resource_usage()));
+      self.postMessage({ type: 'resourceUsage', id, usage } satisfies WorkerResponse);
       return;
     }
 

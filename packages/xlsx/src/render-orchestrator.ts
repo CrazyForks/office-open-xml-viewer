@@ -7,6 +7,7 @@ import {
   acquireBitmapCacheLease,
   preferVectorBlip,
   metafileRasterSize,
+  isOoxmlDecodedImageLimitError,
   EMU_PER_PT,
   type MathRenderer,
   type SrcRect,
@@ -150,6 +151,10 @@ export async function prefetchImages(
   // Defaults to the real `OffscreenCanvas` when the runtime provides one.
   opts?: { offscreenFactory?: OffscreenFactory },
 ): Promise<void> {
+  // This map is only the synchronous lookup for the current frame. Never keep
+  // entries from another worksheet/frame: their shared-cache owners may have
+  // evicted and closed the underlying drawable in the meantime.
+  imageCache.clear();
   if (!fetchImage) return;
   const fetch = fetchImage;
   const refs = new Map<string, ImageRef>();
@@ -213,7 +218,8 @@ export async function prefetchImages(
         // Record the resolved drawable (INCLUDING a null for an unsupported
         // metafile, so the renderer skips a falsy source without a re-fetch).
         imageCache.set(key, src);
-      } catch {
+      } catch (error) {
+        if (isOoxmlDecodedImageLimitError(error)) throw error;
         // Transient failure: DELETE any prior lookup entry rather than leaving
         // it. A prior entry is re-resolved precisely because its shared-cache
         // backing may be gone (LRU-evicted and GPU-closed); when the re-resolve
@@ -228,8 +234,6 @@ export async function prefetchImages(
 export interface RenderDeps {
   ws: Worksheet;
   styles: ParsedWorkbook['styles'];
-  /** Shared decoded-image cache, owned by the caller (workbook or worker). */
-  imageCache: Map<string, CanvasImageSource | null>;
   math?: MathRenderer;
 }
 
@@ -267,7 +271,10 @@ async function renderWorksheetViewportLeased(
   viewport: ViewportRange,
   opts: RenderViewportOptions = {},
 ): Promise<void> {
-  const { ws, styles, imageCache } = deps;
+  const { ws, styles } = deps;
+  // Frame-local synchronous lookup only. Core owns decoded reuse/eviction;
+  // retaining this map across frames would accumulate stale closed references.
+  const imageCache = new Map<string, CanvasImageSource | null>();
 
   // ── Step 1: Preload any uncached image sources BEFORE touching the canvas.
   //
