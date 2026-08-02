@@ -118,15 +118,24 @@ export function isWasmTrap(err: unknown): boolean {
 }
 
 /**
- * The input a wasm-bindgen `init(input)` accepts: a URL string / `URL` to fetch,
+ * The module input a wasm-bindgen `init({ module_or_path })` accepts: a URL
+ * string / `URL` to fetch,
  * or the already-decoded module bytes (a `data:` URL that `init` cannot fetch is
  * decoded to an `ArrayBuffer`/`BufferSource` by the worker first). Kept wide to
  * match the generated glue's `InitInput` without depending on its exact type.
  */
 export type WasmInitInput = string | URL | ArrayBuffer | ArrayBufferView | Response;
 
-/** How a {@link WasmParserHost} initialises its WASM module. Mirrors the
- *  wasm-bindgen `init(input)` free function each parser package exports. */
+/** Current wasm-bindgen async initialization options. Passing the module input
+ * directly remains supported by generated glue for compatibility, but emits a
+ * deprecation warning in browsers. */
+interface WasmInitOptions {
+  readonly module_or_path: WasmInitInput | Promise<WasmInitInput>;
+}
+
+/** How a {@link WasmParserHost} initialises its WASM module. This intentionally
+ * keeps the established callback type; the host adapts its invocation to
+ * wasm-bindgen's current object form internally. */
 export type WasmInit = (input: WasmInitInput) => Promise<unknown>;
 
 /**
@@ -144,6 +153,18 @@ export type WasmInit = (input: WasmInitInput) => Promise<unknown>;
  * {@link WasmParserHost.ensureReady}.
  */
 export type WasmReinit = (input: WasmInitInput) => Promise<unknown>;
+
+function invokeWasmInitializer(
+  initializer: WasmInit | WasmReinit,
+  input: WasmInitInput,
+): Promise<unknown> {
+  // Generated wasm-bindgen functions accept both forms, but the positional
+  // form is deprecated and logs once per new worker. Keep that glue detail at
+  // this boundary instead of leaking it into each DOCX/XLSX/PPTX worker.
+  return (initializer as unknown as (options: WasmInitOptions) => Promise<unknown>)({
+    module_or_path: input,
+  });
+}
 
 /** Optional per-host hooks. */
 export interface WasmParserHostOptions<TArchive> {
@@ -213,11 +234,12 @@ export class WasmParserHost<TArchive = unknown> {
   }
 
   /** Record the WASM URL/input and kick off the first `init`. Called once, on
-   *  the worker's `init` message — same moment the old code did `init(url)`. */
+   *  the worker's `init` message. The object form is required by current
+   *  wasm-bindgen glue; its legacy positional form logs a browser warning. */
   setWasmUrl(input: WasmInitInput): void {
     this._wasmInput = input;
     this._poisoned = false;
-    this._initPromise = this._init(input);
+    this._initPromise = invokeWasmInitializer(this._init, input);
   }
 
   /** The archive handle for the current instance, or null when none is open
@@ -277,7 +299,7 @@ export class WasmParserHost<TArchive = unknown> {
       // Only flip `_poisoned` off once the rebuild settles successfully, so a
       // failed rebuild stays poisoned and is retried on the following request
       // rather than handing back a dead module.
-      const p = rebuild(this._wasmInput);
+      const p = invokeWasmInitializer(rebuild, this._wasmInput);
       this._initPromise = p;
       await p;
       this._poisoned = false;

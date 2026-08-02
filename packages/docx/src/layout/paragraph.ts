@@ -3987,6 +3987,29 @@ export interface RetainedFrameGroupAcquisition {
   }>[];
 }
 
+/** Downward glyph paint outside a retained frame member's nominal baseline.
+ * Frame admission and anchor flow consume this immutable retained geometry;
+ * neither stage reconstructs run-position semantics from parser fields. */
+export function retainedFrameDownwardPaintOverflowPt(
+  acquisition: RetainedFrameGroupAcquisition,
+): number {
+  let maximumPt = 0;
+  for (const member of acquisition.members) {
+    for (const line of member.fragment.lines) {
+      for (const placement of line.placements) {
+        if (placement.kind !== 'text') continue;
+        for (const operation of placement.paintOps) {
+          maximumPt = Math.max(
+            maximumPt,
+            placement.origin.yPt + operation.offset.yPt - line.baselinePt,
+          );
+        }
+      }
+    }
+  }
+  return maximumPt;
+}
+
 export interface RetainedFrameGroupOptions {
   readonly contexts: readonly ParagraphLayoutContext[];
   readonly inputs: readonly ParagraphAcquisitionInput[];

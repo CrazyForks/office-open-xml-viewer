@@ -26,7 +26,7 @@ import { isAllRotatedVerticalTextDirection, isVerticalSection, isVerticalTextDir
 import { gridForParagraphContext, paragraphMeasurementEnvironment } from './measurement-environment.js';
 import { BODY_STORY_CONTEXT, bodyAnchorReferenceFrames, retainedTableRecord, resolveBodyParagraphLayoutContext, resolveStateParagraphLayoutContext, withTableCellStory } from './acquisition-state.js';
 import { applyNumberingBodyOffset, resolveNumberingMarkerGeometry } from './numbering-marker.js';
-import { resolveTableColumnWidths } from './table-columns.js';
+import { measureTableIntrinsicWidths, resolveTableColumnWidths } from './table-columns.js';
 import { measureParagraphIntrinsicWidths, measureTableCellIntrinsicWidths } from './intrinsic-width.js';
 // ── Line-layout engine (segmentation + line-breaking + measurement) ──────────
 // Body acquisition drives the pure root line-layout kernel through this
@@ -40,7 +40,7 @@ import { layoutTable as layoutRetainedTableInput } from './table.js';
 import { startTableFragmentCursor, takeTableFragment, type PageDependentTableBlockRequest } from './table-pagination.js';
 import { paragraphGapAdjustment } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges } from './paragraph-border-adjacency.js';
-import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, type BodyFrameGroup } from './paragraph.js';
+import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameDownwardPaintOverflowPt, type BodyFrameGroup } from './paragraph.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, RetainedTableRecord } from './acquisition-context.js';
 import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisition, TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX } from './paragraph-wrap-registry.js';
@@ -936,6 +936,10 @@ function buildConcreteBodyLayoutKernel(
             if (!acquiredGroup) throw new Error('Body frame acquisition omitted its retained group');
             const member = acquiredGroup.members.find((candidate) => candidate.paragraph === paragraph);
             if (!member) throw new Error('Body frame acquisition omitted its retained member');
+            const dropCapAnchorLeadingPt = paragraph === frameGroup.members.at(-1)
+              && frameGroup.framePr.dropCap !== 'none'
+              ? retainedFrameDownwardPaintOverflowPt(acquiredGroup)
+              : 0;
             const absoluteVertical = paragraph.framePr.vAnchor === 'page'
               || paragraph.framePr.vAnchor === 'margin';
             const frameOccurrenceId = box.exclusionId
@@ -960,7 +964,12 @@ function buildConcreteBodyLayoutKernel(
             });
             return Object.freeze({
               layout: member.fragment,
-              blockExtentPt: 0,
+              // §17.3.1.11 fixes a drop cap's exclusion to N anchor lines, while
+              // §17.3.2.24 can lower its glyph without changing that line box.
+              // Advance only the anchor band's leading edge by the retained
+              // downward paint offset; extending the exclusion would wrap N+1
+              // lines and moving the frame would change its authored anchor.
+              blockExtentPt: dropCapAnchorLeadingPt,
               lineEndBoundaries: Object.freeze([]),
               placement: Object.freeze({
                 coordinateSpace: 'logical-body' as const,
@@ -2182,11 +2191,6 @@ function resolveColumnWidths(
   state: BodyMeasurementContext,
 ): number[] {
   const format = state.acquisitionInputs.tableFormatInput(table);
-  const marginsByCell = new WeakMap<object, Readonly<{ left: number; right: number }>>();
-  table.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
-    const acquired = format.rows[rowIndex]?.cells[cellIndex]?.marginsPt;
-    marginsByCell.set(cell, acquired ?? effCellMargins(cell, table));
-  }));
   const baseIndentPt = Number.isFinite(table.tblInd) ? (table.tblInd ?? 0) : 0;
   const rowIndentPts = format.rows.map((row) => {
     const exception = row.exception;
@@ -2243,12 +2247,20 @@ function resolveColumnWidths(
   const maximumTableWidthPt = isLeadingMarginPageStoryTable
     ? Math.max(contentWPt, pageFitCeilingPt)
     : contentWPt;
-  return [...resolveTableColumnWidths(state.acquisitionInputs.tableColumnLayoutInput(
-    table,
-    contentWPt,
-    (cell) => {
-      const margins = marginsByCell.get(cell as object) ?? effCellMargins(cell, table);
-      return measureTableCellIntrinsicWidths(cell, margins, {
+
+  const intrinsicWidthsForTable = (
+    owner: TableLayoutSource,
+    ownerFormat = state.acquisitionInputs.tableFormatInput(owner),
+  ): ((cell: DeepReadonly<DocTableCell>) => ReturnType<typeof measureTableCellIntrinsicWidths>) => {
+    const ownerMargins = new WeakMap<object, Readonly<{ left: number; right: number }>>();
+    owner.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
+      const acquired = ownerFormat.rows[rowIndex]?.cells[cellIndex]?.marginsPt;
+      ownerMargins.set(cell, acquired ?? effCellMargins(cell, owner));
+    }));
+    return (cell) => measureTableCellIntrinsicWidths(
+      cell,
+      ownerMargins.get(cell as object) ?? effCellMargins(cell, owner),
+      {
         paragraph: (paragraph) => {
           const baseContext = resolveParagraphLayoutContext(
             state.layoutSettings,
@@ -2289,13 +2301,21 @@ function resolveColumnWidths(
             numbering,
           );
         },
-        nestedTable: (nested) => {
-          const widthPt = resolveColumnWidths(nested, contentWPt, state)
-            .reduce((sum, width) => sum + width, 0);
-          return { minWidthPt: widthPt, maxWidthPt: widthPt };
-        },
-      });
-    },
+        nestedTable: (nested) => measureTableIntrinsicWidths(
+          state.acquisitionInputs.tableColumnLayoutInput(
+            nested,
+            contentWPt,
+            intrinsicWidthsForTable(nested),
+            contentWPt,
+          ),
+        ),
+      },
+    );
+  };
+  return [...resolveTableColumnWidths(state.acquisitionInputs.tableColumnLayoutInput(
+    table,
+    contentWPt,
+    intrinsicWidthsForTable(table, format),
     state.acquisitionInputs.tableParticipatesInOrdinaryFlow(table)
       ? maximumTableWidthPt
       : Math.max(contentWPt, state.pageWidth),

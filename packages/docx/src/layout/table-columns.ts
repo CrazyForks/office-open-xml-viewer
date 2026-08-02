@@ -333,6 +333,54 @@ function growSpan(widths: number[], start: number, span: number, amountPt: numbe
   }
 }
 
+export interface TableIntrinsicWidths {
+  readonly minWidthPt: number;
+  readonly maxWidthPt: number;
+}
+
+/**
+ * Measure only the content interval contributed by a table when it is nested
+ * inside another cell. ECMA-376 §17.18.87 establishes these content bounds
+ * before the containing grid is fitted. tblW/tcW remain preferred-width
+ * constraints; feeding a nested table's fitted occurrence width back as its
+ * parent's content minimum would create a circular width constraint.
+ *
+ * Fixed-layout tables do not acquire cell-content constraints (§17.18.87).
+ * They remain one fixed-width atom using their already-projected preferred
+ * width; only AutoFit tables expose recursively measured content min/max.
+ */
+export function measureTableIntrinsicWidths(
+  input: TableColumnLayoutInput,
+): TableIntrinsicWidths {
+  const columnCount = requiredColumnCount(input);
+  if (input.layout === 'fixed') {
+    const widthsPt = fixedWidths(input, columnCount);
+    const widthPt = widthsPt.reduce((sum, width) => sum + width, 0);
+    return Object.freeze({ minWidthPt: widthPt, maxWidthPt: widthPt });
+  }
+  const minimums = new Array<number>(columnCount).fill(0);
+  const maximums = new Array<number>(columnCount).fill(0);
+  const cells = input.rows.flatMap((row) => row.cells)
+    .sort((left, right) => left.columnSpan - right.columnSpan);
+  const enforce = (widths: number[], cell: TableColumnCellConstraint, requiredPt: number): void => {
+    const start = Math.max(0, cell.columnStart);
+    const span = Math.max(1, Math.min(cell.columnSpan, widths.length - start));
+    if (span <= 0) return;
+    const deficitPt = finiteNonNegative(requiredPt) - spanSum(widths, start, span);
+    if (deficitPt > EPSILON_PT) growSpan(widths, start, span, deficitPt);
+  };
+  for (const cell of cells) {
+    enforce(minimums, cell, cell.minContentWidthPt);
+    enforce(maximums, cell, Math.max(cell.minContentWidthPt, cell.maxContentWidthPt));
+  }
+  const minWidthPt = minimums.reduce((sum, width) => sum + width, 0);
+  const maxWidthPt = Math.max(
+    minWidthPt,
+    maximums.reduce((sum, width) => sum + width, 0),
+  );
+  return Object.freeze({ minWidthPt, maxWidthPt });
+}
+
 function enforceContentConstraint(
   widths: number[],
   minimums: readonly number[],
