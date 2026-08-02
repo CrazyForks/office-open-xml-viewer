@@ -1,10 +1,11 @@
 import { OoxmlResourceLimitError, type OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
   HARD_MAX_PPTX_SLIDE_JSON_BYTES,
+  exactTransferableArrayBuffer,
   PULL_SESSION_PROTOCOL,
-  PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
   PullSessionHost,
   PullSessionHostCoordinator,
+  normalizePullSessionInsufficientCreditError,
   deserializeWorkerError,
   parseResourceLimitError,
   serializeWorkerError,
@@ -107,12 +108,16 @@ export class SlidePullWorker {
                 byteCredit,
               ));
             } catch (error) {
-              const insufficient = asInsufficientCreditError(error, byteCredit);
+              const insufficient = normalizePullSessionInsufficientCreditError(
+                error,
+                byteCredit,
+                HARD_MAX_PPTX_SLIDE_JSON_BYTES,
+              );
               if (insufficient) throw insufficient;
               this.latchResourceFailure(error);
               throw error;
             }
-            const payload = exactArrayBuffer(bytes);
+            const payload = exactTransferableArrayBuffer(bytes);
             if (this.acceptSlide) {
               preparedSlide = JSON.parse(new TextDecoder().decode(new Uint8Array(payload))) as Slide;
             }
@@ -490,36 +495,4 @@ function sameIdentity(
 ): boolean {
   return left.sessionId === right.sessionId && left.operationId === right.operationId &&
     left.generation === right.generation;
-}
-
-function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength &&
-      bytes.buffer instanceof ArrayBuffer) {
-    return bytes.buffer;
-  }
-  const exact = new Uint8Array(bytes.byteLength);
-  exact.set(bytes);
-  return exact.buffer;
-}
-
-const INSUFFICIENT_CREDIT_PATTERN = /^slide unit requires ([0-9]+) bytes but credit is ([0-9]+)$/u;
-
-function asInsufficientCreditError(error: unknown, offeredCredit: number): RangeError | undefined {
-  const message = error instanceof Error ? error.message : String(error);
-  const match = INSUFFICIENT_CREDIT_PATTERN.exec(message);
-  if (!match) return undefined;
-  const required = Number(match[1]);
-  const reportedCredit = Number(match[2]);
-  if (
-    !Number.isSafeInteger(required) || required <= 0 ||
-    !Number.isSafeInteger(reportedCredit) || reportedCredit <= 0 ||
-    String(required) !== match[1] || String(reportedCredit) !== match[2] ||
-    reportedCredit !== offeredCredit || required <= reportedCredit ||
-    required > HARD_MAX_PPTX_SLIDE_JSON_BYTES
-  ) {
-    return undefined;
-  }
-  return Object.assign(new RangeError(message), {
-    code: PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
-  });
 }

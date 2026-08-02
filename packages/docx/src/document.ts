@@ -8,22 +8,28 @@ import {
   WorkerBridge,
   defaultDpr,
   dropSvgImageCache,
-  dropBitmapCacheByPath,
+  dropDecodedBitmapCache,
   resolveOoxmlContainer,
   toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
+  type OoxmlResourceMetrics,
 } from '@silurus/ooxml-core';
 import {
   deserializeWorkerError,
   disposeRejectedLoad,
+  HARD_MAX_RAW_PART_CACHE_BYTES,
+  HARD_MAX_RAW_PART_CACHE_ENTRIES,
   normalizeLoadResourceOptions,
+  OOXML_RESOURCE_METRICS_PROBE_TIMEOUT_MS,
   OoxmlResourceMetricsSession,
+  readLatestOoxmlResourceMetrics,
   PULL_SESSION_PROTOCOL,
   type NormalizedOoxmlResourcePolicy,
 } from '@silurus/ooxml-core/worker';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
-import { renderLayoutSourceToCanvas, documentHasMath, prepareMathRuns, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
+import { renderLayoutSourceToCanvas, documentHasMath, prepareMathRuns, type DocxTextRunInfo } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
@@ -82,12 +88,8 @@ export type RenderPageToBitmapOptions = WireRenderPageOptions & {
   onTextRun?: (run: DocxTextRunInfo) => void;
 };
 
-/** A diagnostic-only round trip must never inherit the load API's unlimited
- * worker wait. The archive counter getter is synchronous once the worker is
- * responsive, so one second is ample while still bounding a silent worker. */
-const DEFAULT_RESOURCE_USAGE_PROBE_TIMEOUT_MS = 1_000;
-
 export class DocxDocument {
+  private _metrics: OoxmlResourceMetricsSession | null = null;
   private _document: DocxDocumentModel | null = null;
   private _source: LayoutSourceStore | null = null;
   private _meta: DocumentMeta | null = null;
@@ -99,7 +101,10 @@ export class DocxDocument {
   private _mode: 'main' | 'worker' = 'main';
   private _worker: Worker;
   private _bridge: WorkerBridge<WorkerResponse | RenderWorkerResponse>;
-  private _imageCache = new Map<string, Promise<Blob>>();
+  private readonly _rawParts = new BoundedRawPartCache({
+    maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
+    maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
+  });
   /** Embedded `FontFace` objects this document registered into `document.fonts`
    *  (main mode only — in worker mode the worker owns them and terminates with
    *  its own FontFaceSet). Released in {@link destroy} so they do not leak into
@@ -139,10 +144,10 @@ export class DocxDocument {
             : undefined,
       toError: (res) => {
         if ('protocol' in res || res.type !== 'error') return undefined;
-        if (res.code === 'ooxml-resource-limit') return deserializeWorkerError(res);
-        return Object.assign(new Error(res.message), {
-          name: res.errorName ?? 'Error',
-          ...(res.code !== undefined ? { code: res.code } : {}),
+        // Reconstruct every shared typed error first (resource quota, decoded
+        // image quota, pull credit, container errors), then preserve DOCX-only
+        // pagination diagnostics as supplemental fields.
+        return Object.assign(deserializeWorkerError(res), {
           ...(res.reason !== undefined ? { reason: res.reason } : {}),
           ...(res.outgoingColumnIndex !== undefined
             ? { outgoingColumnIndex: res.outgoingColumnIndex }
@@ -168,7 +173,7 @@ export class DocxDocument {
     const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
     const metrics = new OoxmlResourceMetricsSession({
-      enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
+      enabled: true,
       format: 'docx',
       mode,
       policy: resourceOptions.policy,
@@ -202,6 +207,7 @@ export class DocxDocument {
     let doc: DocxDocument | undefined;
     try {
       doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
+      doc._metrics = metrics;
       // In worker mode the worker preloads fonts before paginating (pagination
       // measures text), so the flag is forwarded; in main mode fonts are loaded
       // here after parse, before the lazy first pagination.
@@ -273,18 +279,16 @@ export class DocxDocument {
         // the same work here so layout failures reject load() in both modes.
         retained.layoutVariants.defaultLayout;
       }
-      if (resourceOptions.debug || resourceOptions.onResourceMetrics) {
-        // This final snapshot includes eager embedded-font extraction performed
-        // after the parse response. Telemetry is strictly best-effort: a worker
-        // failure or a silent worker may omit the newest counters, but must not
-        // turn an otherwise successful load into a rejection or an endless wait.
-        await doc._resourceUsage(
-          opts.workerTimeoutMs ?? DEFAULT_RESOURCE_USAGE_PROBE_TIMEOUT_MS,
-        ).then(
-          (usage) => metrics.observeUsage(usage),
-          () => undefined,
-        );
-      }
+      // This final snapshot includes eager embedded-font extraction performed
+      // after the parse response. Telemetry is strictly best-effort: a worker
+      // failure or a silent worker may omit the newest counters, but must not
+      // turn an otherwise successful load into a rejection or an endless wait.
+      await doc._resourceUsage(
+        opts.workerTimeoutMs ?? OOXML_RESOURCE_METRICS_PROBE_TIMEOUT_MS,
+      ).then(
+        (usage) => metrics.observeUsage(usage),
+        () => undefined,
+      );
       metrics.checkpoint('model and layout ready');
       metrics.succeed({ pages: doc.pageCount });
       return doc;
@@ -351,7 +355,7 @@ export class DocxDocument {
     this._meta = null;
     documentLayoutRuntimeOf(this).services = null;
     this._bookmarkPages = null;
-    this._imageCache.clear();
+    this._rawParts.clear();
     // Release the embedded fonts this document added to the shared FontFaceSet
     // (main mode). Refcounted in core: a font also used by another open document
     // stays until that one is destroyed too. Without this, every opened document
@@ -373,13 +377,11 @@ export class DocxDocument {
       unloadLocalFontMetrics(this._localMetricFontFaces);
       this._localMetricFontFaces = [];
     }
-    // Release this document's three per-fetchImage image caches: the decoded
-    // base raster bitmaps (GPU-backed, shared with pptx/xlsx), the a:clrChange
-    // color-replaced bitmaps (docx-only second layer), and the decoded-SVG
-    // object URLs. All are keyed by `_fetchImage`, so a discarded document frees
-    // its GPU/URL handles promptly rather than waiting for GC.
-    dropBitmapCacheByPath(this._fetchImage);
-    dropColorReplacedCache(this._fetchImage);
+    // Release both image owners keyed by this document's stable loader: the
+    // shared decoded owner (base + derived colour surfaces) and the SVG lookup
+    // owner. SVG object URLs are revoked immediately after decode; dropping its
+    // lookup releases retained decoded elements and prevents stale reuse.
+    dropDecodedBitmapCache(this._fetchImage);
     dropSvgImageCache(this._fetchImage);
   }
 
@@ -392,16 +394,12 @@ export class DocxDocument {
    * are decoded lazily rather than inlined as base64 at parse time.
    */
   async getImage(imagePath: string, mimeType: string): Promise<Blob> {
-    const hit = this._imageCache.get(imagePath);
-    if (hit) return hit;
-    const p = this._bridge
+    return this._rawParts.get(imagePath, mimeType, () => this._bridge
       .request((id) => ({ type: 'extractImage', id, path: imagePath }) satisfies WorkerRequest)
       .then((res) => {
         const bytes = (res as Extract<WorkerResponse, { type: 'imageExtracted' }>).bytes;
         return new Blob([bytes], { type: mimeType });
-      });
-    this._imageCache.set(imagePath, p);
-    return p;
+      }));
   }
 
   /**
@@ -429,6 +427,15 @@ export class DocxDocument {
       { timeoutMs },
     );
     return (res as Extract<WorkerResponse, { type: 'resourceUsage' }>).usage;
+  }
+
+  /** Return a fresh content-free metrics snapshot, including lazy archive work
+   * completed since load. Collection is always active; `debug` only controls
+   * console presentation. */
+  async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
+    const metrics = this._metrics;
+    if (!metrics) throw new Error('Document not loaded');
+    return readLatestOoxmlResourceMetrics(metrics, (timeoutMs) => this._resourceUsage(timeoutMs));
   }
 
   /**

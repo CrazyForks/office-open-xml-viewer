@@ -1,5 +1,6 @@
 import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
 import {
+  decodeOoxmlResourceUsage,
   resourcePolicyForWasm,
   serializeWorkerError,
   type PullSessionCommand,
@@ -66,7 +67,7 @@ self.onmessage = async (
   }
 
   if (request.kind === 'init') {
-    host.setWasmUrl(decodeDataUrl(request.wasmUrl) ?? request.wasmUrl);
+    host.setWasmInput(decodeDataUrl(request.wasmUrl) ?? request.wasmUrl);
     return;
   }
 
@@ -146,6 +147,12 @@ self.onmessage = async (
       if (request.kind === 'extractImage') {
         const bytes = host.run(() => archive.extract_image(request.path).buffer as ArrayBuffer);
         post({ kind: 'imageExtracted', id, bytes }, [bytes]);
+        return;
+      }
+
+      if (request.kind === 'resourceUsage') {
+        const usage = decodeOoxmlResourceUsage(host.run(() => archive.resource_usage()));
+        post({ kind: 'resourceUsage', id, usage });
         return;
       }
 

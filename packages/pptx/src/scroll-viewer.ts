@@ -1,4 +1,4 @@
-import { computeVisibleRange, EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindHighlightColors, type FindMatch, type FindMatchesOptions, type VisibleRange, type HyperlinkTarget, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
+import { computeVisibleRange, EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindHighlightColors, type FindMatch, type FindMatchesOptions, type VisibleRange, type HyperlinkTarget, type OoxmlResourceMetrics, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
 import { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
@@ -2026,6 +2026,12 @@ export class PptxScrollViewer implements ZoomableViewer {
     const r = this._range();
     const contentY = (r.offsets[slide] ?? 0) + frac * (this._heights[slide] || 0);
     return contentY - this._scrollHost.scrollTop;
+  }
+
+  /** Return the owning engine's latest content-free package-usage snapshot. */
+  async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
+    if (!this._pres) throw new Error('Presentation not loaded');
+    return await this._pres.getResourceMetrics();
   }
 
   /**

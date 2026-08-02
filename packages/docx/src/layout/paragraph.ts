@@ -3987,10 +3987,10 @@ export interface RetainedFrameGroupAcquisition {
   }>[];
 }
 
-/** Downward glyph paint outside a retained frame member's nominal baseline.
- * Frame admission and anchor flow consume this immutable retained geometry;
- * neither stage reconstructs run-position semantics from parser fields. */
-export function retainedFrameDownwardPaintOverflowPt(
+/** Maximum downward baseline shift carried by retained frame glyph paint.
+ * Consumers receive immutable retained geometry and do not reconstruct run
+ * positioning from parser fields. */
+export function retainedFrameMaximumBaselineLoweringPt(
   acquisition: RetainedFrameGroupAcquisition,
 ): number {
   let maximumPt = 0;
@@ -3998,12 +3998,7 @@ export function retainedFrameDownwardPaintOverflowPt(
     for (const line of member.fragment.lines) {
       for (const placement of line.placements) {
         if (placement.kind !== 'text') continue;
-        for (const operation of placement.paintOps) {
-          maximumPt = Math.max(
-            maximumPt,
-            placement.origin.yPt + operation.offset.yPt - line.baselinePt,
-          );
-        }
+        maximumPt = Math.max(maximumPt, -(placement.positionPt ?? 0));
       }
     }
   }

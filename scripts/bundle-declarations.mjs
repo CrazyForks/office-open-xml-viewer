@@ -10,7 +10,7 @@ import { dts } from 'rolldown-plugin-dts';
 const require = createRequire(new URL('../package.json', import.meta.url));
 const ts = require('typescript');
 
-const entries = ['index', 'docx', 'xlsx', 'pptx', 'math'];
+const entries = ['index', 'docx', 'xlsx', 'pptx', 'math', 'node'];
 const dist = path.resolve(process.cwd(), 'dist');
 const workDir = path.join(dist, '.types-work');
 const outDir = path.join(dist, 'types');

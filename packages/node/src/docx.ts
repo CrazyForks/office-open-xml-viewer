@@ -3,7 +3,7 @@ import type {
   OoxmlResourceUsageSnapshot,
 } from '@silurus/ooxml-core';
 import {
-  dropBitmapCacheByPath,
+  dropDecodedBitmapCache,
   dropSvgImageCache,
   OoxmlResourceLimitError,
 } from '@silurus/ooxml-core';
@@ -25,7 +25,6 @@ import {
 import { createLayoutServices } from '../../docx/src/layout-runtime.ts';
 import { retainRenderWorkerDocumentLayout } from '../../docx/src/render-worker-layout.ts';
 import {
-  dropColorReplacedCache,
   renderLayoutSourceToCanvas,
   type DocxTextRunInfo,
 } from '../../docx/src/renderer.ts';
@@ -34,15 +33,13 @@ import * as docxWasm from '../../docx/src/wasm/docx_parser.js';
 import { InProcessPullTransport } from './in-process-pull-transport.ts';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import {
-  installImageBitmapShim,
-  installOffscreenCanvasShim,
   type NodeCanvasFactory,
   type NodeCanvasLike,
+  withNodeCanvasRuntime,
 } from './render.ts';
 import { loadWasmModule, resolveWasm } from './wasm-loader.ts';
 
 let initialized = false;
-let nodeCanvasRuntimeTail: Promise<void> = Promise.resolve();
 
 interface DocxArchiveHandle extends DocxDocumentCursorArchive {
   free(): void;
@@ -360,8 +357,7 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
 
   private async release(): Promise<void> {
     await this.renderTail;
-    dropBitmapCacheByPath(this.fetchImage);
-    dropColorReplacedCache(this.fetchImage);
+    dropDecodedBitmapCache(this.fetchImage);
     dropSvgImageCache(this.fetchImage);
     this.state = null;
     try {
@@ -379,27 +375,6 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
     if (!this.state) throw new Error('DOCX document session is closed');
     return this.state;
   }
-}
-
-function withNodeCanvasRuntime<T>(
-  factory: NodeCanvasFactory,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const run = async (): Promise<T> => {
-    const restoreImageBitmap = typeof globalThis.createImageBitmap === 'function'
-      ? () => undefined
-      : installImageBitmapShim(factory);
-    const restoreOffscreen = installOffscreenCanvasShim(factory);
-    try {
-      return await operation();
-    } finally {
-      restoreOffscreen();
-      restoreImageBitmap();
-    }
-  };
-  const result = nodeCanvasRuntimeTail.then(run, run);
-  nodeCanvasRuntimeTail = result.then(() => undefined, () => undefined);
-  return result;
 }
 
 function normalizeCurrentDate(value: Date | number | undefined): number {

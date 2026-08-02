@@ -16,6 +16,7 @@ import {
   type PullSessionPost,
   type PullSessionResponse,
 } from './pull-session.js';
+import { PullSessionInsufficientCreditError } from './pull-credit-error.js';
 
 type Payload = { value: string };
 type Response = PullSessionResponse<Payload, string>;
@@ -148,8 +149,9 @@ describe('BoundedPullSession client', () => {
       driver: {
         pull: (credit) => {
           if (credit < 12) {
-            throw Object.assign(new RangeError('unit requires more byte credit'), {
-              code: PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
+            throw new PullSessionInsufficientCreditError({
+              requiredBytes: 12,
+              offeredBytes: credit,
             });
           }
           return { payload, byteLength: 12, done: true };
@@ -163,7 +165,7 @@ describe('BoundedPullSession client', () => {
     };
 
     await expect(session.pull(8)).rejects.toMatchObject({
-      name: 'RangeError',
+      name: 'PullSessionInsufficientCreditError',
       code: PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
     });
     expect(worker.posted).toHaveLength(1);

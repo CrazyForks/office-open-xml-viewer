@@ -1,10 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getCachedBitmapByPath,
+  getCachedDerivedBitmap,
   peekCachedBitmapByPath,
   dropBitmapCacheByPath,
   acquireBitmapCacheLease,
 } from './bitmap-image-by-path';
+import {
+  MAX_CONCURRENT_IMAGE_DECODES,
+  MAX_DECODED_IMAGE_BYTES,
+} from './pixel-budget';
 
 /** Build a minimal standard (non-placeable) WMF that draws one polyline, so the
  *  shared player produces non-empty geometry (→ a non-null bitmap). Mirrors the
@@ -191,6 +196,52 @@ describe('getCachedBitmapByPath', () => {
     await getCachedBitmapByPath('word/media/drop-a.png', 'image/png', fetchImage);
     expect(fetchImage).toHaveBeenCalledTimes(3); // cache cleared → fresh decode
   });
+
+  it('rejects and closes an oversized decode when its header was not recognized', async () => {
+    const close = vi.fn();
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width: 8192, height: 8192, close }) as unknown as ImageBitmap),
+    );
+    const fetchImage = vi.fn(async (_path: string, mime: string) =>
+      new Blob([new Uint8Array([1, 2, 3])], { type: mime }));
+
+    await expect(getCachedBitmapByPath('word/media/unknown.bin', 'application/octet-stream', fetchImage))
+      .rejects.toMatchObject({
+        code: 'ooxml-decoded-image-limit',
+        metric: 'image-pixels',
+        observed: 8192 * 8192,
+      });
+    expect(close).toHaveBeenCalledOnce();
+    expect(peekCachedBitmapByPath('word/media/unknown.bin', fetchImage)).toBeUndefined();
+  });
+
+  it('admits at most the shared number of concurrent decodes per document', async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const releases: Array<() => void> = [];
+    vi.stubGlobal('createImageBitmap', vi.fn(() => new Promise<ImageBitmap>((resolve) => {
+      active++;
+      maximumActive = Math.max(maximumActive, active);
+      releases.push(() => {
+        active--;
+        resolve({ width: 1, height: 1, close() {} } as unknown as ImageBitmap);
+      });
+    })));
+    const fetchImage = vi.fn(async (_path: string, mime: string) =>
+      new Blob([new Uint8Array([1])], { type: mime }));
+
+    const decodes = Array.from({ length: MAX_CONCURRENT_IMAGE_DECODES + 2 }, (_, index) =>
+      getCachedBitmapByPath(`word/media/concurrent-${index}.png`, 'image/png', fetchImage));
+    await vi.waitFor(() => expect(active).toBe(MAX_CONCURRENT_IMAGE_DECODES));
+
+    for (const release of releases.splice(0)) release();
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    for (const release of releases.splice(0)) release();
+    await Promise.all(decodes);
+    expect(maximumActive).toBe(MAX_CONCURRENT_IMAGE_DECODES);
+    dropBitmapCacheByPath(fetchImage);
+  });
 });
 
 /**
@@ -319,5 +370,67 @@ describe('acquireBitmapCacheLease (render-pass liveness)', () => {
     dropBitmapCacheByPath(fetchImage);
     await flush();
     expect(closes.length).toBe(1);
+  });
+
+  it('rejects a render pass before its live decoded images exceed the byte ceiling', async () => {
+    const closes: number[] = [];
+    const bitmapBytes = MAX_DECODED_IMAGE_BYTES / 2;
+    const width = 4096;
+    const height = bitmapBytes / width / 4;
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width, height, close: () => closes.push(1) }) as unknown as ImageBitmap),
+    );
+    const fetchImage = vi.fn(async (_path: string, mime: string) =>
+      new Blob([new Uint8Array([1])], { type: mime }));
+
+    const release = acquireBitmapCacheLease(fetchImage);
+    await getCachedBitmapByPath('word/media/live-a.png', 'image/png', fetchImage);
+    await getCachedBitmapByPath('word/media/live-b.png', 'image/png', fetchImage);
+    await expect(getCachedBitmapByPath('word/media/live-c.png', 'image/png', fetchImage))
+      .rejects.toMatchObject({
+        name: 'OoxmlDecodedImageLimitError',
+        code: 'ooxml-decoded-image-limit',
+        metric: 'active-decoded-bytes',
+        limit: MAX_DECODED_IMAGE_BYTES,
+        observed: MAX_DECODED_IMAGE_BYTES + bitmapBytes,
+      });
+    expect(closes.length).toBe(1);
+    release();
+    dropBitmapCacheByPath(fetchImage);
+  });
+
+  it('accounts base and derived surfaces against one render-pass ceiling', async () => {
+    const width = 4096;
+    const height = MAX_DECODED_IMAGE_BYTES / 2 / width / 4;
+    const closeBase = vi.fn();
+    const closeDerived = vi.fn();
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width, height, close: closeBase }) as unknown as ImageBitmap),
+    );
+    const fetchImage = vi.fn(async () => new Blob([new Uint8Array([1])]));
+    const release = acquireBitmapCacheLease(fetchImage);
+
+    await getCachedBitmapByPath('word/media/base.bin', 'application/octet-stream', fetchImage);
+    await getCachedDerivedBitmap('effect', 'first', fetchImage, async () => ({
+      bitmap: { width, height, close: closeDerived } as unknown as ImageBitmap,
+      owned: true,
+    }));
+    await expect(getCachedDerivedBitmap('effect', 'second', fetchImage, async () => ({
+      bitmap: { width, height, close: closeDerived } as unknown as ImageBitmap,
+      owned: true,
+    }))).rejects.toMatchObject({
+      code: 'ooxml-decoded-image-limit',
+      metric: 'active-decoded-bytes',
+      observed: MAX_DECODED_IMAGE_BYTES * 1.5,
+    });
+    expect(closeDerived).toHaveBeenCalledTimes(1);
+
+    release();
+    dropBitmapCacheByPath(fetchImage);
+    await flush();
+    expect(closeBase).toHaveBeenCalledTimes(1);
+    expect(closeDerived).toHaveBeenCalledTimes(2);
   });
 });

@@ -6,7 +6,7 @@ import { buildDocxTextLayer } from './text-layer';
 import { buildDocxHighlightLayer, type DocxHighlightMatch } from './find-highlight-layer';
 import { DocxFindController, type DocxMatchLocation } from './find';
 import { openExternalHyperlink, PT_TO_PX, nextZoomStep, prevZoomStep, clampScale, fitScale } from '@silurus/ooxml-core';
-import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, ZoomableViewer } from '@silurus/ooxml-core';
+import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
 
 export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   container?: HTMLElement;
@@ -425,6 +425,12 @@ export class DocxViewer implements ZoomableViewer {
   private _redrawHighlights(): void {
     const runs = this._find.pageRuns(this._currentPage) ?? [];
     this._buildHighlightLayer(runs);
+  }
+
+  /** Latest content-free resource metrics for the loaded document. */
+  async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
+    if (!this._doc) throw new Error('Document not loaded');
+    return await this._doc.getResourceMetrics();
   }
 
   /**

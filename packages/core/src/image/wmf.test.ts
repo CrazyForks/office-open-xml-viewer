@@ -831,7 +831,7 @@ describe('decodeRasterOrMetafile', () => {
     expect(cib).toHaveBeenCalledWith(blob);
   });
 
-  it('a PNG decode bomb (60000×60000 header, tiny payload) → null, WITHOUT calling createImageBitmap (RB1)', async () => {
+  it('a PNG decode bomb rejects with a typed quota before createImageBitmap (RB1)', async () => {
     // The decode-bomb guard: a valid PNG header declaring a 60000×60000 image
     // (~14 GB RGBA once decoded) must be refused BEFORE createImageBitmap ever
     // allocates the surface. The fixture is a couple dozen bytes.
@@ -851,8 +851,13 @@ describe('decodeRasterOrMetafile', () => {
     put(16, 60000);
     put(20, 60000);
     const blob = new Blob([bomb as BlobPart], { type: 'image/png' });
-    const bmp = await decodeRasterOrMetafile(blob, { widthPt: 50, heightPt: 50 });
-    expect(bmp).toBeNull(); // refused — graceful "skip the picture" contract
+    await expect(decodeRasterOrMetafile(blob, { widthPt: 50, heightPt: 50 }))
+      .rejects.toMatchObject({
+        name: 'OoxmlDecodedImageLimitError',
+        code: 'ooxml-decoded-image-limit',
+        metric: 'image-pixels',
+        observed: 60000 * 60000,
+      });
     expect(cib).not.toHaveBeenCalled(); // never handed to the decoder
   });
 
@@ -875,6 +880,22 @@ describe('decodeRasterOrMetafile', () => {
     const bmp = await decodeRasterOrMetafile(blob, { widthPt: 50, heightPt: 50 });
     expect(bmp).toBe(fake);
     expect(cib).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes and rejects an oversized decode when the header was unrecognized', async () => {
+    const close = vi.fn();
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width: 8192, height: 8192, close }) as unknown as ImageBitmap),
+    );
+    const blob = new Blob([new Uint8Array([1, 2, 3])], { type: 'application/octet-stream' });
+
+    await expect(decodeRasterOrMetafile(blob)).rejects.toMatchObject({
+      code: 'ooxml-decoded-image-limit',
+      metric: 'image-pixels',
+      observed: 8192 * 8192,
+    });
+    expect(close).toHaveBeenCalledTimes(1);
   });
 
   it('sniffs a header slice for raster: only the header is read, the Blob is handed to createImageBitmap whole', async () => {

@@ -3,7 +3,7 @@ import type {
   OoxmlResourceUsageSnapshot,
 } from '../errors/ooxml-error.js';
 
-/** Effective public admission policy used for one measured operation. */
+/** Configured public admission policy used for one measured operation. */
 export interface OoxmlResourcePolicySnapshot {
   readonly maxArchiveEntryBytes: number | null;
   readonly maxTotalInflatedBytes: number | null;
@@ -16,9 +16,10 @@ export interface OoxmlResourceMetricsCheckpoint {
 }
 
 /**
- * Content-free, machine-readable resource report emitted by an OOXML load or
- * bounded Node session. Byte counters describe measured package work, not the
- * JavaScript heap, WASM allocator overhead, decoded images, canvas, or GPU.
+ * Content-free, machine-readable resource report for an OOXML load or bounded
+ * Node session. Byte counters describe measured package work, not the JavaScript
+ * heap, WASM allocator overhead, decoded images, canvas, or GPU. Browser engines
+ * and Viewers can return a newer snapshot after lazy package access.
  *
  * No source URL, filename, OOXML part name, document text, password, or raw
  * error message is included. Sizes, counts, and timings are still
@@ -29,8 +30,7 @@ export interface OoxmlResourceMetrics {
   /** Version of this metrics payload, independent of the package version. */
   readonly schemaVersion: 1;
   /**
-   * Browser factories and Node DOCX open report `load`; bounded Node PPTX/XLSX
-   * pull lifetimes report `session`.
+   * Browser factories report `load`; bounded Node sessions report `session`.
    */
   readonly scope: 'load' | 'session';
   readonly format: OoxmlFormat;

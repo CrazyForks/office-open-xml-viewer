@@ -5,16 +5,19 @@
  *
  * The original renderers reach for a few browser-only globals:
  *   - `createImageBitmap` — used to paint embedded raster pictures
- *   - `new Image()` — used by xlsx image anchors
  *   - `document.fonts.add(new FontFace(...))` — used by the Google-Fonts loader
  *
- * We provide minimal Node shims for the first two (the third stays opt-in
- * via `useGoogleFonts: false`). The user passes in a canvas factory so the
+ * We provide minimal Node shims for bitmap decode and auxiliary canvases. The
+ * shared SVG loader detects the absence of `Image` and uses this same bitmap
+ * decoder. Font loading stays opt-in
+ * via `useGoogleFonts: false`. The user passes in a canvas factory so the
  * package itself does not pin a particular Node canvas implementation;
  * `skia-canvas` is recommended in the README.
  */
 
 import type { Presentation } from '@silurus/ooxml-pptx';
+
+let nodeCanvasRuntimeTail: Promise<void> = Promise.resolve();
 
 /** A subset of the Node-canvas API that the renderers actually need. The
  *  `skia-canvas` `Canvas` (and `@napi-rs/canvas`'s `Canvas`) both satisfy
@@ -131,6 +134,34 @@ export function installImageBitmapShim(factory: NodeCanvasFactory): () => void {
 }
 
 /**
+ * Run one renderer while this process owns the browser-canvas compatibility
+ * globals. Node globals are process-wide, so DOCX and PPTX operations share one
+ * queue and always restore exactly the values they observed.
+ *
+ * @internal
+ */
+export function withNodeCanvasRuntime<T>(
+  factory: NodeCanvasFactory,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const run = async (): Promise<T> => {
+    const restoreImageBitmap = typeof globalThis.createImageBitmap === 'function'
+      ? () => undefined
+      : installImageBitmapShim(factory);
+    const restoreOffscreen = installOffscreenCanvasShim(factory);
+    try {
+      return await operation();
+    } finally {
+      restoreOffscreen();
+      restoreImageBitmap();
+    }
+  };
+  const result = nodeCanvasRuntimeTail.then(run, run);
+  nodeCanvasRuntimeTail = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+/**
  * Build a `fetchImage` that reads embedded image bytes straight out of the
  * original `.pptx` archive via the WASM `extract_image` export — the Node twin
  * of the browser worker's in-worker `getImage` closure (render-worker.ts). The
@@ -138,8 +169,8 @@ export function installImageBitmapShim(factory: NodeCanvasFactory): () => void {
  * source archive bytes are the byte source server-side; no base64 is ever
  * inlined. Mime travels on the element, so the renderer supplies it.
  *
- * `maxZipEntryBytes` mirrors the worker's per-entry guard and is optional
- * (no cap when omitted).
+ * `maxZipEntryBytes` mirrors the worker's per-entry guard and is optional;
+ * omission selects the shared standard policy default.
  */
 export function makeSourceBufferFetchImage(
   sourceBuffer: ArrayBuffer | Uint8Array,
@@ -161,24 +192,25 @@ export function makeSourceBufferFetchImage(
 /** Skeleton: render a single slide into a user-supplied Node canvas. The
  *  caller must:
  *   - have called `parsePptx(buffer)` to obtain `presentation`
- *   - install `createImageBitmap` shim via {@link installImageBitmapShim}
+ *   - pass `opts.factory` (recommended) or install a compatible
+ *     `createImageBitmap` implementation yourself
  *   - load fonts they want available into the canvas implementation's font
  *     registry (e.g. `Font.use(...)` for skia-canvas) BEFORE calling render
  *
- *  Returns the canvas; encode to PNG with `canvas.toBuffer('png')`.
+ *  Resolves after painting the caller-owned canvas; encode it with the canvas
+ *  implementation's PNG API (for example `canvas.toBuffer('png')`).
  *
  *  Note: the underlying browser renderer is `async` and imports Vite-only
  *  worker assets at the top of `presentation.ts`. The Node path bypasses
  *  `PptxPresentation` and `worker.ts` entirely and calls the pure
  *  `renderSlide` function from `@silurus/ooxml-pptx`.
  *
- *  Bevel / scene3d / effects: pass `opts.factory` (the same canvas factory you
- *  used for {@link installImageBitmapShim}) so this function can install the
- *  {@link installOffscreenCanvasShim} for the duration of the render. Without a
- *  factory there is no way to allocate auxiliary canvases, and the renderer's
- *  beveled-flat path, scene3d projection, and inner-shadow / soft-edge /
- *  reflection effects silently fall back to flat output. The shim is restored
- *  before this function returns. */
+ *  Pass `opts.factory` so this function can install both image-decoding and
+ *  auxiliary-canvas shims for the duration of the render. Without a factory,
+ *  the caller must provide `createImageBitmap` itself and effects that require
+ *  auxiliary canvases can degrade to flat output. Shared Node renders are
+ *  serialized while the process-wide shims are installed, then the previous
+ *  globals are restored. */
 export async function renderSlideNode(
   canvas: NodeCanvasLike,
   presentation: Presentation,
@@ -200,7 +232,7 @@ export async function renderSlideNode(
     /**
      * Optional per-zip-entry byte cap forwarded to `extract_image`, mirroring the
      * browser worker's guard. Only consulted when `sourceBuffer` drives the
-     * default `fetchImage`. No cap when omitted.
+     * default `fetchImage`. Omission selects the shared standard policy default.
      */
     maxZipEntryBytes?: number;
     /**
@@ -212,6 +244,8 @@ export async function renderSlideNode(
      * media placeholder.
      */
     fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
+    /** Lazily resolve embedded media/poster bytes. Defaults to an empty Blob. */
+    fetchMedia?: (path: string) => Promise<Blob>;
   } = {},
 ): Promise<void> {
   // Direct import of the pure renderer module — avoids `presentation.ts`
@@ -233,9 +267,6 @@ export async function renderSlideNode(
   // Light up bevel/scene3d/effects auxiliary-canvas allocation for the render,
   // then restore the global. No-op restore if a factory was not supplied or an
   // OffscreenCanvas already exists.
-  const restoreOffscreen = opts.factory
-    ? installOffscreenCanvasShim(opts.factory)
-    : () => {};
   // Resolve the image byte source: an explicit `fetchImage` wins; otherwise, if
   // the caller handed us the source archive, read image bytes from it via
   // `extract_image`; otherwise fall back to the empty-Blob default (pictures
@@ -245,7 +276,7 @@ export async function renderSlideNode(
     (opts.sourceBuffer
       ? makeSourceBufferFetchImage(opts.sourceBuffer, opts.maxZipEntryBytes)
       : async () => new Blob([]));
-  try {
+  const paint = async (): Promise<void> => {
     await renderSlide(
       canvas as unknown as HTMLCanvasElement,
       slide,
@@ -260,7 +291,7 @@ export async function renderSlideNode(
         hlinkColor: presentation.hlinkColor ?? null,
         // Node-side renderers don't run media playback, so an empty fetcher
         // is fine for posters.
-        fetchMedia: async () => new Blob([]),
+        fetchMedia: opts.fetchMedia ?? (async () => new Blob([])),
         // Pictures/blip fills now carry zip paths; bytes come from `sourceBuffer`
         // (via extract_image), an explicit `fetchImage`, or — when neither is
         // given — an empty Blob so text/shape-only renders still work.
@@ -268,7 +299,6 @@ export async function renderSlideNode(
         skipMediaControls: true,
       },
     );
-  } finally {
-    restoreOffscreen();
-  }
+  };
+  await (opts.factory ? withNodeCanvasRuntime(opts.factory, paint) : paint());
 }

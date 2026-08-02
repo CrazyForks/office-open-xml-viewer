@@ -33,6 +33,10 @@ export type OoxmlErrorStage =
   | 'rendering'
   | 'worker';
 
+/**
+ * @deprecated Use {@link OoxmlErrorStage}. Retained as a compatibility alias
+ * for the short-lived resource-governance API that exposed this vocabulary.
+ */
 export type OoxmlErrorSource =
   | 'container'
   | 'zip-part'

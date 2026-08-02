@@ -22,7 +22,10 @@ export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core
 // narrow on `err.code`.
 export {
   OoxmlError,
+  OoxmlDecodedImageLimitError,
   OoxmlResourceLimitError,
+  isOoxmlDecodedImageLimitError,
+  type OoxmlDecodedImageLimitMetric,
   type OoxmlErrorCode,
   type OoxmlErrorSource,
   type OoxmlErrorStage,

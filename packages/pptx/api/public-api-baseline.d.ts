@@ -521,6 +521,15 @@ export interface MediaElement {
 export interface NoFill {
     fillType: 'none';
 }
+export type OoxmlDecodedImageLimitMetric = 'image-pixels' | 'active-decoded-bytes';
+export class OoxmlDecodedImageLimitError extends RangeError {
+    readonly metric: OoxmlDecodedImageLimitMetric;
+    readonly limit: number;
+    readonly observed: number;
+    readonly code: "ooxml-decoded-image-limit";
+    constructor(metric: OoxmlDecodedImageLimitMetric, limit: number, observed: number);
+}
+export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
 export class OoxmlError extends Error {
     readonly code: OoxmlErrorCode;
     constructor(code: OoxmlErrorCode, message: string);
@@ -709,6 +718,7 @@ export class PptxPresentation {
     collectSlideRuns(slideIndex: number, width?: number): Promise<PptxTextRunInfo[]>;
     getMedia(mediaPath: string): Promise<Blob>;
     getImage(imagePath: string, mimeType: string): Promise<Blob>;
+    getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     toMarkdown(): Promise<string>;
     presentSlide(canvas: HTMLCanvasElement, slideIndex: number, opts?: RenderSlideOptions): Promise<PresentationHandle>;
     destroy(): void;
@@ -734,6 +744,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     findPrev(): Promise<FindMatch<PptxMatchLocation> | null>;
     clearFind(): void;
     get topVisibleSlide(): number;
+    getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     destroy(): void;
     private __privatePresence;
 }
@@ -802,6 +813,7 @@ export class PptxViewer implements ZoomableViewer {
     findNext(): Promise<FindMatch<PptxMatchLocation> | null>;
     findPrev(): Promise<FindMatch<PptxMatchLocation> | null>;
     clearFind(): void;
+    getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     destroy(): void;
     private __privatePresence;
 }

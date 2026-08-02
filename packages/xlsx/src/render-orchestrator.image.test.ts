@@ -27,6 +27,9 @@ import {
 
 // A minimal stand-in for a decoded raster bitmap.
 class FakeBitmap {
+  readonly width = 1;
+  readonly height = 1;
+  close() {}
   constructor(public readonly tag: string) {}
 }
 
@@ -197,7 +200,9 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
 
   it('prefetchImages is a no-op when fetchImage is absent (cache stays empty)', async () => {
     const ws = worksheetWithImages();
-    const cache = new Map<string, CanvasImageSource>();
+    const cache = new Map<string, CanvasImageSource>([
+      ['stale-from-previous-sheet', {} as CanvasImageSource],
+    ]);
     await prefetchImages(ws, cache, undefined);
     expect(cache.size).toBe(0);
   });
@@ -603,10 +608,8 @@ describe('render-pass lease: >cap prefetch never draws a closed bitmap', () => {
 
     const drawn = { closedAtDraw: [] as boolean[] };
     const canvas = makeRecordingCanvas(drawn);
-    const imageCache = new Map<string, CanvasImageSource | null>();
-
     await renderWorksheetViewport(
-      { ws, styles: STYLES, imageCache },
+      { ws, styles: STYLES },
       canvas,
       { row: 1, col: 1, rows: 10, cols: 10 },
       { fetchImage, width: 800, height: 600, dpr: 1 },

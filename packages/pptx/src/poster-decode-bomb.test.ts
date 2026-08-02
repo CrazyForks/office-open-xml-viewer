@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { getPosterBitmap } from './renderer.js';
+import {
+  acquireBitmapCacheLease,
+  dropBitmapCacheByPath,
+  getCachedBitmapByPath,
+  MAX_DECODED_IMAGE_BYTES,
+} from '@silurus/ooxml-core';
 import type { MediaElement } from './types';
 
 /**
@@ -11,9 +17,10 @@ import type { MediaElement } from './types';
  * (a decompression bomb) that OOMs the tab, bypassing the RB1 guard that already
  * protects picture blips.
  *
- * The fix routes the poster through the same `rasterHeaderExceedsBudget` sniff.
- * These tests assert the bomb is rejected BEFORE `createImageBitmap` is called,
- * and that a normal in-budget poster still decodes.
+ * The fix routes the poster through the shared raster decoder and decoded-
+ * surface owner. These tests assert the bomb is rejected BEFORE
+ * `createImageBitmap`, normal posters decode, and pictures/posters share one
+ * presentation-level live-byte budget.
  */
 
 /** Big-endian u32 into a byte array at `o`. */
@@ -69,7 +76,6 @@ describe('getPosterBitmap — RB1 poster decode-bomb guard', () => {
       async (_path: string) => new Blob([bomb as BlobPart], { type: 'image/png' }),
     );
 
-    // A fresh element each time (the cache is keyed by element identity).
     await expect(getPosterBitmap(mediaEl(), fetchMedia)).rejects.toThrow();
     expect(createImageBitmapSpy).not.toHaveBeenCalled();
   });
@@ -95,5 +101,32 @@ describe('getPosterBitmap — RB1 poster decode-bomb guard', () => {
     const bmp = await getPosterBitmap(mediaEl('image/svg+xml'), fetchMedia);
     expect(bmp).toBe(SENTINEL);
     expect(createImageBitmapSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares the live decoded-byte ceiling with ordinary presentation images', async () => {
+    const width = 4096;
+    const baseHeight = MAX_DECODED_IMAGE_BYTES / 2 / width / 4;
+    const posterHeight = baseHeight + 1;
+    const closeBase = vi.fn();
+    const closePoster = vi.fn();
+    createImageBitmapSpy
+      .mockResolvedValueOnce({ width, height: baseHeight, close: closeBase } as unknown as ImageBitmap)
+      .mockResolvedValueOnce({ width, height: posterHeight, close: closePoster } as unknown as ImageBitmap);
+    const fetchImage = vi.fn(async () => new Blob([new Uint8Array([1])]));
+    const fetchMedia = vi.fn(async () => new Blob([new Uint8Array([2])]));
+    const release = acquireBitmapCacheLease(fetchImage);
+
+    await getCachedBitmapByPath('ppt/media/picture.bin', 'application/octet-stream', fetchImage);
+    await expect(getPosterBitmap(mediaEl('application/octet-stream'), fetchMedia, fetchImage))
+      .rejects.toMatchObject({
+        code: 'ooxml-decoded-image-limit',
+        metric: 'active-decoded-bytes',
+      });
+    expect(closePoster).toHaveBeenCalledTimes(1);
+
+    release();
+    dropBitmapCacheByPath(fetchImage);
+    await Promise.resolve();
+    expect(closeBase).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,5 +1,5 @@
 import type { DimOptions } from './types';
-import { renderSlide, dropImageBitmapCache, dropDuotoneBitmapCache, type TextRunCallback, type PptxTextRunInfo } from './renderer';
+import { renderSlide, dropImageBitmapCache, type TextRunCallback, type PptxTextRunInfo } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
 import {
   buildSlidePartIndex,
@@ -18,16 +18,18 @@ import {
   OoxmlResourceLimitError,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
+  type OoxmlResourceMetrics,
 } from '@silurus/ooxml-core';
 import {
   deserializeWorkerError,
   disposeRejectedLoad,
-  HARD_MAX_PPTX_RAW_PART_CACHE_BYTES,
-  HARD_MAX_PPTX_RAW_PART_CACHE_ENTRIES,
+  HARD_MAX_RAW_PART_CACHE_BYTES,
+  HARD_MAX_RAW_PART_CACHE_ENTRIES,
   HARD_MAX_PPTX_CACHED_SLIDES,
   HARD_MAX_PPTX_CACHED_SLIDE_PROJECTION_BYTES,
   normalizeLoadResourceOptions,
   OoxmlResourceMetricsSession,
+  readLatestOoxmlResourceMetrics,
   parseResourceLimitError,
   PULL_SESSION_PROTOCOL,
   type NormalizedOoxmlResourcePolicy,
@@ -129,6 +131,7 @@ export interface RenderSlideOptions {
  * await pres.renderSlide(canvas, 0, { width: 960 });
  */
 export class PptxPresentation {
+  private _metrics: OoxmlResourceMetricsSession | null = null;
   private readonly _worker: Worker;
   private readonly _bridge: WorkerBridge<
     PptxWorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>
@@ -146,8 +149,8 @@ export class PptxPresentation {
   private _slidePartIndex: Map<string, number> | null = null;
   /** One bounded retained-byte owner shared by images and media. */
   private readonly _rawParts = new BoundedRawPartCache({
-    maxEntries: HARD_MAX_PPTX_RAW_PART_CACHE_ENTRIES,
-    maxBytes: HARD_MAX_PPTX_RAW_PART_CACHE_BYTES,
+    maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
+    maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
   });
   /** Google-Fonts `FontFace` objects this deck preloaded into `document.fonts`
    *  (main mode only — in worker mode the worker owns them and terminates with
@@ -161,6 +164,7 @@ export class PptxPresentation {
    *  reference across every render also lets those caches hit across slides. */
   private readonly _fetchImage = (path: string, mime: string): Promise<Blob> =>
     this.getImage(path, mime);
+  private readonly _fetchMedia = (path: string): Promise<Blob> => this.getMedia(path);
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
    *  `renderSlide` / `presentSlide` reuses it — equations render when present,
    *  and are skipped (engine tree-shaken) when omitted. */
@@ -217,7 +221,7 @@ export class PptxPresentation {
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
     const metrics = new OoxmlResourceMetricsSession({
-      enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
+      enabled: true,
       format: 'pptx',
       mode,
       policy: resourceOptions.policy,
@@ -253,6 +257,7 @@ export class PptxPresentation {
     let pres: PptxPresentation | undefined;
     try {
       pres = new PptxPresentation(worker, mode, opts.wasmUrl);
+      pres._metrics = metrics;
       if (opts.math && mode === 'worker') {
         console.warn(
           "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
@@ -497,7 +502,7 @@ export class PptxPresentation {
             majorFont: compact.majorFont,
             minorFont: compact.minorFont,
             hlinkColor: compact.hlinkColor,
-            fetchMedia: (path) => this.getMedia(path),
+            fetchMedia: this._fetchMedia,
             fetchImage: this._fetchImage,
             skipMediaControls: opts.skipMediaControls,
             dim: opts.dim,
@@ -631,6 +636,21 @@ export class PptxPresentation {
     }
   }
 
+  /** Return a fresh content-free metrics snapshot, including lazy slide and
+   * media work completed since load. */
+  async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
+    const metrics = this._metrics;
+    if (!metrics) throw new Error('Presentation not loaded');
+    return readLatestOoxmlResourceMetrics(metrics, async (timeoutMs) => {
+      const response = await this._bridge.request(
+        (id) => ({ kind: 'resourceUsage', id }) satisfies PptxWorkerRequest,
+        undefined,
+        { timeoutMs },
+      );
+      return (response as Extract<PptxWorkerResponse, { kind: 'resourceUsage' }>).usage;
+    });
+  }
+
   /**
    * Project the presentation to GitHub-flavoured markdown: title slides become
    * `#` headings, body shapes become nested bullets at each paragraph's `lvl`,
@@ -716,7 +736,7 @@ export class PptxPresentation {
         width,
         dpr,
         slideWidthEmu: this.slideWidth,
-        fetchMedia: (path) => this.getMedia(path),
+        fetchMedia: this._fetchMedia,
         fetchImage: this._fetchImage,
         drawBase,
         onError: opts.onError,
@@ -749,7 +769,6 @@ export class PptxPresentation {
     // rasters, and SVG object URLs promptly; all three caches are keyed by
     // `_fetchImage`.
     dropImageBitmapCache(this._fetchImage);
-    dropDuotoneBitmapCache(this._fetchImage);
     dropSvgImageCache(this._fetchImage);
   }
 }

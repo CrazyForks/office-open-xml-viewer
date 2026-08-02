@@ -340,10 +340,11 @@ export interface TableIntrinsicWidths {
 
 /**
  * Measure only the content interval contributed by a table when it is nested
- * inside another cell. ECMA-376 §17.18.87 establishes these content bounds
- * before the containing grid is fitted. tblW/tcW remain preferred-width
- * constraints; feeding a nested table's fitted occurrence width back as its
- * parent's content minimum would create a circular width constraint.
+ * inside another cell. This deterministically applies the ECMA-376 §17.18.87
+ * content min/max algorithm to nested content. tblW/tcW remain preferred-width
+ * constraints; using a nested occurrence's final fitted width as its parent's
+ * content minimum would create a circular width constraint, so recursion uses
+ * the intrinsic interval instead.
  *
  * Fixed-layout tables do not acquire cell-content constraints (§17.18.87).
  * They remain one fixed-width atom using their already-projected preferred

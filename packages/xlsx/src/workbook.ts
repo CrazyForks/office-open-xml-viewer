@@ -5,14 +5,14 @@ import {
   unloadGoogleFonts,
   WorkerBridge,
   defaultDpr,
-  dropBitmapCacheByPath,
-  dropDuotoneBitmapCache,
+  dropDecodedBitmapCache,
   dropSvgImageCache,
   resolveOoxmlContainer,
   toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
   OoxmlResourceLimitError,
+  type OoxmlResourceMetrics,
 } from '@silurus/ooxml-core';
 import {
   deserializeWorkerError,
@@ -20,11 +20,15 @@ import {
   disposeRejectedLoad,
   normalizeLoadResourceOptions,
   OoxmlResourceMetricsSession,
+  readLatestOoxmlResourceMetrics,
   normalizeResourcePolicy,
   type NormalizedOoxmlResourcePolicy,
   PULL_SESSION_PROTOCOL,
   type PullSessionResponse,
+  HARD_MAX_RAW_PART_CACHE_BYTES,
+  HARD_MAX_RAW_PART_CACHE_ENTRIES,
 } from '@silurus/ooxml-core/worker';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
@@ -75,6 +79,7 @@ function isWorksheetPullResponse(
 }
 
 export class XlsxWorkbook {
+  private metrics: OoxmlResourceMetricsSession | null = null;
   private worker: Worker;
   private bridge: WorkerBridge<
     WorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>
@@ -85,14 +90,13 @@ export class XlsxWorkbook {
    * for the bounded worksheet cursor: concurrent callers share one cursor and
    * one eventual mutable compatibility object instead of doubling peak work. */
   private sheetLoads = new Map<number, Promise<Worksheet>>();
-  /** Cache of decoded image sources keyed by their zip `imagePath`. Shared
-   *  across sheets. */
-  private imageCache = new Map<string, CanvasImageSource | null>();
   /** Cache of fetched image *bytes* (as Blobs) keyed by zip path, populated by
    *  {@link XlsxWorkbook.getImage}. Twin of pptx/docx's per-instance
-   *  `_imageCache`; kept separate from {@link XlsxWorkbook.imageCache} (decoded
-   *  sources) so each layer dedupes independently. */
-  private imageBlobCache = new Map<string, Promise<Blob>>();
+   *  raw-part owner; decoded sources are owned separately by core. */
+  private readonly rawParts = new BoundedRawPartCache({
+    maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
+    maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
+  });
   /** Public archive-queue reservations. Kept separate so an active render does
    * not await a same-path load that is queued behind that render. */
   private queuedImageLoads = new Map<string, Promise<Blob>>();
@@ -102,7 +106,6 @@ export class XlsxWorkbook {
    *  across viewport renders. */
   private readonly _fetchImage = (path: string, mime: string): Promise<Blob> =>
     this.getImageWithinArchiveOperation(path, mime);
-  private rawData: ArrayBuffer | null = null;
   private resourcePolicy: NormalizedOoxmlResourcePolicy | null = null;
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
    *  `renderViewport` call reuses it — equations in shapes render when present,
@@ -156,7 +159,7 @@ export class XlsxWorkbook {
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
     const metrics = new OoxmlResourceMetricsSession({
-      enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
+      enabled: true,
       format: 'xlsx',
       mode,
       policy: resourceOptions.policy,
@@ -174,6 +177,7 @@ export class XlsxWorkbook {
     // legacy-binary / unknown CFB, becomes a typed OoxmlError (whose `instanceof`
     // would not survive the worker boundary). The resolved buffer is handed to
     // `_load` so a URL source is not fetched twice.
+    const callerBuffer = typeof source === 'string' ? undefined : source;
     let buffer: ArrayBuffer;
     if (typeof source === 'string') {
       const res = await fetch(source);
@@ -183,6 +187,7 @@ export class XlsxWorkbook {
       buffer = source;
     }
     buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
+    const preserveCallerBuffer = buffer === callerBuffer;
     metrics.setSourceBytes(buffer.byteLength);
     metrics.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so
@@ -194,11 +199,13 @@ export class XlsxWorkbook {
     let wb: XlsxWorkbook | undefined;
     try {
       wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
+      wb.metrics = metrics;
       await wb._load(
         buffer,
         opts,
         resourceOptions.policy,
         (usage) => metrics.observeUsage(usage),
+        preserveCallerBuffer,
       );
       metrics.checkpoint('workbook index ready');
       metrics.succeed({ sheets: wb.sheetCount });
@@ -223,6 +230,7 @@ export class XlsxWorkbook {
     opts: LoadOptions = {},
     resourcePolicy: NormalizedOoxmlResourcePolicy = normalizeResourcePolicy(opts),
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
+    preserveCallerBuffer = false,
   ): Promise<void> {
     this.resourceFailure = null;
     this.retainedSheetUsage = { rows: 0, cells: 0 };
@@ -232,7 +240,6 @@ export class XlsxWorkbook {
     }
     this.sheetSessions?.clear();
     this.generation = (this.generation ?? 0) + 1;
-    this.rawData = data;
     this.resourcePolicy = resourcePolicy;
     this.workerTimeoutMs = opts.workerTimeoutMs;
     this.math = opts.math;
@@ -244,23 +251,27 @@ export class XlsxWorkbook {
     // In worker mode the worker preloads fonts before its first render
     // (rendering measures text), so the flag is forwarded; in main mode fonts
     // are loaded here after parse.
+    // Preserve XLSX's historical caller-owned ArrayBuffer contract only when
+    // the resolved ZIP is literally the caller's buffer. URL and decrypted
+    // buffers are library-owned and can transfer directly without a peak copy.
+    const workerData = preserveCallerBuffer ? data.slice(0) : data;
     const parsed = await this.bridge.request(
       (id) =>
         this._mode === 'worker'
           ? ({
               type: 'parse',
               id,
-              data: data.slice(0),
+              data: workerData,
               resourcePolicy,
               useGoogleFonts: !!opts.useGoogleFonts,
             } satisfies RenderWorkerRequest)
           : ({
               type: 'parse',
               id,
-              data: data.slice(0),
+              data: workerData,
               resourcePolicy,
             } satisfies WorkerRequest),
-      undefined,
+      [workerData],
       { timeoutMs: opts.workerTimeoutMs },
     );
     // Both modes carry the light, workbook-level ParsedWorkbook back, so
@@ -345,13 +356,25 @@ export class XlsxWorkbook {
     }
   }
 
+  /** Return a fresh content-free metrics snapshot, including lazy worksheet and
+   * media work completed since load. */
+  async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
+    const metrics = this.metrics;
+    if (!metrics) throw new Error('Workbook not loaded');
+    return readLatestOoxmlResourceMetrics(metrics, async (timeoutMs) => {
+      const response = await this.bridge.request(
+        (id) => ({ type: 'resourceUsage', id }) satisfies WorkerRequest,
+        undefined,
+        { timeoutMs },
+      );
+      return (response as Extract<WorkerResponse, { type: 'resourceUsage' }>).usage;
+    });
+  }
+
   private async loadWorksheet(sheetIndex: number): Promise<Worksheet> {
-    // `!this.rawData` guards that `parse` has run: the worker retained the
-    // whole-workbook buffer at parse time, and `parseSheet` reuses it. We no
-    // longer re-send the buffer here (it previously structured-cloned the entire
-    // file per sheet switch); the retained `rawData` is still kept for
-    // `getImage`'s route-through-worker path.
-    if (!this.parsedWorkbook || !this.rawData) {
+    // The worker retained its transferred archive at parse time; loaded state
+    // is represented by the workbook bootstrap, not a duplicate source buffer.
+    if (!this.parsedWorkbook) {
       throw new Error('Workbook not loaded');
     }
     const sheetMeta = this.parsedWorkbook.workbook.sheets[sheetIndex];
@@ -465,14 +488,11 @@ export class XlsxWorkbook {
    * instance. The renderer's `fetchImage` option points here so image bytes are
    * extracted lazily rather than inlined as base64 at parse time.
    *
-   * Routed through the worker even though the main thread also retains
-   * `rawData`, to keep all WASM `extract_image` decoding on the worker (the
-   * route-through-worker decision).
+   * Routed through the persistent worker so all WASM `extract_image` decoding
+   * stays with the archive owner.
    */
   async getImage(imagePath: string, mimeType: string): Promise<Blob> {
     this.assertResourceHealthy();
-    const hit = this.imageBlobCache.get(imagePath);
-    if (hit) return hit;
     const queued = this.queuedImageLoads?.get(imagePath);
     if (queued) return queued;
     const p = this.runArchiveOperation(() =>
@@ -486,14 +506,11 @@ export class XlsxWorkbook {
   }
 
   private getImageWithinArchiveOperation(imagePath: string, mimeType: string): Promise<Blob> {
-    const hit = this.imageBlobCache.get(imagePath);
-    if (hit) return hit;
-    const request = this.requestImage(imagePath, mimeType);
-    this.imageBlobCache.set(imagePath, request);
-    void request.catch(() => {
-      if (this.imageBlobCache.get(imagePath) === request) this.imageBlobCache.delete(imagePath);
-    });
-    return request;
+    return this.rawParts.get(
+      imagePath,
+      mimeType,
+      () => this.requestImage(imagePath, mimeType),
+    );
   }
 
   private requestImage(imagePath: string, mimeType: string): Promise<Blob> {
@@ -623,7 +640,7 @@ export class XlsxWorkbook {
     const styles = this.parsedWorkbook.styles;
     return this.withWorksheetArchiveOperation(sheetIndex, (ws) =>
       renderWorksheetViewport(
-        { ws, styles, imageCache: this.imageCache, math: this.math },
+        { ws, styles, math: this.math },
         target,
         viewport,
         // The stable closure uses the archive operation already reserved by
@@ -675,7 +692,7 @@ export class XlsxWorkbook {
     if (active) {
       return this.runArchiveOperation(async () => operation(await active));
     }
-    if (!this.parsedWorkbook || !this.rawData) {
+    if (!this.parsedWorkbook) {
       return Promise.reject(new Error('Workbook not loaded'));
     }
     const sheetMeta = this.parsedWorkbook.workbook.sheets[sheetIndex];
@@ -724,21 +741,12 @@ export class XlsxWorkbook {
       unloadGoogleFonts(this.googleFontFaces);
       this.googleFontFaces = [];
     }
-    // The per-instance imageCache is a pure synchronous-lookup map into the
-    // shared, per-`_fetchImage` core caches (base raster via getCachedBitmapByPath,
-    // duotone recolour via getCachedDuotoneBitmapByPath, SVG via
-    // getCachedSvgImageByPath) — the same ownership split docx/pptx use. Clearing
-    // the map only drops lookup references; the GPU-backed ImageBitmaps and SVG
-    // object URLs are released by dropping the three shared caches keyed by
-    // `_fetchImage`, so a discarded workbook frees its GPU/URL handles promptly
-    // rather than waiting for GC.
-    this.imageCache.clear();
-    dropBitmapCacheByPath(this._fetchImage);
-    dropDuotoneBitmapCache(this._fetchImage);
+    // Frame-local lookup maps never escape the renderer; drop the owning core
+    // caches to release decoded surfaces and SVG references.
+    dropDecodedBitmapCache(this._fetchImage);
     dropSvgImageCache(this._fetchImage);
-    this.imageBlobCache.clear();
+    this.rawParts.clear();
     this.queuedImageLoads?.clear();
-    this.rawData = null;
   }
 
   private assertResourceHealthy(): void {

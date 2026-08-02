@@ -39,8 +39,10 @@
 
 import { decodePackedDib, blitDibToCtx } from './dib.js';
 import { renderEmfToBitmap } from './emf.js';
-import { rasterHeaderExceedsBudget } from './raster-dimensions.js';
+import { rasterExceedsBudget, sniffRasterDimensions } from './raster-dimensions.js';
+import { MAX_RASTER_PIXELS, OoxmlDecodedImageLimitError } from './pixel-budget.js';
 import { createAuxCanvas } from '../canvas/aux-canvas.js';
+import { closeImageBitmapIfSupported } from './image-bitmap-lifecycle.js';
 
 // WMF record function codes (the subset we act on; others are skipped by size).
 const META = {
@@ -844,17 +846,47 @@ export async function decodeRasterOrMetafile(
 
   if (isWmf(head)) {
     const { w, h } = wmfRasterTarget(widthPt, heightPt);
-    return renderWmfToBitmap(new Uint8Array(await data.arrayBuffer()), w, h, suppressBoundaryFrame);
+    return enforceDecodedBitmapBudget(
+      await renderWmfToBitmap(new Uint8Array(await data.arrayBuffer()), w, h, suppressBoundaryFrame),
+    );
   }
   if (isEmf(head)) {
     const { w, h } = wmfRasterTarget(widthPt, heightPt);
-    return renderEmfToBitmap(new Uint8Array(await data.arrayBuffer()), w, h);
+    return enforceDecodedBitmapBudget(
+      await renderEmfToBitmap(new Uint8Array(await data.arrayBuffer()), w, h),
+    );
   }
   // Decode-bomb guard: if the header declares a recognized raster (PNG/JPEG/GIF/
   // BMP/WEBP) whose pixel dimensions exceed the shared budget, refuse it BEFORE
-  // `createImageBitmap` allocates a multi-GB surface. Returning null matches the
-  // existing "unsupported image ⇒ skip the picture, keep rendering" contract that
-  // every caller already handles. An unrecognized header is not blocked here.
-  if (rasterHeaderExceedsBudget(head)) return null;
-  return createImageBitmap(data);
+  // `createImageBitmap` allocates a multi-GB surface. An unrecognized header
+  // cannot be rejected before decode, so the decoded dimensions are validated
+  // immediately afterwards and the surface is closed before it can be retained.
+  const rasterDimensions = sniffRasterDimensions(head);
+  if (rasterDimensions && rasterExceedsBudget(rasterDimensions)) {
+    throw new OoxmlDecodedImageLimitError(
+      'image-pixels',
+      MAX_RASTER_PIXELS,
+      rasterDimensions.width * rasterDimensions.height,
+    );
+  }
+  return enforceDecodedBitmapBudget(await createImageBitmap(data));
+}
+
+/** Validate at the decoder boundary so direct callers and the shared cache have
+ * identical hard-quota semantics. The allocation has already happened when a
+ * header was unrecognized, but an oversized surface is closed immediately and
+ * never reaches a renderer or cache. */
+function enforceDecodedBitmapBudget(bitmap: ImageBitmap | null): ImageBitmap | null {
+  if (!bitmap) return null;
+  const width = Number(bitmap.width);
+  const height = Number(bitmap.height);
+  if (!rasterExceedsBudget({ width, height })) return bitmap;
+
+  const pixels = width * height;
+  closeImageBitmapIfSupported(bitmap);
+  throw new OoxmlDecodedImageLimitError(
+    'image-pixels',
+    MAX_RASTER_PIXELS,
+    Number.isSafeInteger(pixels) && pixels >= 0 ? pixels : Number.MAX_SAFE_INTEGER,
+  );
 }

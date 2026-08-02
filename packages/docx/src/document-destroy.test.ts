@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import {
   WorkerBridge,
   loadLocalFontMetrics,
@@ -171,7 +172,7 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     attachDocumentLayoutRuntime(instance, 0);
     instance._bridge = bridge;
     // Fields destroy() clears after terminate(); undefined would throw.
-    instance._imageCache = new Map();
+    instance._rawParts = new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 });
     instance._embeddedFontFaces = [];
     instance._googleFontFaces = [];
     instance._localMetricFontFaces = [];

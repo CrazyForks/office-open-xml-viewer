@@ -53,6 +53,14 @@ function bytes(value: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(value));
 }
 
+function insufficientCredit(requiredBytes: number, offeredBytes: number): Error {
+  return new Error(`OOXML_INSUFFICIENT_CREDIT:${JSON.stringify({
+    code: PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
+    requiredBytes,
+    offeredBytes,
+  })}`);
+}
+
 function makeArchive(payload = bytes({ index: 0, slideNumber: 1, background: null, elements: [] })) {
   return {
     pull_slide: vi.fn((
@@ -126,7 +134,7 @@ describe('SlidePullWorker', () => {
     const archive = makeArchive(payload);
     archive.pull_slide.mockImplementation((_index, _operation, _generation, credit) => {
       if (credit < prepared.byteLength) {
-        throw new Error(`slide unit requires ${prepared.byteLength} bytes but credit is ${credit}`);
+        throw insufficientCredit(prepared.byteLength, credit);
       }
       const result = prepared;
       prepared = new Uint8Array();
@@ -152,7 +160,7 @@ describe('SlidePullWorker', () => {
     const archive = makeArchive(payload);
     archive.pull_slide.mockImplementation((_index, _operation, _generation, credit) => {
       if (credit < payload.byteLength) {
-        throw new Error(`slide unit requires ${payload.byteLength} bytes but credit is ${credit}`);
+        throw insufficientCredit(payload.byteLength, credit);
       }
       return payload;
     });
@@ -171,7 +179,7 @@ describe('SlidePullWorker', () => {
     });
 
     await expect(client.pull(1)).rejects.toMatchObject({
-      name: 'RangeError', code: PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
+      name: 'PullSessionInsufficientCreditError', code: PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
     });
     expect(transport.posted).toHaveLength(1);
     const chunk = await client.pull(payload.byteLength);

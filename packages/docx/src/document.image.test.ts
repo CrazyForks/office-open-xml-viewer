@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { DocxDocument } from './document';
 import type { WorkerRequest } from './types';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 
 /**
  * `DocxDocument.getImage(path, mime)` routes through the persistent worker via
@@ -30,7 +31,7 @@ describe('DocxDocument.getImage', () => {
     // intersecting the class's private members.
     const instance = Object.create(DocxDocument.prototype) as Record<string, unknown>;
     instance._bridge = { request };
-    instance._imageCache = new Map<string, Promise<Blob>>();
+    instance._rawParts = new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 });
     const doc = instance as unknown as GetImageProbe;
     return { doc, request };
   }

@@ -1,11 +1,13 @@
 import {
   decodeOoxmlResourceUsage,
+  exactTransferableArrayBuffer,
   HARD_MAX_DOCX_BODY_CHUNK_JSON_BYTES,
   HARD_MAX_DOCX_BOOTSTRAP_JSON_BYTES,
-  PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
   PULL_SESSION_PROTOCOL,
+  PullSessionInsufficientCreditError,
   PullSessionHost,
   PullSessionHostCoordinator,
+  normalizePullSessionInsufficientCreditError,
   serializeWorkerError,
   type PullSessionCommand,
   type PullSessionIdentity,
@@ -79,9 +81,10 @@ export class MaterializedDocumentCursorArchive implements DocxDocumentCursorArch
       };
     }
     if (this.prepared.bytes.byteLength > byteCredit) {
-      throw new Error(
-        `document unit requires ${this.prepared.bytes.byteLength} bytes but credit is ${byteCredit}`,
-      );
+      throw new PullSessionInsufficientCreditError({
+        requiredBytes: this.prepared.bytes.byteLength,
+        offeredBytes: byteCredit,
+      });
     }
     // The returned buffer is transferred and detached; retain the prepared
     // bytes so an unacknowledged pull can be retried without reserialization.
@@ -180,11 +183,15 @@ export class DocumentPullWorker {
               byteCredit,
             ));
           } catch (error) {
-            const insufficient = asInsufficientCreditError(error, byteCredit);
+            const insufficient = normalizePullSessionInsufficientCreditError(
+              error,
+              byteCredit,
+              MAX_DOCUMENT_UNIT_BYTES,
+            );
             if (insufficient) throw insufficient;
             throw error;
           }
-          const payload = exactArrayBuffer(bytes);
+          const payload = exactTransferableArrayBuffer(bytes);
           return {
             payload,
             byteLength: payload.byteLength,
@@ -276,33 +283,4 @@ export function createLocalDocumentPullTransport(
     forgetOrphaned() {},
     terminate() {},
   };
-}
-
-function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-    && bytes.buffer instanceof ArrayBuffer) {
-    return bytes.buffer;
-  }
-  return bytes.slice().buffer as ArrayBuffer;
-}
-
-const INSUFFICIENT_CREDIT_PATTERN =
-  /^document unit requires ([0-9]+) bytes but credit is ([0-9]+)$/u;
-
-function asInsufficientCreditError(error: unknown, offeredCredit: number): RangeError | undefined {
-  const message = error instanceof Error ? error.message : String(error);
-  const match = INSUFFICIENT_CREDIT_PATTERN.exec(message);
-  if (!match) return undefined;
-  const required = Number(match[1]);
-  const reportedCredit = Number(match[2]);
-  if (
-    !Number.isSafeInteger(required) || required <= 0
-    || !Number.isSafeInteger(reportedCredit) || reportedCredit <= 0
-    || String(required) !== match[1] || String(reportedCredit) !== match[2]
-    || reportedCredit !== offeredCredit || required <= reportedCredit
-    || required > MAX_DOCUMENT_UNIT_BYTES
-  ) return undefined;
-  return Object.assign(new RangeError(message), {
-    code: PULL_SESSION_INSUFFICIENT_CREDIT_CODE,
-  });
 }

@@ -6,6 +6,8 @@ import {
   openPptxPresentation,
   parsePptx,
 } from './pptx.ts';
+import { OoxmlDecodedImageLimitError } from '@silurus/ooxml-core';
+import type { NodeCanvasFactory, NodeCanvasLike } from './render.ts';
 
 let bytes: Buffer;
 
@@ -38,6 +40,83 @@ describe('Node bounded PPTX presentation session', () => {
       expect(parse).not.toHaveBeenCalled();
     } finally {
       parse.mockRestore();
+    }
+  });
+
+  it('extracts lazy parts through the session-owned bounded cache', async () => {
+    const extract = vi.spyOn(archivePrototype(), 'extract_image');
+    try {
+      const session = await openPptxPresentation(bytes);
+      const first = await session.getImage('ppt/media/image1.jpeg', 'image/jpeg');
+      const second = await session.getImage('ppt/media/image1.jpeg', 'image/jpeg');
+
+      expect(first).toBe(second);
+      expect(first.size).toBeGreaterThan(0);
+      expect(extract).toHaveBeenCalledTimes(1);
+      expect(session.resourceUsage?.distinctInflatedBytes).toBeGreaterThan(0);
+      await session.close();
+      await expect(session.getImage('ppt/media/image1.jpeg', 'image/jpeg'))
+        .rejects.toThrow(/closed/);
+    } finally {
+      extract.mockRestore();
+    }
+  });
+
+  it('reuses one render byte source and lets an accepted render finish before close', async () => {
+    const renderModule = await import('./render.ts');
+    const started = deferred<void>();
+    const resume = deferred<void>();
+    const fetchers: unknown[] = [];
+    const render = vi.spyOn(renderModule, 'renderSlideNode').mockImplementation(
+      async (_canvas, _presentation, _slideIndex, options) => {
+        fetchers.push(options?.fetchImage);
+        started.resolve();
+        await resume.promise;
+        await options?.fetchImage?.('ppt/media/image1.jpeg', 'image/jpeg');
+      },
+    );
+    const free = vi.spyOn(archivePrototype(), 'free');
+    try {
+      const session = await openPptxPresentation(bytes);
+      const slide = parsePptx(bytes).slides[0]!;
+      const rendering = session.renderSlide(fakeCanvas(), slide, { factory: fakeFactory() });
+      await started.promise;
+      let closeSettled = false;
+      const closing = session.close().finally(() => { closeSettled = true; });
+      await Promise.resolve();
+      expect(closeSettled).toBe(false);
+      expect(free).not.toHaveBeenCalled();
+
+      resume.resolve();
+      await rendering;
+      await closing;
+      expect(fetchers).toHaveLength(1);
+      expect(free).toHaveBeenCalledTimes(1);
+    } finally {
+      render.mockRestore();
+      free.mockRestore();
+    }
+  });
+
+  it('reports render failures as terminal session metrics', async () => {
+    const renderModule = await import('./render.ts');
+    const failure = new OoxmlDecodedImageLimitError('image-pixels', 10, 11);
+    const render = vi.spyOn(renderModule, 'renderSlideNode').mockRejectedValue(failure);
+    const onResourceMetrics = vi.fn();
+    try {
+      const session = await openPptxPresentation(bytes, { onResourceMetrics });
+      const slide = parsePptx(bytes).slides[0]!;
+      await expect(session.renderSlide(fakeCanvas(), slide, { factory: fakeFactory() }))
+        .rejects.toBe(failure);
+      await session.close();
+      expect(onResourceMetrics).toHaveBeenCalledOnce();
+      expect(onResourceMetrics).toHaveBeenCalledWith(expect.objectContaining({
+        format: 'pptx',
+        scope: 'session',
+        status: 'error',
+      }));
+    } finally {
+      render.mockRestore();
     }
   });
 
@@ -118,9 +197,27 @@ describe('Node bounded PPTX presentation session', () => {
 
 type ArchivePrototype = {
   free(): void;
+  extract_image(path: string): Uint8Array;
 };
 
 function archivePrototype(): ArchivePrototype {
   return (pptxWasm as unknown as { PptxArchive: { prototype: ArchivePrototype } })
     .PptxArchive.prototype;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
+function fakeCanvas(): NodeCanvasLike {
+  return { width: 1, height: 1, getContext: vi.fn() as unknown as NodeCanvasLike['getContext'] };
+}
+
+function fakeFactory(): NodeCanvasFactory {
+  return {
+    createCanvas: vi.fn(() => fakeCanvas()),
+    loadImage: vi.fn(async () => ({ width: 1, height: 1 })),
+  };
 }

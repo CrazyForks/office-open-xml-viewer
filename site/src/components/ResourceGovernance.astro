@@ -12,7 +12,7 @@
     <div class="rg-facts">
       <div>
         <strong>Calibrate with real traffic</strong>
-        <span><code>onResourceMetrics</code> works independently of debug logging, so an application can collect content-free sizes, counts and timings under its own telemetry policy.</span>
+        <span><code>onResourceMetrics</code> captures the initial load independently of debug logging; <code>getResourceMetrics()</code> returns a fresh snapshot after lazy package access.</span>
       </div>
       <div>
         <strong>Inspect without instrumentation</strong>
@@ -24,9 +24,12 @@
       </div>
     </div>
     <p class="rg-caveat">
-      These are deterministic admission and structural limits, not exact JavaScript, WASM,
-      decoded-image, canvas or GPU memory accounting. They reduce catastrophic-failure risk;
-      they cannot guarantee that every device avoids OOM.
+      Raster decode is also guarded uniformly: 32 MP per image, 128 MiB of decoded
+      ownership per document cache or render pass, and two concurrent decodes. These are
+      deterministic admission guards—not exact JavaScript, WASM, canvas or GPU accounting—so
+      they reduce catastrophic-failure risk but cannot guarantee that every device avoids OOM.
+      Browser-managed SVG/vector storage has no portable decoded-byte metric; its cache is
+      count-bounded and owned object URLs are revoked, but it is outside the RGBA counter.
     </p>
   </div>
 

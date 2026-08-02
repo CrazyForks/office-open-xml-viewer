@@ -94,6 +94,23 @@ export const WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION = defineCompatibilit
   description: 'In a vertical-rl section, Word admits the final visible text column when its transformed baseline and retained visible ink remain inside the block-end edge even if the complete logical line box crosses that edge. The complete retained advance remains authoritative after admission.',
 });
 
+export const WORD_LOWERED_DROP_CAP_ANCHOR_LEADING = defineCompatibilityRule({
+  id: 'word-lowered-drop-cap-anchor-leading',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/frame-keep-with-anchor.test.ts#keeps anchor text below a lowered drop cap without extending its authored line count',
+  },
+  description: 'Word keeps the following anchor text below a baseline-lowered drop-cap glyph while preserving the drop cap exclusion height authored by framePr lines. ECMA-376 specifies those two inputs independently but does not prescribe this interaction.',
+});
+
+/** Compatibility projection governed by
+ * {@link WORD_LOWERED_DROP_CAP_ANCHOR_LEADING}. */
+export function wordLoweredDropCapAnchorLeadingPt(
+  maximumBaselineLoweringPt: number,
+): number {
+  return Math.max(0, maximumBaselineLoweringPt);
+}
+
 /** Compatibility projection governed by {@link WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION}. */
 export function wordFinalParagraphAdmissionExtentPt(input: Readonly<{
   advancePt: number;

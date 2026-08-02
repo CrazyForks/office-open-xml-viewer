@@ -5,6 +5,7 @@ export {
   extractImage as extractPptxImage,
   type OpenPptxPresentationOptions,
   type PptxPresentationSession,
+  type PptxSessionRenderOptions,
 } from './pptx';
 export {
   openDocxDocument,
@@ -37,4 +38,14 @@ export type {
   OoxmlResourceMetrics,
   OoxmlResourceMetricsCheckpoint,
   OoxmlResourcePolicySnapshot,
+} from '@silurus/ooxml-core';
+export {
+  OoxmlDecodedImageLimitError,
+  OoxmlResourceLimitError,
+  isOoxmlDecodedImageLimitError,
+  type OoxmlDecodedImageLimitMetric,
+  type OoxmlResourceLimit,
+  type OoxmlResourceLimitErrorDetails,
+  type OoxmlResourceLimits,
+  type OoxmlResourceUsageSnapshot,
 } from '@silurus/ooxml-core';

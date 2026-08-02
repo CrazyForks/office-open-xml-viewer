@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { XlsxWorkbook } from './workbook.js';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 
 describe('XlsxWorkbook resource-policy wiring', () => {
   it('sends the normalized policy once and reuses the retained session for sheets', async () => {
@@ -10,7 +11,7 @@ describe('XlsxWorkbook resource-policy wiring', () => {
     instance.sheetCache = new Map();
     instance.sheetLoads = new Map();
     instance.imageCache = new Map();
-    instance.imageBlobCache = new Map();
+    instance.rawParts = new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 });
     instance.googleFontFaces = [];
     const bridge = {
       request: vi.fn(async (createRequest: (id: number) => Record<string, unknown>) => {

@@ -42,6 +42,7 @@ export type PptxWorkerRequest =
   | { kind: 'finishPresentationPreflight'; id: number }
   | { kind: 'extractMedia'; id: number; path: string }
   | { kind: 'extractImage'; id: number; path: string }
+  | { kind: 'resourceUsage'; id: number }
   | { kind: 'toMarkdown'; id: number };
 
 export type PptxWorkerResponse =
@@ -50,6 +51,7 @@ export type PptxWorkerResponse =
   | { kind: 'presentationPreflightReady'; id: number; preflight: PresentationPreflight }
   | { kind: 'mediaExtracted'; id: number; bytes: ArrayBuffer }
   | { kind: 'imageExtracted'; id: number; bytes: ArrayBuffer }
+  | { kind: 'resourceUsage'; id: number; usage: OoxmlResourceUsageSnapshot }
   | { kind: 'markdownRendered'; id: number; markdown: string }
   | ({ kind: 'error'; id: number } & WorkerErrorPayload);
 
@@ -67,6 +69,7 @@ export type RenderWorkerRequest =
     }
   | { kind: 'extractMedia'; id: number; path: string }
   | { kind: 'extractImage'; id: number; path: string }
+  | { kind: 'resourceUsage'; id: number }
   | { kind: 'toMarkdown'; id: number }
   | {
       kind: 'renderSlide';

@@ -11,6 +11,7 @@ import type {
 import type { NormalizedOoxmlResourcePolicy } from './resource-policy.js';
 import { emitOoxmlResourceDebugReport } from './resource-debug-view.js';
 import { WasmTrapError } from './wasm-guard.js';
+import { OoxmlDecodedImageLimitError } from '../image/pixel-budget.js';
 
 export interface OoxmlResourceMetricsSessionOptions {
   readonly enabled: boolean;
@@ -22,6 +23,22 @@ export interface OoxmlResourceMetricsSessionOptions {
   readonly onMetrics?: (report: OoxmlResourceMetrics) => void;
   /** Emit the human-readable console card in addition to `onMetrics`. */
   readonly emitToConsole?: boolean;
+}
+
+/** Bound an explicit metrics probe so a failed worker cannot wedge telemetry. */
+export const OOXML_RESOURCE_METRICS_PROBE_TIMEOUT_MS = 1_000;
+
+/** Refresh a terminal metrics session from its archive owner. Explicit reads
+ * promise freshness: timeout/worker failure rejects instead of disguising the
+ * previous snapshot as current. */
+export async function readLatestOoxmlResourceMetrics(
+  session: OoxmlResourceMetricsSession,
+  probe: (timeoutMs: number) => Promise<OoxmlResourceUsageSnapshot>,
+): Promise<OoxmlResourceMetrics> {
+  session.observeUsage(await probe(OOXML_RESOURCE_METRICS_PROBE_TIMEOUT_MS));
+  const report = session.current();
+  if (!report) throw new Error('OOXML resource metrics are not ready');
+  return report;
 }
 
 /**
@@ -38,6 +55,10 @@ export class OoxmlResourceMetricsSession {
   private lastUsage?: OoxmlResourceUsageSnapshot;
   private mode: OoxmlResourceMetrics['mode'];
   private finished = false;
+  private terminalStatus?: OoxmlResourceMetrics['status'];
+  private terminalError?: unknown;
+  private terminalOutcome?: Readonly<Record<string, number>>;
+  private terminalElapsedMs?: number;
 
   constructor(private readonly options: OoxmlResourceMetricsSessionOptions) {
     this.now = options.now ?? defaultNow;
@@ -74,8 +95,19 @@ export class OoxmlResourceMetricsSession {
   }
 
   observeUsage(usage: OoxmlResourceUsageSnapshot | undefined): void {
-    if (!this.options.enabled || this.finished || !usage) return;
+    if (!this.options.enabled || !usage) return;
     this.lastUsage = immutableUsage(usage);
+  }
+
+  /** Latest immutable snapshot. Available after the measured load/session has
+   * settled; later lazy-operation usage observed by the owner is reflected. */
+  current(): OoxmlResourceMetrics | undefined {
+    if (!this.options.enabled || !this.terminalStatus) return undefined;
+    return this.report(
+      this.terminalStatus,
+      this.terminalError,
+      this.terminalOutcome,
+    );
   }
 
   succeed(outcome?: Readonly<Record<string, number>>): OoxmlResourceMetrics | undefined {
@@ -93,32 +125,43 @@ export class OoxmlResourceMetricsSession {
   ): OoxmlResourceMetrics | undefined {
     if (!this.options.enabled || this.finished) return undefined;
     this.finished = true;
+    this.terminalStatus = status;
+    this.terminalError = error;
+    this.terminalOutcome = outcome;
+    this.terminalElapsedMs = elapsed(this.startedAt, this.now());
+    const report = this.report(status, error, outcome);
+    if (this.options.onMetrics) safelyEmit(this.options.onMetrics, report);
+    if (this.options.emitToConsole ?? this.options.onMetrics === undefined) {
+      safelyEmit(emitOoxmlResourceDebugReport, report);
+    }
+    return report;
+  }
+
+  private report(
+    status: OoxmlResourceMetrics['status'],
+    error?: unknown,
+    outcome?: Readonly<Record<string, number>>,
+  ): OoxmlResourceMetrics {
     const failureUsage = safeFailureUsage(error);
     // A typed violation is the authoritative terminal checkpoint. A previous
     // successful pull necessarily predates it and must not hide its counters.
     const finalUsage = failureUsage ?? this.lastUsage;
-    const report: OoxmlResourceMetrics = Object.freeze({
+    return Object.freeze({
       schemaVersion: 1,
       scope: this.options.scope ?? 'load',
       format: this.options.format,
       mode: this.mode,
       status,
       ...(this.sourceBytes === undefined ? {} : { sourceBytes: this.sourceBytes }),
-      elapsedMs: elapsed(this.startedAt, this.now()),
+      // `scope: load` describes the measured load duration, not document age.
+      // Later explicit probes may refresh usage, but terminal timing is stable.
+      elapsedMs: this.terminalElapsedMs ?? elapsed(this.startedAt, this.now()),
       policy: this.policy,
       ...(finalUsage ? { usage: finalUsage } : {}),
       checkpoints: Object.freeze([...this.checkpoints]),
       ...(outcome ? { outcome: safeOutcome(outcome) } : {}),
       ...(status === 'error' ? { error: safeError(error) } : {}),
     });
-    // Diagnostics must never change library semantics. A hostile/replaced
-    // console or an application-provided observer cannot turn a successful
-    // load into a failure or mask the original load error.
-    if (this.options.onMetrics) safelyEmit(this.options.onMetrics, report);
-    if (this.options.emitToConsole ?? this.options.onMetrics === undefined) {
-      safelyEmit(emitOoxmlResourceDebugReport, report);
-    }
-    return report;
   }
 }
 
@@ -194,6 +237,9 @@ function safeError(error: unknown): OoxmlResourceMetrics['error'] {
       });
     }
     if (error instanceof OoxmlError) {
+      return Object.freeze({ code: error.code });
+    }
+    if (error instanceof OoxmlDecodedImageLimitError) {
       return Object.freeze({ code: error.code });
     }
     if (

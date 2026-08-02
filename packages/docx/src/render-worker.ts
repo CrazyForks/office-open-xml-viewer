@@ -13,18 +13,21 @@ import {
   preloadGoogleFonts,
   unloadLocalFontMetrics,
   WasmParserHost,
-  dropBitmapCacheByPath,
+  dropDecodedBitmapCache,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
   decodeOoxmlResourceUsage,
+  HARD_MAX_RAW_PART_CACHE_BYTES,
+  HARD_MAX_RAW_PART_CACHE_ENTRIES,
   PULL_SESSION_PROTOCOL,
   resourcePolicyForWasm,
   serializeWorkerError,
   type PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
-import { renderLayoutSourceToCanvas, dropColorReplacedCache } from './renderer';
+import { renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
@@ -72,7 +75,10 @@ let documentGeneration = 0;
 let fallbackPull: DocumentPullWorker | null = null;
 let doc: RetainedRenderWorkerDocumentLayout | null = null;
 let localMetricFontFaces: FontFace[] = [];
-const imageCache = new Map<string, Promise<Blob>>();
+const rawParts = new BoundedRawPartCache({
+  maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
+  maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
+});
 
 const post = (
   msg: RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>,
@@ -85,16 +91,12 @@ const post = (
  *  decoded straight from the retained archive with no main-thread round-trip.
  *  Mime travels on the element, so the caller supplies it. */
 function getImage(path: string, mimeType: string): Promise<Blob> {
-  const hit = imageCache.get(path);
-  if (hit) return hit;
-  const p = (async () => {
+  return rawParts.get(path, mimeType, async () => {
     const loaded = host.archive;
     if (!loaded) throw new Error('No docx loaded');
     const bytes = host.run(() => loaded.extract_image(path));
     return new Blob([new Uint8Array(bytes).slice()], { type: mimeType });
-  })();
-  imageCache.set(path, p);
-  return p;
+  });
 }
 
 self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
@@ -117,7 +119,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
     return;
   }
   if (req.type === 'init') {
-    host.setWasmUrl(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
+    host.setWasmInput(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
     return;
   }
   const id = req.id;
@@ -138,16 +140,15 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       }
       // Cached blobs belong to the previous document; serving them after a
       // re-parse would silently return the wrong file's image.
-      imageCache.clear();
-      // A re-parse starts a fresh document: also drop the shared, per-`getImage`
-      // decoded caches (base raster, a:clrChange/duotone recolour, SVG object
-      // URLs), symmetric with DocxDocument.destroy(). The worker's `getImage`
+      rawParts.clear();
+      // A re-parse starts a fresh document: also drop the shared decoded owner
+      // (base raster + derived colour surfaces) and SVG lookup owner, symmetric
+      // with DocxDocument.destroy(). The worker's `getImage`
       // closure is a stable module-level identity, so without this a new document
       // sharing a zip path (e.g. word/media/image1.png) would be served the
-      // previous file's decoded bitmap, and the GPU/URL handles would linger past
-      // the LRU cap. Symmetric across docx/pptx/xlsx render workers (issue #781).
-      dropBitmapCacheByPath(getImage);
-      dropColorReplacedCache(getImage);
+      // previous file's decoded surface. Symmetric across docx/pptx/xlsx render
+      // workers (issue #781).
+      dropDecodedBitmapCache(getImage);
       dropSvgImageCache(getImage);
       const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
       const bytes = new Uint8Array(req.data);

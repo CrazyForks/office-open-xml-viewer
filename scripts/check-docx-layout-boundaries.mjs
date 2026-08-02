@@ -96,7 +96,11 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['drawImageCropped', 'value'],
     ['doubleRailGeometry', 'value'],
     ['fillDoubleBorder', 'value'],
+    // Shared decoded-surface ownership is a paint resource concern. DOCX may
+    // create/drop derived clrChange/duotone surfaces without importing layout.
+    ['dropCachedDerivedBitmapNamespace', 'value'],
     ['getCachedBitmapByPath', 'value'],
+    ['getCachedDerivedBitmap', 'value'],
     ['getCachedSvgImageByPath', 'value'],
     ['HyperlinkTarget', 'type'],
     ['imageNaturalSize', 'value'],
@@ -106,6 +110,7 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['paintDrawingMLShape', 'value'],
     ['withVertFeature', 'value'],
     ['preferVectorBlip', 'value'],
+    ['releaseOwnedBitmap', 'value'],
     ['PT_TO_PX', 'value'],
     // Shared fill resolution keeps gradient/no-fill semantics identical across
     // DOCX, PPTX, and XLSX painters; paint may consume it but not layout APIs.

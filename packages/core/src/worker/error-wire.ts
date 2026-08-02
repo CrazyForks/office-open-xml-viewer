@@ -8,6 +8,16 @@ import {
   type OoxmlResourceUsageSnapshot,
   type OoxmlResourceViolation,
 } from '../errors/ooxml-error.js';
+import {
+  OoxmlDecodedImageLimitError,
+  type OoxmlDecodedImageLimitMetric,
+} from '../image/pixel-budget.js';
+import {
+  PullSessionInsufficientCreditError,
+  isPullSessionInsufficientCreditDetails,
+  parsePullSessionInsufficientCreditError,
+  type PullSessionInsufficientCreditDetails,
+} from './pull-credit-error.js';
 
 const RESOURCE_LIMIT_PREFIX = 'OOXML_RESOURCE_LIMIT:';
 const MAX_IDENTIFIER_LENGTH = 128;
@@ -20,6 +30,12 @@ export interface WorkerErrorPayload {
   errorName?: string;
   code?: string;
   resourceLimit?: OoxmlResourceLimitErrorDetails;
+  insufficientCredit?: PullSessionInsufficientCreditDetails;
+  decodedImage?: {
+    metric: OoxmlDecodedImageLimitMetric;
+    limit: number;
+    observed: number;
+  };
 }
 
 interface RustResourceLimitPayload {
@@ -220,6 +236,30 @@ export function parseResourceLimitError(error: unknown): OoxmlResourceLimitError
 }
 
 function serializeWorkerErrorUnchecked(error: unknown): WorkerErrorPayload {
+  if (error instanceof OoxmlDecodedImageLimitError) {
+    return {
+      message: error.message,
+      errorName: error.name,
+      code: error.code,
+      decodedImage: {
+        metric: error.metric,
+        limit: error.limit,
+        observed: error.observed,
+      },
+    };
+  }
+  const insufficientCredit = parsePullSessionInsufficientCreditError(error);
+  if (insufficientCredit) {
+    return {
+      message: insufficientCredit.message,
+      errorName: insufficientCredit.name,
+      code: insufficientCredit.code,
+      insufficientCredit: {
+        requiredBytes: insufficientCredit.requiredBytes,
+        offeredBytes: insufficientCredit.offeredBytes,
+      },
+    };
+  }
   const typed =
     error instanceof OoxmlError || error instanceof OoxmlResourceLimitError
       ? error
@@ -286,6 +326,27 @@ const OOXML_ERROR_CODES = new Set<OoxmlErrorCode>([
 
 /** Reconstruct a real Error subclass after a payload crosses a worker boundary. */
 export function deserializeWorkerError(payload: WorkerErrorPayload): Error {
+  if (
+    payload.code === 'ooxml-decoded-image-limit'
+    && payload.decodedImage
+    && (payload.decodedImage.metric === 'image-pixels'
+      || payload.decodedImage.metric === 'active-decoded-bytes')
+    && isNonNegativeSafeInteger(payload.decodedImage.limit)
+    && isNonNegativeSafeInteger(payload.decodedImage.observed)
+    && payload.decodedImage.observed > payload.decodedImage.limit
+  ) {
+    return new OoxmlDecodedImageLimitError(
+      payload.decodedImage.metric,
+      payload.decodedImage.limit,
+      payload.decodedImage.observed,
+    );
+  }
+  if (
+    payload.code === 'ooxml-insufficient-credit'
+    && isPullSessionInsufficientCreditDetails(payload.insufficientCredit)
+  ) {
+    return new PullSessionInsufficientCreditError(payload.insufficientCredit);
+  }
   if (
     payload.code === 'ooxml-resource-limit' &&
     isResourceLimitDetails(payload.resourceLimit)

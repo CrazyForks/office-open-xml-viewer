@@ -3,13 +3,16 @@ import { OoxmlError, OoxmlResourceLimitError } from '../errors/ooxml-error.js';
 import { BROWSER_CONSOLE_TUI_STYLE } from '../internal/console-tui.js';
 import { deserializeWorkerError, serializeWorkerError } from './error-wire.js';
 import {
+  OOXML_RESOURCE_METRICS_PROBE_TIMEOUT_MS,
   OoxmlResourceMetricsSession,
+  readLatestOoxmlResourceMetrics,
 } from './resource-debug.js';
 import {
   emitOoxmlResourceDebugReport,
   formatOoxmlResourceDebugReport,
 } from './resource-debug-view.js';
 import { WasmTrapError } from './wasm-guard.js';
+import { OoxmlDecodedImageLimitError } from '../image/pixel-budget.js';
 
 const policy = {
   maxArchiveEntryBytes: 128 * 1024 * 1024,
@@ -215,6 +218,20 @@ describe('OoxmlResourceMetricsSession', () => {
     });
   });
 
+  it('publishes the content-free code for a decoded-raster quota failure', () => {
+    const session = new OoxmlResourceMetricsSession({
+      enabled: true,
+      format: 'pptx',
+      mode: 'node',
+      policy,
+      now: () => 0,
+      onMetrics: () => undefined,
+    });
+    expect(session.fail(
+      new OoxmlDecodedImageLimitError('image-pixels', 10, 11),
+    )?.error).toEqual({ code: 'ooxml-decoded-image-limit' });
+  });
+
   it.each([
     new WasmTrapError('private direct message'),
     deserializeWorkerError(serializeWorkerError(new WasmTrapError('private worker message'))),
@@ -302,6 +319,50 @@ describe('OoxmlResourceMetricsSession', () => {
 
     expect(session.succeed()?.status).toBe('ok');
     await Promise.resolve();
+  });
+
+  it('returns a fresh immutable snapshot after lazy package work', () => {
+    let now = 10;
+    const session = new OoxmlResourceMetricsSession({
+      enabled: true,
+      format: 'pptx',
+      mode: 'main',
+      policy,
+      now: () => now,
+      onMetrics: () => undefined,
+    });
+    session.observeUsage({ ...usage, distinctInflatedBytes: 1 });
+    now = 25;
+    const initial = session.succeed({ slides: 3 });
+    now = 10_000;
+    session.observeUsage({ ...usage, distinctInflatedBytes: 2 });
+    const current = session.current();
+
+    expect(initial?.usage?.distinctInflatedBytes).toBe(1);
+    expect(current?.usage?.distinctInflatedBytes).toBe(2);
+    expect(initial?.elapsedMs).toBe(15);
+    expect(current?.elapsedMs).toBe(15);
+    expect(current).not.toBe(initial);
+    expect(Object.isFrozen(current)).toBe(true);
+    expect(Object.isFrozen(current?.usage)).toBe(true);
+  });
+
+  it('bounds explicit probes and propagates failure rather than returning stale data', async () => {
+    const session = new OoxmlResourceMetricsSession({
+      enabled: true,
+      format: 'xlsx',
+      mode: 'worker',
+      policy,
+      now: () => 0,
+      onMetrics: () => undefined,
+    });
+    session.observeUsage(usage);
+    session.succeed();
+    const failure = new Error('worker did not answer');
+    const probe = vi.fn(async (_timeoutMs: number) => { throw failure; });
+
+    await expect(readLatestOoxmlResourceMetrics(session, probe)).rejects.toBe(failure);
+    expect(probe).toHaveBeenCalledWith(OOXML_RESOURCE_METRICS_PROBE_TIMEOUT_MS);
   });
 
   it('does no work or output when disabled', () => {

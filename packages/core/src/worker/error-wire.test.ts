@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { OoxmlError, OoxmlResourceLimitError } from '../errors/ooxml-error.js';
+import { OoxmlDecodedImageLimitError } from '../image/pixel-budget.js';
 import {
   deserializeWorkerError,
   parseResourceLimitError,
@@ -42,6 +43,23 @@ describe('worker error wire', () => {
     expect((error as OoxmlResourceLimitError).details.violation).toMatchObject({
       resource: 'archive-entry',
       part: 'xl/worksheets/sheet1.xml',
+    });
+  });
+
+  it('preserves a decoded-image quota error across the worker boundary', () => {
+    const original = new OoxmlDecodedImageLimitError(
+      'active-decoded-bytes',
+      128 * 1024 * 1024,
+      192 * 1024 * 1024,
+    );
+    const restored = deserializeWorkerError(structuredClone(serializeWorkerError(original)));
+
+    expect(restored).toBeInstanceOf(OoxmlDecodedImageLimitError);
+    expect(restored).toMatchObject({
+      code: 'ooxml-decoded-image-limit',
+      metric: 'active-decoded-bytes',
+      limit: 128 * 1024 * 1024,
+      observed: 192 * 1024 * 1024,
     });
   });
 

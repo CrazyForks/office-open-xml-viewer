@@ -255,12 +255,12 @@ describe('sniffRasterDimensions — reads declared pixel dimensions from the hea
 describe('rasterExceedsBudget — enforces the shared pixel budget', () => {
   it('accepts in-budget dimensions', () => {
     expect(rasterExceedsBudget({ width: 1920, height: 1080 })).toBe(false);
-    // A ~35 MP scan (within the 64 MP budget and under the per-axis cap).
-    expect(rasterExceedsBudget({ width: 7016, height: 4961 })).toBe(false);
+    // A 28 MP scan remains within the 32 MP budget and per-axis cap.
+    expect(rasterExceedsBudget({ width: 7000, height: 4000 })).toBe(false);
   });
 
   it('rejects an over-megapixel image within the per-axis cap', () => {
-    // Both axes ≤ 32767 but the product blows the 64 MP budget.
+    // Both axes ≤ 32767 but the product blows the 32 MP budget.
     const w = 30000;
     const h = 30000;
     expect(w).toBeLessThanOrEqual(MAX_RASTER_DIMENSION);
@@ -270,7 +270,7 @@ describe('rasterExceedsBudget — enforces the shared pixel budget', () => {
   });
 
   it('rejects an over-dimension image even when it would be within the MP budget', () => {
-    // 40000 × 1: only 40 000 px (well under 64 MP) but past the 32767 axis cap,
+    // 40000 × 1: only 40 000 px (well under 32 MP) but past the 32767 axis cap,
     // so it could never be drawn to a canvas — reject it.
     expect(rasterExceedsBudget({ width: 40000, height: 1 })).toBe(true);
   });
@@ -285,8 +285,8 @@ describe('rasterExceedsBudget — enforces the shared pixel budget', () => {
     expect(rasterExceedsBudget({ width: MAX_RASTER_DIMENSION, height: 1 })).toBe(false);
     // A 1 × MAX_RASTER_PIXELS strip is exactly the MP budget (but > axis cap):
     // use a squarer at-budget case instead.
-    expect(rasterExceedsBudget({ width: 8192, height: 8192 })).toBe(false); // 64 MP exactly
-    expect(8192 * 8192).toBe(MAX_RASTER_PIXELS);
+    expect(rasterExceedsBudget({ width: 4096, height: 8192 })).toBe(false);
+    expect(4096 * 8192).toBe(MAX_RASTER_PIXELS);
   });
 });
 

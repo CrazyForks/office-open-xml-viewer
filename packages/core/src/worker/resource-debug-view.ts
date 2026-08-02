@@ -123,6 +123,6 @@ function meterRow(
     : Math.min(1, observed / limit);
   const filled = Math.round(ratio * cells);
   const meter = `${'█'.repeat(filled)}${'░'.repeat(cells - filled)}`;
-  const values = `${observed === undefined ? '—' : formatBytes(observed)} / ${limit === null ? 'off' : formatBytes(limit)}`;
+  const values = `${observed === undefined ? '—' : formatBytes(observed)} / ${limit === null ? 'public off' : formatBytes(limit)}`;
   return row(`${label.padEnd(14)} ${meter}  ${values}`, width);
 }
