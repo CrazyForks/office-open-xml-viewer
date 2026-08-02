@@ -148,7 +148,7 @@ describe('WasmParserHost', () => {
     await host.ensureReady();
     expect(init).toHaveBeenCalledTimes(1); // still just the first load
     expect(reinit).toHaveBeenCalledTimes(1); // the fresh instance came from reinit
-    expect(reinit).toHaveBeenCalledWith('wasm://x');
+    expect(reinit).toHaveBeenCalledWith({ module_or_path: 'wasm://x' });
     expect(host.poisoned).toBe(false);
     // ...and the next parse succeeds on clean linear memory.
     const good = host.run(() => {
@@ -213,8 +213,8 @@ describe('WasmParserHost', () => {
     ).toThrow(WasmTrapError);
     await host.ensureReady();
     // First load through `init`, recovery through `reinit`, both with the same url.
-    expect(init).toHaveBeenNthCalledWith(1, 'wasm://original');
-    expect(reinit).toHaveBeenNthCalledWith(1, 'wasm://original');
+    expect(init).toHaveBeenNthCalledWith(1, { module_or_path: 'wasm://original' });
+    expect(reinit).toHaveBeenNthCalledWith(1, { module_or_path: 'wasm://original' });
   });
 
   it('falls back to init when no reinit hook is supplied (unit hosts only)', async () => {

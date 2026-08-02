@@ -98,16 +98,16 @@ describe.each(FORMATS)('RB6 real-glue recovery: $name parser', ({ glue, wasmRel 
     // Track how the live instance moves by reading the module's exported memory
     // through the glue each time.
     const host = new WasmParserHost<unknown>(
-      (input) => mod.default(input as unknown as { module_or_path: WebAssembly.Module }),
+      (options) => mod.default(options as unknown as { module_or_path: WebAssembly.Module }),
       {
-        reinit: (input) => mod.reinit(input as unknown as { module_or_path: WebAssembly.Module }),
+        reinit: (options) => mod.reinit(options as unknown as { module_or_path: WebAssembly.Module }),
       },
     );
     // Ensure a known baseline: force a fresh instance before this test so the
     // singleton isn't whatever a sibling test left cached, then let the host load.
     const baseline = await mod.reinit({ module_or_path: compiled });
     const sentinel = stampSentinel(baseline.memory);
-    host.setWasmUrl({ module_or_path: compiled } as unknown as string);
+    host.setWasmUrl(compiled as unknown as string);
     await host.ensureReady(); // host's `init` returns the cached (stamped) instance
 
     // Sanity: the host is running on the SAME stamped instance right now (init is

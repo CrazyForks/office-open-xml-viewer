@@ -160,7 +160,7 @@ export const DebugJson: Story = {
     // idempotent and cached, so the second await resolves instantly. This
     // closes the race where picking a file before init resolved would silently
     // return without ever updating the pre.
-    const wasmReady = init(wasmUrl);
+    const wasmReady = init({ module_or_path: wasmUrl });
 
     fileInput.addEventListener('change', async () => {
       const file = fileInput.files?.[0];
