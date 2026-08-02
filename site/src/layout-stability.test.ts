@@ -5,6 +5,7 @@ const globalCss = readFileSync(new URL('./styles/global.css', import.meta.url), 
 const nav = readFileSync(new URL('./components/Nav.astro', import.meta.url), 'utf8');
 const base = readFileSync(new URL('./layouts/Base.astro', import.meta.url), 'utf8');
 const formatPage = readFileSync(new URL('./layouts/FormatPage.astro', import.meta.url), 'utf8');
+const apiReference = readFileSync(new URL('./components/ApiReference.astro', import.meta.url), 'utf8');
 
 function darkHexToken(name: string): [number, number, number] {
   const darkTheme = globalCss.match(/:root\[data-theme='dark'\]\s*\{([\s\S]*?)\n\}/)?.[1] ?? '';
@@ -73,5 +74,14 @@ describe('official-site layout stability', () => {
       const channels = lightHexToken(token);
       expect(Math.max(...channels) - Math.min(...channels), token).toBeLessThanOrEqual(8);
     }
+  });
+
+  it('uses the stronger shared light accent throughout the API table without changing dark mode', () => {
+    expect(apiReference).toContain('color: var(--accent-2)');
+    expect(apiReference).toContain('color: var(--accent)');
+    expect(lightHexToken('signal-ink')).toEqual([0x3b, 0x7e, 0x00]);
+    expect(lightHexToken('accent-2')).toEqual([0x3b, 0x7e, 0x00]);
+    expect(darkHexToken('signal-ink')).toEqual([0xc9, 0xff, 0x43]);
+    expect(darkHexToken('accent-2')).toEqual([0xa9, 0xd3, 0x66]);
   });
 });

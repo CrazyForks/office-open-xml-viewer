@@ -7,7 +7,7 @@
   --signal-text: #20211f;
   --selection-bg: rgba(201, 255, 67, 0.38);
   --ambient-signal: rgba(201, 255, 67, 0.055);
-  --signal-ink: #416300;
+  --signal-ink: #3b7e00;
   --signal-wash: rgba(201, 255, 67, 0.17);
   --hero-bg: #ecebe6;
   --hero-text: #20211f;
@@ -25,7 +25,7 @@
   --text-dim: #5e605a;
   --text-faint: #74766f;
   --accent: var(--signal-ink);
-  --accent-2: #66872e;
+  --accent-2: #3b7e00;
   --accent-3: #b9563e;
   --docx: #2b7cff;
   --xlsx: #22c55e;
