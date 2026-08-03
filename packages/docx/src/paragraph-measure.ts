@@ -156,6 +156,7 @@ export function measureParagraph(
       environment.resolvedLocalFonts,
       environment.layoutServices?.text,
       environment.paragraphMarkShapeInput,
+      environment.useFeLayout === true,
     );
     if (placement.wrap) {
       markTopPt = placement.wrap.lineWindow({
@@ -193,6 +194,7 @@ export function measureParagraph(
         environment.resolvedLocalFonts,
         environment.layoutServices?.text,
         environment.paragraphMarkShapeInput,
+        environment.useFeLayout === true,
       ),
       placement: recordedPlacement,
     };

@@ -357,6 +357,64 @@ describe('measureParagraph', () => {
     expect(result.contentEndYPt).toBe(40);
   });
 
+  it('uses face-specific Far East design metrics for useFELayout empty marks', () => {
+    const markAdvance = (
+      fontSize: number,
+      pitchPt: number,
+      family: string,
+    ): number => measureParagraph(
+      paragraph({
+        defaultFontSize: fontSize,
+        defaultFontFamily: family,
+        defaultFontFamilyEastAsia: family,
+        spaceBefore: 0,
+      }),
+      layoutContext({
+        lineGrid: { active: true, pitchPt },
+        spaceBeforePt: 0,
+      }),
+      placement({ startYPt: 0 }),
+      measurer,
+      environment({ useFeLayout: true }),
+    ).contentEndYPt;
+
+    // Word 16.111.1 / macOS 26.5.2 synthetic matrix. Meiryo UI uses
+    // 1.3 * hhea while the other requested faces stay below one grid pitch.
+    expect(markAdvance(10, 18, 'Meiryo UI')).toBe(18);
+    expect(markAdvance(11, 18, 'Meiryo UI')).toBe(36);
+    expect(markAdvance(12, 20, 'Meiryo UI')).toBe(20);
+    expect(markAdvance(13, 20, 'Meiryo UI')).toBe(40);
+    expect(markAdvance(11, 18, 'Times New Roman')).toBe(18);
+    expect(markAdvance(11, 18, 'Yu Gothic')).toBe(18);
+    expect(markAdvance(11, 18, 'ＭＳ 明朝')).toBe(18);
+  });
+
+  it('keeps useFELayout paragraph marks on the grid unless exact spacing overrides it', () => {
+    const atLeast = { value: 18, rule: 'atLeast' as const, explicit: true };
+    const exact = { value: 18, rule: 'exact' as const, explicit: true };
+    const measure = (lineSpacing: typeof atLeast | typeof exact): number => measureParagraph(
+      paragraph({
+        defaultFontSize: 11,
+        defaultFontFamily: 'Meiryo UI',
+        defaultFontFamilyEastAsia: 'Meiryo UI',
+        lineSpacing,
+        spaceBefore: 0,
+      }),
+      layoutContext({
+        lineGrid: { active: true, pitchPt: 18 },
+        lineSpacing,
+        spaceBeforePt: 0,
+      }),
+      placement({ startYPt: 0 }),
+      measurer,
+      environment({ useFeLayout: true }),
+    ).contentEndYPt;
+
+    // §17.6.5 names exact spacing (not atLeast) as the grid-line override.
+    expect(measure(atLeast)).toBe(36);
+    expect(measure(exact)).toBe(18);
+  });
+
   it('matches observed Word spacing for an explicit atLeast line on a body grid', () => {
     const designRatio = 3269 / 2048;
     const designMeasurer: TextMeasurer = {

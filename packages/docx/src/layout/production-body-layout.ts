@@ -2357,6 +2357,7 @@ function frameAnchorLineHeightPx(
       state.resolvedLocalFonts,
       state.layoutServices?.text,
       state.acquisitionInputs.paragraphMarkShapeInput(p),
+      state.layoutSettings.compat.useFeLayout,
     );
   }
   const fp = frameEl;
@@ -2372,6 +2373,7 @@ function frameAnchorLineHeightPx(
     state.resolvedLocalFonts,
     state.layoutServices?.text,
     state.acquisitionInputs.paragraphMarkShapeInput(fp),
+    state.layoutSettings.compat.useFeLayout,
   );
 }
 

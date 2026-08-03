@@ -13,22 +13,39 @@ export const WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM = defineCompatibilityRule
   id: 'word-use-fe-layout-inherited-grid-minimum',
   evidence: {
     kind: 'office-observation',
-    syntheticFixtureId: 'far-east-hinted-latin-grid-multiple',
+    syntheticFixtureId: 'use-fe-layout-visible-script-grid-matrix',
     application: 'Microsoft Word',
     version: '16.111.1',
     platform: 'macOS 26.5.2',
   },
-  description: 'With useFELayout enabled, a Latin line carrying an eastAsia-hinted run participates in Far East grid metrics; inherited automatic spacing keeps the larger of its whole-cell design allocation and one grid pitch multiplied by the inherited spacing value.',
+  description: 'With useFELayout enabled, a visible Latin line with a resolved eastAsia font axis participates in Far East grid metrics even when w:rFonts@hint is absent; inherited automatic spacing keeps the larger of its whole-cell design allocation and one grid pitch multiplied by the inherited spacing value.',
 });
 
 export const WORD_USE_FE_LAYOUT_EMPTY_MARK_GRID_ALLOCATION = defineCompatibilityRule({
   id: 'word-use-fe-layout-empty-mark-grid-allocation',
   evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/paragraph-measure.test.ts#applies useFELayout grid-cell allocation to an empty paragraph mark',
+    kind: 'office-observation',
+    syntheticFixtureId: 'use-fe-layout-empty-mark-grid-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
   },
-  description: 'With useFELayout enabled, a content-less paragraph mark participates in Far East whole-cell document-grid allocation even when the document contains no literal East Asian text.',
+  description: 'With useFELayout enabled, a content-less paragraph mark participates in Far East whole-cell document-grid allocation even when the document contains no literal East Asian text. Its face-specific Far East design height governs the cell count; exact spacing and snapToGrid=false remain the document-grid overrides named by ECMA-376 §17.6.5.',
 });
+
+/** Compatibility projection governed by
+ * {@link WORD_USE_FE_LAYOUT_EMPTY_MARK_GRID_ALLOCATION}. The caller supplies
+ * the ordinary line-spacing result and the mark's whole-cell grid allocation;
+ * §17.6.5 makes exact spacing the sole line-spacing override. */
+export function wordUseFeLayoutParagraphMarkGridAdvancePx(
+  ordinaryAdvancePx: number,
+  allocatedGridAdvancePx: number,
+  exactSpacing: boolean,
+): number {
+  return exactSpacing
+    ? ordinaryAdvancePx
+    : Math.max(ordinaryAdvancePx, allocatedGridAdvancePx);
+}
 
 export const WORD_CONTIGUOUS_UNDERLINE_GEOMETRY = defineCompatibilityRule({
   id: 'word-contiguous-underline-geometry',

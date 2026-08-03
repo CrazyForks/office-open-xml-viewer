@@ -1824,6 +1824,34 @@ describe('planLine visual geometry', () => {
     expect(() => stableFingerprint('planned-line', line)).not.toThrow();
   });
 
+  it('retains an underline across the full advance of an underlined tab run', () => {
+    const line = planLine({
+      paragraphXPt: 0, availableWidthPt: 100, alignment: 'left', baseRtl: false,
+      isFirstLine: true, isLastLine: true, stretchLastLine: false,
+      line: {
+        range: { start: 0, end: 1 }, topPt: 0, baselinePt: 10, advancePt: 12,
+        xOffsetPt: 0, availableWidthPt: 100, endsWithBreak: false,
+        segments: [{
+          kind: 'tab', range: { start: 0, end: 1 }, measuredWidthPt: 72,
+          leader: 'none', fontSizePt: 10,
+          underline: {
+            base: { ascentPt: 8, descentPt: 2, inkBounds: { xMinPt: 0, xMaxPt: 5, ascentPt: 7, descentPt: 1 } },
+            probe: { ascentPt: 8, descentPt: 2, inkBounds: { xMinPt: 0, xMaxPt: 5, ascentPt: -2, descentPt: 3 } },
+            color: '#123456', authoredStyle: 'single',
+          },
+        }],
+      },
+    });
+
+    expect(line.placements[0]).toMatchObject({
+      kind: 'tab', advancePt: 72,
+      decorations: [{
+        kind: 'underline', color: '#123456',
+        from: { xPt: 0 }, to: { xPt: 72 },
+      }],
+    });
+  });
+
   it('retains contextual text plus uniform spacing for internal CJK justification gaps', () => {
     const line = planLine({
       paragraphXPt: 5,

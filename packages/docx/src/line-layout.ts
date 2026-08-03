@@ -97,6 +97,7 @@ import {
   wordIsOverflowPunctuation,
   wordJapanesePunctuationRetainedExtentPt,
   wordMsMinchoEmptyEastAsianMarkSingleLinePx,
+  wordUseFeLayoutParagraphMarkGridAdvancePx,
 } from './layout/line-compatibility.js';
 import { wordNeutralAttachesToActiveScript } from './layout/script-compatibility.js';
 
@@ -845,6 +846,12 @@ export function normalizeFontFamilyUncached(
         // CJK-sans path below. Genuine monospace faces (Courier, Consolas, 等幅)
         // are still caught there by name.
         if (fontFamilyPitches[family] === 'fixed') {
+          if (cjk != null) {
+            const cjkFallbacks = cjk === 'jp'
+              ? ['Yu Gothic', 'YuGothic', 'Hiragino Sans', 'Meiryo', 'Noto Sans JP']
+              : cjkFallbackChain(cjk, 'sans');
+            return `${head}, ${quoteAll([...cjkFallbacks, 'Courier New'])}, monospace`;
+          }
           return `${head}, "Courier New", monospace`;
         }
         break;
@@ -1534,6 +1541,7 @@ export function paragraphMarkLineMetrics(
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
   textLayoutService?: TextLayoutService,
   markShapeInput?: NumberingMarkerShapeInput,
+  useFeLayout = false,
 ): MarkLineMetrics {
   const effectiveMarkShapeInput = markShapeInput;
   // ECMA-376 §17.3.2.26 `w:rFonts@w:hint`: an empty paragraph has no code
@@ -1632,7 +1640,7 @@ export function paragraphMarkLineMetrics(
   const gridCountSingle = eastAsian
     ? eastAsianGridCountSinglePx(intendedSingle, fs * scale)
     : undefined;
-  const advancePx = lineBoxHeight(
+  const ordinaryAdvancePx = lineBoxHeight(
     effectiveLineSpacing,
     asc,
     desc,
@@ -1643,6 +1651,26 @@ export function paragraphMarkLineMetrics(
     eastAsian,
     gridCountSingle,
   );
+  const allocatedGridAdvancePx = useFeLayout && eastAsian && isGridLineRule(grid)
+    ? lineBoxHeight(
+        null,
+        asc,
+        desc,
+        scale,
+        grid,
+        paraHasRuby,
+        intendedSingle,
+        eastAsian,
+        gridCountSingle,
+      )
+    : ordinaryAdvancePx;
+  const advancePx = useFeLayout
+    ? wordUseFeLayoutParagraphMarkGridAdvancePx(
+        ordinaryAdvancePx,
+        allocatedGridAdvancePx,
+        effectiveLineSpacing?.rule === 'exact',
+      )
+    : ordinaryAdvancePx;
   return { advancePx, ascentPx: asc, descentPx: desc };
 }
 
@@ -1658,10 +1686,11 @@ export function paragraphMarkLineHeight(
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
   textLayoutService?: TextLayoutService,
   markShapeInput?: NumberingMarkerShapeInput,
+  useFeLayout = false,
 ): number {
   return paragraphMarkLineMetrics(
     para, scale, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
-    resolvedLocalFonts, textLayoutService, markShapeInput,
+    resolvedLocalFonts, textLayoutService, markShapeInput, useFeLayout,
   ).advancePx;
 }
 
@@ -1700,11 +1729,12 @@ export function paragraphMarkBelowBaselinePt(
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
   textLayoutService?: TextLayoutService,
   markShapeInput?: NumberingMarkerShapeInput,
+  useFeLayout = false,
 ): number {
   // Measured at scale 1 so the returned px value is already in points.
   const m = paragraphMarkLineMetrics(
     para, 1, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
-    resolvedLocalFonts, textLayoutService, markShapeInput,
+    resolvedLocalFonts, textLayoutService, markShapeInput, useFeLayout,
   );
   return lineBelowBaselinePx(m.advancePx, m.ascentPx, m.descentPx);
 }
@@ -2758,9 +2788,14 @@ export function buildSegments(
       const eaLineMetric = localEaFloor ?? (eaFontFamily
         ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(eaFontFamily)]
         : undefined);
+      const resolvedEaFloorFamily = eaResolution?.resolvedFamily
+        ?? localEaFloor?.family
+        ?? eaFontFamily;
+      const useFeEastAsianMetric = environment.useFeLayout
+        && (r.fontHint === 'eastAsia' || Boolean(resolvedEaFloorFamily?.trim()));
       segs.push({
         text,
-        ...(environment.useFeLayout && r.fontHint === 'eastAsia'
+        ...(useFeEastAsianMetric
           ? { metricEastAsian: true as const }
           : {}),
         bold,
@@ -2796,9 +2831,9 @@ export function buildSegments(
         revision,
         rtl,
         digitsAsAN: digitsAsAN ? true : undefined,
-        // §17.3.2.26 declared eastAsia axis — recorded for the text-box line-box
-        // floor only (see LayoutTextSeg.eaFloorFamily). Inert for the body path.
-        eaFloorFamily: eaResolution?.resolvedFamily ?? localEaFloor?.family ?? eaFontFamily,
+        // §17.3.2.26 declared eastAsia axis — used by text-box line floors and
+        // the compatibility-owned useFELayout body metric path.
+        eaFloorFamily: resolvedEaFloorFamily,
         eaFloorRoute: eaResolution?.route,
         resolvedEaFloorLineHeightRatio: eaLineMetric?.lineHeightRatio,
         textBoxLineFloor: (r as DocxTextRun & { textBoxLineFloor?: boolean }).textBoxLineFloor,
@@ -2950,7 +2985,10 @@ export function buildSegments(
           pushTextPiece(parts[i], t, t.vertAlign, runIndex, i);
         }
         if (i < parts.length - 1) {
-          segs.push({ isTab: true, fontSize: t.fontSize, measuredWidth: 0, bold: t.bold, italic: t.italic });
+          segs.push({
+            isTab: true, fontSize: t.fontSize, measuredWidth: 0,
+            bold: t.bold, italic: t.italic, sourceRunIndex: runIndex,
+          });
         }
       }
     } else if (run.type === 'image') {
@@ -3656,7 +3694,7 @@ export function layoutLines(
         ? 0
         : Math.max(
             segmentIntendedSingleLinePx(ts, intendedEm, segScriptHint),
-            ts.textBoxLineFloor
+            ts.textBoxLineFloor || ts.metricEastAsian === true
               ? segmentEastAsiaFloorSingleLinePx(ts, intendedEm, segScriptHint)
               : 0,
           );
