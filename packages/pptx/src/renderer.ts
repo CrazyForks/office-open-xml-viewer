@@ -3416,7 +3416,19 @@ export function renderTextBody(
   const colHeightCapacity = Math.max(0, effectiveBh - tPad - bPad);
   // When `bh === 0` (caller relies on auto-height) the capacity is unbounded
   // and content always fits, so a multi-col directive collapses to single col.
-  const fitsInOneCol = bh === 0 || totalHeight <= colHeightCapacity + 0.5;
+  // `spcAft` is spacing AFTER a paragraph. On the final line there is no
+  // following content, so that trailing gap cannot by itself fill the column
+  // and force otherwise-fitting text into the next overflow container
+  // (ECMA-376 §21.1.2.1.1 bodyPr@numCol). Keep it for drawing/anchoring, but
+  // exclude it from the one-column overflow decision. A common boundary case
+  // is a heading plus three short bullets whose final 3pt spcAft alone crosses
+  // a rounded-rectangle text-rect capacity.
+  const lastEntry = allLines[allLines.length - 1];
+  const trailingSpaceAfter = lastEntry
+    ? Math.max(0, lastEntry.linePx - lastEntry.lineHeight)
+    : 0;
+  const occupiedHeight = totalHeight - trailingSpaceAfter;
+  const fitsInOneCol = bh === 0 || occupiedHeight <= colHeightCapacity + 0.5;
   const useMultiCol = numCol > 1 && !fitsInOneCol;
   const linesPerCol = useMultiCol ? Math.ceil(allLines.length / numCol) : allLines.length;
   let colIdx = 0;
