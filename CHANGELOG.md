@@ -4,6 +4,31 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.75.1 — 2026-08-03
+
+Patch. Improves PowerPoint chart and text layout fidelity, keeps spreadsheet
+footer navigation stable across zoom levels, and refines the website preview
+experience.
+
+- **pptx / charts:** honor authored inner manual plot rectangles instead of
+  clamping them to automatic chart gutters, and use PowerPoint's default
+  automatic scale target for a deleted value axis whose ticks are not visible.
+  This keeps stacked horizontal bars aligned with separately authored labels
+  and other slide content. (§21.2.2.89; observed PowerPoint scale behavior;
+  #1136, #1138)
+- **pptx text:** inherit placeholder text insets from layouts and masters
+  attribute by attribute, and exclude a final paragraph's trailing spacing from
+  the multi-column overflow decision. This preserves authored page margins,
+  wrapping, and column placement. (§21.1.2.1.1; Annex L.3.2.3; #1136)
+- **xlsx:** keep the sheet-tab previous/next navigation area at its 100% row
+  header width, independently of the worksheet cell zoom. (#1137)
+- **website:** retain preloaded home-page viewers across format switches, add
+  selectable DOCX/PPTX text layers, keep preview frames and wide content
+  responsive, avoid unrelated font downloads during parser prewarming, and
+  improve progress feedback and mobile alignment. (#1135) The stacked mobile
+  hero icon also retains its full colour in light mode instead of inheriting
+  the tablet-layout translucency.
+
 ## 0.75.0 — 2026-08-03
 
 Minor. Makes bounded resource use, typed limit failures, and observable usage

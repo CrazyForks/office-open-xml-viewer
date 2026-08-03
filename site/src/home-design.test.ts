@@ -77,8 +77,9 @@ describe('official-site home design', () => {
   });
 
   it('centres a smaller hero icon and aligns the second-row format links on mobile', () => {
-    expect(home).toContain('.hero-art { grid-column: 1 / 13; min-height: 280px; margin-top: 16px; }');
+    expect(home).toContain('.hero-art { grid-column: 1 / 13; min-height: 280px; margin-top: 16px; opacity: 1; }');
     expect(home).toContain('.hero-icon { width: min(62%, 260px); }');
+    expect(home).toMatch(/@media \(max-width: 680px\)[\s\S]*?\.hero-art \{[^}]*opacity: 1;/);
     expect(home).toContain('.format-rail a + a:nth-child(odd) { padding-left: 0; }');
     expect(home).toContain('.format-rail a:nth-child(even) { padding-left: 18px; }');
   });
