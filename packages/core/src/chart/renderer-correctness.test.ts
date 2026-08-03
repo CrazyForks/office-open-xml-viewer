@@ -190,6 +190,37 @@ describe('CH1 — negative bar/column values extend from the zero line', () => {
     expect(neg.w).toBeCloseTo(pos.w, 4);
   });
 
+  it('a deleted value axis uses the default automatic scale instead of visible-tick density', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBarH',
+      categories: ['A'],
+      series: [
+        series({ name: 'S1', values: [20] }),
+        series({ name: 'S2', values: [77] }),
+      ],
+      valAxisHidden: true,
+      plotAreaManualLayout: {
+        layoutTarget: 'inner',
+        xMode: 'edge',
+        yMode: 'edge',
+        x: 0.1,
+        y: 0.1,
+        w: 0.8,
+        h: 0.8,
+      },
+    }), RECT, 1);
+
+    // With no visible value-axis ticks, Office uses the default five-interval
+    // auto-scale target: data max 97 → major unit 20 → axis max 120. Applying
+    // the wide-axis tick-density rule would instead choose unit 10 / max 110,
+    // making the stacked bar too long relative to separately authored labels.
+    const bars = rec.rects;
+    expect(bars).toHaveLength(2);
+    const totalLength = bars[0].w + bars[1].w;
+    expect(totalLength).toBeCloseTo(RECT.w * 0.8 * (97 / 120), 4);
+  });
+
   it('positive-only data keeps the axis anchored at 0 (pre-fix behavior)', () => {
     // Regression guard: min degenerates to 0 so nothing about a positive-only
     // chart changes. Zero-line bottom edge == plot bottom.
