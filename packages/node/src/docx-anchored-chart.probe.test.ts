@@ -34,6 +34,7 @@ const rendererMod = skia ? await loadDocxRendererForTests() : null;
 
 const SAMPLE_24 = resolve(ROOT, 'packages/docx/public/private/sample-24.docx');
 const haveSample = existsSync(SAMPLE_24);
+const sampleBytes = haveSample ? readFileSync(SAMPLE_24) : null;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -59,6 +60,20 @@ function collectRuns(body: Any[], type: string): Any[] {
   }
   return out;
 }
+
+// Private sample numbers are local workspace slots, not stable fixture ids.
+// Run this probe only when the slot still contains the chart fixture this test
+// describes; another valid private document at the same path must skip cleanly.
+const haveExpectedChartSample = (() => {
+  if (!docxMod || !sampleBytes) return false;
+  try {
+    const doc = docxMod.parseDocx(sampleBytes) as Any;
+    return collectRuns(doc.body, 'chart').length === 6
+      && collectRuns(doc.body, 'image').length === 0;
+  } catch {
+    return false;
+  }
+})();
 
 async function renderPage(
   doc: Any,
@@ -113,7 +128,7 @@ function nonWhiteInRect(
   return n;
 }
 
-describe.skipIf(!skia || !docxMod || !rendererMod || !haveSample)(
+describe.skipIf(!skia || !docxMod || !rendererMod || !haveExpectedChartSample)(
   'docx anchored + chartex charts render (sample-24, #747/#752)',
   () => {
     // #747 — sample-24's two inline PNG pictures are the mc:Fallback rendered
@@ -124,7 +139,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSample)(
     // two charts, NOT the static snapshots.
     it('sample-24 parses 6 chart runs and 0 image runs (MCE Choice, not Fallback)', () => {
       const { parseDocx } = docxMod!;
-      const doc = parseDocx(readFileSync(SAMPLE_24)) as Any;
+      const doc = parseDocx(sampleBytes!) as Any;
       const charts = collectRuns(doc.body, 'chart');
       const images = collectRuns(doc.body, 'image');
       expect(charts.length).toBe(6);
@@ -139,7 +154,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSample)(
     // where Word's PDF ground truth shows the two charts.
     it('sample-24 pages paint ink for every chart box (charts draw, not blank)', async () => {
       const { parseDocx } = docxMod!;
-      const doc = parseDocx(readFileSync(SAMPLE_24)) as Any;
+      const doc = parseDocx(sampleBytes!) as Any;
       const restoreImg = installImageBitmapShim(factory);
       const restoreOff = installOffscreenCanvasShim(factory);
       let pageCount: number;
@@ -170,7 +185,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSample)(
     // branch, so the box stayed blank.
     it('an anchored chart draws at its absolute page box (#752)', async () => {
       const { parseDocx } = docxMod!;
-      const base = parseDocx(readFileSync(SAMPLE_24)) as Any;
+      const base = parseDocx(sampleBytes!) as Any;
 
       // Find a REAL parsed paragraph that carries an inline chart (keeps every
       // paragraph prop the layout/pagination path reads), and flip that chart

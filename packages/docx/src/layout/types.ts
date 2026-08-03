@@ -419,6 +419,8 @@ export interface TabPlacement {
   readonly leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'heavy' | 'middleDot';
   /** Fully repeated and positioned during acquisition; paint never measures. */
   readonly leaderGlyphs?: readonly RetainedGlyphPaintOperation[];
+  /** Run formatting applies to the tab character itself (§17.3.1.37). */
+  readonly decorations?: readonly TextDecorationLayout[];
 }
 
 export interface AnchorHostPlacement {
@@ -529,7 +531,7 @@ export interface BorderSegment {
   readonly widthPt: number;
   /** Exact authored ST_Border token. Kept independently of paint normalization. */
   readonly authoredStyle: string;
-  readonly style: 'solid' | 'double' | 'dotted' | 'dashed' | 'wavy';
+  readonly style: 'solid' | 'double' | 'compound' | 'dotted' | 'dashed' | 'wavy';
   /** Final ST_Border cadence in point-space; empty for continuous/double rails. */
   readonly dashPatternPt?: readonly number[];
 }
@@ -630,6 +632,15 @@ export interface ParagraphLayout extends LayoutNodeBase {
 
 export type ResolvedBorderSegment = BorderSegment;
 
+/** A point-space rectangular frame whose outer compound border segments are
+ * painted as one joined unit. Layout owns rectangle recognition and segment
+ * membership; paint owns only device-pixel rail projection. */
+export interface CompoundBorderFrameLayout {
+  readonly bounds: LayoutRect;
+  readonly border: Pick<BorderSegment, 'authoredStyle' | 'color' | 'widthPt' | 'style'>;
+  readonly segmentIndexes: readonly number[];
+}
+
 export interface TableCellBlockLayout {
   readonly layout: ParagraphLayout | TableLayout;
   /** Final block origin from the cell border-box top. */
@@ -661,6 +672,7 @@ export interface TableLayout extends LayoutNodeBase {
   readonly columnWidthsPt: readonly number[];
   readonly rows: readonly TableRowLayout[];
   readonly borders: readonly ResolvedBorderSegment[];
+  readonly compoundBorderFrames?: readonly CompoundBorderFrameLayout[];
   readonly floatingTables?: readonly FloatingTablePlacementLayout[];
   readonly resolvedFloatingTables?: readonly ResolvedFloatingTablePlacementLayout[];
   /** Point space already owned by `resolvedFloatingTables`; occurrence projection

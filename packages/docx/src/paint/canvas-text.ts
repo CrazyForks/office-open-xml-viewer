@@ -271,6 +271,9 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
           }
           for (const operation of placement.leaderGlyphs) paintRetainedGlyph(operation, context);
         }
+        for (const decoration of placement.decorations ?? []) {
+          paintStrokeSegment(decoration, context);
+        }
         continue;
       }
       if (placement.kind !== 'text') continue;

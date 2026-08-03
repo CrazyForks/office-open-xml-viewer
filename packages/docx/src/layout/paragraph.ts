@@ -92,6 +92,7 @@ import {
   type ParagraphAcquisitionRuntimeCache,
 } from './runtime-state.js';
 import {
+  wordLayoutInCellOwnsRowContainment,
   wordPreservesLowerLayerSameParagraphComposition,
   wordTextBoxVisibleAnchorExtentPt,
 } from './anchor-compatibility.js';
@@ -213,6 +214,12 @@ export interface MeasuredTabPlanSegment {
   readonly fontSizePt: number;
   readonly bold?: boolean;
   readonly italic?: boolean;
+  readonly underline?: Readonly<{
+    readonly base: RetainedInkMetric;
+    readonly authoredStyle?: string;
+    readonly color: string;
+    readonly probe: RetainedInkMetric;
+  }>;
   readonly leaderShape?: Readonly<{
     glyph: string;
     advancePt: number;
@@ -597,7 +604,7 @@ function coalesceAdjacentDecorations(placements: ParagraphPlacement[]): void {
   }>;
   let active: ActiveDecoration[] = [];
   placements.forEach((placement, placementIndex) => {
-    if (placement.kind !== 'text') {
+    if ((placement.kind !== 'text' && placement.kind !== 'tab') || !placement.decorations) {
       active = [];
       return;
     }
@@ -613,8 +620,8 @@ function coalesceAdjacentDecorations(placements: ParagraphPlacement[]): void {
       if (prior) {
         consumed.add(prior);
         const owner = placements[prior.placementIndex];
-        if (!owner || owner.kind !== 'text') {
-          throw new Error('Continuous decoration owner left the retained text line');
+        if (!owner || (owner.kind !== 'text' && owner.kind !== 'tab') || !owner.decorations) {
+          throw new Error('Continuous decoration owner left the retained line');
         }
         const ownerDecorations = [...owner.decorations];
         const merged = mergedContinuousDecoration(prior.decoration, decoration);
@@ -754,11 +761,21 @@ export function planLine(input: PlanLineInput): LineLayout {
     const widthPt = segmentWidth(segment) + internalStretchPt;
     if (segment.kind === 'tab') {
       const bounds = { xPt, yPt: line.topPt, widthPt: segment.measuredWidthPt, heightPt: line.advancePt };
+      const decorations = segment.underline
+        ? retainedTextDecorations({
+            origin: { xPt, yPt: line.baselinePt },
+            advancePt: segment.measuredWidthPt,
+            base: segment.underline.base,
+            color: segment.underline.color,
+            underline: segment.underline,
+          })
+        : undefined;
       placements.push({
         kind: 'tab', range: segment.range,
         bounds,
         advancePt: segment.measuredWidthPt,
         leader: segment.leader,
+        ...(decorations?.length ? { decorations } : {}),
         ...(segment.leader === 'none' ? {} : segment.leaderShape ? {
           leaderGlyphs: centeredLeaderGlyphOrigins({
             interval: bounds,
@@ -1980,25 +1997,23 @@ function planMeasuredLines(
         const tab = segment as LayoutTabSeg;
         const leader = tab.leader ?? 'none';
         let leaderShape: MeasuredTabPlanSegment['leaderShape'];
-        if (leader !== 'none') {
-          if (!textService) {
-            throw new Error('Tab leader acquisition requires TextLayoutService');
-          }
-          const glyph = leader === 'hyphen' ? '-'
-            : leader === 'underscore' || leader === 'heavy' ? '_'
-              : leader === 'middleDot' ? '·' : '.';
-          const textSource = sourceRun?.type === 'text' || sourceRun?.type === 'field'
-            ? sourceRun
-            : undefined;
-          const richRun = textSource as (typeof textSource & Readonly<{
-            fontSlots?: Readonly<{
-              direct: import('./text.js').TextFontSlots;
-              theme?: import('./text.js').TextFontSlots;
-              themePresent?: import('./text.js').TextFontSlotPresence;
-            }>;
-            colorAuto?: boolean;
-          }>) | undefined;
-          const shape = textService.shape({
+        let underline: MeasuredTabPlanSegment['underline'];
+        const textSource = sourceRun?.type === 'text' || sourceRun?.type === 'field'
+          ? sourceRun
+          : undefined;
+        const richRun = textSource as (typeof textSource & Readonly<{
+          fontSlots?: Readonly<{
+            direct: import('./text.js').TextFontSlots;
+            theme?: import('./text.js').TextFontSlots;
+            themePresent?: import('./text.js').TextFontSlotPresence;
+          }>;
+          colorAuto?: boolean;
+          underlineStyle?: string | null;
+          underlineColor?: string | null;
+        }>) | undefined;
+        const shapeTabGlyph = (glyph: string) => {
+          if (!textService) throw new Error('Formatted tab acquisition requires TextLayoutService');
+          return textService.shape({
             text: glyph,
             fontSizePt: tab.fontSize,
             fonts: richRun?.fontSlots?.direct
@@ -2009,6 +2024,37 @@ function planMeasuredLines(
             style: tab.italic ? 'italic' : 'normal',
             measure: true,
           });
+        };
+        const selectedMetric = (glyph: string): RetainedInkMetric => {
+          const shaped = shapeTabGlyph(glyph);
+          const span = shaped.spans[0];
+          if (!span || shaped.spans.length !== 1 || span.start !== 0 || span.end !== glyph.length) {
+            throw new Error('Formatted tab probe requires one selected-face span');
+          }
+          return {
+            ascentPt: span.ascentPt,
+            descentPt: span.descentPt,
+            ...(span.inkBounds ? { inkBounds: span.inkBounds } : {}),
+          };
+        };
+        if (textSource?.underline) {
+          const textColor = textSource.color ? `#${textSource.color}` : '#000000';
+          underline = {
+            base: selectedMetric('M'),
+            probe: selectedMetric('_'),
+            color: richRun?.underlineColor && richRun.underlineColor !== 'auto'
+              ? `#${richRun.underlineColor}` : textColor,
+            ...(richRun?.underlineStyle ? { authoredStyle: richRun.underlineStyle } : {}),
+          };
+        }
+        if (leader !== 'none') {
+          if (!textService) {
+            throw new Error('Tab leader acquisition requires TextLayoutService');
+          }
+          const glyph = leader === 'hyphen' ? '-'
+            : leader === 'underscore' || leader === 'heavy' ? '_'
+              : leader === 'middleDot' ? '·' : '.';
+          const shape = shapeTabGlyph(glyph);
           const span = shape.spans[0];
           if (!span || !Number.isFinite(shape.advancePt) || shape.advancePt <= 0) {
             throw new Error('Tab leader acquisition produced no shaped glyph advance');
@@ -2029,6 +2075,7 @@ function planMeasuredLines(
           kind: 'tab', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
           measuredWidthPt: tab.measuredWidth, leader,
           fontSizePt: tab.fontSize, bold: tab.bold, italic: tab.italic,
+          ...(underline ? { underline } : {}),
           ...(leaderShape ? { leaderShape } : {}),
         });
       } else if ('imagePath' in segment) {
@@ -2958,7 +3005,12 @@ function acquireAnchorOccurrence(
         'vertical',
         behavior.layoutInCell && options.anchorCellBounds !== undefined,
       ),
-      ...(behavior.layoutInCell && options.anchorCellBounds
+      ...(behavior.layoutInCell
+        && wordLayoutInCellOwnsRowContainment(
+          behavior.allowOverlap,
+          effectiveResult.geometry.wrap.kind,
+        )
+        && options.anchorCellBounds
         ? { cellContainment: true as const }
         : {}),
     },
@@ -2999,7 +3051,12 @@ function acquireAnchorOccurrence(
   };
   return {
     result: effectiveResult, drawing, exclusion, collision, textBoxes,
-    ...(behavior.layoutInCell && options.anchorCellBounds
+    ...(behavior.layoutInCell
+      && wordLayoutInCellOwnsRowContainment(
+        behavior.allowOverlap,
+        effectiveResult.geometry.wrap.kind,
+      )
+      && options.anchorCellBounds
       ? { cellContainmentBounds: rect }
       : {}),
     hostLineIndex, hostRange: host.range,

@@ -824,6 +824,39 @@ describe('table-cell parser-owned anchor reflow', () => {
       placedMovingBottomPt,
     );
   });
+
+  it('does not grow an automatic row for an overlapping layoutInCell wrapNone object', () => {
+    const baseline = model([
+      paragraph([textRun('A')]),
+    ], 100);
+    const withOverlay = model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-overlay',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          verticalOffsetPt: 10,
+          widthPt: 80,
+          heightPt: 80,
+          allowOverlap: true,
+          wrapKind: 'none',
+        }),
+        textRun('A'),
+      ]),
+    ], 100);
+    const rowHeight = (document: DocxDocumentModel): number => {
+      const result = layoutDocument(
+        document,
+        createLayoutServices(document, { measureContext: makeCtx() }),
+        { currentDateMs: 0 },
+      );
+      const table = result.pages[0]!.layers.body.find((node) => node.kind === 'table');
+      if (!table || table.kind !== 'table') throw new Error('Expected retained table');
+      return table.rows[0]!.heightPt;
+    };
+
+    expect(rowHeight(withOverlay)).toBe(rowHeight(baseline));
+  });
 });
 
 describe('body parser-owned anchor collision carry', () => {

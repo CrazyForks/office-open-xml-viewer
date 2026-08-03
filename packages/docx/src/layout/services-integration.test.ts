@@ -231,14 +231,22 @@ describe('production layout service integration', () => {
       : false)).toEqual([true, false]);
   });
 
-  it('classifies an eastAsia-hinted Latin run for Far East metrics only when useFELayout is active', () => {
-    const run = textRun('Latin title', {
+  it('classifies Latin runs with a resolved eastAsia axis only when useFELayout is active', () => {
+    const hinted = textRun('Hinted Latin title', {
       fontFamilyEastAsia: 'EA Face',
       fontHint: 'eastAsia',
       langEastAsia: 'ja-jp',
     });
-    const off = buildSegments([run], { pageIndex: 0, totalPages: 1 });
-    const on = buildSegments([run], { pageIndex: 0, totalPages: 1, useFeLayout: true });
+    const unhinted = textRun('Unhinted Latin title', {
+      fontFamilyEastAsia: 'EA Face',
+      fontHint: null,
+      langEastAsia: 'ja-jp',
+    });
+    const off = buildSegments([hinted, unhinted], { pageIndex: 0, totalPages: 1 });
+    const on = buildSegments(
+      [hinted, unhinted],
+      { pageIndex: 0, totalPages: 1, useFeLayout: true },
+    );
 
     expect(off.filter((segment) => 'text' in segment)
       .every((segment) => !('metricEastAsian' in segment))).toBe(true);
