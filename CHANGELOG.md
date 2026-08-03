@@ -4,6 +4,25 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.75.2 — 2026-08-04
+
+Patch. Improves Word-compatible DOCX text metrics, anchored drawing flow,
+table pagination, and compound border rendering.
+
+- **docx text:** retain underline decoration across tab advances, preserve CJK
+  fallback for fixed-pitch East Asian faces, and resolve Far East layout-grid
+  metrics from the East Asia font axis for empty paragraph marks and visible
+  Latin or CJK text. (§§17.3.1.37, 17.6.5; observed Word `useFELayout`
+  behavior; #1141)
+- **docx tables / drawings:** keep overlap-permitted, non-wrapping in-cell
+  drawings out of automatic row containment, include winning collapsed-border
+  half-rules in non-exact row tracks, and reserve page-local boundary rules
+  when selecting split rows. (§§17.4.43, 17.4.66, 17.4.80, 20.4.2.3;
+  observed Word row-footprint behavior; #1141)
+- **docx borders:** retain compound `ST_Border` rails and paint table outer
+  borders as joined closed frames, including continuous corner connections,
+  without inferring table structure during the paint pass. (§17.18.2; #1141)
+
 ## 0.75.1 — 2026-08-03
 
 Patch. Improves PowerPoint chart and text layout fidelity, keeps spreadsheet
