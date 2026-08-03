@@ -49,6 +49,9 @@ const VALIDATION_PANEL_MAX_W = 240;
 const VALIDATION_PANEL_MAX_H = 200;
 
 const TAB_BAR_H = 30;
+// Footer chrome stays in screen pixels: sheet zoom scales grid cells and their
+// row/column headers, but must not resize the tab-navigation controls.
+const TAB_NAV_W = HEADER_W;
 // Gap between adjacent sheet tabs. The first tab also gets this much leading
 // space so it is offset from the row-header boundary by the same margin that
 // separates tabs from each other.
@@ -447,7 +450,6 @@ export class XlsxViewer implements ZoomableViewer {
   private tabStrip: HTMLDivElement;
   private navPrev: HTMLButtonElement;
   private navNext: HTMLButtonElement;
-  private navGroup!: HTMLDivElement;
   private tabs: HTMLButtonElement[] = [];
   /** Per-tab colors parallel to `tabs`, from `<sheetPr><tabColor>`. */
   private tabColors: (string | null)[] = [];
@@ -700,8 +702,6 @@ export class XlsxViewer implements ZoomableViewer {
     this.canvasArea.appendChild(this.commentPopup);
     this.canvasArea.appendChild(this.validationPanel);
 
-    const headerW = Math.round(HEADER_W * (this.opts.cellScale ?? 1));
-
     this.tabBar = document.createElement('div');
     this.tabBar.style.cssText =
       `display:flex;align-items:flex-end;height:${TAB_BAR_H}px;flex-shrink:0;` +
@@ -714,14 +714,13 @@ export class XlsxViewer implements ZoomableViewer {
     this.navPrev.dataset.xlsxTabNav = 'prev';
     this.navNext.dataset.xlsxTabNav = 'next';
 
-    // The two buttons together span the row-header width so the tab strip starts
-    // at the same x as the data columns (which begin after the HEADER_W header).
+    // Keep the two-button footer control at the row-header width from the 100%
+    // view. It is viewer chrome, so workbook zoom must not resize or shift it.
     const navGroup = document.createElement('div');
     navGroup.style.cssText =
-      `display:flex;flex-shrink:0;width:${headerW}px;height:100%;`;
+      `display:flex;flex-shrink:0;width:${TAB_NAV_W}px;height:100%;`;
     navGroup.appendChild(this.navPrev);
     navGroup.appendChild(this.navNext);
-    this.navGroup = navGroup;
 
     // The scrollable strip that actually holds the sheet tabs. position:relative
     // so each tab's offsetLeft is measured against the strip's scroll content.
@@ -3154,8 +3153,7 @@ export class XlsxViewer implements ZoomableViewer {
    * IX9 {@link ZoomableViewer} — set the cell/header scale (`1` = 100%; the
    * viewer's `cellScale`) and re-lay-out the current sheet. Clamped to the zoom
    * bounds and snapped to whole percent; keeps the slider thumb, percentage label
-   * and the row-header-aligned tab-nav width in sync, and fires `onScaleChange`
-   * when the resolved scale actually changes.
+   * in sync, and fires `onScaleChange` when the resolved scale actually changes.
    */
   setScale(scale: number): void {
     const zoomMin = this.opts.zoomMin ?? 0.1;
@@ -3181,8 +3179,6 @@ export class XlsxViewer implements ZoomableViewer {
 
     if (this.zoomSlider) this.zoomSlider.value = String(this.zoomScaleToPos(next, zoomMin, zoomMax));
     if (this.zoomLabel) this.zoomLabel.textContent = `${pct}%`;
-    // The tab-nav block spans the row-header width, which scales with the cells.
-    this.navGroup.style.width = `${Math.round(HEADER_W * next)}px`;
 
     if (this.currentWorksheet) {
       // Preserve the START-anchored effective scroll position across the zoom.

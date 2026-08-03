@@ -53,6 +53,7 @@ interface Priv {
   currentWorksheet: Worksheet | null;
   canvasArea: { clientWidth: number; clientHeight: number; getBoundingClientRect(): DOMRect };
   scrollHost: FakeScrollHost;
+  navPrev: { parentElement: { style: { width: string } } | null };
   _pendingZoomAnchor: { x: number; y: number } | null;
 }
 
@@ -135,6 +136,18 @@ describe('XlsxViewer IX9 zoom contract', () => {
     expect(v.getScale()).toBe(2);
     v.setScale(0.01);
     expect(v.getScale()).toBe(0.5);
+  });
+
+  it('keeps the footer tab-navigation width fixed at its 100% size', () => {
+    installDom();
+    const { v, priv } = mount(makeSheet(), { cellScale: 2 });
+
+    // The footer is viewer chrome, not sheet content. Its two navigation
+    // buttons therefore keep the row-header width at 100%, even when the
+    // workbook is initially opened or subsequently rendered at another zoom.
+    expect(priv.navPrev.parentElement?.style.width).toBe(`${HEADER_W}px`);
+    v.setScale(0.5);
+    expect(priv.navPrev.parentElement?.style.width).toBe(`${HEADER_W}px`);
   });
 
   it('zoomIn / zoomOut walk the shared ladder', () => {
