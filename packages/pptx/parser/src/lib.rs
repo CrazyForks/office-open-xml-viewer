@@ -5007,6 +5007,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 ShapeKind::Sp,
                 &mut zip,
             );
@@ -5651,6 +5652,7 @@ mod tests {
                 None, // inherited_italic
                 None, // inherited_caps
                 None, // inherited_anchor
+                None, // inherited_text_insets
                 None, // inherited_alignment
                 None, // inherited_ea_ln_brk
                 None, // inherited_space_before
@@ -5717,6 +5719,7 @@ mod tests {
                 [None; 9],
                 Default::default(),
                 &empty_level_bullets(),
+                None,
                 None,
                 None,
                 None,
@@ -5808,6 +5811,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 ShapeKind::Sp,
                 &mut zip,
             );
@@ -5885,6 +5889,7 @@ mod tests {
                 [None; 9],
                 Default::default(),
                 &empty_level_bullets(),
+                None,
                 None,
                 None,
                 None,

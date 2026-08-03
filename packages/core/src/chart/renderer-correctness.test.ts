@@ -431,7 +431,7 @@ describe('CH7 â€” percentStacked normalizes signed values against per-category Î
     }
   });
 
-  it('keeps explicit-size value-axis labels inside an inner manual-layout chart frame', () => {
+  it('keeps explicit-size value-axis labels inside a correctly authored inner manual-layout frame', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
       chartType: 'stackedBarPct',
@@ -444,13 +444,13 @@ describe('CH7 â€” percentStacked normalizes signed values against per-category Î
       valAxisFormatCode: '0%',
       valAxisFontSizeHpt: 1100,
       // ECMA-376 Â§21.2.2.89: an inner target describes the data region,
-      // excluding axes and labels. Those labels must still remain inside the
-      // chart frame when their actual DrawingML font metrics need more room.
+      // excluding axes and labels. The producer therefore reserves the label
+      // gutter in the authored x offset rather than relying on auto-layout.
       plotAreaManualLayout: {
         layoutTarget: 'inner',
         xMode: 'edge',
         yMode: 'edge',
-        x: 0.055,
+        x: 0.184,
         y: 0.046,
         w: 0.728,
         h: 0.784,
