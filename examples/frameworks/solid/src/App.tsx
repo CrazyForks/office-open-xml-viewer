@@ -1,34 +1,15 @@
 import { createSignal } from 'solid-js';
-import { createOfficeViewer, type OfficeSource, type OfficeViewerHandle } from './createOfficeViewer';
+import { createOfficeViewer, type OfficeFormat, type OfficeSource } from './createOfficeViewer';
 
-type OfficeFormat = 'docx' | 'xlsx' | 'pptx';
 interface SelectedDocument { format: OfficeFormat; source: OfficeSource; name: string }
-
-const SAMPLE = 'https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/packages/docx/public/demo/sample-1.docx';
 
 export function App() {
   const [target, setTarget] = createSignal<HTMLElement | null>(null);
-  const [selected, setSelected] = createSignal<SelectedDocument>({
-    format: 'docx',
-    source: SAMPLE,
-    name: 'sample-1.docx',
-  });
-  const createViewer = () => async (container: HTMLElement): Promise<OfficeViewerHandle> => {
-    if (selected().format === 'xlsx') {
-      const { XlsxViewer } = await import('@silurus/ooxml/xlsx');
-      return new XlsxViewer(container, { showZoomSlider: true });
-    }
-    if (selected().format === 'pptx') {
-      const { PptxScrollViewer } = await import('@silurus/ooxml/pptx');
-      return new PptxScrollViewer(container, { background: '#53606d' });
-    }
-    const { DocxScrollViewer } = await import('@silurus/ooxml/docx');
-    return new DocxScrollViewer(container, { enableTextSelection: true, background: '#53606d' });
-  };
+  const [selected, setSelected] = createSignal<SelectedDocument | null>(null);
   const viewer = createOfficeViewer({
     target,
-    source: () => selected().source,
-    createViewer,
+    format: () => selected()?.format ?? null,
+    source: () => selected()?.source ?? null,
   });
   const chooseFile = async (event: Event) => {
     const file = (event.currentTarget as HTMLInputElement).files?.[0];
@@ -46,7 +27,7 @@ export function App() {
         <button onClick={viewer.reload}>Reload</button>
         <input class="file-input" type="file" accept=".docx,.xlsx,.pptx" onChange={chooseFile} />
         <span classList={{ status: true, error: Boolean(viewer.error()) }}>
-          {viewer.error()?.message ?? `${selected().name} · ${viewer.status()}`}
+          {viewer.error()?.message ?? (selected() ? `${selected()?.name} · ${viewer.status()}` : 'Choose an Office file')}
         </span>
       </div>
       <div class="stage" ref={setTarget} />

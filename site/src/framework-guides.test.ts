@@ -47,7 +47,10 @@ describe('framework integration guides', () => {
     for (const guide of frameworkGuides) {
       expect(guide.adapterCode).not.toContain('@ooxml-framework-examples');
       expect(guide.adapterCode).not.toContain('../shared');
-      expect(guide.adapterCode).toContain('createViewer');
+      expect(guide.adapterCode).toContain("from '@silurus/ooxml/docx'");
+      expect(guide.adapterCode).toContain("from '@silurus/ooxml/xlsx'");
+      expect(guide.adapterCode).toContain("from '@silurus/ooxml/pptx'");
+      expect(guide.adapterCode).not.toContain("await import('@silurus/ooxml");
       expect(guide.adapterCode).toContain('destroy');
       expect(guide.adapterCode).not.toMatch(/\blet\s+/);
       expect(guide.adapterCode).not.toMatch(/\bvoid\s+[A-Za-z_(]/);
@@ -61,22 +64,36 @@ describe('framework integration guides', () => {
     expect(hook).toContain('<div {...props} ref={mountRef} />');
     expect(hook).toContain('useEffect(() =>');
     expect(hook).toContain('const controller = new AbortController();');
-    expect(hook).toContain('viewer?.destroy();');
+    expect(hook).toContain('viewer.destroy();');
     expect(hook).not.toMatch(/\blet\s+/);
     expect(hook).not.toMatch(/\bvoid\s+mountOfficeViewer/);
     expect(hook).not.toContain('targetRef:');
   });
 
-  it('uses one div-backed viewer surface and a replaceable local file source', async () => {
+  it('keeps viewer construction out of components and accepts a replaceable local file source', async () => {
     const { frameworkGuides } = await import('./lib/framework-guides');
     for (const guide of frameworkGuides) {
-      expect(guide.appCode).toContain('DocxScrollViewer');
-      expect(guide.appCode).toContain('PptxScrollViewer');
-      expect(guide.appCode).toContain('XlsxViewer');
+      expect(guide.appCode).not.toContain("import('@silurus/ooxml");
+      expect(guide.appCode).not.toContain('DocxScrollViewer');
+      expect(guide.appCode).not.toContain('PptxScrollViewer');
+      expect(guide.appCode).not.toContain('XlsxViewer');
       expect(guide.appCode).toContain('file.arrayBuffer()');
       expect(guide.appCode).toContain('.docx,.xlsx,.pptx');
+      expect(guide.appCode).toContain("'Choose an Office file'");
+      expect(guide.appCode).not.toContain('raw.githubusercontent.com');
       expect(guide.appCode).not.toContain('<canvas');
     }
+  });
+
+  it('embeds a local-file try surface without an initial sample', () => {
+    const guide = readFileSync(new URL('components/FrameworkGuide.astro', siteRoot), 'utf8');
+    const tryYours = readFileSync(new URL('components/FrameworkTryYours.astro', siteRoot), 'utf8');
+
+    expect(guide).toContain('FrameworkTryYours');
+    expect(guide).not.toContain('LiveShowcase');
+    expect(tryYours).toContain('accept=".docx,.xlsx,.pptx"');
+    expect(tryYours).toContain('Your file stays in this browser.');
+    expect(tryYours).not.toContain('sample-1');
   });
 
   it('documents and performs DOCX teardown in the existing snippets', () => {

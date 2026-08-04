@@ -1,6 +1,10 @@
 import { readonly, ref, shallowRef, toValue, watchEffect, type MaybeRefOrGetter, type ShallowRef } from 'vue';
+import { DocxScrollViewer } from '@silurus/ooxml/docx';
+import { PptxScrollViewer } from '@silurus/ooxml/pptx';
+import { XlsxViewer } from '@silurus/ooxml/xlsx';
 
 export type OfficeSource = string | ArrayBuffer;
+export type OfficeFormat = 'docx' | 'xlsx' | 'pptx';
 export type OfficeViewerStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export interface OfficeViewerHandle {
@@ -14,18 +18,30 @@ export interface OfficeViewerHandle {
   fitPage: () => void;
 }
 
-export type OfficeViewerFactory<V extends OfficeViewerHandle> = (
-  container: HTMLElement,
-) => V | Promise<V>;
-
-export interface UseOfficeViewerOptions<V extends OfficeViewerHandle> {
+export interface UseOfficeViewerOptions {
   target: Readonly<ShallowRef<HTMLElement | null>>;
-  source: MaybeRefOrGetter<OfficeSource>;
-  createViewer: OfficeViewerFactory<V>;
+  format: MaybeRefOrGetter<OfficeFormat | null>;
+  source: MaybeRefOrGetter<OfficeSource | null>;
 }
 
-export function useOfficeViewer<V extends OfficeViewerHandle>(config: UseOfficeViewerOptions<V>) {
-  const viewer = shallowRef<V | null>(null);
+function createViewer(
+  format: OfficeFormat,
+  container: HTMLElement,
+): OfficeViewerHandle {
+  if (format === 'xlsx') {
+    return new XlsxViewer(container, { showZoomSlider: true });
+  }
+  if (format === 'pptx') {
+    return new PptxScrollViewer(container, { background: '#53606d' });
+  }
+  return new DocxScrollViewer(container, {
+    enableTextSelection: true,
+    background: '#53606d',
+  });
+}
+
+export function useOfficeViewer(config: UseOfficeViewerOptions) {
+  const viewer = shallowRef<OfficeViewerHandle | null>(null);
   const status = ref<OfficeViewerStatus>('idle');
   const error = shallowRef<Error | null>(null);
   const reloadVersion = ref(0);
@@ -33,48 +49,35 @@ export function useOfficeViewer<V extends OfficeViewerHandle>(config: UseOfficeV
   watchEffect((onCleanup) => {
     reloadVersion.value;
     const container = config.target.value;
-    if (!container) {
+    const format = toValue(config.format);
+    const source = toValue(config.source);
+    if (!container || !format || !source) {
       status.value = 'idle';
       return;
     }
 
     const controller = new AbortController();
+    const nextViewer = createViewer(format, container);
+    viewer.value = nextViewer;
     status.value = 'loading';
     error.value = null;
 
-    Promise.resolve(config.createViewer(container))
-      .then(async (nextViewer) => {
-        if (controller.signal.aborted) {
-          nextViewer.destroy();
-          return null;
-        }
-        try {
-          await nextViewer.load(toValue(config.source));
-          return nextViewer;
-        } catch (reason) {
-          nextViewer.destroy();
-          throw reason;
-        }
-      })
-      .then((nextViewer) => {
-        if (!nextViewer || controller.signal.aborted) {
-          nextViewer?.destroy();
-          return;
-        }
-        viewer.value = nextViewer;
-        status.value = 'ready';
+    nextViewer.load(source)
+      .then(() => {
+        if (!controller.signal.aborted) status.value = 'ready';
       })
       .catch((reason: unknown) => {
         if (controller.signal.aborted) return;
+        nextViewer.destroy();
+        if (viewer.value === nextViewer) viewer.value = null;
         error.value = reason instanceof Error ? reason : new Error(String(reason));
         status.value = 'error';
       });
 
     onCleanup(() => {
       controller.abort();
-      const currentViewer = viewer.value;
-      viewer.value = null;
-      currentViewer?.destroy();
+      if (viewer.value === nextViewer) viewer.value = null;
+      nextViewer.destroy();
     });
   });
 

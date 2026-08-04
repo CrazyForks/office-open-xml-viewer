@@ -1,7 +1,11 @@
 import { writable, type Readable } from 'svelte/store';
 import type { Action } from 'svelte/action';
+import { DocxScrollViewer } from '@silurus/ooxml/docx';
+import { PptxScrollViewer } from '@silurus/ooxml/pptx';
+import { XlsxViewer } from '@silurus/ooxml/xlsx';
 
 export type OfficeSource = string | ArrayBuffer;
+export type OfficeFormat = 'docx' | 'xlsx' | 'pptx';
 export type OfficeViewerStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export interface OfficeViewerHandle {
@@ -15,17 +19,13 @@ export interface OfficeViewerHandle {
   fitPage: () => void;
 }
 
-export type OfficeViewerFactory<V extends OfficeViewerHandle> = (
-  container: HTMLElement,
-) => V | Promise<V>;
-
-export interface OfficeViewerConfig<V extends OfficeViewerHandle> {
-  source: OfficeSource;
-  createViewer: OfficeViewerFactory<V>;
+export interface OfficeViewerConfig {
+  format: OfficeFormat | null;
+  source: OfficeSource | null;
 }
 
-export interface OfficeViewerAction<V extends OfficeViewerHandle> {
-  action: Action<HTMLElement, OfficeViewerConfig<V>>;
+export interface OfficeViewerAction {
+  action: Action<HTMLElement, OfficeViewerConfig>;
   status: Readable<OfficeViewerStatus>;
   error: Readable<Error | null>;
   reload: () => void;
@@ -37,13 +37,29 @@ export interface OfficeViewerAction<V extends OfficeViewerHandle> {
   fitPage: () => void;
 }
 
-export function createOfficeViewer<V extends OfficeViewerHandle>(): OfficeViewerAction<V> {
+function createViewer(
+  format: OfficeFormat,
+  container: HTMLElement,
+): OfficeViewerHandle {
+  if (format === 'xlsx') {
+    return new XlsxViewer(container, { showZoomSlider: true });
+  }
+  if (format === 'pptx') {
+    return new PptxScrollViewer(container, { background: '#53606d' });
+  }
+  return new DocxScrollViewer(container, {
+    enableTextSelection: true,
+    background: '#53606d',
+  });
+}
+
+export function createOfficeViewer(): OfficeViewerAction {
   const status = writable<OfficeViewerStatus>('idle');
   const error = writable<Error | null>(null);
   const state = {
     node: null as HTMLElement | null,
-    config: null as OfficeViewerConfig<V> | null,
-    viewer: null as V | null,
+    config: null as OfficeViewerConfig | null,
+    viewer: null as OfficeViewerHandle | null,
     controller: null as AbortController | null,
   };
 
@@ -58,45 +74,31 @@ export function createOfficeViewer<V extends OfficeViewerHandle>(): OfficeViewer
   const mount = () => {
     destroyViewer();
     const { node, config } = state;
-    if (!node || !config) {
+    if (!node || !config?.format || !config.source) {
       status.set('idle');
       return;
     }
 
     const controller = new AbortController();
+    const viewer = createViewer(config.format, node);
     state.controller = controller;
+    state.viewer = viewer;
     status.set('loading');
     error.set(null);
-    Promise.resolve(config.createViewer(node))
-      .then(async (viewer) => {
-        if (controller.signal.aborted) {
-          viewer.destroy();
-          return null;
-        }
-        try {
-          await viewer.load(config.source);
-          return viewer;
-        } catch (reason) {
-          viewer.destroy();
-          throw reason;
-        }
-      })
-      .then((viewer) => {
-        if (!viewer || controller.signal.aborted) {
-          viewer?.destroy();
-          return;
-        }
-        state.viewer = viewer;
-        status.set('ready');
+    viewer.load(config.source)
+      .then(() => {
+        if (!controller.signal.aborted) status.set('ready');
       })
       .catch((reason: unknown) => {
         if (controller.signal.aborted) return;
+        viewer.destroy();
+        if (state.viewer === viewer) state.viewer = null;
         error.set(reason instanceof Error ? reason : new Error(String(reason)));
         status.set('error');
       });
   };
 
-  const action: Action<HTMLElement, OfficeViewerConfig<V>> = (element, initialConfig) => {
+  const action: Action<HTMLElement, OfficeViewerConfig> = (element, initialConfig) => {
     state.node = element;
     state.config = initialConfig;
     mount();

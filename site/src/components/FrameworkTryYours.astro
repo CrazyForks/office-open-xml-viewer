@@ -1,0 +1,83 @@
+<div class="framework-try" data-framework-try>
+  <label class="file-picker">
+    <strong>Choose an Office file</strong>
+    <span>DOCX · XLSX · PPTX</span>
+    <input type="file" accept=".docx,.xlsx,.pptx" data-file />
+  </label>
+  <p class="privacy">Your file stays in this browser.</p>
+  <p class="status" data-status>Nothing selected</p>
+  <div class="stage" data-stage hidden></div>
+</div>
+
+<script>
+  import { disposeRenderedFile, renderFile } from '../lib/try';
+
+  document.querySelectorAll<HTMLElement>('[data-framework-try]').forEach((root) => {
+    const input = root.querySelector('[data-file]') as HTMLInputElement;
+    const stage = root.querySelector('[data-stage]') as HTMLDivElement;
+    const status = root.querySelector('[data-status]') as HTMLParagraphElement;
+    const state = { generation: 0 };
+
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      input.value = '';
+      if (!file) return;
+
+      const generation = ++state.generation;
+      stage.hidden = false;
+      status.textContent = `Rendering ${file.name}…`;
+      status.classList.remove('error');
+
+      try {
+        await renderFile(stage, file);
+        if (generation === state.generation) status.textContent = file.name;
+      } catch (reason) {
+        if (generation !== state.generation) return;
+        stage.hidden = true;
+        status.textContent = reason instanceof Error ? reason.message : String(reason);
+        status.classList.add('error');
+      }
+    });
+
+    window.addEventListener('pagehide', disposeRenderedFile, { once: true });
+  });
+</script>
+
+<style>
+  .framework-try {
+    border: 1px solid var(--border);
+    background: var(--panel);
+    overflow: hidden;
+  }
+  .file-picker {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 14px;
+    margin: 18px 18px 0;
+    padding: 11px 14px;
+    background: var(--signal);
+    color: var(--signal-text);
+    cursor: pointer;
+  }
+  .file-picker strong { font-size: 13px; }
+  .file-picker span { font: 10px var(--mono); opacity: .75; }
+  .file-picker input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .privacy, .status { display: inline-block; margin: 0 0 0 14px; font: 11px var(--mono); color: var(--text-dim); }
+  .status { float: right; margin: 28px 18px 0; }
+  .status.error { color: var(--accent-3); }
+  .stage {
+    clear: both;
+    height: min(72vh, 680px);
+    min-height: 420px;
+    margin-top: 18px;
+    border-top: 1px solid var(--border);
+    background: radial-gradient(120% 80% at 50% 0%, var(--preview-top), var(--preview-bottom) 70%);
+  }
+  .stage[hidden] { display: none; }
+  .stage :global(.lv-scroll-viewer), .stage :global(.lv-xlsx) { width: 100%; height: 100%; border-radius: 0; }
+  @media (max-width: 680px) {
+    .file-picker { display: flex; margin-right: 18px; }
+    .privacy, .status { display: block; float: none; margin: 12px 18px 0; }
+    .stage { height: min(64vh, 520px); min-height: 340px; }
+  }
+</style>

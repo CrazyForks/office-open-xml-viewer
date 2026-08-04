@@ -1,31 +1,13 @@
 <script setup lang="ts">
 import { computed, shallowRef, useTemplateRef } from 'vue';
-import { useOfficeViewer, type OfficeSource, type OfficeViewerHandle } from './useOfficeViewer';
+import { useOfficeViewer, type OfficeFormat, type OfficeSource } from './useOfficeViewer';
 
-type OfficeFormat = 'docx' | 'xlsx' | 'pptx';
-const SAMPLE = 'https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/packages/docx/public/demo/sample-1.docx';
-const document = shallowRef<{ format: OfficeFormat; source: OfficeSource; name: string }>({
-  format: 'docx',
-  source: SAMPLE,
-  name: 'sample-1.docx',
-});
+const document = shallowRef<{ format: OfficeFormat; source: OfficeSource; name: string } | null>(null);
 const target = useTemplateRef<HTMLDivElement>('target');
-const createViewer = computed(() => async (container: HTMLElement): Promise<OfficeViewerHandle> => {
-  if (document.value.format === 'xlsx') {
-    const { XlsxViewer } = await import('@silurus/ooxml/xlsx');
-    return new XlsxViewer(container, { showZoomSlider: true });
-  }
-  if (document.value.format === 'pptx') {
-    const { PptxScrollViewer } = await import('@silurus/ooxml/pptx');
-    return new PptxScrollViewer(container, { background: '#53606d' });
-  }
-  const { DocxScrollViewer } = await import('@silurus/ooxml/docx');
-  return new DocxScrollViewer(container, { enableTextSelection: true, background: '#53606d' });
-});
 const viewer = useOfficeViewer({
   target,
-  source: computed(() => document.value.source),
-  createViewer: (container) => createViewer.value(container),
+  format: computed(() => document.value?.format ?? null),
+  source: computed(() => document.value?.source ?? null),
 });
 const chooseFile = async (event: Event) => {
   const file = (event.currentTarget as HTMLInputElement).files?.[0];
@@ -44,7 +26,7 @@ const chooseFile = async (event: Event) => {
       <button @click="viewer.reload">Reload</button>
       <input class="file-input" type="file" accept=".docx,.xlsx,.pptx" @change="chooseFile" />
       <span :class="['status', { error: viewer.error.value }]">
-        {{ viewer.error.value?.message ?? `${document.name} · ${viewer.status.value}` }}
+        {{ viewer.error.value?.message ?? (document ? `${document.name} · ${viewer.status.value}` : 'Choose an Office file') }}
       </span>
     </div>
     <div ref="target" class="stage"></div>

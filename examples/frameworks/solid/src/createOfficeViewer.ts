@@ -1,6 +1,10 @@
 import { createEffect, createSignal, onCleanup, type Accessor } from 'solid-js';
+import { DocxScrollViewer } from '@silurus/ooxml/docx';
+import { PptxScrollViewer } from '@silurus/ooxml/pptx';
+import { XlsxViewer } from '@silurus/ooxml/xlsx';
 
 export type OfficeSource = string | ArrayBuffer;
+export type OfficeFormat = 'docx' | 'xlsx' | 'pptx';
 export type OfficeViewerStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export interface OfficeViewerHandle {
@@ -14,69 +18,66 @@ export interface OfficeViewerHandle {
   fitPage: () => void;
 }
 
-export type OfficeViewerFactory<V extends OfficeViewerHandle> = (
-  container: HTMLElement,
-) => V | Promise<V>;
-
-export interface CreateOfficeViewerOptions<V extends OfficeViewerHandle> {
+export interface CreateOfficeViewerOptions {
   target: Accessor<HTMLElement | null>;
-  source: Accessor<OfficeSource>;
-  createViewer: Accessor<OfficeViewerFactory<V>>;
+  format: Accessor<OfficeFormat | null>;
+  source: Accessor<OfficeSource | null>;
 }
 
-export function createOfficeViewer<V extends OfficeViewerHandle>(config: CreateOfficeViewerOptions<V>) {
+function createViewer(
+  format: OfficeFormat,
+  container: HTMLElement,
+): OfficeViewerHandle {
+  if (format === 'xlsx') {
+    return new XlsxViewer(container, { showZoomSlider: true });
+  }
+  if (format === 'pptx') {
+    return new PptxScrollViewer(container, { background: '#53606d' });
+  }
+  return new DocxScrollViewer(container, {
+    enableTextSelection: true,
+    background: '#53606d',
+  });
+}
+
+export function createOfficeViewer(config: CreateOfficeViewerOptions) {
   const [status, setStatus] = createSignal<OfficeViewerStatus>('idle');
   const [error, setError] = createSignal<Error | null>(null);
   const [reloadVersion, setReloadVersion] = createSignal(0);
-  const [viewer, setViewer] = createSignal<V | null>(null);
+  const [viewer, setViewer] = createSignal<OfficeViewerHandle | null>(null);
 
   createEffect(() => {
     reloadVersion();
     const container = config.target();
-    if (!container) {
+    const format = config.format();
+    const source = config.source();
+    if (!container || !format || !source) {
       setStatus('idle');
       return;
     }
 
     const controller = new AbortController();
-    const createViewer = config.createViewer();
-    const source = config.source();
+    const nextViewer = createViewer(format, container);
+    setViewer(() => nextViewer);
     setStatus('loading');
     setError(null);
 
-    Promise.resolve(createViewer(container))
-      .then(async (nextViewer) => {
-        if (controller.signal.aborted) {
-          nextViewer.destroy();
-          return null;
-        }
-        try {
-          await nextViewer.load(source);
-          return nextViewer;
-        } catch (reason) {
-          nextViewer.destroy();
-          throw reason;
-        }
-      })
-      .then((nextViewer) => {
-        if (!nextViewer || controller.signal.aborted) {
-          nextViewer?.destroy();
-          return;
-        }
-        setViewer(() => nextViewer);
-        setStatus('ready');
+    nextViewer.load(source)
+      .then(() => {
+        if (!controller.signal.aborted) setStatus('ready');
       })
       .catch((reason: unknown) => {
         if (controller.signal.aborted) return;
+        nextViewer.destroy();
+        if (viewer() === nextViewer) setViewer(null);
         setError(reason instanceof Error ? reason : new Error(String(reason)));
         setStatus('error');
       });
 
     onCleanup(() => {
       controller.abort();
-      const currentViewer = viewer();
-      setViewer(null);
-      currentViewer?.destroy();
+      if (viewer() === nextViewer) setViewer(null);
+      nextViewer.destroy();
     });
   });
 

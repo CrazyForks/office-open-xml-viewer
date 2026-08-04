@@ -6,8 +6,12 @@ import {
   type HTMLAttributes,
   type ReactElement,
 } from 'react';
+import { DocxScrollViewer } from '@silurus/ooxml/docx';
+import { PptxScrollViewer } from '@silurus/ooxml/pptx';
+import { XlsxViewer } from '@silurus/ooxml/xlsx';
 
 export type OfficeSource = string | ArrayBuffer;
+export type OfficeFormat = 'docx' | 'xlsx' | 'pptx';
 export type OfficeViewerStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export interface OfficeViewerHandle {
@@ -21,14 +25,9 @@ export interface OfficeViewerHandle {
   fitPage: () => void;
 }
 
-export type OfficeViewerFactory<V extends OfficeViewerHandle> = (
-  container: HTMLElement,
-) => V | Promise<V>;
-
-export interface UseOfficeViewerOptions<V extends OfficeViewerHandle> {
-  source: OfficeSource;
-  /** Keep this factory referentially stable with useCallback. */
-  createViewer: OfficeViewerFactory<V>;
+export interface UseOfficeViewerOptions {
+  format: OfficeFormat | null;
+  source: OfficeSource | null;
 }
 
 export interface UseOfficeViewerResult {
@@ -44,12 +43,28 @@ export interface UseOfficeViewerResult {
   fitPage: () => void;
 }
 
-export function useOfficeViewer<V extends OfficeViewerHandle>({
+function createViewer(
+  format: OfficeFormat,
+  container: HTMLElement,
+): OfficeViewerHandle {
+  if (format === 'xlsx') {
+    return new XlsxViewer(container, { showZoomSlider: true });
+  }
+  if (format === 'pptx') {
+    return new PptxScrollViewer(container, { background: '#53606d' });
+  }
+  return new DocxScrollViewer(container, {
+    enableTextSelection: true,
+    background: '#53606d',
+  });
+}
+
+export function useOfficeViewer({
+  format,
   source,
-  createViewer,
-}: UseOfficeViewerOptions<V>): UseOfficeViewerResult {
+}: UseOfficeViewerOptions): UseOfficeViewerResult {
   const mountRef = useRef<HTMLDivElement>(null);
-  const viewerRef = useRef<V | null>(null);
+  const viewerRef = useRef<OfficeViewerHandle | null>(null);
   const [status, setStatus] = useState<OfficeViewerStatus>('idle');
   const [error, setError] = useState<Error | null>(null);
   const [reloadVersion, setReloadVersion] = useState(0);
@@ -61,50 +76,35 @@ export function useOfficeViewer<V extends OfficeViewerHandle>({
 
   useEffect(() => {
     const container = mountRef.current;
-    if (!container) {
+    if (!container || !format || !source) {
       setStatus('idle');
       return;
     }
 
     const controller = new AbortController();
+    const viewer = createViewer(format, container);
+    viewerRef.current = viewer;
     setStatus('loading');
     setError(null);
 
-    Promise.resolve(createViewer(container))
-      .then(async (viewer) => {
-        if (controller.signal.aborted) {
-          viewer.destroy();
-          return null;
-        }
-        try {
-          await viewer.load(source);
-          return viewer;
-        } catch (reason) {
-          viewer.destroy();
-          throw reason;
-        }
-      })
-      .then((viewer) => {
-        if (!viewer || controller.signal.aborted) {
-          viewer?.destroy();
-          return;
-        }
-        viewerRef.current = viewer;
-        setStatus('ready');
+    viewer.load(source)
+      .then(() => {
+        if (!controller.signal.aborted) setStatus('ready');
       })
       .catch((reason: unknown) => {
         if (controller.signal.aborted) return;
+        viewer.destroy();
+        if (viewerRef.current === viewer) viewerRef.current = null;
         setError(reason instanceof Error ? reason : new Error(String(reason)));
         setStatus('error');
       });
 
     return () => {
       controller.abort();
-      const viewer = viewerRef.current;
-      viewerRef.current = null;
-      viewer?.destroy();
+      if (viewerRef.current === viewer) viewerRef.current = null;
+      viewer.destroy();
     };
-  }, [createViewer, reloadVersion, source]);
+  }, [format, reloadVersion, source]);
 
   const reload = useCallback(() => setReloadVersion((version) => version + 1), []);
   const getScale = useCallback(() => viewerRef.current?.getScale(), []);

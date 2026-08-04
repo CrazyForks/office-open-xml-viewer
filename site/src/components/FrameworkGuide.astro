@@ -2,7 +2,7 @@
 import Base from '../layouts/Base.astro';
 import Nav from './Nav.astro';
 import CodeTabs from './CodeTabs.astro';
-import LiveShowcase from './LiveShowcase.astro';
+import FrameworkTryYours from './FrameworkTryYours.astro';
 import {
   frameworkGuides,
   getFrameworkGuide,
@@ -105,11 +105,11 @@ const structuredData = JSON.stringify({
     <section class="section live-section">
       <div class="wrap">
         <div class="section-intro">
-          <p class="eyebrow">Live renderer</p>
-          <h2 class="section-title">See all three formats.</h2>
-          <p class="section-lead">This preview runs the same browser-only viewer APIs wrapped by the {guide.name} module. Switch between DOCX, XLSX, and PPTX.</p>
+          <p class="eyebrow">Try yours</p>
+          <h2 class="section-title">Choose a local Office file.</h2>
+          <p class="section-lead">Render a DOCX, XLSX, or PPTX file locally. Nothing is displayed until you choose a file, and the document never leaves your browser.</p>
         </div>
-        <LiveShowcase />
+        <FrameworkTryYours />
       </div>
     </section>
 
