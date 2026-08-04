@@ -614,8 +614,8 @@ export interface LineLayoutEnvironment {
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
   /** ECMA-376 §17.15.1.18 document-wide full-width character compression. */
   readonly characterSpacingControl?: string;
-  /** False only for the Word-compatible fixed-line-count drop-cap frame path,
-   * whose authored frame height remains authoritative even when glyph paint is
+  /** False only when `w:framePr` specifies a drop cap with a fixed `w:lines`;
+   * the authored frame height remains authoritative even when glyph paint is
    * lowered beyond it. Folded into retained text segments during acquisition. */
   readonly positionExtendsLineBox?: boolean;
 }
