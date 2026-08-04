@@ -10,7 +10,8 @@ demo component supplies a `createViewer(container)` factory using the public
 `@silurus/ooxml/{docx,xlsx,pptx}` entry points, then switches its `source`
 between a URL and local `File.arrayBuffer()` values.
 
-Run an example from this directory:
+Each framework directory is also a standalone project, which lets StackBlitz and
+users install only the framework they want. Run an example from this directory:
 
 ```sh
 pnpm install
