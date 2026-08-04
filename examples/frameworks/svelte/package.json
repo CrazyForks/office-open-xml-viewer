@@ -2,6 +2,9 @@
   "name": "@ooxml-framework-examples/svelte",
   "private": true,
   "type": "module",
+  "stackblitz": {
+    "startCommand": false
+  },
   "scripts": {
     "dev": "vite",
     "build": "svelte-check --tsconfig ./tsconfig.json && vite build",

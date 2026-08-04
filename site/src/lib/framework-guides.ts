@@ -21,10 +21,9 @@ function stackBlitzEmbed(framework: FrameworkId, file: string): string {
   const params = new URLSearchParams({
     embed: '1',
     file,
-    startScript: 'dev',
-    view: 'both',
+    view: 'editor',
+    showSidebar: '1',
     hideNavigation: '1',
-    terminalHeight: '0',
   });
   return `https://stackblitz.com/github/${repository}/tree/main/examples/frameworks/${framework}?${params}`;
 }
