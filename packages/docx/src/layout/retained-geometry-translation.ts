@@ -60,7 +60,7 @@ function translateClip(clip: ClipPathData, delta: LayoutTranslation): ClipPathDa
 
 function translateDrawingCommand(command: DrawingPaintCommand, delta: LayoutTranslation): DrawingPaintCommand {
   if (command.kind === 'noop') return command;
-  if (command.kind === 'drawingml-shape') return {
+  if (command.kind === 'drawingml-shape' || command.kind === 'drawingml-image-fill') return {
     ...command,
     plan: { ...command.plan, rect: {
       ...command.plan.rect,

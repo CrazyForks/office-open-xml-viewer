@@ -4,6 +4,7 @@ use ooxml_common::blip::{
 };
 use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::drawing::{parse_xsd_bool, DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
+use ooxml_common::fill::{parse_fill_rect, parse_tile};
 use ooxml_common::ns::{attr_ns, is_w_ns, is_wp_ns, math, relationships, wordprocessingml};
 use ooxml_common::package_session::{PackageEntryStream, PackageOperation, PackageSessionHandle};
 use ooxml_common::resource::ResourceUsage;
@@ -6739,6 +6740,56 @@ fn parse_inline_drawing_impl(
                 }
             }
         }
+        // ECMA-376 §20.4.2.8: wp:inline contains an arbitrary DrawingML
+        // graphic, not only a picture. Word emits WPS text panels as a direct
+        // `<wps:wsp>` payload (for example section-label rectangles). Parse it
+        // through the same shape grammar as an anchored WPS object, but keep it
+        // in paragraph flow: no anchor-acquisition wire, wrap metadata, or page
+        // positioning. Inline placement is resolved later from the paragraph
+        // pen, so anchor-relative flags remain false just like an inline image.
+        let direct_wps_payload = container
+            .descendants()
+            .find(|n| n.tag_name().name() == "graphicData")
+            .filter(|graphic_data| {
+                graphic_data
+                    .attribute("uri")
+                    .is_some_and(|uri| uri.contains("wordprocessingShape"))
+            })
+            .and_then(|graphic_data| {
+                graphic_data
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "wsp")
+            });
+        if let (Some(wsp), Some((width_pt, height_pt))) =
+            (direct_wps_payload, drawing_extent_points(container))
+        {
+            if let Some(mut shape) = parse_wsp_shape(
+                style_map,
+                num_map,
+                wsp,
+                theme,
+                media_map,
+                chart_map,
+                rel_map,
+                depth,
+                0.0,
+                false,
+                0.0,
+                false,
+                &AnchorMeta::default(),
+                None,
+                None,
+                0,
+            ) {
+                // §20.4.2.7: wp:extent is the final outer size of the inline
+                // object. The WPS a:xfrm remains the shape's internal geometry;
+                // it must not dictate paragraph advance or final paint bounds.
+                shape.width_pt = width_pt;
+                shape.height_pt = height_pt;
+                shape.inline = true;
+                return vec![DocRun::Shape(Box::new(shape))];
+            }
+        }
         // Resolve the picture's blip + `<wp:extent>` natural size. The Microsoft
         // 2016 SVG extension is handled inside `resolve_inline_blip` →
         // `resolve_blip_urls` (prefer the vector original, keep the raster as a
@@ -8567,7 +8618,7 @@ fn parse_wsp_shape(
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "style");
 
-    let fill = match parse_shape_fill(sp_pr, theme) {
+    let fill = match parse_shape_fill(sp_pr, theme, media_map) {
         FillSpec::Explicit(f) => Some(f),
         FillSpec::NoFill => None,
         FillSpec::Absent => style_node
@@ -8686,6 +8737,7 @@ fn parse_wsp_shape(
     );
 
     let mut shape = ShapeRun {
+        inline: false,
         width_pt,
         height_pt,
         anchor_x_pt,
@@ -9934,6 +9986,7 @@ fn parse_vml_pict(
         .unwrap_or_default();
 
     Some(ShapeRun {
+        inline: false,
         width_pt,
         height_pt,
         anchor_x_pt,
@@ -10651,7 +10704,11 @@ enum FillSpec {
 /// Parse a shape's direct fill (solidFill / gradFill / noFill), reporting which
 /// of the three states applies so the caller can decide whether to fall back to
 /// the style's fillRef.
-fn parse_shape_fill(sp_pr: roxmltree::Node, theme: &ThemeColors) -> FillSpec {
+fn parse_shape_fill(
+    sp_pr: roxmltree::Node,
+    theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
+) -> FillSpec {
     for child in sp_pr.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
             "solidFill" => {
@@ -10668,6 +10725,45 @@ fn parse_shape_fill(sp_pr: roxmltree::Node, theme: &ThemeColors) -> FillSpec {
                     Some(f) => FillSpec::Explicit(f),
                     None => FillSpec::NoFill,
                 };
+            }
+            "blipFill" => {
+                // §20.1.8.14: a direct picture fill is an authored fill even
+                // when its relationship cannot be resolved. Never fall back to
+                // wps:style/fillRef, which would replace the picture with an
+                // unrelated theme paint.
+                let Some(blip) = child
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "blip")
+                else {
+                    return FillSpec::NoFill;
+                };
+                let Some((image_path, mime_type, svg_image_path)) =
+                    resolve_blip_urls(blip, media_map)
+                else {
+                    return FillSpec::NoFill;
+                };
+                let tile = child
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "tile")
+                    .map(parse_tile);
+                let fill_rect = if tile.is_none() {
+                    child
+                        .children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "stretch")
+                        .and_then(parse_fill_rect)
+                } else {
+                    None
+                };
+                return FillSpec::Explicit(ShapeFill::Image {
+                    image_path,
+                    mime_type,
+                    svg_image_path,
+                    src_rect: parse_src_rect(child),
+                    fill_rect,
+                    tile,
+                    alpha: parse_blip_alpha(child),
+                    duotone: parse_blip_duotone_docx(child, theme),
+                });
             }
             "noFill" => return FillSpec::NoFill,
             _ => {}
@@ -15438,6 +15534,14 @@ mod cs_toggle_tests {
         assert!(!run.underline);
         assert_eq!(run.underline_style, None);
         assert_eq!(run.underline_color, None);
+
+        // §17.3.2.40: the element may carry color while omitting @val; @val
+        // then inherits and must not manufacture a single underline.
+        let color_only =
+            run_of(r#"<w:p><w:r><w:rPr><w:u w:color="FF0000"/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
+        assert!(!color_only.underline);
+        assert_eq!(color_only.underline_style, None);
+        assert_eq!(color_only.underline_color, None);
     }
 
     #[test]
@@ -18793,120 +18897,6 @@ mod anchor_image_relative_from_tests {
             }
             other => panic!("expected DocRun::Chart, got {other:?}"),
         }
-    }
-
-    /// CH14 end-to-end — `private/sample-24.docx` has 6 `<w:drawing>` chart
-    /// references total (`word/charts/chart1.xml`..`chart6.xml`, rId5..rId11
-    /// each used exactly once in `document.xml`). Two of the six parts —
-    /// `chart4.xml` (box-and-whisker) and `chart6.xml` (sunburst) — are
-    /// actually `<cx:chartSpace>` chartEx parts wrapped in
-    /// `<mc:AlternateContent><mc:Choice Requires="cx">` (with an `mc:Fallback`
-    /// rendered-image for older Word versions); the other four
-    /// (`chart1`/`chart2`/`chart3`/`chart5`) are legacy `<c:chartSpace>`
-    /// bar/line/radar/stock charts. Before this fix the uri gate in
-    /// `parse_inline_drawing` only matched the legacy DrawingML chart uri, so
-    /// chart4/chart6 fell through to the (blip-less) picture path and
-    /// produced nothing — this confirms the full zip → document.xml →
-    /// AlternateContent/Choice → inline drawing → chart_map pipeline now
-    /// surfaces both as `DocRun::Chart`, and that all 6 chart drawings still
-    /// produce exactly one `DocRun::Chart` each (no regression, no
-    /// duplication from the `mc:Fallback` branch). `stockChart` (chart5) is
-    /// not implemented by `parse_chart_part` and reports as "unknown" —  a
-    /// pre-existing legacy-chart gap, unrelated to and out of scope for this
-    /// chartex wiring task. Skips gracefully when the private,
-    /// non-redistributable fixture is not present (e.g. CI).
-    #[test]
-    fn sample24_chartex_charts_parse_as_chart_runs() {
-        const LOCAL_SAMPLE_24: &str = "../public/private/sample-24.docx";
-        let Ok(data) = std::fs::read(LOCAL_SAMPLE_24) else {
-            eprintln!(
-                "skipping sample24_chartex_charts_parse_as_chart_runs: local sample not found"
-            );
-            return;
-        };
-        let doc = parse_from_bytes(&data).expect("sample-24.docx must parse");
-
-        fn collect_from_paragraph(p: &DocParagraph, out: &mut Vec<String>) {
-            for run in &p.runs {
-                if let DocRun::Chart(c) = run {
-                    out.push(c.chart.chart_type.clone());
-                }
-            }
-        }
-        fn collect_from_table(t: &DocTable, out: &mut Vec<String>) {
-            for row in &t.rows {
-                for cell in &row.cells {
-                    for el in &cell.content {
-                        match el {
-                            CellElement::Paragraph(p) => collect_from_paragraph(p, out),
-                            CellElement::Table(t) => collect_from_table(t, out),
-                        }
-                    }
-                }
-            }
-        }
-        let mut chart_types = Vec::new();
-        for el in &doc.body {
-            match el {
-                BodyElement::Paragraph(p) => collect_from_paragraph(p, &mut chart_types),
-                BodyElement::Table(t) => collect_from_table(t, &mut chart_types),
-                _ => {}
-            }
-        }
-
-        assert_eq!(
-            chart_types.iter().filter(|t| *t == "boxWhisker").count(),
-            1,
-            "expected exactly one boxWhisker chartex chart, got {chart_types:?}"
-        );
-        assert_eq!(
-            chart_types.iter().filter(|t| *t == "sunburst").count(),
-            1,
-            "expected exactly one sunburst chartex chart, got {chart_types:?}"
-        );
-        // 6 chart drawings total: chart1(bar)/chart2(line)/chart3(radar)/
-        // chart5(stock, unimplemented → "unknown") legacy + chart4(boxWhisker)/
-        // chart6(sunburst) chartex. No duplication from mc:Fallback.
-        assert_eq!(
-            chart_types.len(),
-            6,
-            "expected 6 total chart runs (4 legacy + 2 chartex), got {chart_types:?}"
-        );
-
-        // The two chartex Fallback PNGs (image1.png/image2.png) must NOT surface
-        // as image runs: MCE (ECMA-376 Part 3 §9.3) selects the understood `cx`
-        // Choice, so the Fallback is dropped — no double-emit. (Guards #747.)
-        fn count_images_para(p: &DocParagraph, n: &mut usize) {
-            for run in &p.runs {
-                if let DocRun::Image(_) = run {
-                    *n += 1;
-                }
-            }
-        }
-        fn count_images_table(t: &DocTable, n: &mut usize) {
-            for row in &t.rows {
-                for cell in &row.cells {
-                    for el in &cell.content {
-                        match el {
-                            CellElement::Paragraph(p) => count_images_para(p, n),
-                            CellElement::Table(t) => count_images_table(t, n),
-                        }
-                    }
-                }
-            }
-        }
-        let mut image_count = 0usize;
-        for el in &doc.body {
-            match el {
-                BodyElement::Paragraph(p) => count_images_para(p, &mut image_count),
-                BodyElement::Table(t) => count_images_table(t, &mut image_count),
-                _ => {}
-            }
-        }
-        assert_eq!(
-            image_count, 0,
-            "chartex mc:Fallback PNGs must not surface as image runs (got {image_count})"
-        );
     }
 
     /// Parse a `<w:p>` whose namespaces + chart_map are supplied by the caller,
@@ -22353,6 +22343,171 @@ mod shape_preset_geometry_tests {
 
         assert_eq!(shape.stroke.as_deref(), Some("4472C4"));
         assert!((shape.stroke_width - 2.0).abs() < 1e-6);
+    }
+}
+
+// ECMA-376 §20.4.2.8 permits any DrawingML graphic payload inside wp:inline;
+// WPS text boxes are therefore inline layout objects, not picture-only data.
+// Their direct fill is independently governed by §20.1.8.14 blipFill.
+#[cfg(test)]
+mod inline_wps_shape_tests {
+    use super::*;
+
+    fn inline_shape_runs(sp_pr_fill: &str, media_map: &HashMap<String, String>) -> Vec<DocRun> {
+        let xml = format!(
+            r#"<w:drawing
+                 xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                 xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                 xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                 xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                 xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                 <wp:inline>
+                   <wp:extent cx="2540000" cy="635000"/>
+                   <wp:docPr id="1" name="Inline text box"/>
+                   <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                     <wps:wsp>
+                       <wps:spPr>
+                         <a:xfrm><a:off x="0" y="0"/><a:ext cx="1270000" cy="317500"/></a:xfrm>
+                         <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                         {sp_pr_fill}
+                       </wps:spPr>
+                       <wps:txbx><w:txbxContent><w:p><w:r><w:t>Typical Application</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                       <wps:bodyPr anchor="ctr"><a:noAutofit/></wps:bodyPr>
+                     </wps:wsp>
+                   </a:graphicData></a:graphic>
+                 </wp:inline>
+               </w:drawing>"#,
+        );
+        let doc = roxmltree::Document::parse(&xml).expect("inline WPS fixture");
+        parse_inline_drawing_impl(
+            &StyleMap::default(),
+            &mut NumberingMap::default(),
+            doc.root_element(),
+            media_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            DepthGuard::root(),
+        )
+    }
+
+    #[test]
+    fn wp_inline_wps_text_box_is_retained_as_an_inline_shape() {
+        let runs = inline_shape_runs(
+            r#"<a:solidFill><a:srgbClr val="009989"/></a:solidFill>"#,
+            &HashMap::new(),
+        );
+        let [DocRun::Shape(shape)] = runs.as_slice() else {
+            panic!("expected one inline WPS ShapeRun, got {runs:?}");
+        };
+
+        assert_eq!(shape.width_pt, 200.0);
+        assert_eq!(shape.height_pt, 50.0);
+        assert!(
+            shape.inline,
+            "wp:inline WPS must participate in paragraph flow"
+        );
+        assert!(!shape.anchor_x_from_margin);
+        assert!(!shape.anchor_y_from_para);
+        assert_eq!(
+            shape.fill.as_ref().and_then(|fill| match fill {
+                ShapeFill::Solid { color } => Some(color.as_str()),
+                _ => None,
+            }),
+            Some("009989")
+        );
+        assert_eq!(shape.text_blocks[0].text, "Typical Application");
+        assert!(
+            shape.anchor_acquisition.is_none(),
+            "wp:inline must not acquire floating-anchor semantics"
+        );
+    }
+
+    #[test]
+    fn wps_blip_fill_is_preserved_and_blocks_theme_fill_fallback() {
+        let media = HashMap::from([(
+            "rIdOverlay".to_string(),
+            "word/media/overlay.png".to_string(),
+        )]);
+        let runs = inline_shape_runs(
+            r#"<a:blipFill>
+                 <a:blip r:embed="rIdOverlay"><a:alphaModFix amt="75000"/></a:blip>
+                 <a:srcRect l="12500" b="25000"/>
+                 <a:stretch><a:fillRect l="10000" r="-7574"/></a:stretch>
+               </a:blipFill>"#,
+            &media,
+        );
+        let [DocRun::Shape(shape)] = runs.as_slice() else {
+            panic!("expected one image-filled WPS ShapeRun, got {runs:?}");
+        };
+        let json = serde_json::to_value(shape.fill.as_ref().expect("direct image fill"))
+            .expect("image fill serializes");
+        assert_eq!(json["fillType"], "image");
+        assert_eq!(json["imagePath"], "word/media/overlay.png");
+        assert_eq!(json["mimeType"], "image/png");
+        assert_eq!(json["srcRect"]["l"], 0.125);
+        assert_eq!(json["srcRect"]["b"], 0.25);
+        assert_eq!(json["fillRect"]["l"], 0.1);
+        assert_eq!(json["fillRect"]["r"], -0.07574);
+        assert_eq!(json["alpha"], 0.75);
+    }
+
+    #[test]
+    fn wps_tiled_blip_fill_retains_authored_tile_without_stretch() {
+        let media = HashMap::from([(
+            "rIdOverlay".to_string(),
+            "word/media/overlay.png".to_string(),
+        )]);
+        let runs = inline_shape_runs(
+            r#"<a:blipFill>
+                 <a:blip r:embed="rIdOverlay"/>
+                 <a:tile tx="12700" ty="-25400" sx="50000" sy="75000" flip="xy" algn="ctr"/>
+               </a:blipFill>"#,
+            &media,
+        );
+        let [DocRun::Shape(shape)] = runs.as_slice() else {
+            panic!("expected one tiled WPS ShapeRun, got {runs:?}");
+        };
+        let json = serde_json::to_value(shape.fill.as_ref().expect("direct tiled fill"))
+            .expect("tiled fill serializes");
+        assert!(json.get("fillRect").is_none());
+        assert_eq!(json["tile"]["tx"], 12_700);
+        assert_eq!(json["tile"]["ty"], -25_400);
+        assert_eq!(json["tile"]["sx"], 0.5);
+        assert_eq!(json["tile"]["sy"], 0.75);
+        assert_eq!(json["tile"]["flip"], "xy");
+        assert_eq!(json["tile"]["algn"], "ctr");
+    }
+
+    #[test]
+    fn wp_inline_group_is_not_misread_as_its_first_nested_wps_shape() {
+        let xml = r#"<w:drawing
+          xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+          xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
+          xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+          <wp:inline><wp:extent cx="2540000" cy="635000"/>
+            <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">
+              <wpg:wgp><wps:wsp><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1270000" cy="317500"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr></wps:wsp></wpg:wgp>
+            </a:graphicData></a:graphic>
+          </wp:inline>
+        </w:drawing>"#;
+        let doc = roxmltree::Document::parse(xml).expect("inline WPG fixture");
+        let runs = parse_inline_drawing_impl(
+            &StyleMap::default(),
+            &mut NumberingMap::default(),
+            doc.root_element(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            DepthGuard::root(),
+        );
+        assert!(
+            !runs.iter().any(|run| matches!(run, DocRun::Shape(_))),
+            "an inline WPG group must not collapse to its first nested WPS shape"
+        );
     }
 }
 

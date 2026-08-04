@@ -4,6 +4,8 @@ import type {
   MathNode,
   ChartModel,
   Duotone,
+  FillRect,
+  TileInfo,
 } from '@silurus/ooxml-core';
 import type {
   NormalizedOoxmlResourcePolicy,
@@ -773,6 +775,9 @@ export interface AnchorHostMetrics {
 }
 
 export interface ShapeRun {
+  /** ECMA-376 §20.4.2.8 — true when the shape is hosted by `<wp:inline>` and
+   * therefore advances the paragraph pen like an inline drawing object. */
+  inline?: boolean;
   widthPt: number;
   heightPt: number;
   /** X offset in pt */
@@ -1024,7 +1029,21 @@ export interface ShapeText {
 
 export type ShapeFill =
   | { fillType: 'solid'; color: string }
-  | { fillType: 'gradient'; stops: GradientStop[]; angle: number; gradType: string };
+  | { fillType: 'gradient'; stops: GradientStop[]; angle: number; gradType: string }
+  | {
+      /** ECMA-376 §20.1.8.14 picture fill on a DrawingML shape. */
+      fillType: 'image';
+      imagePath: string;
+      mimeType: string;
+      /** Microsoft 2016 SVG original retained beside the raster fallback. */
+      svgImagePath?: string;
+      /** ECMA-376 §20.1.8.55 source-image crop. */
+      srcRect?: { l: number; t: number; r: number; b: number };
+      fillRect?: FillRect;
+      tile?: TileInfo;
+      alpha?: number;
+      duotone?: Duotone;
+    };
 
 export interface GradientStop {
   /** 0.0–1.0 */
@@ -1167,7 +1186,8 @@ export interface DocxTextRun {
    *  width, not the gap between glyphs. Absent ⇒ 100%. */
   charScale?: number;
   /** ECMA-376 §17.3.2.24 `<w:position w:val>` — baseline raise (positive) /
-   *  lower (negative) in POINTS, without changing the font size or line box.
+   *  lower (negative) in POINTS, without changing the font size. The shifted
+   *  ink still participates in the surrounding line's visible extent.
    *  Absent ⇒ no shift. */
   position?: number;
   /** ECMA-376 §17.3.2.19 `<w:kern w:val>` — font-kerning threshold in POINTS

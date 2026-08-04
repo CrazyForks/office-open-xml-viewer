@@ -97,6 +97,7 @@ import {
   wordTextBoxVisibleAnchorExtentPt,
 } from './anchor-compatibility.js';
 import { wordRunVerticalAlignRaisePt } from './line-compatibility.js';
+import { wordFramePositionExtendsLineBox } from './body-pagination-compatibility.js';
 import {
   resolveFloatPlacement,
   type FloatPlacementParticipant,
@@ -254,6 +255,16 @@ export interface MeasuredUnavailableResourcePlanSegment {
   readonly drawingId: string;
 }
 
+export interface MeasuredInlineDrawingPlanSegment {
+  readonly kind: 'inline-drawing';
+  readonly range: import('./types.js').TextRange;
+  readonly measuredWidthPt: number;
+  readonly widthPt: number;
+  readonly heightPt: number;
+  readonly topOffsetPt: number;
+  readonly drawingId: string;
+}
+
 export interface MeasuredAnchorHostPlanSegment {
   readonly kind: 'anchor-host';
   readonly measuredWidthPt: 0;
@@ -267,6 +278,7 @@ export type MeasuredLinePlanSegment =
   | MeasuredTabPlanSegment
   | MeasuredResourcePlanSegment
   | MeasuredUnavailableResourcePlanSegment
+  | MeasuredInlineDrawingPlanSegment
   | MeasuredAnchorHostPlanSegment;
 
 export interface MeasuredLinePlanInput {
@@ -795,7 +807,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         },
         advancePt: segment.measuredWidthPt,
       });
-    } else if (segment.kind === 'unavailable-resource') {
+    } else if (segment.kind === 'unavailable-resource' || segment.kind === 'inline-drawing') {
       placements.push({
         kind: 'drawing',
         range: segment.range,
@@ -1144,7 +1156,8 @@ function retainedBaselineOffsetPt(segment: LayoutTextSeg): number {
     segment.vertAlign,
     segment.fontSize,
   );
-  const raisePt = verticalAlignRaisePt + (segment.position ?? 0);
+  const raisePt = verticalAlignRaisePt
+    + (segment.lineRelativePosition ?? segment.position ?? 0);
   return raisePt === 0 ? 0 : -raisePt;
 }
 
@@ -1953,6 +1966,7 @@ function planMeasuredLines(
   paragraphXPt: number,
   availableWidthPt: number,
   source: SourceRef,
+  paragraphId: string,
   context: ParagraphLayoutContext,
   occurrences: LogicalOccurrenceMap,
   numberingPlan?: RetainedNumberingPlan,
@@ -2083,6 +2097,19 @@ function planMeasuredLines(
         if (image.anchor) continue;
         const runIndex = sourceRunIndex(segment);
         const occurrence = runSource(source, runIndex ?? 0);
+        if (image.inlineShape) {
+          segments.push({
+            kind: 'inline-drawing',
+            range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
+            drawingId: `${paragraphId}:drawing:${runIndex ?? 0}`,
+            measuredWidthPt: image.measuredWidth,
+            widthPt: image.widthPt,
+            heightPt: image.heightPt,
+            topOffsetPt: -image.heightPt,
+          });
+          sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
+          continue;
+        }
         if (image.unavailableResourceKind) {
           segments.push({
             kind: 'unavailable-resource',
@@ -2353,22 +2380,27 @@ function drawingForShape(
   rect: LayoutRect,
   options: ParagraphAcquisitionOptions,
   runIndex: number,
+  inline = false,
 ): DrawingLayout {
+  const source = runSource(options.source, runIndex);
   const plan = planShapeDrawing(
     shape,
     rect,
     options.environment.layoutServices?.text,
     shape.vmlTextPathInput,
+    shape.fill?.fillType === 'image'
+      ? imageResourceKey(source, shape.fill.imagePath)
+      : undefined,
   );
   const commands = [plan.command];
-  const diagnostics = shapePlanDiagnostics(plan, runSource(options.source, runIndex));
+  const diagnostics = shapePlanDiagnostics(plan, source);
   return {
-    kind: 'drawing', id: `${options.id}:drawing:${runIndex}`, source: runSource(options.source, runIndex),
+    kind: 'drawing', id: `${options.id}:drawing:${runIndex}`, source,
     flowDomainId: options.flowDomainId, flowBounds: rect, inkBounds: rect, advancePt: 0,
     ordinaryFlow: false,
     commands,
     ...(diagnostics.length === 0 ? {} : { diagnostics }),
-    anchorLayer: {
+    ...(!inline ? { anchorLayer: {
       occurrenceId: `public-shape:${options.id}:${runIndex}`,
       behindDoc: shape.behindDoc === true,
       relativeHeight: Number.isFinite(shape.zOrder) ? shape.zOrder : runIndex,
@@ -2379,7 +2411,7 @@ function drawingForShape(
         || shape.anchorYRelativeFrom === 'character'
         || (!shape.anchorYRelativeFrom && shape.anchorYFromPara)
         ? 'host' : 'page',
-    },
+    } } : {}),
   };
 }
 
@@ -2954,6 +2986,9 @@ function acquireAnchorOccurrence(
         paintRect,
         options.environment.layoutServices?.text,
         run.vmlTextPathInput,
+        run.fill?.fillType === 'image'
+          ? imageResourceKey(source, run.fill.imagePath)
+          : undefined,
       );
       commands.push(plan.command);
       diagnostics.push(...shapePlanDiagnostics(plan, source));
@@ -4207,7 +4242,14 @@ export function acquireRetainedFrameGroup(
           context,
           placement,
           measurer: options.measurer,
-          environment: options.environment,
+          // `word-lowered-drop-cap-anchor-leading`: only a drop cap keeps its
+          // authored line count/height fixed while separately retained glyph
+          // lowering expands the following anchor exclusion. Ordinary frames
+          // keep positioned ink in their line boxes.
+          environment: {
+            ...options.environment,
+            positionExtendsLineBox: wordFramePositionExtendsLineBox(group.framePr.dropCap),
+          },
           exclusions: wrapRegistry.exclusions,
           anchorCollisions: wrapRegistry.collisions,
           containerShading: options.containerShading,
@@ -4277,7 +4319,7 @@ export function paragraphLayoutFromMeasurement(
     ? undefined
     : retainedNumberingPlan(paragraph, planningContext, options);
   let lines = planMeasuredLines(
-    measured, paragraph, paragraphXPt, availableWidthPt, options.source, planningContext,
+    measured, paragraph, paragraphXPt, availableWidthPt, options.source, options.id, planningContext,
     occurrences, numberingPlan, options.environment.layoutServices?.text,
     options.environment.verticalGlyphMeasurement,
     options.environment.verticalPageFrame,
@@ -4426,7 +4468,15 @@ export function paragraphLayoutFromMeasurement(
     if (run.type === 'shape' && !run.anchorAcquisitionInput && !options.continuesFromPrevious) {
       // Resolve the point-space box once. Shape panel paint, retained textbox
       // flow, and the line's drawing placement must own identical geometry.
-      const authoredShapeRect = resolvedShapeLayoutRect(run, options);
+      const drawingId = `${options.id}:drawing:${runIndex}`;
+      const inlinePlacement = run.inline === true
+        ? lines.flatMap((line) => line.placements).find((placement) =>
+            placement.kind === 'drawing' && placement.drawingId === drawingId)
+        : undefined;
+      if (run.inline === true && !inlinePlacement) {
+        throw new Error(`Inline shape ${drawingId} has no retained line placement`);
+      }
+      const authoredShapeRect = inlinePlacement?.bounds ?? resolvedShapeLayoutRect(run, options);
       const textBoxId = `${options.id}:textbox:${runIndex}`;
       const textBox = acquireShapeTextBoxLayout(run, authoredShapeRect, {
         id: textBoxId,
@@ -4438,14 +4488,17 @@ export function paragraphLayoutFromMeasurement(
         input: run.textBoxInput,
         acquireCompleteStory: options.acquireCompleteStory,
       });
-      const shapeRect = textBox?.flowBounds ?? authoredShapeRect;
-      let drawing = drawingForShape(run, shapeRect, options, runIndex);
+      // The wp:inline extent is the line-flow contract. A WPS text body may
+      // acquire richer internal geometry, but it must not move or resize the
+      // outer inline object after the line breaker has committed its advance.
+      const shapeRect = run.inline === true ? authoredShapeRect : textBox?.flowBounds ?? authoredShapeRect;
+      let drawing = drawingForShape(run, shapeRect, options, runIndex, run.inline === true);
       if (textBox) {
         textBoxes.push(textBox);
         drawing = { ...drawing, textBoxIds: [textBoxId] };
       }
       drawings.push(drawing);
-      const firstLine = lines[0];
+      const firstLine = run.inline === true ? undefined : lines[0];
       if (firstLine) {
         lines = [{
           ...firstLine,

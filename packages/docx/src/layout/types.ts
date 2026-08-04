@@ -121,6 +121,13 @@ export type DrawingPaintCommand =
       plan: DeepReadonly<DrawingMLShapePaintPlan>;
     }>
   | Readonly<{
+      /** A retained image resource clipped to the authored DrawingML shape. */
+      kind: 'drawingml-image-fill';
+      plan: DeepReadonly<DrawingMLShapePaintPlan>;
+      resourceKey: string;
+      fillRect?: Readonly<{ l: number; t: number; r: number; b: number }>;
+    }>
+  | Readonly<{
       kind: 'fill-rect';
       rect: LayoutRect;
       fill: string;

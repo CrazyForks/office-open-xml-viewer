@@ -11,10 +11,15 @@ import pixelmatch from 'pixelmatch';
 const PPTX_FILES: { name: string; slideCount: number }[] = [
   { name: 'private/sample-1', slideCount: 5 },
   { name: 'private/sample-2', slideCount: 17 },
-  { name: 'private/sample-3', slideCount: 17 },
-  { name: 'private/sample-4', slideCount: 15 },
-  { name: 'private/sample-5', slideCount: 3 },
-  { name: 'private/sample-6', slideCount: 3 },
+  { name: 'private/sample-3', slideCount: 21 },
+  { name: 'private/sample-4', slideCount: 6 },
+  { name: 'private/sample-5', slideCount: 16 },
+  { name: 'private/sample-6', slideCount: 13 },
+  { name: 'private/sample-7', slideCount: 2 },
+  { name: 'private/sample-8', slideCount: 1 },
+  { name: 'private/sample-9', slideCount: 2 },
+  { name: 'private/sample-10', slideCount: 5 },
+  { name: 'private/sample-11', slideCount: 3 },
   { name: 'demo/sample-1', slideCount: 9 },
 ];
 

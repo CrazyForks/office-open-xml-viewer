@@ -253,6 +253,9 @@ function validateResourceManifests(
           }
         }
       }
+      if (run.type === 'shape' && run.fill?.fillType === 'image') {
+        addImage(imageResourceKey(runSource, run.fill.imagePath));
+      }
     });
   }
   const metadataKeys = new Set(imageMetadata.map((record) => record.resourceKey));

@@ -99,10 +99,13 @@ export const WORD_DEGENERATE_LINE_SPACING_SINGLE = defineCompatibilityRule({
 export const WORD_AUTO_MULTIPLE_BASELINE_PIN = defineCompatibilityRule({
   id: 'word-auto-multiple-baseline-pin',
   evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/line-spacing-baseline.test.ts#2.0× keeps the baseline at top + ascent (extra 1.0× leading below, NOT centred)',
+    kind: 'office-observation',
+    syntheticFixtureId: 'auto-multiple-baseline-pin',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
   },
-  description: 'Paint an automatic line-spacing multiplier at or above one with its glyph baseline pinned inside the single design line and place multiplier leading below it; this is draw-only and does not replace the centered trailing-mark pagination metric.',
+  description: 'Paint a positive automatic line-spacing multiplier with its glyph baseline pinned inside the single design line, placing extra leading or compressed overflow toward block-end; this is draw-only and does not replace the centered trailing-mark pagination metric.',
 });
 
 export const WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS = defineCompatibilityRule({
@@ -358,6 +361,29 @@ export const WORD_RUN_VERTICAL_ALIGN_BASELINE_SHIFT = defineCompatibilityRule({
   },
   description: 'Retain the established run-level baseline displacement for vertically aligned text: superscript rises by 0.35 of its authored font size and subscript falls by 0.15, while the separately authored w:position remains additive.',
 });
+
+export const WORD_UNIFORM_RUN_POSITION_LEADING = defineCompatibilityRule({
+  id: 'word-uniform-run-position-leading',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'uniform-run-position-leading',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'When every metric-bearing item on a line has the same non-zero w:position, Word preserves the enlarged line extent but shares the resulting surplus above and below the glyphs. A line containing a differently-positioned item retains the full relative displacement.',
+});
+
+/** Paint-relative baseline position governed by
+ * {@link WORD_UNIFORM_RUN_POSITION_LEADING}. */
+export function wordUniformRunPositionPaintPt(
+  authoredPositionPt: number,
+  commonLinePositionPt: number,
+): number {
+  return commonLinePositionPt === 0
+    ? authoredPositionPt
+    : authoredPositionPt - commonLinePositionPt / 2;
+}
 
 /** Compatibility projection governed by
  * {@link WORD_RUN_VERTICAL_ALIGN_BASELINE_SHIFT}. */

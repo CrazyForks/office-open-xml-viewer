@@ -749,6 +749,77 @@ describe('layoutParagraph', () => {
 });
 
 describe('paragraphLayoutFromMeasurement retained authorities', () => {
+  it('flows consecutive wp:inline WPS shapes at their paragraph pen positions', () => {
+    const inlineShape = () => ({
+      type: 'shape' as const,
+      inline: true,
+      widthPt: 20,
+      heightPt: 10,
+      anchorXPt: 0,
+      anchorYPt: 0,
+      anchorXFromMargin: false,
+      anchorYFromPara: false,
+      zOrder: 0,
+      subpaths: [],
+      presetGeometry: 'rect',
+      fill: { fillType: 'solid' as const, color: '009989' },
+      stroke: null,
+      textBlocks: [],
+    });
+    const tabRun = {
+      ...(paragraph.runs[0] as Extract<DocParagraph['runs'][number], { type: 'text' }>),
+      text: '\t',
+    };
+    const inlineParagraph = {
+      ...paragraph,
+      runs: [
+        inlineShape(), tabRun,
+        inlineShape(), tabRun,
+        inlineShape(),
+      ],
+    } as unknown as DocParagraph;
+    const context: ParagraphLayoutContext = {
+      ...acquisitionContext,
+      tabStops: [
+        { pos: 30, alignment: 'left', leader: 'none' },
+        { pos: 60, alignment: 'left', leader: 'none' },
+      ],
+    };
+    const placement = {
+      startYPt: 10,
+      paragraphXPt: 10,
+      availableWidthPt: 100,
+      maximumYPt: 500,
+      suppressSpaceBefore: false,
+    };
+    const measurer = { context: measureContext, fontFamilyClasses: {} };
+    const environment = {
+      documentHasEastAsianText: false,
+      pageWritingMode: 'horizontal-tb' as const,
+      pageIndex: 0,
+      totalPages: 1,
+    };
+    const measured = measureParagraph(
+      inlineParagraph as never,
+      context,
+      placement,
+      measurer,
+      environment,
+    );
+    const node = paragraphLayoutFromMeasurement(inlineParagraph as never, {
+      id: 'inline-wps', source, flowDomainId: 'body', ordinaryFlow: true,
+      context, placement, measurer, environment,
+      exclusions: [],
+    } as never, measured);
+
+    const placements = node.lines.flatMap((line) => line.placements)
+      .filter((item) => item.kind === 'drawing');
+    expect(placements.map((item) => item.bounds.xPt)).toEqual([10, 40, 70]);
+    expect(placements.map((item) => item.advancePt)).toEqual([20, 20, 20]);
+    expect(node.drawings.map((drawing) => drawing.flowBounds.xPt)).toEqual([10, 40, 70]);
+    expect(node.drawings.every((drawing) => drawing.anchorLayer === undefined)).toBe(true);
+  });
+
   it('retains selected-face anchor-host metrics instead of font-size ratios', () => {
     const paragraph = {
       alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,

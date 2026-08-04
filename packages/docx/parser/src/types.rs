@@ -1,3 +1,4 @@
+use ooxml_common::fill::{FillRect, TileInfo};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -1454,6 +1455,10 @@ pub(crate) struct AnchorAcquisitionWire {
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeRun {
+    /// True when this WPS shape is hosted by `wp:inline` and therefore
+    /// participates in paragraph line flow like a glyph-sized drawing object.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub inline: bool,
     /// pt
     pub width_pt: f64,
     /// pt
@@ -1720,6 +1725,29 @@ pub enum ShapeFill {
         angle: f64,
         /// "linear" | "radial"
         grad_type: String,
+    },
+    /// ECMA-376 §20.1.8.14 `a:blipFill` applied to a DrawingML shape.
+    /// The embedded package path is retained for the renderer's ordinary lazy
+    /// image-resource pipeline; stretch and tile are mutually exclusive.
+    #[serde(rename_all = "camelCase")]
+    Image {
+        image_path: String,
+        mime_type: String,
+        /// Microsoft 2016 SVG extension carried beside the raster fallback.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        svg_image_path: Option<String>,
+        /// ECMA-376 §20.1.8.55 source-image crop. This is independent of the
+        /// destination inset represented by `fill_rect`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        src_rect: Option<SrcRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fill_rect: Option<FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tile: Option<TileInfo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alpha: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duotone: Option<Duotone>,
     },
 }
 
