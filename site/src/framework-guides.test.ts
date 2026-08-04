@@ -35,6 +35,15 @@ describe('framework integration guides', () => {
     expect(index).toContain('React, Vue, Svelte, and Solid');
   });
 
+  it('uses the standard site footer on the chooser and framework detail pages', () => {
+    const index = readFileSync(new URL('pages/frameworks/index.astro', siteRoot), 'utf8');
+    const guide = readFileSync(new URL('components/FrameworkGuide.astro', siteRoot), 'utf8');
+
+    expect(index).toContain('<SiteFooter />');
+    expect(guide).toContain('<SiteFooter />');
+    expect(guide).not.toContain('guide-footer');
+  });
+
   it.each(['docx', 'xlsx', 'pptx'])('keeps %s framework guidance on the dedicated pages', (format) => {
     const formatPage = readFileSync(new URL(`pages/${format}.astro`, siteRoot), 'utf8');
 
@@ -148,17 +157,24 @@ describe('framework integration guides', () => {
         `stackblitz.com/github/yukiyokotani/office-open-xml-viewer/tree/main/examples/frameworks/${framework.id}`,
       );
       expect(framework.stackBlitzEmbedUrl).toContain('embed=1');
-      expect(framework.stackBlitzEmbedUrl).toContain('startScript=dev');
-      expect(framework.stackBlitzEmbedUrl).not.toContain('startScript=dev%3A');
+      expect(framework.stackBlitzEmbedUrl).toContain('view=editor');
+      expect(framework.stackBlitzEmbedUrl).toContain('showSidebar=1');
+      expect(framework.stackBlitzEmbedUrl).not.toContain('startScript');
+      expect(framework.stackBlitzUrl).toContain('startScript=dev');
+      expect(framework.stackBlitzUrl).not.toContain('startScript=dev%3A');
     }
   });
 
   it.each(['react', 'vue', 'svelte', 'solid'])('keeps the %s StackBlitz project self-contained', (framework) => {
     const mainExtension = framework === 'react' || framework === 'solid' ? 'tsx' : 'ts';
     const main = exampleSource(`${framework}/src/main.${mainExtension}`);
+    const packageJson = JSON.parse(exampleSource(`${framework}/package.json`)) as {
+      stackblitz?: { startCommand?: boolean };
+    };
 
     expect(main).toContain("import './example.css';");
     expect(existsSync(new URL(`examples/frameworks/${framework}/src/example.css`, repositoryRoot))).toBe(true);
+    expect(packageJson.stackblitz?.startCommand).toBe(false);
   });
 
 });

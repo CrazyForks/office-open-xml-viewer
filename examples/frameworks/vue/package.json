@@ -2,6 +2,9 @@
   "name": "@ooxml-framework-examples/vue",
   "private": true,
   "type": "module",
+  "stackblitz": {
+    "startCommand": false
+  },
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",

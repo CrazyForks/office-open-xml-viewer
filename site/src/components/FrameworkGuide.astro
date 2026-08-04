@@ -2,6 +2,7 @@
 import Base from '../layouts/Base.astro';
 import Nav from './Nav.astro';
 import FrameworkStackBlitz from './FrameworkStackBlitz.astro';
+import SiteFooter from './SiteFooter.astro';
 import {
   frameworkGuides,
   getFrameworkGuide,
@@ -53,9 +54,9 @@ const structuredData = JSON.stringify({
     <section class="section live-section">
       <div class="wrap">
         <div class="section-intro">
-          <p class="eyebrow">Live project</p>
-          <h2 class="section-title">Run it on StackBlitz.</h2>
-          <p class="section-lead">Edit the real {guide.name} project and choose a local DOCX, XLSX, or PPTX file in its preview.</p>
+          <p class="eyebrow">Framework example</p>
+          <h2 class="section-title">Read the code. Run it on StackBlitz.</h2>
+          <p class="section-lead">Browse the complete {guide.name} project here, then open the live project to choose a local DOCX, XLSX, or PPTX file.</p>
         </div>
         <FrameworkStackBlitz framework={guide.name} src={guide.stackBlitzEmbedUrl} openUrl={guide.stackBlitzUrl} />
       </div>
@@ -69,9 +70,7 @@ const structuredData = JSON.stringify({
     </nav>
   </main>
 
-  <footer class="guide-footer">
-    <div class="wrap">@silurus/ooxml · Browser-based DOCX, XLSX, and PPTX rendering</div>
-  </footer>
+  <SiteFooter />
   <script type="application/ld+json" set:html={structuredData}></script>
 </Base>
 
@@ -94,7 +93,6 @@ const structuredData = JSON.stringify({
   .framework-rail { display: flex; align-items: center; gap: 22px; padding-top: 28px; padding-bottom: 28px; border-top: 1px solid var(--border); font: 12px var(--mono); }
   .framework-rail span { margin-right: auto; color: var(--text-faint); text-transform: uppercase; letter-spacing: .08em; }
   .framework-rail a { border-bottom: 1px solid var(--signal); }
-  .guide-footer { padding: 28px 0; background: var(--hero-bg); color: var(--hero-muted); font: 11px var(--mono); }
   @media (max-width: 900px) {
     .guide-copy { grid-column: 1 / 10; }.guide-facts { grid-column: 10 / 13; }
   }
