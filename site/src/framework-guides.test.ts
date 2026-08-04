@@ -74,6 +74,7 @@ describe('framework integration guides', () => {
     const { frameworkGuides } = await import('./lib/framework-guides');
     for (const guide of frameworkGuides) {
       expect(guide.appCode).not.toContain("import('@silurus/ooxml");
+      expect(guide.appCode).not.toContain("from '@silurus/ooxml");
       expect(guide.appCode).not.toContain('DocxScrollViewer');
       expect(guide.appCode).not.toContain('PptxScrollViewer');
       expect(guide.appCode).not.toContain('XlsxViewer');
