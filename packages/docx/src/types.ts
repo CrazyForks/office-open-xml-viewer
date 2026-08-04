@@ -500,10 +500,9 @@ export interface DocParagraph {
   defaultFontFamilyEastAsia?: string | null;
   /** ECMA-376 §17.3.1.29 — the paragraph mark run's resolved `w:color` (direct
    *  pPr/rPr → pStyle chain → docDefaults; hex 6 without `#`, lowercased; an
-   *  explicit `auto` surfaces as absent, §17.3.2.6). The numbering level rPr
-   *  (§17.9.24) layers over the mark's run properties, so the renderer uses
-   *  this as the marker-color fallback when {@link NumberingInfo.color} is
-   *  absent. */
+   *  explicit `auto` surfaces as absent, §17.3.2.6). Compatibility rule
+   *  `word-numbering-marker-paragraph-mark-fallback` uses this when §17.9.24
+   *  leaves {@link NumberingInfo.color} absent. */
   paragraphMarkColor?: string | null;
   /**
    * ECMA-376 §17.3.1.6 `<w:bidi>` — right-to-left paragraph. `true` = RTL,
@@ -636,7 +635,8 @@ export interface NumberingInfo {
    *  it (the renderer treats absent as "left"). */
   jc?: string;
   /** ECMA-376 §17.3.2.26 ascii axis for the marker glyph, resolved through the
-   *  level's `rPr` (§17.9.6) merged over the paragraph's run formatting. The
+   *  level's `rPr` (§17.9.24) plus compatibility rule
+   *  `word-numbering-marker-paragraph-mark-fallback`. The
    *  renderer draws Latin marker chars (e.g. a decimal "1") with this family, so
    *  a heading whose ascii=Times renders its auto-number in Times (serif) even
    *  when eastAsia=Gothic. Absent ⇒ the renderer falls back to its default. */
@@ -649,9 +649,11 @@ export interface NumberingInfo {
   /** ECMA-376 §17.9.24 — the numbering level rPr's `w:color` (hex 6 without
    *  `#`, lowercased). Colors the marker glyph only, never the paragraph's
    *  runs. Absent ⇒ the renderer falls back to
-   *  {@link DocParagraph.paragraphMarkColor} (§17.3.1.29 — the level rPr layers
-   *  over the paragraph mark's run properties) and finally to its
-   *  default ink. An explicit `w:val="auto"` is absent here + {@link colorAuto}. */
+   *  {@link DocParagraph.paragraphMarkColor} under compatibility rule
+   *  `word-numbering-marker-paragraph-mark-fallback`, then to its default ink.
+   *  §17.3.1.29 defines the
+   *  mark properties but not that fallback. An explicit `w:val="auto"` is
+   *  absent here + {@link colorAuto}. */
   color?: string | null;
   /** ECMA-376 §17.3.2.6 / ST_HexColorAuto (§17.18.39) — true when the level
    *  rPr carries an EXPLICIT `w:color w:val="auto"`. Auto names no concrete
@@ -952,6 +954,13 @@ export interface ShapeText {
   text: string;
   fontSizePt: number;
   color?: string | null;
+  /** Resolved paragraph-mark run color used by compatibility rule
+   *  `word-numbering-marker-paragraph-mark-fallback` when the numbering level
+   *  has no explicit color; kept separate from the first content run's
+   *  compatibility-level {@link ShapeText.color}. `null` means the parser
+   *  resolved automatic/default ink; `undefined` preserves the legacy contract
+   *  for hand-built values that did not provide paragraph-mark facts. */
+  paragraphMarkColor?: string | null;
   fontFamily?: string | null;
   bold?: boolean;
   italic?: boolean;

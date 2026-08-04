@@ -898,7 +898,14 @@ export function planLine(input: PlanLineInput): LineLayout {
         ...(ownedTrailingSlackPt !== 0 ? { ownedTrailingSlackPt } : {}),
         ...((style.highlight || style.background) ? {
           highlightFragments: [{
-            rect: {
+            rect: style.highlight && retainedGeometry ? {
+              xPt,
+              // ECMA-376 §17.3.2.15 applies highlighting behind the run
+              // contents, not across the paragraph's authored line advance.
+              yPt: line.baselinePt + baselineOffsetPt - retainedGeometry.base.ascentPt,
+              widthPt: widthPt + ownedTrailingSlackPt,
+              heightPt: retainedGeometry.base.ascentPt + retainedGeometry.base.descentPt,
+            } : {
               xPt, yPt: line.topPt,
               widthPt: widthPt + ownedTrailingSlackPt,
               heightPt: line.advancePt,
@@ -1592,7 +1599,7 @@ function retainedGeometryPlan(
   sourceOffset: number,
   color: TextPlacement['color'],
 ): RetainedTextGeometryPlan | undefined {
-  if (!(segment.underline || segment.strikethrough
+  if (!(segment.highlight || segment.underline || segment.strikethrough
     || segment.doubleStrikethrough || segment.emphasisMark)) return undefined;
   const service = segment.textLayoutService;
   const request = segment.textShapeRequest;
@@ -1612,7 +1619,15 @@ function retainedGeometryPlan(
       ...(span.inkBounds ? { inkBounds: span.inkBounds } : {}),
     };
   };
-  const base = shape(segment.text);
+  const fontBox = segment.selectedFaceFontBox;
+  if (!fontBox || !segment.selectedFaceInkBounds) {
+    throw new Error('Retained typography geometry requires authoritative selected-face metrics');
+  }
+  const base: RetainedInkMetric = {
+    ascentPt: fontBox.ascentPt,
+    descentPt: fontBox.descentPt,
+    inkBounds: segment.selectedFaceInkBounds,
+  };
   const textColor = retainedColorString(color);
   const underline = segment.underline ? {
     ...(segment.underlineStyle ? { authoredStyle: segment.underlineStyle } : {}),
@@ -3920,6 +3935,9 @@ function immutableMeasuredLayoutSegment(
       } : {}),
       ...(segment.selectedFaceInkBounds ? {
         selectedFaceInkBounds: Object.freeze({ ...segment.selectedFaceInkBounds }),
+      } : {}),
+      ...(segment.selectedFaceFontBox ? {
+        selectedFaceFontBox: Object.freeze({ ...segment.selectedFaceFontBox }),
       } : {}),
       ...(segment.ruby ? { ruby: Object.freeze({ ...segment.ruby }) } : {}),
       ...(segment.border ? { border: Object.freeze({ ...segment.border }) } : {}),

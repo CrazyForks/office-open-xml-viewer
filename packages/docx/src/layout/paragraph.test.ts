@@ -2380,6 +2380,10 @@ describe('planLine visual geometry', () => {
         { range: { start: 0, end: 1 }, offsetPt: 0, advancePt: 5 },
         { range: { start: 1, end: 2 }, offsetPt: 5, advancePt: 5 },
       ],
+      selectedFaceFontBox: { ascentPt: 8, descentPt: 2 },
+      selectedFaceInkBounds: {
+        xMinPt: 0, xMaxPt: 10, ascentPt: 7, descentPt: 2,
+      },
       smallCaps: true, underline: true, underlineStyle: 'double', underlineColor: 'auto',
       strikethrough: true, doubleStrikethrough: false,
       emphasisMark: 'dot', position: 2, vertAlign: null, fontSize: 10,

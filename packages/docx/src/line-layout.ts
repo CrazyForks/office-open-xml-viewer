@@ -95,6 +95,7 @@ import {
   wordCandidateFitWidthPx,
   wordJustifiedCandidateFitAllowancePx,
   wordIsOverflowPunctuation,
+  wordDocumentCharacterCompressionApplies,
   wordJapanesePunctuationRetainedExtentPt,
   wordMsMinchoEmptyEastAsianMarkSingleLinePx,
   wordUniformRunPositionPaintPt,
@@ -158,6 +159,10 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** Tight selected-face ink retained by the authoritative shape call that
    * also produced `shapedClusters`. */
   selectedFaceInkBounds?: GlyphInkBounds;
+  /** Selected-face font box retained by that same authoritative shape call.
+   * Decorations and highlighting consume this instead of shaping the placed
+   * run a second time. */
+  selectedFaceFontBox?: Readonly<{ ascentPt: number; descentPt: number }>;
   /** False when this segment starts inside the preceding grapheme cluster. */
   breakBefore?: boolean;
   smallCaps?: boolean;
@@ -2564,6 +2569,13 @@ export function buildSegments(
       r.position,
     );
     const effectiveCharacterSpacing = acquiredTypography?.characterSpacingPt ?? r.charSpacing;
+    // ECMA-376 §17.3.2.35 gives an authored run an explicit character pitch.
+    // Word observation: a positive `w:spacing` owns that expanded pitch and suppresses
+    // document-level §17.15.1.18 punctuation whitespace compression for the
+    // run. Combining both adjustments collapses consecutive Japanese closing
+    // punctuation even though Word preserves the authored spacing.
+    const documentCharacterCompressionApplies =
+      wordDocumentCharacterCompressionApplies(effectiveCharacterSpacing);
     const effectiveCharacterScale = acquiredTypography?.characterScale ?? r.charScale;
     const effectiveKerningThreshold = acquiredTypography?.kerningThresholdPt ?? r.kerning;
     const effectiveSnapToGrid = acquiredTypography?.snapToGrid ?? r.snapToGrid;
@@ -2663,6 +2675,7 @@ export function buildSegments(
       // whitespace. Non-eligible text retains contextual shaping.
       if (
         !compressCharacterWhitespace
+        && documentCharacterCompressionApplies
         && fitTextRegionIndex === undefined
       ) {
         const boundaries = [0, ...graphemeClusterOffsets(text), text.length];
@@ -2713,7 +2726,8 @@ export function buildSegments(
       const shaped = authoritativeSpan
         ? { spans: [authoritativeSpan] }
         : environment.layoutServices?.text.shape(textShapeRequest);
-      const punctuationCompressions = compressCharacterWhitespace
+      const punctuationCompressions =
+        compressCharacterWhitespace && documentCharacterCompressionApplies
         ? (() => {
             const boundaries = [0, ...graphemeClusterOffsets(text), text.length];
             const compressions: Array<{ end: number; adjustmentPt: number }> = [];
@@ -2812,7 +2826,8 @@ export function buildSegments(
               : span.script === 'highAnsi'
                 ? highAnsiFontFamily
                 : base.fontFamily;
-          const compressedSpan = compressCharacterWhitespace
+          const compressedSpan = documentCharacterCompressionApplies
+            && compressCharacterWhitespace
             && [...span.text].some((grapheme) =>
               characterSpacingControlCompresses(
                 grapheme,
@@ -3908,6 +3923,10 @@ export function layoutLines(
       });
       if (clusterGeometry) {
         s.shapedClusters = shaped.clusters;
+        s.selectedFaceFontBox = {
+          ascentPt: shaped.ascentPt,
+          descentPt: shaped.descentPt,
+        };
         s.selectedFaceInkBounds = shaped.inkBounds ?? {
           xMinPt: 0,
           xMaxPt: shaped.advancePt,

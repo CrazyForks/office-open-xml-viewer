@@ -4272,6 +4272,103 @@ fn resolve_numbered_indent_axes(
     }
 }
 
+/// Project one numbering level to the marker model shared by body and text-box
+/// paragraphs. ECMA-376 §17.9.24 keeps the level `rPr` separate from content
+/// runs. Word additionally uses the resolved paragraph-mark run properties as
+/// the marker fallback when a level property is absent; this compatibility
+/// behavior is applied here once so the two WordprocessingML stories cannot
+/// drift in font, color, theme-slot, or picture-bullet handling. The controlled
+/// observation is catalogued as `word-numbering-marker-paragraph-mark-fallback`
+/// in the renderer compatibility inventory.
+fn resolve_numbering_marker(
+    num_map: &mut NumberingMap,
+    num_id: u32,
+    num_level: u32,
+    paragraph_mark_run: &RunFmt,
+    theme: &ThemeColors,
+) -> NumberingInfo {
+    let (
+        format,
+        indent_left,
+        tab,
+        suff,
+        justification,
+        font_family,
+        font_family_east_asia,
+        font_facts,
+        color,
+        color_auto,
+        picture_bullet,
+    ) = num_map
+        .get_level(num_id, num_level)
+        .map(|level| {
+            let mut marker_run = paragraph_mark_run.clone();
+            apply_direct_run(&mut marker_run, &level.rpr);
+            (
+                level.format.clone(),
+                level.indent_left,
+                level.tab,
+                level.suff.clone(),
+                level.lvl_jc.clone(),
+                theme.resolve_font_ref(marker_run.font_family_ascii.clone()),
+                theme.resolve_font_ref(marker_run.font_family_east_asia.clone()),
+                Some(resolved_run_font_facts(&marker_run, theme)),
+                level.rpr.color.clone(),
+                level.rpr.color_auto,
+                level.pic_bullet.clone(),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                "decimal".to_string(),
+                36.0,
+                18.0,
+                "tab".to_string(),
+                "left".to_string(),
+                theme.resolve_font_ref(paragraph_mark_run.font_family_ascii.clone()),
+                theme.resolve_font_ref(paragraph_mark_run.font_family_east_asia.clone()),
+                Some(resolved_run_font_facts(paragraph_mark_run, theme)),
+                None,
+                false,
+                None,
+            )
+        });
+    let counter = num_map.advance(num_id, num_level);
+    let text = num_map.resolve_text(num_id, num_level, counter);
+    let (pic_bullet_image_path, pic_bullet_mime_type, pic_bullet_width_pt, pic_bullet_height_pt) =
+        match picture_bullet {
+            // §17.9.20 defines no default size; absence stays absent so layout can
+            // resolve it against the retained marker font geometry.
+            Some(picture) => (
+                Some(picture.image_path),
+                Some(picture.mime_type),
+                picture.width_pt,
+                picture.height_pt,
+            ),
+            None => (None, None, None, None),
+        };
+
+    NumberingInfo {
+        num_id,
+        level: num_level,
+        format,
+        text,
+        indent_left,
+        tab,
+        suff,
+        jc: justification,
+        font_family,
+        font_family_east_asia,
+        font_facts,
+        color,
+        color_auto,
+        pic_bullet_image_path,
+        pic_bullet_mime_type,
+        pic_bullet_width_pt,
+        pic_bullet_height_pt,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_paragraph_cond_at_depth_with_diagnostics(
     node: roxmltree::Node,
@@ -4366,106 +4463,9 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
     let numbering = if let (Some(num_id), Some(num_level)) = (base_para.num_id, base_para.num_level)
     {
         if num_id != 0 {
-            // Resolve the marker's font axes (ECMA-376 §17.9.6 + §17.3.2.26): take
-            // the level's own run properties (`rPr`) MERGED OVER the paragraph's
-            // resolved run formatting via the SAME `apply_direct_run` body runs
-            // use, then resolve the ascii and eastAsia axes INDEPENDENTLY through
-            // theme refs. A bare `<w:rFonts w:hint="eastAsia"/>` carries no
-            // typeface, so the marker simply inherits the paragraph's ascii (e.g.
-            // Times → the auto-number renders serif) and eastAsia (e.g. MS Gothic).
-            // §17.9.24 — the level rPr's own `<w:color>` also rides along
-            // (`marker_color` + `marker_color_auto`; parse_run_fmt maps an
-            // explicit auto to None + color_auto, §17.3.2.6). Kept UNMERGED
-            // from the run formatting: the paragraph-mark fallback lives in
-            // `paragraph_mark_color` below and the renderer resolves the
-            // precedence (lvl → mark → default ink; explicit auto stops the
-            // fallback at the default ink).
-            let (
-                format,
-                ind_left,
-                tab,
-                suff,
-                lvl_jc,
-                marker_ascii,
-                marker_ea,
-                marker_font_facts,
-                marker_color,
-                marker_color_auto,
-                pic_bullet,
-            ) = num_map
-                .get_level(num_id, num_level)
-                .map(|l| {
-                    let mut marker_fmt = base_run.clone();
-                    apply_direct_run(&mut marker_fmt, &l.rpr);
-                    let marker_font_facts = resolved_run_font_facts(&marker_fmt, theme);
-                    (
-                        l.format.clone(),
-                        l.indent_left,
-                        l.tab,
-                        l.suff.clone(),
-                        l.lvl_jc.clone(),
-                        theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
-                        theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
-                        Some(marker_font_facts),
-                        l.rpr.color.clone(),
-                        l.rpr.color_auto,
-                        l.pic_bullet.clone(),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        "decimal".to_string(),
-                        36.0,
-                        18.0,
-                        "tab".to_string(),
-                        "left".to_string(),
-                        theme.resolve_font_ref(base_run.font_family_ascii.clone()),
-                        theme.resolve_font_ref(base_run.font_family_east_asia.clone()),
-                        Some(resolved_run_font_facts(&base_run, theme)),
-                        None,
-                        false,
-                        None,
-                    )
-                });
-            let counter = num_map.advance(num_id, num_level);
-            let text = num_map.resolve_text(num_id, num_level, counter);
-            let (
-                pic_bullet_image_path,
-                pic_bullet_mime_type,
-                pic_bullet_width_pt,
-                pic_bullet_height_pt,
-            ) = match pic_bullet {
-                // width_pt / height_pt are already Option<f64> (None when the VML
-                // shape style omits the dimension — §17.9.20 defines no default
-                // size, so the renderer resolves the absence against the marker
-                // font), so they flow through unchanged.
-                Some(pb) => (
-                    Some(pb.image_path),
-                    Some(pb.mime_type),
-                    pb.width_pt,
-                    pb.height_pt,
-                ),
-                None => (None, None, None, None),
-            };
-            Some(Box::new(NumberingInfo {
-                num_id,
-                level: num_level,
-                format,
-                text,
-                indent_left: ind_left,
-                tab,
-                suff,
-                jc: lvl_jc,
-                font_family: marker_ascii,
-                font_family_east_asia: marker_ea,
-                font_facts: marker_font_facts,
-                color: marker_color,
-                color_auto: marker_color_auto,
-                pic_bullet_image_path,
-                pic_bullet_mime_type,
-                pic_bullet_width_pt,
-                pic_bullet_height_pt,
-            }))
+            Some(Box::new(resolve_numbering_marker(
+                num_map, num_id, num_level, &mark_run, theme,
+            )))
         } else {
             None
         }
@@ -9194,6 +9194,10 @@ fn extract_simple_paragraph_text(
     // paragraph half feeds layout below; the run half is the docDefaults +
     // paragraph-style rPr baseline for every run in this paragraph.
     let (style_para, base_run) = style_map.resolve_para(style_id.as_deref(), None);
+    let mut mark_run = base_run.clone();
+    if let Some(rpr) = ppr_node.and_then(|ppr| child_w(ppr, "rPr")) {
+        apply_direct_run(&mut mark_run, &parse_run_fmt(rpr));
+    }
     let paragraph_style = style_map.resolve_paragraph_style_layer(style_id.as_deref());
     let direct_numbering = ppr_node.and_then(|ppr| child_w(ppr, "numPr")).is_some();
     let resolve_run_fmt = |rpr_node: Option<roxmltree::Node>| -> RunFmt {
@@ -9452,89 +9456,9 @@ fn extract_simple_paragraph_text(
             return None;
         }
         let num_level = direct_ind.num_level.or(style_para.num_level).unwrap_or(0);
-        let first_fmt = first_run_fmt.clone().unwrap_or_default();
-        let (
-            format,
-            ind_left,
-            tab,
-            suff,
-            lvl_jc,
-            marker_ascii,
-            marker_ea,
-            marker_font_facts,
-            marker_color,
-            marker_color_auto,
-            pic_bullet,
-        ) = num_map
-            .get_level(num_id, num_level)
-            .map(|l| {
-                let mut marker_fmt = first_fmt.clone();
-                apply_direct_run(&mut marker_fmt, &l.rpr);
-                let marker_font_facts = resolved_run_font_facts(&marker_fmt, theme);
-                (
-                    l.format.clone(),
-                    l.indent_left,
-                    l.tab,
-                    l.suff.clone(),
-                    l.lvl_jc.clone(),
-                    theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
-                    theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
-                    Some(marker_font_facts),
-                    l.rpr.color.clone(),
-                    l.rpr.color_auto,
-                    l.pic_bullet.clone(),
-                )
-            })
-            .unwrap_or_else(|| {
-                (
-                    "decimal".to_string(),
-                    36.0,
-                    18.0,
-                    "tab".to_string(),
-                    "left".to_string(),
-                    theme.resolve_font_ref(first_fmt.font_family_ascii.clone()),
-                    theme.resolve_font_ref(first_fmt.font_family_east_asia.clone()),
-                    Some(resolved_run_font_facts(&first_fmt, theme)),
-                    None,
-                    false,
-                    None,
-                )
-            });
-        let counter = num_map.advance(num_id, num_level);
-        let text = num_map.resolve_text(num_id, num_level, counter);
-        let (
-            pic_bullet_image_path,
-            pic_bullet_mime_type,
-            pic_bullet_width_pt,
-            pic_bullet_height_pt,
-        ) = match pic_bullet {
-            Some(pb) => (
-                Some(pb.image_path),
-                Some(pb.mime_type),
-                pb.width_pt,
-                pb.height_pt,
-            ),
-            None => (None, None, None, None),
-        };
-        Some(Box::new(NumberingInfo {
-            num_id,
-            level: num_level,
-            format,
-            text,
-            indent_left: ind_left,
-            tab,
-            suff,
-            jc: lvl_jc,
-            font_family: marker_ascii,
-            font_family_east_asia: marker_ea,
-            font_facts: marker_font_facts,
-            color: marker_color,
-            color_auto: marker_color_auto,
-            pic_bullet_image_path,
-            pic_bullet_mime_type,
-            pic_bullet_width_pt,
-            pic_bullet_height_pt,
-        }))
+        Some(Box::new(resolve_numbering_marker(
+            num_map, num_id, num_level, &mark_run, theme,
+        )))
     });
     let level = numbering
         .as_ref()
@@ -9673,6 +9597,7 @@ fn extract_simple_paragraph_text(
         text,
         font_size_pt,
         color,
+        paragraph_mark_color: mark_run.color.clone(),
         font_family,
         bold,
         italic,
@@ -22681,6 +22606,48 @@ mod numbering_marker_font_tests {
         )
     }
 
+    fn parse_body_numbered_paragraph(paragraph: &str, numbering: &str) -> DocParagraph {
+        let body_xml = format!(r#"<w:document{NS}><w:body>{paragraph}</w:body></w:document>"#);
+        let doc = roxmltree::Document::parse(&body_xml).unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|node| node.tag_name().name() == "body")
+            .unwrap();
+        let style_map = StyleMap::parse(&styles_xml());
+        let mut num_map = NumberingMap::parse(numbering, &HashMap::new());
+        parse_body_elements(
+            body,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .into_iter()
+        .find_map(|element| match element {
+            BodyElement::Paragraph(para) => Some(*para),
+            _ => None,
+        })
+        .expect("numbered body paragraph")
+    }
+
+    fn parse_textbox_numbered_paragraph(paragraph: &str, numbering: &str) -> ShapeText {
+        let doc = roxmltree::Document::parse(paragraph).unwrap();
+        let style_map = StyleMap::parse(&styles_xml());
+        let mut num_map = NumberingMap::parse(numbering, &HashMap::new());
+        extract_simple_paragraph_text(
+            &style_map,
+            &mut num_map,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("numbered text-box paragraph")
+    }
+
     /// Parse a body whose single paragraph is the numbered Heading1 "原稿の体裁".
     fn heading_para() -> DocParagraph {
         let body_xml = format!(
@@ -22780,6 +22747,92 @@ mod numbering_marker_font_tests {
             facts.font_family_east_asia.as_deref(),
             Some("ＭＳ ゴシック")
         );
+    }
+
+    /// Word compatibility observation: when §17.9.24 leaves a marker font or
+    /// color unspecified, Word uses the §17.3.1.29 paragraph-mark formatting,
+    /// not a content run. Body and text-box stories must project that observation
+    /// identically from the shared marker resolver.
+    #[test]
+    fn numbering_marker_inherits_direct_paragraph_mark_formatting_in_both_stories() {
+        let paragraph = format!(
+            r#"<w:p{NS}><w:pPr>
+              <w:pStyle w:val="見出し1"/>
+              <w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>
+              <w:rPr><w:rFonts w:ascii="ＭＳ Ｐゴシック" w:hAnsi="ＭＳ Ｐゴシック"
+                w:eastAsia="ＭＳ Ｐゴシック"/><w:color w:val="FF0000"/></w:rPr>
+            </w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman"/>
+              <w:color w:val="00B050"/></w:rPr><w:t>body</w:t></w:r></w:p>"#,
+        );
+        let numbering_part = numbering_xml();
+        let body = parse_body_numbered_paragraph(&paragraph, &numbering_part);
+        let textbox = parse_textbox_numbered_paragraph(&paragraph, &numbering_part);
+        let body_numbering = body.numbering.as_ref().expect("body marker");
+        let textbox_numbering = textbox.numbering.as_ref().expect("text-box marker");
+
+        assert_eq!(
+            body_numbering.font_family.as_deref(),
+            Some("ＭＳ Ｐゴシック")
+        );
+        assert_eq!(
+            body_numbering.font_family_east_asia.as_deref(),
+            Some("ＭＳ Ｐゴシック"),
+        );
+        assert_eq!(body_numbering.font_family, textbox_numbering.font_family);
+        assert_eq!(
+            body_numbering.font_family_east_asia,
+            textbox_numbering.font_family_east_asia,
+        );
+        assert_eq!(body.paragraph_mark_color.as_deref(), Some("ff0000"));
+        assert_eq!(textbox.paragraph_mark_color.as_deref(), Some("ff0000"));
+        assert_eq!(textbox.runs[0].color.as_deref(), Some("00b050"));
+    }
+
+    /// The level's own §17.9.24 properties remain authoritative over the
+    /// Word-observed paragraph-mark fallback, in both WordprocessingML stories.
+    #[test]
+    fn numbering_level_formatting_wins_over_paragraph_mark_in_both_stories() {
+        let paragraph = format!(
+            r#"<w:p{NS}><w:pPr>
+              <w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>
+              <w:rPr><w:rFonts w:ascii="ＭＳ Ｐゴシック" w:hAnsi="ＭＳ Ｐゴシック"/>
+                <w:color w:val="FF0000"/></w:rPr>
+            </w:pPr><w:r><w:t>body</w:t></w:r></w:p>"#,
+        );
+        let numbering_part = format!(
+            r#"<w:numbering{NS}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">
+              <w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1"/>
+              <w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:color w:val="0070C0"/></w:rPr>
+            </w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/>
+            </w:num></w:numbering>"#,
+        );
+        let body = parse_body_numbered_paragraph(&paragraph, &numbering_part);
+        let textbox = parse_textbox_numbered_paragraph(&paragraph, &numbering_part);
+        let body_numbering = body.numbering.as_ref().expect("body marker");
+        let textbox_numbering = textbox.numbering.as_ref().expect("text-box marker");
+
+        assert_eq!(body_numbering.font_family.as_deref(), Some("Arial"));
+        assert_eq!(body_numbering.color.as_deref(), Some("0070c0"));
+        assert_eq!(body_numbering.font_family, textbox_numbering.font_family);
+        assert_eq!(body_numbering.color, textbox_numbering.color);
+    }
+
+    #[test]
+    fn textbox_marker_retains_default_mark_ink_separately_from_content_color() {
+        let paragraph = format!(
+            r#"<w:p{NS}><w:pPr>
+              <w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>
+            </w:pPr><w:r><w:rPr><w:color w:val="00B050"/></w:rPr>
+              <w:t>body</w:t></w:r></w:p>"#,
+        );
+        let textbox = parse_textbox_numbered_paragraph(&paragraph, &numbering_xml());
+
+        assert_eq!(textbox.paragraph_mark_color, None);
+        assert_eq!(
+            serde_json::to_value(&textbox).unwrap()["paragraphMarkColor"],
+            serde_json::Value::Null,
+        );
+        assert_eq!(textbox.runs[0].color.as_deref(), Some("00b050"));
     }
 
     #[test]

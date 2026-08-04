@@ -970,7 +970,7 @@ function buildConcreteBodyLayoutKernel(
               // The catalogued projection preserves the §17.3.1.11 authored
               // exclusion height; see WORD_LOWERED_DROP_CAP_ANCHOR_LEADING.
               blockExtentPt: dropCapAnchorLeadingPt,
-              lineEndBoundaries: Object.freeze([]),
+              fragmentation: Object.freeze({ kind: 'indivisible' as const }),
               placement: Object.freeze({
                 coordinateSpace: 'logical-body' as const,
                 xPt: member.fragment.flowBounds.xPt,
@@ -1037,7 +1037,12 @@ function buildConcreteBodyLayoutKernel(
           return Object.freeze({
             layout,
             blockExtentPt: layout.advancePt,
-            lineEndBoundaries: Object.freeze(allBoundaries),
+            fragmentation: measured.markOnly
+              ? Object.freeze({ kind: 'indivisible' as const })
+              : Object.freeze({
+                  kind: 'splittable' as const,
+                  lineEndBoundaries: Object.freeze(allBoundaries),
+                }),
             ...(measured.markOnly
               ? { markBelowBaselinePt: measured.lastLineBelowBaselinePt }
               : {}),

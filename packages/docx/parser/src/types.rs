@@ -835,10 +835,11 @@ pub struct DocParagraph {
     /// (direct `pPr/rPr` → pStyle chain → docDefaults, the same `mark_run`
     /// resolution that feeds `default_font_size`; hex 6 lowercased; an
     /// explicit `auto` breaks the chain and surfaces as `None`, §17.3.2.6).
-    /// Word formats a numbering marker with the level rPr (§17.9.24) layered
-    /// over the mark's run properties, so a mark-colored list item tints its
-    /// bullet/number even when the level rPr carries no color — the renderer
-    /// reads this as the marker-color fallback after `NumberingInfo::color`.
+    /// Office compatibility observation: when the numbering-level rPr
+    /// (§17.9.24) leaves color unspecified, Word falls back to the paragraph
+    /// mark's run properties. The renderer reads this after
+    /// `NumberingInfo::color`; §17.3.1.29 defines the mark properties but does
+    /// not itself define this cross-element fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paragraph_mark_color: Option<String>,
     /// ECMA-376 §17.3.1.20 `<w:outlineLvl w:val="N">` (0–8). Resolved through
@@ -1065,17 +1066,18 @@ pub struct NumberingInfo {
     /// lowercased like run colors). Colors the marker glyph only, never the
     /// paragraph's runs. `None` (absent `<w:color>`) lets the renderer fall
     /// back to the paragraph MARK's resolved color
-    /// (`DocParagraph::paragraph_mark_color`, §17.3.1.29 — Word layers the
-    /// level rPr over the mark's run properties), and finally to its default
-    /// ink. An explicit `val="auto"` is `None` + `color_auto` below.
+    /// (`DocParagraph::paragraph_mark_color`) under the isolated Word-observed
+    /// compatibility rule, and finally to its default ink. §17.3.1.29 defines
+    /// the mark properties but not that fallback. An explicit `val="auto"` is
+    /// `None` + `color_auto` below.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     /// ECMA-376 §17.3.2.6 / ST_HexColorAuto (§17.18.39) — true when the level
     /// rPr carries an EXPLICIT `<w:color w:val="auto"/>`. Auto names no
-    /// concrete color but is NOT "unset": layered over the paragraph mark
-    /// (§17.9.24 over §17.3.1.29) it breaks an inherited concrete mark color,
-    /// so the renderer must NOT fall back to `paragraph_mark_color` and draws
-    /// the automatic (default) ink instead.
+    /// concrete color but is NOT "unset": under the Word-observed marker
+    /// fallback it breaks an inherited concrete mark color, so the renderer
+    /// must NOT fall back to `paragraph_mark_color` and draws automatic/default
+    /// ink instead.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub color_auto: bool,
     /// ECMA-376 §17.9.9/§17.9.20 — when the level uses a `<w:lvlPicBulletId>`,
@@ -2391,6 +2393,13 @@ pub struct ShapeText {
     pub font_size_pt: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Resolved run color of the paragraph mark. Kept separate from `color`,
+    /// which is the first content run's compatibility projection, so numbering
+    /// markers in text boxes use the same Word-observed fallback as body lists.
+    /// This field intentionally serializes `None` as null: null means resolution
+    /// selected automatic/default ink, while an absent field remains available
+    /// to legacy hand-built `ShapeText` values as "paragraph mark unknown".
+    pub paragraph_mark_color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
