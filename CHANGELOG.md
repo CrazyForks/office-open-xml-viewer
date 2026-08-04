@@ -4,6 +4,22 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.75.3 — 2026-08-04
+
+Patch. Restores Word-compatible DOCX pagination at signed `atLeast` spacing
+boundaries and keeps scheduled ZIP extraction fuzzing buildable.
+
+- **docx layout:** preserve Word's signed `atLeast` boundary for content-less
+  paragraph marks when Far East layout is enabled on an active document grid.
+  Negative values retain their authored magnitude, zero follows ordinary
+  `atLeast` spacing, and positive values continue to allocate whole grid cells,
+  without changing non-grid or `snapToGrid=false` layout. (§§17.3.1.33,
+  17.6.5; observed Word behavior; #1144)
+- **fuzzing:** align the independent ZIP extraction fuzz target with the
+  resource-governed package API, retain the package handle for entry reads, and
+  add ordinary CI format and Clippy gates so parser API drift is detected before
+  scheduled campaigns. (#1143)
+
 ## 0.75.2 — 2026-08-04
 
 Patch. Improves Word-compatible DOCX text metrics, anchored drawing flow,
