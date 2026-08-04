@@ -1,6 +1,6 @@
 use crate::xml_util::*;
 use ooxml_common::depth::parse_guarded;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// ECMA-376 §17.3.2.14 `<w:fitText>` as one cascaded run property.
 #[derive(Clone, PartialEq, Debug)]
@@ -570,18 +570,17 @@ impl StyleMap {
     /// the derived style overrides). Returns defaults if the ID is unknown.
     pub fn resolve_table_style(&self, style_id: &str) -> TableStyleDef {
         let mut chain: Vec<&TableStyleDef> = Vec::new();
-        let mut cur = self.table_styles.get(style_id);
-        let mut guard = 0;
-        while let Some(def) = cur {
-            chain.push(def);
-            guard += 1;
-            if guard > 16 {
+        let mut current = Some(style_id);
+        let mut visited = HashSet::new();
+        while let Some(current_id) = current {
+            if !visited.insert(current_id) {
                 break;
             }
-            cur = def
-                .based_on
-                .as_deref()
-                .and_then(|b| self.table_styles.get(b));
+            let Some(def) = self.table_styles.get(current_id) else {
+                break;
+            };
+            chain.push(def);
+            current = def.based_on.as_deref();
         }
         // Merge from base (end of chain) to derived (front).
         let mut out = TableStyleDef::default();
@@ -755,10 +754,26 @@ impl StyleMap {
     }
 
     fn apply_style_chain(&self, id: &str, merged_para: &mut ParaFmt, merged_run: &mut RunFmt) {
-        if let Some(def) = self.styles.get(id) {
-            if let Some(base) = def.based_on.clone() {
-                self.apply_style_chain(&base, merged_para, merged_run);
+        let mut chain = Vec::new();
+        let mut visited = HashSet::new();
+        let mut current = Some(id);
+        while let Some(style_id) = current {
+            if !visited.insert(style_id) {
+                break;
             }
+            let Some(def) = self.styles.get(style_id) else {
+                break;
+            };
+            chain.push(def);
+            current = def.based_on.as_deref();
+        }
+
+        // ECMA-376 Part 1 §17.7.4.3 defines the parent chain. MS-OI29500
+        // §2.1.233 requires Word-authored chains not to contain circular
+        // references. A malformed cycle is therefore terminated at the edge
+        // that revisits a style; every unique style already found still
+        // participates once, from the base-most entry to the requested style.
+        for def in chain.into_iter().rev() {
             apply_para(merged_para, &def.para);
             apply_run(merged_run, &def.run);
             // pPr/rPr (paragraph mark run properties) also apply to runs
@@ -813,7 +828,8 @@ impl StyleMap {
     /// malformed `basedOn` cycle terminates.
     fn effective_num_id(&self, id: &str) -> Option<u32> {
         let mut cur = id;
-        for _ in 0..=self.styles.len() {
+        let mut visited = HashSet::new();
+        while visited.insert(cur) {
             let def = self.styles.get(cur)?;
             if def.para.num_id.is_some() {
                 return def.para.num_id;
@@ -2634,6 +2650,43 @@ mod tests {
             map.styles.is_empty(),
             "an over-deep styles.xml must be rejected, yielding no styles"
         );
+    }
+
+    #[test]
+    fn circular_based_on_chain_terminates_and_applies_each_style_once() {
+        // ECMA-376 Part 1 §17.7.4.3 defines style inheritance, while
+        // MS-OI29500 §2.1.233 says Word requires the based-on chain not to be
+        // circular. Invalid input must still degrade without overflowing the
+        // WASM stack. The edge that returns Base to Derived is ignored.
+        let xml = format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:styleId="Base">
+                    <w:basedOn w:val="Derived"/>
+                    <w:pPr><w:spacing w:after="120"/></w:pPr>
+                </w:style>
+                <w:style w:type="paragraph" w:styleId="Derived">
+                    <w:basedOn w:val="Base"/>
+                    <w:rPr><w:b/></w:rPr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS,
+        );
+
+        let (paragraph, run) = StyleMap::parse(&xml).resolve_para(Some("Derived"), None);
+        assert_eq!(paragraph.space_after, Some(6.0));
+        assert_eq!(run.bold, Some(true));
+
+        let self_referencing = format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:styleId="Normal">
+                    <w:basedOn w:val="Normal"/>
+                    <w:rPr><w:sz w:val="20"/></w:rPr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS,
+        );
+        let (_, run) = StyleMap::parse(&self_referencing).resolve_para(Some("Normal"), None);
+        assert_eq!(run.font_size, Some(10.0));
     }
 
     #[test]
