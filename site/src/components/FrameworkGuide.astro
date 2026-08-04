@@ -39,10 +39,7 @@ const structuredData = JSON.stringify({
             A portable {guide.name} integration for displaying DOCX, XLSX, and PPTX files with
             <code>@silurus/ooxml</code>. Choose a local file and render it without uploading it.
           </p>
-          <div class="guide-actions">
-            <span class="install-command">{installCommand}</span>
-            <a class="btn btn-primary" href={guide.stackBlitzUrl}>Open live {guide.name} project ↗</a>
-          </div>
+          <span class="install-command">{installCommand}</span>
         </div>
         <dl class="guide-facts">
           <div><dt>Formats</dt><dd>DOCX · XLSX · PPTX</dd></div>
@@ -86,8 +83,7 @@ const structuredData = JSON.stringify({
   .guide-copy h1 em { color: var(--hero-text); font-style: normal; background: linear-gradient(transparent 72%, var(--signal) 72%, var(--signal) 90%, transparent 90%); }
   .guide-lead { max-width: 68ch; margin: 36px 0 0; color: var(--hero-muted); font-size: 17px; }
   .guide-lead code { color: var(--hero-text); font: .92em var(--mono); }
-  .guide-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 22px; margin-top: 32px; }
-  .install-command { padding: 11px 14px; border: 1px solid var(--hero-line); font: 12px var(--mono); }
+  .install-command { display: inline-flex; margin-top: 32px; padding: 11px 14px; border: 1px solid var(--hero-line); font: 12px var(--mono); }
   .guide-facts { grid-column: 10 / 13; margin: 58px 0 0; border-top: 1px solid var(--hero-line); }
   .guide-facts div { padding: 15px 0; border-bottom: 1px solid var(--hero-line); }
   .guide-facts dt { color: var(--hero-faint); font: 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; }

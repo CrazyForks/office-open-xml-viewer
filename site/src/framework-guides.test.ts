@@ -133,6 +133,7 @@ describe('framework integration guides', () => {
     expect(guide).not.toContain('<h2>Component</h2>');
     expect(guide).not.toContain('Step 1');
     expect(guide).not.toContain('Step 2');
+    expect(guide).not.toContain('Open live');
     expect(stackBlitz).toContain('<iframe');
     for (const framework of frameworkGuides) {
       expect(framework.stackBlitzEmbedUrl).toContain('stackblitz.com/github/');
