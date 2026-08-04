@@ -35,6 +35,14 @@ describe('framework integration guides', () => {
     expect(index).toContain('React, Vue, Svelte, and Solid');
   });
 
+  it.each(['docx', 'xlsx', 'pptx'])('keeps %s framework guidance on the dedicated pages', (format) => {
+    const formatPage = readFileSync(new URL(`pages/${format}.astro`, siteRoot), 'utf8');
+
+    expect(formatPage).not.toContain('FrameworkSection');
+    expect(formatPage).not.toContain('In your framework');
+    expect(existsSync(new URL('components/FrameworkSection.astro', siteRoot))).toBe(false);
+  });
+
   it('keeps Storybook as a development tool rather than a public-site destination', () => {
     const publicNavigation = [
       'components/Nav.astro',
@@ -142,13 +150,4 @@ describe('framework integration guides', () => {
     }
   });
 
-  it('documents and performs DOCX teardown in the existing snippets', () => {
-    const snippets = readFileSync(new URL('lib/demo-snippets.ts', siteRoot), 'utf8');
-    expect(snippets).toContain("const fwDocx: FwCfg = { Viewer: 'DocxViewer'");
-    expect(snippets).toContain('return () => viewer.destroy();');
-    expect(snippets).toContain('onBeforeUnmount(() => viewer?.destroy());');
-    expect(snippets).not.toMatch(/\bvoid\s+viewer\.load/);
-    expect(snippets).not.toContain('destroy: false');
-    expect(snippets).not.toContain('docx renders into the canvas you own and needs no teardown');
-  });
 });
