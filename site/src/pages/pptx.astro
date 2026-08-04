@@ -1,7 +1,6 @@
 ---
 import FormatPage from '../layouts/FormatPage.astro';
 import DemoBlock from '../components/DemoBlock.astro';
-import FrameworkSection from '../components/FrameworkSection.astro';
 import ApiReference from '../components/ApiReference.astro';
 import { pptxSnippets } from '../lib/demo-snippets';
 ---
@@ -31,6 +30,5 @@ import { pptxSnippets } from '../lib/demo-snippets';
     description="Combine both: a PptxPresentation for the thumbnail rail and a PptxViewer for the detail pane. Click a thumbnail to jump the preview with goToSlide()."
     code={pptxSnippets.masterdetail}
   />
-  <FrameworkSection format="pptx" />
   <ApiReference format="pptx" />
 </FormatPage>

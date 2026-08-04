@@ -1,7 +1,6 @@
 ---
 import FormatPage from '../layouts/FormatPage.astro';
 import DemoBlock from '../components/DemoBlock.astro';
-import FrameworkSection from '../components/FrameworkSection.astro';
 import ApiReference from '../components/ApiReference.astro';
 import { xlsxSheetSnippet } from '../lib/demo-snippets';
 ---
@@ -13,6 +12,5 @@ import { xlsxSheetSnippet } from '../lib/demo-snippets';
     description="Unlike slides and pages, a spreadsheet is one continuous grid — so XlsxViewer owns its own canvas, sheet-tab bar and zoom slider. Switch sheets along the bottom, click-drag to select a range, press Ctrl/Cmd+C to copy it as TSV, zoom with the slider or Ctrl/Cmd+wheel · trackpad pinch (10–400%), and drag a column/row header border to resize it. Resizing and zooming are view-only — they change what you see, never the loaded file."
     code={xlsxSheetSnippet}
   />
-  <FrameworkSection format="xlsx" />
   <ApiReference format="xlsx" />
 </FormatPage>

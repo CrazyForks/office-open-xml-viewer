@@ -1,9 +1,8 @@
 ---
 interface Props {
-  active?: 'pptx' | 'docx' | 'xlsx' | 'announcements';
+  active?: 'pptx' | 'docx' | 'xlsx' | 'announcements' | 'frameworks';
 }
 const { active } = Astro.props;
-const storybook = `${import.meta.env.BASE_URL}storybook/`.replace(/([^:])\/\/+/g, '$1/');
 ---
 <nav class="nav">
   <div class="wrap nav-inner">
@@ -16,7 +15,7 @@ const storybook = `${import.meta.env.BASE_URL}storybook/`.replace(/([^:])\/\/+/g
       <a href="/xlsx" class:list={[{ 'nav-on': active === 'xlsx' }]}>XLSX</a>
       <a href="/pptx" class:list={[{ 'nav-on': active === 'pptx' }]}>PPTX</a>
       <a href="/try">Try yours</a>
-      <a class="nav-ext" href={storybook}>Storybook</a>
+      <a href="/frameworks" class:list={[{ 'nav-on': active === 'frameworks' }]}>Frameworks</a>
       <button class="theme-toggle" type="button" data-theme-toggle aria-label="Toggle color theme">
         <span class="theme-glyph" aria-hidden="true"></span>
         <span class="theme-label" aria-hidden="true"></span>

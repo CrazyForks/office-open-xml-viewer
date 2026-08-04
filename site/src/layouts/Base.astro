@@ -1,7 +1,12 @@
 ---
 import '../styles/global.css';
-const { title = 'Office Open XML Viewer', description = 'Browser-based OOXML viewer (docx / xlsx / pptx) — Rust/WASM parser + Canvas renderer.' } = Astro.props;
+const {
+  title = 'Office Open XML Viewer',
+  description = 'Browser-based OOXML viewer (docx / xlsx / pptx) — Rust/WASM parser + Canvas renderer.',
+  canonicalPath,
+} = Astro.props;
 const base = import.meta.env.BASE_URL;
+const canonicalUrl = canonicalPath ? new URL(canonicalPath, 'https://ooxml.silurus.dev').href : undefined;
 ---
 <!doctype html>
 <html lang="en">
@@ -10,11 +15,14 @@ const base = import.meta.env.BASE_URL;
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
     <meta name="description" content={description} />
+    {canonicalUrl && <link rel="canonical" href={canonicalUrl} />}
     <link rel="icon" type="image/png" href={`${base}icon.png`.replace(/([^:])\/\/+/g, '$1/')} />
     <link rel="apple-touch-icon" href={`${base}icon.png`.replace(/([^:])\/\/+/g, '$1/')} />
     <meta name="theme-color" content="#edf2f7" />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    {canonicalUrl && <meta property="og:url" content={canonicalUrl} />}
     <meta property="og:image" content={`${base}icon.png`.replace(/([^:])\/\/+/g, '$1/')} />
     <meta name="twitter:card" content="summary" />
     <script is:inline>
