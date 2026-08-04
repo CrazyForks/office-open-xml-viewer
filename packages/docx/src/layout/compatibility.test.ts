@@ -63,6 +63,7 @@ import {
   wordFarEastSingleLinePx,
   wordFirstJustifiedContentSegment,
   wordGridAtLeastLineHeightPx,
+  wordUseFeLayoutParagraphMarkGridAdvancePx,
   wordUseFeLayoutInheritedGridHeightPx,
   wordCandidateFitWidthPx,
   wordJustifiedCandidateFitAllowancePx,
@@ -565,6 +566,27 @@ describe('layout compatibility inventory', () => {
     expect(wordPageLevelAnchorY(null, false)).toBe(true);
     expect(wordPageLevelAnchorY(undefined, true)).toBe(false);
     expect(wordGridAtLeastLineHeightPx(28, 18, 18)).toBe(28);
+    const markGridAdvance = (
+      lineSpacing: Parameters<typeof wordUseFeLayoutParagraphMarkGridAdvancePx>[0]['lineSpacing'],
+      gridAllocationActive = true,
+      scale = 1,
+    ): number => wordUseFeLayoutParagraphMarkGridAdvancePx({
+      ordinaryAdvancePx: 16,
+      allocatedGridAdvancePx: 30,
+      atLeastZeroAdvancePx: 18,
+      lineSpacing,
+      gridAllocationActive,
+      scale,
+    });
+    expect(markGridAdvance(null)).toBe(30);
+    expect(markGridAdvance({ rule: 'atLeast', value: 18, explicit: true })).toBe(30);
+    expect(markGridAdvance({ rule: 'atLeast', value: 0, explicit: false })).toBe(18);
+    expect(markGridAdvance({ rule: 'atLeast', value: -1, explicit: true })).toBe(1);
+    expect(markGridAdvance({ rule: 'atLeast', value: -18, explicit: true })).toBe(18);
+    expect(markGridAdvance({ rule: 'atLeast', value: -1, explicit: true }, true, 2)).toBe(2);
+    expect(markGridAdvance({ rule: 'atLeast', value: 0, explicit: true })).toBe(18);
+    expect(markGridAdvance({ rule: 'exact', value: 18, explicit: true })).toBe(16);
+    expect(markGridAdvance({ rule: 'atLeast', value: -1, explicit: true }, false)).toBe(16);
     expect(wordDegenerateLineSpacingIsSingle('exact', 0)).toBe(true);
     expect(wordDegenerateLineSpacingIsSingle('atLeast', 0)).toBe(false);
     expect(wordAutoMultipleCenterBoxPx(true, false, 10, 12, 24)).toBe(12);
