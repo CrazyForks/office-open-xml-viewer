@@ -8619,7 +8619,7 @@ fn parse_wsp_shape(
         .find(|n| n.is_element() && n.tag_name().name() == "style");
 
     let fill = match parse_shape_fill(sp_pr, theme, media_map) {
-        FillSpec::Explicit(f) => Some(f),
+        FillSpec::Explicit(f) => Some(*f),
         FillSpec::NoFill => None,
         FillSpec::Absent => style_node
             .and_then(|st| {
@@ -10694,7 +10694,7 @@ fn parse_object_ole_image(
 /// the theme gradient referenced by fillRef, which is wrong.
 enum FillSpec {
     /// A direct solidFill/gradFill was present and resolved.
-    Explicit(ShapeFill),
+    Explicit(Box<ShapeFill>),
     /// An explicit `<a:noFill/>` — the shape is intentionally unfilled.
     NoFill,
     /// No direct fill element at all — defer to wps:style/fillRef.
@@ -10713,7 +10713,7 @@ fn parse_shape_fill(
         match child.tag_name().name() {
             "solidFill" => {
                 return match resolve_color_element(child, theme) {
-                    Some(c) => FillSpec::Explicit(ShapeFill::Solid { color: c }),
+                    Some(c) => FillSpec::Explicit(Box::new(ShapeFill::Solid { color: c })),
                     // A solidFill whose color failed to resolve is still an
                     // explicit, direct fill declaration — do not fall back to
                     // the style reference.
@@ -10722,7 +10722,7 @@ fn parse_shape_fill(
             }
             "gradFill" => {
                 return match parse_grad_fill(child, theme) {
-                    Some(f) => FillSpec::Explicit(f),
+                    Some(f) => FillSpec::Explicit(Box::new(f)),
                     None => FillSpec::NoFill,
                 };
             }
@@ -10745,7 +10745,8 @@ fn parse_shape_fill(
                 let tile = child
                     .children()
                     .find(|n| n.is_element() && n.tag_name().name() == "tile")
-                    .map(parse_tile);
+                    .map(parse_tile)
+                    .map(Box::new);
                 let fill_rect = if tile.is_none() {
                     child
                         .children()
@@ -10754,7 +10755,7 @@ fn parse_shape_fill(
                 } else {
                     None
                 };
-                return FillSpec::Explicit(ShapeFill::Image {
+                return FillSpec::Explicit(Box::new(ShapeFill::Image {
                     image_path,
                     mime_type,
                     svg_image_path,
@@ -10763,7 +10764,7 @@ fn parse_shape_fill(
                     tile,
                     alpha: parse_blip_alpha(child),
                     duotone: parse_blip_duotone_docx(child, theme),
-                });
+                }));
             }
             "noFill" => return FillSpec::NoFill,
             _ => {}

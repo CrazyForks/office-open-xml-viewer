@@ -1743,7 +1743,7 @@ pub enum ShapeFill {
         #[serde(skip_serializing_if = "Option::is_none")]
         fill_rect: Option<FillRect>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        tile: Option<TileInfo>,
+        tile: Option<Box<TileInfo>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         alpha: Option<f64>,
         #[serde(skip_serializing_if = "Option::is_none")]

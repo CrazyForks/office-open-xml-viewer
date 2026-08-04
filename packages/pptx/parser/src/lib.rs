@@ -4033,7 +4033,7 @@ mod tests {
                 let fr = fill_rect.expect("fillRect should be present");
                 assert!((fr.t - (-0.09)).abs() < 1e-9, "t={}", fr.t);
                 assert!((fr.b - (-0.09)).abs() < 1e-9, "b={}", fr.b);
-                assert!(is_zero_f64(&fr.l) && is_zero_f64(&fr.r));
+                assert!(fr.l.abs() < 1e-9 && fr.r.abs() < 1e-9);
                 assert!(tile.is_none(), "stretch fill must not carry tile");
                 assert!((alpha.expect("alpha") - 0.8).abs() < 1e-6);
             }

@@ -526,10 +526,6 @@ pub(crate) struct PictureElement {
     pub(crate) sp3d: Option<Sp3d>,
 }
 
-pub(crate) fn is_zero_f64(v: &f64) -> bool {
-    v.abs() < 1e-9
-}
-
 /// ECMA-376 §19.3.1.17/18 a:audioFile / a:videoFile and the
 /// p14:media extension (embed attribute).
 /// Represents a p:pic that acts as an audio/video placeholder.
