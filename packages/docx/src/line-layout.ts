@@ -1651,7 +1651,8 @@ export function paragraphMarkLineMetrics(
     eastAsian,
     gridCountSingle,
   );
-  const allocatedGridAdvancePx = useFeLayout && eastAsian && isGridLineRule(grid)
+  const gridAllocationActive = useFeLayout && eastAsian && isGridLineRule(grid);
+  const allocatedGridAdvancePx = gridAllocationActive
     ? lineBoxHeight(
         null,
         asc,
@@ -1664,12 +1665,31 @@ export function paragraphMarkLineMetrics(
         gridCountSingle,
       )
     : ordinaryAdvancePx;
+  // Candidate for the observed atLeast=0 compatibility branch. Compute it
+  // independently of the source's inheritance flag so the compatibility owner
+  // can select it without leaking the signed boundary into this producer.
+  const atLeastZeroAdvancePx = gridAllocationActive
+    ? lineBoxHeight(
+        { rule: 'atLeast', value: 0, explicit: true },
+        asc,
+        desc,
+        scale,
+        grid,
+        paraHasRuby,
+        intendedSingle,
+        eastAsian,
+        gridCountSingle,
+      )
+    : ordinaryAdvancePx;
   const advancePx = useFeLayout
-    ? wordUseFeLayoutParagraphMarkGridAdvancePx(
+    ? wordUseFeLayoutParagraphMarkGridAdvancePx({
         ordinaryAdvancePx,
         allocatedGridAdvancePx,
-        effectiveLineSpacing?.rule === 'exact',
-      )
+        atLeastZeroAdvancePx,
+        lineSpacing: effectiveLineSpacing,
+        gridAllocationActive,
+        scale,
+      })
     : ordinaryAdvancePx;
   return { advancePx, ascentPx: asc, descentPx: desc };
 }

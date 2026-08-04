@@ -1,4 +1,5 @@
 import { defineCompatibilityRule } from './compatibility.js';
+import type { LineSpacing } from '../types.js';
 
 export const WORD_EAST_ASIAN_GRID_LINE_ALLOCATION = defineCompatibilityRule({
   id: 'word-east-asian-grid-line-allocation',
@@ -30,19 +31,40 @@ export const WORD_USE_FE_LAYOUT_EMPTY_MARK_GRID_ALLOCATION = defineCompatibility
     version: '16.111.1',
     platform: 'macOS 26.5.2',
   },
-  description: 'With useFELayout enabled, a content-less paragraph mark participates in Far East whole-cell document-grid allocation even when the document contains no literal East Asian text. Its face-specific Far East design height governs the cell count; exact spacing and snapToGrid=false remain the document-grid overrides named by ECMA-376 §17.6.5.',
+  description: 'With useFELayout enabled, a content-less paragraph mark participates in Far East whole-cell document-grid allocation even when the document contains no literal East Asian text. Its face-specific Far East design height governs the cell count; exact spacing and snapToGrid=false remain the document-grid overrides named by ECMA-376 §17.6.5. Observed Word output gives signed atLeast spacing a discontinuous boundary on an active grid: negative values use their absolute magnitude as the mark advance, zero keeps the ordinary atLeast-zero advance regardless of inheritance source, and positive values retain whole-cell allocation.',
 });
 
-/** Compatibility projection governed by
- * {@link WORD_USE_FE_LAYOUT_EMPTY_MARK_GRID_ALLOCATION}. The caller supplies
- * the ordinary line-spacing result and the mark's whole-cell grid allocation;
- * §17.6.5 makes exact spacing the sole line-spacing override. */
+/** Compatibility projection governed by the useFELayout empty-mark allocation
+ * and {@link WORD_GRID_AT_LEAST_TALL_LINE_UNSNAPPED}. The caller supplies the
+ * ordinary line-spacing result and the mark's whole-cell grid allocation.
+ * Exact spacing is the normative §17.6.5 override. Observed Word output gives
+ * signed atLeast values an empty-mark-specific negative/zero/positive boundary. */
 export function wordUseFeLayoutParagraphMarkGridAdvancePx(
-  ordinaryAdvancePx: number,
-  allocatedGridAdvancePx: number,
-  exactSpacing: boolean,
+  input: Readonly<{
+    ordinaryAdvancePx: number;
+    allocatedGridAdvancePx: number;
+    atLeastZeroAdvancePx: number;
+    lineSpacing: LineSpacing | null;
+    gridAllocationActive: boolean;
+    scale: number;
+  }>,
 ): number {
-  return exactSpacing
+  const {
+    ordinaryAdvancePx,
+    allocatedGridAdvancePx,
+    atLeastZeroAdvancePx,
+    lineSpacing,
+    gridAllocationActive,
+    scale,
+  } = input;
+  if (!gridAllocationActive) return ordinaryAdvancePx;
+  if (lineSpacing?.rule === 'atLeast' && lineSpacing.value < 0) {
+    return Math.abs(lineSpacing.value) * scale;
+  }
+  if (lineSpacing?.rule === 'atLeast' && lineSpacing.value === 0) {
+    return atLeastZeroAdvancePx;
+  }
+  return lineSpacing?.rule === 'exact'
     ? ordinaryAdvancePx
     : Math.max(ordinaryAdvancePx, allocatedGridAdvancePx);
 }
