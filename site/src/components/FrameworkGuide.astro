@@ -1,0 +1,194 @@
+---
+import Base from '../layouts/Base.astro';
+import Nav from './Nav.astro';
+import CodeTabs from './CodeTabs.astro';
+import LiveShowcase from './LiveShowcase.astro';
+import {
+  frameworkGuides,
+  getFrameworkGuide,
+  sharedViewerCode,
+  type FrameworkId,
+} from '../lib/framework-guides';
+
+interface Props {
+  framework: FrameworkId;
+}
+
+const { framework } = Astro.props;
+const guide = getFrameworkGuide(framework);
+const installCommand = `npm install @silurus/ooxml`;
+const canonicalPath = `/frameworks/${guide.id}`;
+const structuredData = JSON.stringify({
+  '@context': 'https://schema.org',
+  '@type': 'TechArticle',
+  headline: guide.title,
+  description: guide.description,
+  url: `https://ooxml.silurus.dev${canonicalPath}`,
+  proficiencyLevel: 'Beginner',
+  dependencies: `${guide.name}, TypeScript, @silurus/ooxml`,
+});
+---
+<Base title={guide.title} description={guide.description} canonicalPath={canonicalPath}>
+  <Nav active="frameworks" />
+
+  <main>
+    <header class="guide-hero">
+      <div class="wrap guide-hero-grid">
+        <div class="guide-copy">
+          <p class="eyebrow">{guide.name} + TypeScript guide</p>
+          <h1>Render Office files in the browser with <em>{guide.name}.</em></h1>
+          <p class="guide-lead">
+            A portable {guide.name} integration for displaying DOCX, XLSX, and PPTX files with
+            <code>@silurus/ooxml</code>. It keeps documents in the browser and handles loading,
+            stale async work, viewer controls, and teardown.
+          </p>
+          <div class="guide-actions">
+            <span class="install-command">{installCommand}</span>
+            <a class="btn btn-primary" href={guide.stackBlitzUrl}>Open live {guide.name} project ↗</a>
+          </div>
+        </div>
+        <dl class="guide-facts">
+          <div><dt>Formats</dt><dd>DOCX · XLSX · PPTX</dd></div>
+          <div><dt>Language</dt><dd>TypeScript</dd></div>
+          <div><dt>Integration</dt><dd>{guide.integrationName}</dd></div>
+          <div><dt>Rendering</dt><dd>Canvas + WebAssembly</dd></div>
+        </dl>
+      </div>
+    </header>
+
+    <section class="section approach-section">
+      <div class="wrap">
+        <div class="section-intro">
+          <p class="eyebrow">Designed for {guide.name}</p>
+          <h2 class="section-title">A module you can keep.</h2>
+          <p class="section-lead">{guide.integrationSummary}</p>
+        </div>
+        <div class="approach-grid">
+          <article><span>01</span><h3>One mount boundary</h3><p>The component owns one host element. DOCX and PPTX receive an internal canvas; XLSX receives a container.</p></article>
+          <article><span>02</span><h3>Safe async replacement</h3><p>A new source or format releases the previous viewer, and a late promise cannot revive an unmounted instance.</p></article>
+          <article><span>03</span><h3>Framework lifecycle</h3><p>{guide.lifecycle}</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section code-section">
+      <div class="wrap code-layout">
+        <div class="code-intro">
+          <p class="eyebrow">Step 1</p>
+          <h2>Copy the {guide.name} integration.</h2>
+          <p>This is the actual module used by the runnable example—not a shortened documentation-only snippet.</p>
+        </div>
+        <CodeTabs filename={guide.adapterFilename} tabs={[{
+          id: 'integration',
+          label: guide.integrationName,
+          lang: guide.adapterLanguage,
+          code: guide.adapterCode,
+        }]} />
+      </div>
+    </section>
+
+    <section class="section usage-section">
+      <div class="wrap code-layout">
+        <div class="code-intro">
+          <p class="eyebrow">Step 2</p>
+          <h2>Use it in a component.</h2>
+          <p>The example adds loading and error status plus zoom, fit, and reload controls without turning the integration into a UI kit.</p>
+        </div>
+        <CodeTabs filename={guide.appFilename} tabs={[{
+          id: 'component',
+          label: 'Component',
+          lang: guide.appLanguage,
+          code: guide.appCode,
+        }]} />
+      </div>
+    </section>
+
+    <section class="section live-section">
+      <div class="wrap">
+        <div class="section-intro">
+          <p class="eyebrow">Live renderer</p>
+          <h2 class="section-title">See all three formats.</h2>
+          <p class="section-lead">This preview runs the same browser-only viewer APIs wrapped by the {guide.name} module. Switch between DOCX, XLSX, and PPTX.</p>
+        </div>
+        <LiveShowcase />
+      </div>
+    </section>
+
+    <section class="section shared-section">
+      <div class="wrap shared-layout">
+        <div>
+          <p class="eyebrow">Shared, typed loader</p>
+          <h2 class="section-title">Keep format loading in one place.</h2>
+          <p class="section-lead">The small framework-independent module dynamically imports only the selected format entry point and preserves each viewer’s native option types.</p>
+        </div>
+        <details>
+          <summary>View office-viewer.ts</summary>
+          <CodeTabs filename="office-viewer.ts" tabs={[{ id: 'shared', label: 'Shared module', lang: 'ts', code: sharedViewerCode }]} />
+        </details>
+      </div>
+    </section>
+
+    <nav class="framework-rail wrap" aria-label="Framework integration guides">
+      <span>Other framework guides</span>
+      {frameworkGuides.filter((candidate) => candidate.id !== guide.id).map((candidate) => (
+        <a href={`/frameworks/${candidate.id}`}>{candidate.name} ↗</a>
+      ))}
+    </nav>
+  </main>
+
+  <footer class="guide-footer">
+    <div class="wrap">@silurus/ooxml · Browser-based DOCX, XLSX, and PPTX rendering</div>
+  </footer>
+  <script type="application/ld+json" set:html={structuredData}></script>
+</Base>
+
+<style>
+  .guide-hero { padding: 88px 0 92px; background: var(--hero-bg); color: var(--hero-text); border-bottom: 1px solid var(--hero-line); }
+  .guide-hero-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 18px; }
+  .guide-copy { grid-column: 1 / 9; }
+  .guide-copy h1 { max-width: 11ch; margin-top: 24px; font-size: clamp(48px, 7vw, 84px); letter-spacing: -.055em; }
+  .guide-copy h1 em { color: var(--hero-text); font-style: normal; background: linear-gradient(transparent 72%, var(--signal) 72%, var(--signal) 90%, transparent 90%); }
+  .guide-lead { max-width: 68ch; margin: 36px 0 0; color: var(--hero-muted); font-size: 17px; }
+  .guide-lead code { color: var(--hero-text); font: .92em var(--mono); }
+  .guide-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 22px; margin-top: 32px; }
+  .install-command { padding: 11px 14px; border: 1px solid var(--hero-line); font: 12px var(--mono); }
+  .guide-facts { grid-column: 10 / 13; margin: 58px 0 0; border-top: 1px solid var(--hero-line); }
+  .guide-facts div { padding: 15px 0; border-bottom: 1px solid var(--hero-line); }
+  .guide-facts dt { color: var(--hero-faint); font: 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+  .guide-facts dd { margin: 5px 0 0; font-size: 14px; }
+  .section-intro { margin-bottom: 48px; }
+  .section-intro .section-title { max-width: none; }
+  .approach-grid { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--border-bright); }
+  .approach-grid article { min-height: 260px; padding: 20px 28px 24px 0; border-right: 1px solid var(--border); }
+  .approach-grid article + article { padding-left: 28px; }
+  .approach-grid article:last-child { border-right: 0; }
+  .approach-grid span { font: 11px var(--mono); color: var(--accent); }
+  .approach-grid h3 { margin-top: 58px; font-size: 23px; }
+  .approach-grid p, .code-intro p { color: var(--text-dim); font-size: 14px; }
+  .code-section { background: var(--surface-muted); }
+  .code-layout { display: grid; grid-template-columns: repeat(12, 1fr); gap: 18px; align-items: start; }
+  .code-intro { grid-column: 1 / 5; position: sticky; top: 90px; }
+  .code-intro h2 { margin: 18px 0; font-size: clamp(30px, 4vw, 46px); }
+  .code-layout > :global(.codetabs) { grid-column: 5 / 13; min-width: 0; }
+  .usage-section { border-bottom: 1px solid var(--border); }
+  .live-section { background: var(--showcase-bg); }
+  .shared-layout { display: grid; grid-template-columns: 4fr 8fr; gap: 42px; align-items: start; }
+  details { min-width: 0; }
+  summary { padding: 14px 0; border-top: 1px solid var(--border-bright); border-bottom: 1px solid var(--border); cursor: pointer; font: 13px var(--mono); }
+  details[open] summary { margin-bottom: 16px; }
+  .framework-rail { display: flex; align-items: center; gap: 22px; padding-top: 28px; padding-bottom: 28px; border-top: 1px solid var(--border); font: 12px var(--mono); }
+  .framework-rail span { margin-right: auto; color: var(--text-faint); text-transform: uppercase; letter-spacing: .08em; }
+  .framework-rail a { border-bottom: 1px solid var(--signal); }
+  .guide-footer { padding: 28px 0; background: var(--hero-bg); color: var(--hero-muted); font: 11px var(--mono); }
+  @media (max-width: 900px) {
+    .guide-copy { grid-column: 1 / 10; }.guide-facts { grid-column: 10 / 13; }
+    .code-intro { grid-column: 1 / 13; position: static; }.code-layout > :global(.codetabs) { grid-column: 1 / 13; }
+    .shared-layout { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 680px) {
+    .guide-hero { padding: 58px 0 64px; }.guide-copy, .guide-facts { grid-column: 1 / 13; }.guide-facts { margin-top: 20px; }
+    .guide-copy h1 { font-size: clamp(42px, 13vw, 58px); }
+    .approach-grid { grid-template-columns: 1fr; }.approach-grid article { min-height: auto; padding: 22px 0 !important; border-right: 0; border-bottom: 1px solid var(--border); }
+    .approach-grid h3 { margin-top: 24px; }.framework-rail { align-items: flex-start; flex-direction: column; gap: 12px; }.framework-rail span { margin-right: 0; }
+  }
+</style>

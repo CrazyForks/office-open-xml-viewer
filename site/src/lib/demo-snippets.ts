@@ -96,8 +96,8 @@ const viewer = new XlsxViewer(container, { showZoomSlider: true });
 await viewer.load('/sample.xlsx');`;
 
 // ── Framework integration (per format) ─────────────────────────────
-// docx/pptx take a <canvas>; xlsx takes a container <div>. pptx & xlsx expose
-// destroy(); docx renders into the canvas you own and needs no teardown.
+// docx/pptx take a <canvas>; xlsx takes a container <div>. Every viewer owns
+// resources and exposes idempotent destroy() for framework unmount cleanup.
 interface FwCfg {
   Viewer: string;
   sub: 'docx' | 'xlsx' | 'pptx';
@@ -105,12 +105,11 @@ interface FwCfg {
   tag: 'canvas' | 'div';
   RefType: 'HTMLCanvasElement' | 'HTMLDivElement';
   opts: string;
-  destroy: boolean;
 }
 
-const fwPptx: FwCfg = { Viewer: 'PptxViewer', sub: 'pptx', el: 'canvas', tag: 'canvas', RefType: 'HTMLCanvasElement', opts: '{ width: 960 }', destroy: true };
-const fwDocx: FwCfg = { Viewer: 'DocxViewer', sub: 'docx', el: 'canvas', tag: 'canvas', RefType: 'HTMLCanvasElement', opts: '{ width: 820 }', destroy: false };
-const fwXlsx: FwCfg = { Viewer: 'XlsxViewer', sub: 'xlsx', el: 'container', tag: 'div', RefType: 'HTMLDivElement', opts: '{ showZoomSlider: true }', destroy: true };
+const fwPptx: FwCfg = { Viewer: 'PptxViewer', sub: 'pptx', el: 'canvas', tag: 'canvas', RefType: 'HTMLCanvasElement', opts: '{ width: 960 }' };
+const fwDocx: FwCfg = { Viewer: 'DocxViewer', sub: 'docx', el: 'canvas', tag: 'canvas', RefType: 'HTMLCanvasElement', opts: '{ width: 820 }' };
+const fwXlsx: FwCfg = { Viewer: 'XlsxViewer', sub: 'xlsx', el: 'container', tag: 'div', RefType: 'HTMLDivElement', opts: '{ showZoomSlider: true }' };
 
 export interface FrameworkSnippets {
   react: string;
@@ -120,14 +119,6 @@ export interface FrameworkSnippets {
 }
 
 function buildFw(c: FwCfg): FrameworkSnippets {
-  const reactCleanup = c.destroy
-    ? '    return () => viewer.destroy();'
-    : `    // ${c.Viewer} renders into the ${c.el} you own — nothing to tear down.`;
-  const svelteCleanup = c.destroy ? '\n    return () => viewer.destroy();' : '';
-  const vueUnmount = c.destroy
-    ? `onBeforeUnmount(() => viewer?.destroy());`
-    : `// ${c.Viewer} needs no explicit teardown.`;
-
   return {
     react: `import { useEffect, useRef } from 'react';
 import { ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
@@ -140,14 +131,14 @@ export function Viewer({ src }: { src: string }) {
     if (!${c.el}) return;
     const viewer = new ${c.Viewer}(${c.el}, ${c.opts});
     void viewer.load(src);
-${reactCleanup}
+    return () => viewer.destroy();
   }, [src]);
 
   return <${c.tag} ref={ref} />;
 }`,
 
     vue: `<script setup lang="ts">
-import { onMounted${c.destroy ? ', onBeforeUnmount' : ''}, ref } from 'vue';
+import { onMounted, onBeforeUnmount, ref } from 'vue';
 import { ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
 
 const props = defineProps<{ src: string }>();
@@ -158,7 +149,7 @@ onMounted(() => {
   viewer = new ${c.Viewer}(${c.el}.value as ${c.RefType}, ${c.opts});
   void viewer.load(props.src);
 });
-${vueUnmount}
+onBeforeUnmount(() => viewer?.destroy());
 <\/script>
 
 <template>
@@ -174,7 +165,8 @@ ${vueUnmount}
 
   onMount(() => {
     const viewer = new ${c.Viewer}(${c.el}, ${c.opts});
-    void viewer.load(src);${svelteCleanup}
+    void viewer.load(src);
+    return () => viewer.destroy();
   });
 <\/script>
 

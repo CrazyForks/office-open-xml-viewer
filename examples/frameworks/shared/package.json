@@ -1,0 +1,12 @@
+{
+  "name": "@ooxml-framework-examples/shared",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/office-viewer.ts",
+    "./example.css": "./src/example.css"
+  },
+  "dependencies": {
+    "@silurus/ooxml": "^0.75.3"
+  }
+}

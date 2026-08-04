@@ -21,6 +21,13 @@ const tabs = [
     call <code>load()</code>{format === 'docx' ? '.' : <>, and call <code>destroy()</code> on unmount.</>}
   </p>
   <CodeTabs tabs={tabs} />
+  <p class="fw-guides">
+    Reusable TypeScript integrations:
+    <a href="/frameworks/react">React</a> ·
+    <a href="/frameworks/vue">Vue</a> ·
+    <a href="/frameworks/svelte">Svelte</a> ·
+    <a href="/frameworks/solid">Solid</a>
+  </p>
 </section>
 
 <style>
@@ -32,4 +39,6 @@ const tabs = [
   .demo-title { font-size: 24px; font-weight: 700; margin: 8px 0 8px; }
   .demo-desc { color: var(--text-dim); font-size: 16px; max-width: 70ch; margin: 0 0 22px; }
   .demo-desc code { font-family: var(--mono); font-size: 0.9em; color: var(--text); }
+  .fw-guides { margin: 16px 0 0; color: var(--text-dim); font-size: 13px; }
+  .fw-guides a { color: var(--accent); border-bottom: 1px solid currentColor; }
 </style>

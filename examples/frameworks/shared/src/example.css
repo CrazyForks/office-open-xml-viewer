@@ -1,0 +1,52 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  color: #172333;
+  background: #e8eef5;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+button { font: inherit; }
+
+.app {
+  width: min(1040px, 100%);
+  margin: 0 auto;
+  padding: 28px;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.toolbar button {
+  padding: 8px 12px;
+  border: 1px solid #aab8c8;
+  background: #fff;
+  color: inherit;
+  cursor: pointer;
+}
+
+.toolbar button:hover { border-color: #087e8f; }
+.status { margin-left: auto; font: 12px ui-monospace, monospace; }
+.error { color: #b42318; }
+
+.stage {
+  min-height: 480px;
+  padding: 24px;
+  overflow: auto;
+  display: grid;
+  place-items: start center;
+  background: #53606d;
+}
+
+.stage canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  background: #fff;
+  box-shadow: 0 8px 30px rgb(0 0 0 / 22%);
+}
