@@ -1110,7 +1110,7 @@ export interface TileInfo {
     sx: number;
     sy: number;
     flip: string;
-    algn: string;
+    algn?: string;
 }
 interface ZoomableViewer {
     getScale(): number;

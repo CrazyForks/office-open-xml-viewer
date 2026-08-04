@@ -775,6 +775,12 @@ export declare interface FieldRun {
     highlight?: string | null;
     emphasisMark?: EmphasisMark;
 }
+declare interface FillRect {
+    l?: number;
+    t?: number;
+    r?: number;
+    b?: number;
+}
 export declare interface FindMatch<Loc = unknown> {
     matchIndex: number;
     text: string;
@@ -1271,8 +1277,24 @@ declare type ShapeFill = {
     stops: GradientStop[];
     angle: number;
     gradType: string;
+} | {
+    fillType: 'image';
+    imagePath: string;
+    mimeType: string;
+    svgImagePath?: string;
+    srcRect?: {
+        l: number;
+        t: number;
+        r: number;
+        b: number;
+    };
+    fillRect?: FillRect;
+    tile?: TileInfo;
+    alpha?: number;
+    duotone?: Duotone;
 };
 export declare interface ShapeRun {
+    inline?: boolean;
     widthPt: number;
     heightPt: number;
     anchorXPt: number;
@@ -1392,6 +1414,14 @@ export declare interface TextPath {
     fontFamily?: string | null;
     bold?: boolean;
     italic?: boolean;
+}
+declare interface TileInfo {
+    tx: number;
+    ty: number;
+    sx: number;
+    sy: number;
+    flip: string;
+    algn?: string;
 }
 export declare type WireRenderPageOptions = Omit<RenderPageOptions, 'onTextRun'>;
 declare interface ZoomableViewer {
