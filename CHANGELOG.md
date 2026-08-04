@@ -4,6 +4,28 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.75.4 — 2026-08-04
+
+Patch. Improves Word DrawingML fidelity, safely handles malformed style
+inheritance, and adds runnable TypeScript integration guides.
+
+- **docx DrawingML:** preserve inline WordprocessingShape objects through
+  parsing, immutable layout, pagination, and paint; retain authored image fills
+  through the shared DrawingML fill model; and carry signed run positioning and
+  resolved page-field metrics without paint-time inference. (§§20.4.2.7–8,
+  20.1.8.14; #1146)
+- **docx styles:** detect circular `basedOn` inheritance by style ID and apply
+  every unique style once before terminating a malformed revisiting edge. Valid
+  paragraph, character, and table style chains remain unbounded by arbitrary
+  depth caps, while invalid input can no longer overflow the WASM stack.
+  (§17.7.4.3; MS-OI29500 §2.1.233; #1148)
+- **website / examples:** publish isolated TypeScript projects and independent,
+  search-oriented StackBlitz guides for React, Vue, Svelte, and Solid. The
+  public navigation now points to one framework chooser, redundant per-format
+  snippets and Storybook links are removed, DOCX teardown guidance uses the
+  current `destroy()` lifecycle, and npm discovery includes `office-viewer` and
+  `office` keywords. (#1146, #1147)
+
 ## 0.75.3 — 2026-08-04
 
 Patch. Restores Word-compatible DOCX pagination at signed `atLeast` spacing

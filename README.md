@@ -30,7 +30,7 @@ So I'm building this library with AI coding agents, spec-first, and keeping it f
 
 A browser-based viewer for Office Open XML documents that renders to an HTML Canvas element.
 The parsers are written in Rust and compiled to WebAssembly; the renderers use the Canvas 2D API.
-Each format also exposes a headless engine (`DocxDocument` / `XlsxWorkbook` / `PptxPresentation`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the `Examples` section in [the Storybook demo](https://ooxml.silurus.dev/storybook/).
+Each format also exposes a headless engine (`DocxDocument` / `XlsxWorkbook` / `PptxPresentation`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the [live framework examples](https://ooxml.silurus.dev/frameworks/) for runnable React, Vue, Svelte, and Solid projects.
 
 ## Project scope: read-only viewing
 
@@ -61,8 +61,9 @@ pnpm add @silurus/ooxml
 >   `new URL` asset references are not processed
 >   ([esbuild#795](https://github.com/evanw/esbuild/issues/795)). Copy the
 >   `.wasm` into your served output and point the viewer at it with the
->   `wasmUrl` load option — see the [Angular example](#framework-examples) for
->   the two-step setup.
+>   `wasmUrl` load option. For Angular CLI, copy the required
+>   `*_parser_bg.wasm` asset from `node_modules/@silurus/ooxml/dist` into the
+>   served output and pass its public URL to the viewer.
 >
 > `wasmUrl` also serves the parser WASM from a CDN or any path you control:
 >
@@ -394,256 +395,13 @@ All three formats follow the same shape: the worker parses the `.docx` / `.xlsx`
 
 ## Framework Examples
 
-<details>
-<summary><strong>React 19</strong></summary>
-
-```tsx
-// React 19.1 — Vite copies the parser .wasm asset automatically; no extra plugin needed.
-import { useEffect, useRef, useState } from 'react';
-import { PptxViewer } from '@silurus/ooxml/pptx';
-
-export function PptxViewerComponent({ src }: { src: string }) {
-  const canvasRef  = useRef<HTMLCanvasElement>(null);
-  const viewerRef  = useRef<PptxViewer | null>(null);
-  const [slide, setSlide] = useState({ current: 0, total: 0 });
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const viewer = new PptxViewer(canvas, {
-      onSlideChange: (i, total) => setSlide({ current: i, total }),
-    });
-    viewerRef.current = viewer;
-    viewer.load(src);
-  }, [src]);
-
-  return (
-    <div>
-      <canvas ref={canvasRef} style={{ width: 800 }} />
-      <button onClick={() => viewerRef.current?.prevSlide()}>‹ Prev</button>
-      <span> {slide.current + 1} / {slide.total} </span>
-      <button onClick={() => viewerRef.current?.nextSlide()}>Next ›</button>
-    </div>
-  );
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Vue 3.5</strong></summary>
-
-```vue
-<!-- Vue 3.5 — useTemplateRef is a 3.5+ feature -->
-<script setup lang="ts">
-import { useTemplateRef, onMounted, ref } from 'vue';
-import { PptxViewer } from '@silurus/ooxml/pptx';
-
-const props = defineProps<{ src: string }>();
-
-const canvas  = useTemplateRef<HTMLCanvasElement>('canvas');
-let viewer: PptxViewer | null = null;
-const current = ref(0);
-const total   = ref(0);
-
-onMounted(async () => {
-  viewer = new PptxViewer(canvas.value as HTMLCanvasElement, {
-    onSlideChange: (i, t) => { current.value = i; total.value = t; },
-  });
-  await viewer.load(props.src);
-});
-</script>
-
-<template>
-  <div>
-    <canvas ref="canvas" style="width: 800px" />
-    <button @click="viewer?.prevSlide()">‹ Prev</button>
-    <span> {{ current + 1 }} / {{ total }} </span>
-    <button @click="viewer?.nextSlide()">Next ›</button>
-  </div>
-</template>
-```
-
-</details>
-
-<details>
-<summary><strong>Angular 19</strong></summary>
-
-The Angular CLI's esbuild-based builder does not process the `new URL('…', import.meta.url)`
-asset reference the parsers use ([angular-cli#22388](https://github.com/angular/angular-cli/issues/22388)),
-so the `.wasm` never reaches the build output — and under `ng serve` the dependency
-optimizer additionally rewrites the reference into its own cache path. **Both steps
-below are required** (the asset copy alone fixes only production builds; `ng serve`
-still 404s without `wasmUrl`):
-
-```jsonc
-// angular.json — copy the parser WASM into the served root
-// (restart `ng serve` after editing this file)
-"architect": {
-  "build": {
-    "options": {
-      "assets": [
-        { "glob": "*_parser_bg.wasm", "input": "node_modules/@silurus/ooxml/dist", "output": "/" },
-        { "glob": "**/*", "input": "public" }
-      ]
-    }
-  }
-}
-```
-
-```typescript
-// Angular 19 — standalone component with signal-based state
-import {
-  Component, ElementRef, viewChild,
-  signal, AfterViewInit,
-} from '@angular/core';
-import { PptxViewer } from '@silurus/ooxml/pptx';
-
-@Component({
-  selector: 'app-pptx-viewer',
-  standalone: true,
-  template: `
-    <div>
-      <canvas #canvas style="width: 800px"></canvas>
-      <button (click)="prev()">‹ Prev</button>
-      <span> {{ current() + 1 }} / {{ total() }} </span>
-      <button (click)="next()">Next ›</button>
-    </div>
-  `,
-})
-export class PptxViewerComponent implements AfterViewInit {
-  canvasEl = viewChild.required<ElementRef<HTMLCanvasElement>>('canvas');
-  current = signal(0);
-  total   = signal(0);
-  private viewer?: PptxViewer;
-
-  ngAfterViewInit(): void {
-    this.viewer = new PptxViewer(this.canvasEl().nativeElement, {
-      wasmUrl: '/pptx_parser_bg.wasm',
-      onSlideChange: (i, t) => { this.current.set(i); this.total.set(t); },
-    });
-    this.viewer.load('/deck.pptx');
-  }
-
-  prev(): void { this.viewer?.prevSlide(); }
-  next(): void { this.viewer?.nextSlide(); }
-}
-```
-
-> The `*_parser_bg.wasm` glob copies all three parsers; narrow it to
-> `pptx_parser_bg.wasm` if you only use one format. If you deploy under a
-> non-root `base href`, adjust `wasmUrl` so it resolves under your base (a
-> relative `wasmUrl` is resolved against the document URL).
-
-</details>
-
-<details>
-<summary><strong>Svelte 5</strong></summary>
-
-```svelte
-<!-- Svelte 5 — runes syntax ($props, $state) -->
-<script lang="ts">
-  import { onMount } from 'svelte';
-  import { PptxViewer } from '@silurus/ooxml/pptx';
-
-  let { src }: { src: string } = $props();
-
-  let canvas: HTMLCanvasElement;
-  let viewer: PptxViewer;
-  let current = $state(0);
-  let total   = $state(0);
-
-  onMount(async () => {
-    viewer = new PptxViewer(canvas, {
-      onSlideChange: (i, t) => { current = i; total = t; },
-    });
-    await viewer.load(src);
-  });
-</script>
-
-<div>
-  <canvas bind:this={canvas} style="width: 800px"></canvas>
-  <button onclick={() => viewer?.prevSlide()}>‹ Prev</button>
-  <span> {current + 1} / {total} </span>
-  <button onclick={() => viewer?.nextSlide()}>Next ›</button>
-</div>
-```
-
-</details>
-
-<details>
-<summary><strong>SolidJS 1.9</strong></summary>
-
-```tsx
-// SolidJS 1.9
-import { createSignal, onMount, onCleanup } from 'solid-js';
-import { PptxViewer } from '@silurus/ooxml/pptx';
-
-export function PptxViewerComponent(props: { src: string }) {
-  let canvasEl!: HTMLCanvasElement;
-  let viewer: PptxViewer | undefined;
-  const [current, setCurrent] = createSignal(0);
-  const [total,   setTotal  ] = createSignal(0);
-
-  onMount(async () => {
-    viewer = new PptxViewer(canvasEl, {
-      onSlideChange: (i, t) => { setCurrent(i); setTotal(t); },
-    });
-    await viewer.load(props.src);
-  });
-
-  onCleanup(() => { /* viewer?.destroy?.() */ });
-
-  return (
-    <div>
-      <canvas ref={canvasEl} style={{ width: '800px' }} />
-      <button onClick={() => viewer?.prevSlide()}>‹ Prev</button>
-      <span> {current() + 1} / {total()} </span>
-      <button onClick={() => viewer?.nextSlide()}>Next ›</button>
-    </div>
-  );
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Qwik 2</strong></summary>
-
-```tsx
-// Qwik 2.0 — dynamic import to keep WASM out of SSR bundle
-import { component$, useSignal, useVisibleTask$ } from '@builder.io/qwik';
-import type { PptxViewer as PptxViewerType } from '@silurus/ooxml/pptx';
-
-export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
-  const canvasRef = useSignal<HTMLCanvasElement>();
-  const current = useSignal(0);
-  const total   = useSignal(0);
-  let viewer: PptxViewerType | undefined;
-
-  // useVisibleTask$ runs only in the browser, never during SSR
-  useVisibleTask$(async () => {
-    if (!canvasRef.value) return;
-    const { PptxViewer } = await import('@silurus/ooxml/pptx');
-    viewer = new PptxViewer(canvasRef.value, {
-      onSlideChange: (i, t) => { current.value = i; total.value = t; },
-    });
-    await viewer.load(src);
-  });
-
-  return (
-    <div>
-      <canvas ref={canvasRef} style={{ width: '800px' }} />
-      <button onClick$={() => viewer?.prevSlide()}>‹ Prev</button>
-      <span> {current.value + 1} / {total.value} </span>
-      <button onClick$={() => viewer?.nextSlide()}>Next ›</button>
-    </div>
-  );
-});
-```
-
-</details>
+Runnable TypeScript projects are available for
+[React](https://ooxml.silurus.dev/frameworks/react/),
+[Vue](https://ooxml.silurus.dev/frameworks/vue/),
+[Svelte](https://ooxml.silurus.dev/frameworks/svelte/), and
+[Solid](https://ooxml.silurus.dev/frameworks/solid/). Each guide embeds the
+complete StackBlitz project and supports selecting a local DOCX, XLSX, or PPTX
+file without uploading it.
 
 ---
 
@@ -689,7 +447,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Images (inline and anchored, with text wrap) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
-| | Text boxes / drawing shapes (`wps:txbx`, `a:prstGeom` — 186 preset geometries via the shared engine; connector arrow heads `headEnd` / `tailEnd` (§20.1.8.3) and `prstDash` dash patterns (§20.1.8.48)). Text-box paragraphs run through the **same line-layout engine as body text**, so kinsoku 行頭/行末禁則 (§17.15.1.58–60), UAX#9 bidi (`w:bidi`, §17.3.1.6), justification (§17.18.44) and tab stops (§17.3.1.37) all apply inside a box | ✅ |
+| | Text boxes / drawing shapes (inline and anchored `wps:wsp` / `wps:txbx`, including solid, gradient, and image fills; `a:prstGeom` — 186 preset geometries via the shared engine; connector arrow heads `headEnd` / `tailEnd` (§20.1.8.3) and `prstDash` dash patterns (§20.1.8.48)). Text-box paragraphs run through the **same line-layout engine as body text**, so kinsoku 行頭/行末禁則 (§17.15.1.58–60), UAX#9 bidi (`w:bidi`, §17.3.1.6), justification (§17.18.44) and tab stops (§17.3.1.37) all apply inside a box | ✅ |
 | | WMF **and EMF** metafile images (legacy vector, incl. inside text boxes) — rasterized via a built-in player: window→viewport mapping (MS-EMF map modes, world transform), pens/brushes, poly/rect/ellipse, text-out, path clipping, and embedded DIB blits | ✅ |
 | | OLE embedded objects (`w:object` — the baked VML `v:imagedata` preview is drawn; the embedded app is not run) | ✅ |
 | **Advanced** | Footnotes — reference markers + bottom-of-page bodies with separator rule, numbered (`w:footnoteReference` / `w:footnoteRef`, §17.11) | ✅ |
