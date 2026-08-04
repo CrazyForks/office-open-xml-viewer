@@ -243,6 +243,29 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
     expect(followingInkLeftPx).toBeGreaterThanOrEqual(closingInkRightPx);
   });
 
+  it('preserves authored run spacing instead of layering punctuation compression over it', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const authoredText = '独自文面の配置を確認します）。';
+    const model = {
+      ...doc([para([
+        textRun(authoredText, { charSpacing: 0.4 }),
+        textRun('次'),
+      ])], section()),
+      settings: {
+        characterSpacingControl: 'compressPunctuation',
+      },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    const authored = drawOf(fills, authoredText);
+    const following = drawOf(fills, '次');
+    expect(authored.letterSpacing).toBe('0.4px');
+    expect(fills.some(({ text }) => text === '）')).toBe(false);
+    expect(fills.some(({ text }) => text === '。')).toBe(false);
+    expect(following.x - authored.x).toBeCloseTo([...authoredText].length * (FONT_PX + 0.4), 5);
+  });
+
   it('does not collapse middle-punctuation advance into the following glyph', async () => {
     const { canvas, fills } = makeRecordingCanvas();
     const model = {

@@ -1269,7 +1269,7 @@ function paginateBodyPass(
         const selected = selectParagraphFragment(
           acquired.layout,
           cursor,
-          acquired.lineEndBoundaries,
+          acquired.fragmentation,
           location.availableBounds.heightPt + trailingMarkAdmissionAllowancePt,
           freshPageExtent(state),
           state.flow.pageHasContent,

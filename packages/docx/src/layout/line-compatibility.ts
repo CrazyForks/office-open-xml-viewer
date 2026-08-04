@@ -165,6 +165,18 @@ export const WORD_JAPANESE_PUNCTUATION_COMPRESSION_CELL = defineCompatibilityRul
   description: 'In the observed Japanese compatibility fixture, compressed full-width punctuation retains at least half of the ideographic cell measured through the selected font route. Tight adjacent glyph ink can require a larger retained extent to prevent collision. This is an Office-observed compression amount, not a normative interpretation of ST_CharacterSpacing.',
 });
 
+export const WORD_AUTHORED_CHARACTER_SPACING_PITCH_PRIORITY = defineCompatibilityRule({
+  id: 'word-authored-character-spacing-pitch-priority',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'authored-character-spacing-punctuation-pitch',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'When a run authors a positive w:spacing character pitch, Word preserves that expanded pitch instead of additionally applying the document-level punctuation whitespace compression. Omitted, zero, or overlapping run spacing leaves characterSpacingControl active.',
+});
+
 export const WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT = defineCompatibilityRule({
   id: 'word-ms-mincho-empty-east-asian-mark-height',
   evidence: {
@@ -193,6 +205,14 @@ export function wordJapanesePunctuationRetainedExtentPt(input: Readonly<{
       input.ideographicCellAdvancePt / 2,
     ),
   );
+}
+
+/** Compatibility projection governed by
+ * {@link WORD_AUTHORED_CHARACTER_SPACING_PITCH_PRIORITY}. */
+export function wordDocumentCharacterCompressionApplies(
+  authoredCharacterSpacingPt: number | undefined,
+): boolean {
+  return authoredCharacterSpacingPt === undefined || authoredCharacterSpacingPt <= 0;
 }
 
 const WORD_OVERFLOW_PUNCTUATION = {
@@ -307,6 +327,18 @@ export const WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB = defineCompatibilityRule
     reference: 'packages/docx/src/layout/numbering-marker.test.ts#keeps a suffix tab on the list stop coincident with the marker end',
   },
   description: 'For the tab synthesized by a numbering suffix, accept an authored numeric list tab coincident with the shaped marker end instead of advancing to the next automatic tab stop.',
+});
+
+export const WORD_NUMBERING_MARKER_PARAGRAPH_MARK_FALLBACK = defineCompatibilityRule({
+  id: 'word-numbering-marker-paragraph-mark-fallback',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'numbering-marker-paragraph-mark-formatting',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'When numbering-level rPr omits a marker formatting axis, Word takes that axis from the effective paragraph-mark rPr rather than a content run. A numbering-level concrete value or explicit auto remains authoritative, and body and text-box stories use the same cascade.',
 });
 
 /** Compatibility projection governed by {@link WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB}. */

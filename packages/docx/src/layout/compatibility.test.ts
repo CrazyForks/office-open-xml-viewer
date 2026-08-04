@@ -36,6 +36,7 @@ import {
 } from './anchor-compatibility.js';
 import {
   WORD_AUTO_MULTIPLE_BASELINE_PIN,
+  WORD_AUTHORED_CHARACTER_SPACING_PITCH_PRIORITY,
   WORD_CJK_BOTH_INTER_CHARACTER_EXPANSION,
   WORD_DEGENERATE_LINE_SPACING_SINGLE,
   WORD_DICTIONARY_SEA_ATOMIC_CHUNK,
@@ -51,6 +52,7 @@ import {
   WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS,
   WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT,
   WORD_NUMBERING_MARKER_OVERFLOW_TAB_ADVANCE,
+  WORD_NUMBERING_MARKER_PARAGRAPH_MARK_FALLBACK,
   WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB,
   WORD_NUMERIC_DECIMAL_TAB_INFERENCE,
   WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS,
@@ -68,6 +70,7 @@ import {
   wordUseFeLayoutParagraphMarkGridAdvancePx,
   wordUseFeLayoutInheritedGridHeightPx,
   wordCandidateFitWidthPx,
+  wordDocumentCharacterCompressionApplies,
   wordJustifiedCandidateFitAllowancePx,
   wordJapanesePunctuationRetainedExtentPt,
   wordMsMinchoEmptyEastAsianMarkSingleLinePx,
@@ -304,12 +307,14 @@ describe('layout compatibility inventory', () => {
       WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT,
       WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS,
       WORD_FULL_WIDTH_CHARACTER_SPACING_SCOPE,
+      WORD_AUTHORED_CHARACTER_SPACING_PITCH_PRIORITY,
       WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE,
       WORD_FIT_TEXT_INTER_CHARACTER_EXPANSION,
       WORD_CJK_BOTH_INTER_CHARACTER_EXPANSION,
       WORD_THAI_DISTRIBUTE_CLUSTER_POLICY,
       WORD_NUMERIC_DECIMAL_TAB_INFERENCE,
       WORD_NUMBERING_MARKER_OVERFLOW_TAB_ADVANCE,
+      WORD_NUMBERING_MARKER_PARAGRAPH_MARK_FALLBACK,
       WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB,
       WORD_TAB_STOP_PAGE_EDGE_CLAMP,
       WORD_DICTIONARY_SEA_NATURAL_FIT,
@@ -404,6 +409,28 @@ describe('layout compatibility inventory', () => {
       punctuationInkEndPt: 6,
       ideographicCellAdvancePt: 10,
     })).toBe(6);
+    expect(WORD_AUTHORED_CHARACTER_SPACING_PITCH_PRIORITY.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'authored-character-spacing-punctuation-pitch',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(WORD_AUTHORED_CHARACTER_SPACING_PITCH_PRIORITY.description)
+      .not.toMatch(/sample|private|\.docx|\.pdf/i);
+    expect(wordDocumentCharacterCompressionApplies(undefined)).toBe(true);
+    expect(wordDocumentCharacterCompressionApplies(0)).toBe(true);
+    expect(wordDocumentCharacterCompressionApplies(0.4)).toBe(false);
+    expect(wordDocumentCharacterCompressionApplies(-0.5)).toBe(true);
+    expect(WORD_NUMBERING_MARKER_PARAGRAPH_MARK_FALLBACK.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'numbering-marker-paragraph-mark-formatting',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(WORD_NUMBERING_MARKER_PARAGRAPH_MARK_FALLBACK.description)
+      .not.toMatch(/sample|private|\.docx|\.pdf/i);
   });
 
   it('scopes the observed MS Mincho height to empty East-Asian marks', () => {

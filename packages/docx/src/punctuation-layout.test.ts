@@ -173,6 +173,27 @@ function punctuationMetricsServices(options: Readonly<{
 }
 
 describe('ECMA-376 East-Asian punctuation fit', () => {
+  it('does not apply document-level punctuation compression over authored run spacing', () => {
+    const authoredText = '独自文面の配置を確認します）。';
+    const run = {
+      ...textRun(authoredText),
+      charSpacing: 0.4,
+    } as DocParagraph['runs'][number];
+    const segments = buildSegments([run], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuation',
+      layoutServices: punctuationMetricsServices(),
+    }) as LayoutTextSeg[];
+
+    expect(segments).toHaveLength(1);
+    expect(segments[0].punctuationCompressions).toBeUndefined();
+    expect(segments[0].charSpacing).toBe(0.4);
+    const authoredWidthPt = [...authoredText].length * 10.4;
+    expect(lines(segments, authoredWidthPt, false)[0].segments[0].measuredWidth)
+      .toBeCloseTo(authoredWidthPt, 5);
+  });
+
   it('retains at least a half-width cell around compressed full-width punctuation', () => {
     const segments = buildSegments([textRun('甲乙．丙')], {
       pageIndex: 0,

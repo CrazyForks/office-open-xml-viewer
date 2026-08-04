@@ -1350,6 +1350,7 @@ export declare interface ShapeText {
     text: string;
     fontSizePt: number;
     color?: string | null;
+    paragraphMarkColor?: string | null;
     fontFamily?: string | null;
     bold?: boolean;
     italic?: boolean;
