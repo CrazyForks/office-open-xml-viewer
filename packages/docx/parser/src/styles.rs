@@ -1862,13 +1862,18 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // (skipping "single"/"none", which need no hint). `w:u@color` (§17.18.99 note)
     // is an underline-only colour override (hex 6 or the literal "auto").
     if let Some(u) = child_w(rpr, "u") {
-        let val = attr_w(u, "val").unwrap_or_else(|| "single".to_string());
-        fmt.underline = Some(val != "none");
-        fmt.underline_style = if val == "none" || val == "single" {
-            None
-        } else {
-            Some(val)
-        };
+        // §17.3.2.40: an omitted @val inherits the setting from the previous
+        // style-hierarchy level; the element's color/theme attributes can still
+        // override an inherited underline. Do not invent `single` merely from
+        // element presence.
+        if let Some(val) = attr_w(u, "val") {
+            fmt.underline = Some(val != "none");
+            fmt.underline_style = if val == "none" || val == "single" {
+                None
+            } else {
+                Some(val)
+            };
+        }
         if let Some(color) = attr_w(u, "color") {
             // Lowercase like the sibling `color` field below: the renderer's
             // `underlineColor !== 'auto'` check (§17.3.2.40's `color="auto"`
@@ -2803,6 +2808,20 @@ mod tests {
         // sibling w:color@val field above.
         let fmt = run_fmt_from(r#"<w:u w:val="single" w:color="FF0000"/>"#);
         assert_eq!(fmt.underline_color.as_deref(), Some("ff0000"));
+    }
+
+    #[test]
+    fn underline_without_val_inherits_instead_of_enabling_single() {
+        let direct = run_fmt_from(r#"<w:u w:color="FF0000"/>"#);
+        assert_eq!(direct.underline, None);
+        assert_eq!(direct.underline_style, None);
+        assert_eq!(direct.underline_color.as_deref(), Some("ff0000"));
+
+        let mut inherited = run_fmt_from(r#"<w:u w:val="double"/>"#);
+        apply_run(&mut inherited, &direct);
+        assert_eq!(inherited.underline, Some(true));
+        assert_eq!(inherited.underline_style.as_deref(), Some("double"));
+        assert_eq!(inherited.underline_color.as_deref(), Some("ff0000"));
     }
 
     #[test]

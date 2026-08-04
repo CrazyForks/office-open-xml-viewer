@@ -81,9 +81,10 @@ export interface TileInfo {
   flip: string;
   /**
    * Anchor corner the tile grid registers against:
-   * `tl|t|tr|l|ctr|r|bl|b|br` (`algn`). Default `'tl'`.
+   * `tl|t|tr|l|ctr|r|bl|b|br` (`algn`). The schema has no default; a host may
+   * apply a compatibility fallback when omitted.
    */
-  algn: string;
+  algn?: string;
 }
 
 /**

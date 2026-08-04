@@ -110,6 +110,20 @@ describe('production layout service integration', () => {
     expect(lines[0].segments.map((segment) => 'text' in segment ? segment.text : '')).toEqual(['a', '\u0301']);
   });
 
+  it('normalizes service-backed w:sym private encoding before measurement and paint', () => {
+    const services = createLayoutServices(model(), { measureContext: measureContext() });
+    const segments = buildSegments([textRun('\uF0B0', {
+      fontFamily: 'Symbol',
+      fontFamilyHighAnsi: 'Symbol',
+      fontFamilyEastAsia: 'Symbol',
+    })], { pageIndex: 0, totalPages: 1, layoutServices: services });
+    const text = segments.filter((segment) => 'text' in segment);
+
+    expect(text).toHaveLength(1);
+    expect(text[0]).toMatchObject({ text: '°' });
+    expect((text[0] as { fontFamily?: string | null }).fontFamily).not.toBe('Symbol');
+  });
+
   it('carries the w:kern threshold through the text service measure adapter', () => {
     let fontKerning: CanvasFontKerning = 'auto';
     const states: CanvasFontKerning[] = [];

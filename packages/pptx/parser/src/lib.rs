@@ -4033,7 +4033,7 @@ mod tests {
                 let fr = fill_rect.expect("fillRect should be present");
                 assert!((fr.t - (-0.09)).abs() < 1e-9, "t={}", fr.t);
                 assert!((fr.b - (-0.09)).abs() < 1e-9, "b={}", fr.b);
-                assert!(is_zero_f64(&fr.l) && is_zero_f64(&fr.r));
+                assert!(fr.l.abs() < 1e-9 && fr.r.abs() < 1e-9);
                 assert!(tile.is_none(), "stretch fill must not carry tile");
                 assert!((alpha.expect("alpha") - 0.8).abs() < 1e-6);
             }
@@ -4138,14 +4138,14 @@ mod tests {
                 assert!((t.sx - 0.5).abs() < 1e-9, "sx={}", t.sx);
                 assert!((t.sy - 0.75).abs() < 1e-9, "sy={}", t.sy);
                 assert_eq!(t.flip, "xy");
-                assert_eq!(t.algn, "ctr");
+                assert_eq!(t.algn.as_deref(), Some("ctr"));
             }
             other => panic!("expected Fill::Image, got {other:?}"),
         }
     }
 
-    /// §20.1.8.58 defaults: a bare `<a:tile/>` yields tx/ty=0, sx/sy=1.0
-    /// (100% native size), flip="none", algn="tl".
+    /// §20.1.8.58: a bare `<a:tile/>` yields the schema defaults for tx/ty,
+    /// sx/sy and flip, while omitted algn remains absent for the host policy.
     #[test]
     fn test_parse_background_blip_fill_tile_defaults() {
         let xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -4168,7 +4168,7 @@ mod tests {
                 assert!((t.sx - 1.0).abs() < 1e-9);
                 assert!((t.sy - 1.0).abs() < 1e-9);
                 assert_eq!(t.flip, "none");
-                assert_eq!(t.algn, "tl");
+                assert_eq!(t.algn, None);
             }
             other => panic!("expected Fill::Image, got {other:?}"),
         }

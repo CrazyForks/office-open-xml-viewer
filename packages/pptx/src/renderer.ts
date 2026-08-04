@@ -37,6 +37,7 @@ import {
   renderPresetShape,
   hasPreset,
   buildPresetGeometryPath,
+  buildPresetGeometryFillPath,
   getConnectorAnchors,
   getCustGeomEndpoints,
   drawArrowHead,
@@ -1516,7 +1517,10 @@ function paintTiledBackground(
   if (!pattern) return;
 
   // Phase: register the grid against the alignment anchor, then add tx/ty.
-  const { ax, ay } = tileAnchorOffset(tile.algn, canvasW, canvasH, tileW, tileH);
+  // PowerPoint registers an omitted algn at the top-left. CT_TileInfoProperties
+  // itself declares no schema default, so keep this host observation here rather
+  // than normalizing it in the shared OOXML parser.
+  const { ax, ay } = tileAnchorOffset(tile.algn ?? 'tl', canvasW, canvasH, tileW, tileH);
   const px = ax + emuToPx(tile.tx, scale);
   const py = ay + emuToPx(tile.ty, scale);
   // `setTransform` exists where DOMMatrix is available (browser + skia-canvas).
@@ -4420,7 +4424,7 @@ async function renderPicture(
         // Driven by the shared preset-geometry engine (roundRect, ellipse, and
         // the other 184 presets), with the avLst adjust handles; the engine
         // substitutes each preset's declared default for any omitted guide.
-        const ok = buildPresetGeometryPath(
+        const ok = buildPresetGeometryFillPath(
           target,
           el.prstGeom,
           cx,

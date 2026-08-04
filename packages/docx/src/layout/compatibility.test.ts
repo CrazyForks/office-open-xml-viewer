@@ -19,6 +19,7 @@ import {
   WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION,
   WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION,
   WORD_TERMINAL_COLUMN_BREAK,
+  wordFramePositionExtendsLineBox,
   wordFinalParagraphAdmissionExtentPt,
 } from './body-pagination-compatibility.js';
 import {
@@ -57,6 +58,7 @@ import {
   WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE,
   WORD_TAB_STOP_PAGE_EDGE_CLAMP,
   WORD_THAI_DISTRIBUTE_CLUSTER_POLICY,
+  WORD_UNIFORM_RUN_POSITION_LEADING,
   wordAutoMultipleCenterBoxPx,
   wordDegenerateLineSpacingIsSingle,
   wordEastAsianGridLineCells,
@@ -71,6 +73,7 @@ import {
   wordMsMinchoEmptyEastAsianMarkSingleLinePx,
   wordNumberingSuffixAcceptsCoincidentListTab,
   wordRubyUniformLineHeightPx,
+  wordUniformRunPositionPaintPt,
   wordVisibleLineMetricPx,
 } from './line-compatibility.js';
 import {
@@ -236,6 +239,12 @@ describe('defineCompatibilityRule', () => {
       'packages/docx/src/contextual-spacing-body-paint.test.ts#paints the adjudicated six-case gap table',
     ]);
   });
+
+  it('limits positioned-run line-box suppression to observed drop caps', () => {
+    expect(wordFramePositionExtendsLineBox('none')).toBe(true);
+    expect(wordFramePositionExtendsLineBox('drop')).toBe(false);
+    expect(wordFramePositionExtendsLineBox('margin')).toBe(false);
+  });
 });
 
 describe('float compatibility evidence', () => {
@@ -306,6 +315,7 @@ describe('layout compatibility inventory', () => {
       WORD_DICTIONARY_SEA_NATURAL_FIT,
       WORD_DICTIONARY_SEA_ATOMIC_CHUNK,
       WORD_OVERLONG_TOKEN_EMERGENCY_BREAK,
+      WORD_UNIFORM_RUN_POSITION_LEADING,
       WORD_NEUTRAL_SCRIPT_ATTACHMENT,
       WORD_RTL_RUN_AMBIGUOUS_CLASS_OVERRIDE,
       WORD_RTL_COMPLEX_SCRIPT_EUROPEAN_DIGITS_AN,
@@ -342,6 +352,14 @@ describe('layout compatibility inventory', () => {
     expect(new Set(rules.map((rule) => rule.id)).size).toBe(rules.length);
     expect(rules.every(Object.isFrozen)).toBe(true);
     expect(rules.every((rule) => Object.isFrozen(rule.evidence))).toBe(true);
+  });
+
+  it('isolates uniform w:position leading without changing mixed-run displacement', () => {
+    expect(wordUniformRunPositionPaintPt(6, 6)).toBe(3);
+    expect(wordUniformRunPositionPaintPt(-6, -6)).toBe(-3);
+    expect(wordUniformRunPositionPaintPt(6, 0)).toBe(6);
+    expect(WORD_UNIFORM_RUN_POSITION_LEADING.description)
+      .not.toMatch(/sample|private|\.docx|\.pdf/i);
   });
 
   it('records the anonymized Word observation for lower-layer anchor composition', () => {

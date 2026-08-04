@@ -89,6 +89,9 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['autoContrastColor', 'value'],
     ['canvasFontString', 'value'],
     ['clampCanvasSize', 'value'],
+    // DrawingML silhouette clipping is shared paint behavior used by
+    // resource-backed shape fills; it does not expose layout acquisition.
+    ['clipDrawingMLShape', 'value'],
     ['crispOffset', 'value'],
     ['defaultDpr', 'value'],
     ['deferBitmapCloseWhileLeased', 'value'],
@@ -117,6 +120,7 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['resolveFill', 'value'],
     ['recolorSvg', 'value'],
     ['renderChart', 'value'],
+    ['withDrawingMLShapeTransform', 'value'],
     ['Duotone', 'type'],
     ['MathRenderer', 'type'],
   ])],

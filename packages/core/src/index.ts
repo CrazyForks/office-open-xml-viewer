@@ -137,6 +137,8 @@ export { hexToRgba, relativeLuma, autoContrastColor, resolveFill, applyStroke } 
 export { buildShapePath, drawStar, drawPolygon, ooxmlArcTo } from './shape/preset';
 export {
   paintDrawingMLShape,
+  clipDrawingMLShape,
+  withDrawingMLShapeTransform,
   type DrawingMLShapeFill,
   type DrawingMLShapeGeometry,
   type DrawingMLShapePaintPlan,
@@ -252,6 +254,7 @@ export {
   renderPresetShape,
   hasPreset,
   buildPresetGeometryPath,
+  buildPresetGeometryFillPath,
   getConnectorAnchors,
 } from './shape/preset-geometry';
 export { type PresetPath } from './shape/preset-geometry/path-executor';

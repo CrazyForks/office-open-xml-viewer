@@ -97,6 +97,7 @@ import {
   wordIsOverflowPunctuation,
   wordJapanesePunctuationRetainedExtentPt,
   wordMsMinchoEmptyEastAsianMarkSingleLinePx,
+  wordUniformRunPositionPaintPt,
   wordUseFeLayoutParagraphMarkGridAdvancePx,
 } from './layout/line-compatibility.js';
 import { wordNeutralAttachesToActiveScript } from './layout/script-compatibility.js';
@@ -259,8 +260,17 @@ export interface LayoutTextSeg extends LayoutSegSource {
   fitTextRegionEnd?: boolean;
   /** ECMA-376 §17.3.2.24 `<w:position>` — baseline raise(+)/lower(−) in POINTS,
    *  applied as a y-offset to the glyphs and decorations without changing the
-   *  font size or the line box. Absent ⇒ 0. */
+   *  font size. Absent ⇒ 0. */
   position?: number;
+  /** Line-relative baseline shift in points, resolved when the line is closed.
+   * When every metric-bearing item has the same `position`, half of the common
+   * displacement is retained so its enlarged line box shares the surplus above
+   * and below the glyphs. The authored, style-resolved value remains in
+   * `position` for the retained model. */
+  lineRelativePosition?: number;
+  /** Whether shifted ink contributes to this retained segment's line extent.
+   * False only for the fixed-line-count drop-cap compatibility projection. */
+  positionExtendsLineBox?: boolean;
   /** ECMA-376 §17.3.2.19 `<w:kern>` — font-kerning threshold in POINTS (smallest
    *  kerned size). Sets `ctx.fontKerning` on measure and paint when the run's
    *  font size ≥ the threshold. Absent ⇒ kerning off (`ctx.fontKerning='none'`
@@ -427,6 +437,9 @@ export interface LayoutImageSeg extends LayoutSegSource {
    *  walk keys off `run.type === 'image'` and never sees a chart run). */
   chart?: true;
   chartResourceKey?: string;
+  /** ECMA-376 §20.4.2.8 — this image-shaped line segment reserves the inline
+   * WPS shape's extent; paint is owned by the paragraph's retained drawing. */
+  inlineShape?: true;
   /** Parser-private retained placeholder for a recognized payload whose
    * package part is unavailable. It participates in line/anchor geometry but
    * never enters the paint resource registry. */
@@ -601,6 +614,10 @@ export interface LineLayoutEnvironment {
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
   /** ECMA-376 §17.15.1.18 document-wide full-width character compression. */
   readonly characterSpacingControl?: string;
+  /** False only when `w:framePr` specifies a drop cap with a fixed `w:lines`;
+   * the authored frame height remains authoritative even when glyph paint is
+   * lowered beyond it. Folded into retained text segments during acquisition. */
+  readonly positionExtendsLineBox?: boolean;
 }
 
 // ── Math (OMML) rendering via MathJax ───────────────────────────────────────
@@ -2523,6 +2540,33 @@ export function buildSegments(
     sourceFragmentIndex?: number,
   ) => {
     const r: ParagraphTextBearingRun = base;
+    const acquiredTypography = (r as ParagraphTextBearingRun & Readonly<{
+      typographyInput?: import('./layout/typography-input.js').RunTypographyAcquisitionInput;
+    }>).typographyInput;
+    // ECMA-376 §17.16.18 stores a complex field's instruction/result across
+    // several physical runs. The parser rebuilds recomputed PAGE/NUMPAGES as a
+    // single FieldRun, while its complete effective §17.3.2 run properties live
+    // on the immutable typography acquisition sidecar. Consume those effective
+    // facts exactly like an ordinary text run so the field result does not lose
+    // baseline position or the core character-metric axes used by measure/paint.
+    const acquiredValue = <T>(
+      value: import('./layout/typography-input.js').TypographyValueInput<T> | undefined,
+      fallback: T | undefined,
+    ): T | undefined => value?.status === 'valid' && value.value !== null
+      ? value.value
+      : fallback;
+    const effectiveVertAlign = acquiredValue(
+      acquiredTypography?.verticalAlign,
+      vertAlign ?? undefined,
+    ) ?? null;
+    const effectivePosition = acquiredValue(
+      acquiredTypography?.positionPt,
+      r.position,
+    );
+    const effectiveCharacterSpacing = acquiredTypography?.characterSpacingPt ?? r.charSpacing;
+    const effectiveCharacterScale = acquiredTypography?.characterScale ?? r.charScale;
+    const effectiveKerningThreshold = acquiredTypography?.kerningThresholdPt ?? r.kerning;
+    const effectiveSnapToGrid = acquiredTypography?.snapToGrid ?? r.snapToGrid;
     // §17.3.2.33 small caps are sized per character: lowercase LETTERS render two
     // points smaller, uppercase letters and non-alphabetic characters at the full
     // run size. `reduced` (set per case-piece in the loop below) carries that onto
@@ -2611,6 +2655,7 @@ export function buildSegments(
       fontFamily: string | null,
       authoritativeSpan?: TextShapeSpan,
       compressCharacterWhitespace = false,
+      mappedSymbolUnicode = false,
     ) => {
       // ECMA-376 §17.15.1.18 / §17.18.7 — dispatch the exact
       // ST_CharacterSpacing value and split each eligible full-width character
@@ -2629,7 +2674,7 @@ export function buildSegments(
             grapheme,
             environment.characterSpacingControl,
           ))) {
-          pushSeg(text, cs, fontFamily, undefined, true);
+          pushSeg(text, cs, fontFamily, undefined, true, mappedSymbolUnicode);
           return;
         }
       }
@@ -2640,22 +2685,29 @@ export function buildSegments(
       const textShapeRequest: TextShapeRequest = Object.freeze({
         text,
         fontSizePt: cs ? csFontSize : base.fontSize,
-        fonts: r.fontSlots?.direct ?? {
-          ascii: base.fontFamily,
-          highAnsi: highAnsiFontFamily,
-          eastAsia: eaFontFamily,
-          complexScript: csFontFamily,
-        },
-        themeFonts: r.fontSlots?.theme,
-        themeFontPresence: r.fontSlots?.themePresent,
+        // A successfully decoded Symbol/Wingdings code point is Unicode text,
+        // not a request for the legacy font encoding. Clear every authored
+        // slot so the text service resolves a Unicode-capable generic route;
+        // otherwise its §17.3.2.26 slot resolver selects Symbol again and the
+        // mapped character can still be drawn with the wrong cmap.
+        fonts: mappedSymbolUnicode
+          ? { ascii: null, highAnsi: null, eastAsia: null, complexScript: null }
+          : r.fontSlots?.direct ?? {
+              ascii: base.fontFamily,
+              highAnsi: highAnsiFontFamily,
+              eastAsia: eaFontFamily,
+              complexScript: csFontFamily,
+            },
+        themeFonts: mappedSymbolUnicode ? undefined : r.fontSlots?.theme,
+        themeFontPresence: mappedSymbolUnicode ? undefined : r.fontSlots?.themePresent,
         weight,
         style,
         complexScript: cs,
         fontHint: r.fontHint,
         eastAsiaLanguage: r.langEastAsia,
-        kerning: r.kerning == null
+        kerning: effectiveKerningThreshold == null
           ? undefined
-          : (cs ? csFontSize : base.fontSize) >= r.kerning,
+          : (cs ? csFontSize : base.fontSize) >= effectiveKerningThreshold,
         measure: false,
       });
       const shaped = authoritativeSpan
@@ -2735,7 +2787,7 @@ export function buildSegments(
               : 0;
             // §17.3.2.43 w:w scales the glyph and both of its sidebearings;
             // trim in the same post-scale coordinate space as segAdvanceWidth.
-            const removablePt = removableUnscaledPt * (r.charScale ?? 1);
+            const removablePt = removableUnscaledPt * (effectiveCharacterScale ?? 1);
               if (removablePt > 0) {
                 compressions.push({ end, adjustmentPt: -removablePt });
               }
@@ -2832,7 +2884,7 @@ export function buildSegments(
         fontFamily: resolvedSpan?.font.resolvedFamily ?? localFont?.family ?? fontFamily,
         fontRoute: resolvedSpan?.fontRoute,
         resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
-        vertAlign,
+        vertAlign: effectiveVertAlign,
         measuredWidth: 0,
         textLayoutService: environment.layoutServices?.text,
         textShapeRequest,
@@ -2861,21 +2913,22 @@ export function buildSegments(
         // IX1 — resolved hyperlink target of the originating run, for the
         // text-layer clickable overlay. Does not affect layout or drawing.
         hyperlink,
-        snapToCharacterGrid: r.snapToGrid !== false,
+        snapToCharacterGrid: effectiveSnapToGrid !== false,
         // WD4 — run character metrics (§17.3.2.35 spacing / §17.3.2.43 w /
         // §17.3.2.24 position / §17.3.2.19 kern). Uniform across the run, so
         // every emitted segment carries the same values; the measure and paint
         // passes apply them identically (measure==paint).
-        charSpacing: r.charSpacing,
+        charSpacing: effectiveCharacterSpacing,
         punctuationCompressions,
         eastAsiaLanguage: r.langEastAsia,
-        charScale: r.charScale,
+        charScale: effectiveCharacterScale,
         fitTextVal: fitTextRegionIndex === undefined ? undefined : r.fitTextVal,
         fitTextId: fitTextRegionIndex === undefined ? undefined : r.fitTextId,
         fitTextRegionIndex,
         fitTextRunIndex: fitTextRegionIndex === undefined ? undefined : fitTextFragmentEntryIndex,
-        position: r.position,
-        kerning: r.kerning,
+        position: effectivePosition,
+        positionExtendsLineBox: environment.positionExtendsLineBox !== false,
+        kerning: effectiveKerningThreshold,
         // ECMA-376 §17.3.2.10 eastAsianLayout — 縦中横 is meaningful ONLY in a
         // vertical (tbRl) page, so fold the vertical gate in HERE at build time
         // (buildSegments receives it through LineLayoutEnvironment). Measure/paint then read a single
@@ -2912,7 +2965,14 @@ export function buildSegments(
       // build time so measure==draw (the seg.text is never transformed later).
       if (isSymbolFontFamily(fontFamily)) {
         for (const part of symbolTextToUnicodeSegments(word, fontFamily)) {
-          pushSeg(part.text, cs, part.mapped ? null : fontFamily);
+          pushSeg(
+            part.text,
+            cs,
+            part.mapped ? null : fontFamily,
+            undefined,
+            false,
+            part.mapped,
+          );
         }
         return;
       }
@@ -2925,6 +2985,15 @@ export function buildSegments(
     // sits next to a gothic eastAsia title) without changing the cs path.
     const emitNonCs = (slice: string) => {
       if (environment.layoutServices?.text) {
+        // `w:sym` is parsed as a one-run private-encoding character carrying
+        // its own Symbol/Wingdings family (§17.3.3.30). Keep normalization in
+        // front of the service-backed script splitter as well as the legacy
+        // path; otherwise a PUA code point such as Symbol F0B0 reaches Canvas
+        // unchanged and renders as tofu.
+        if (isSymbolFontFamily(base.fontFamily)) {
+          emit(slice, 'latin');
+          return;
+        }
         pushSeg(slice, false, base.fontFamily);
         return;
       }
@@ -3056,6 +3125,24 @@ export function buildSegments(
         anchorYFromPara: chartRun.anchorYFromPara ?? false,
         chart: true,
         chartResourceKey: (chartRun as Partial<import('./layout/text.js').ParagraphChartRun>).resourceKey,
+        measuredWidth: 0,
+      });
+    } else if (run.type === 'shape' && run.inline === true) {
+      // `wp:inline` hosts arbitrary DrawingML, including WPS shapes (§20.4.2.8).
+      // Reserve its extent in the same line-breaking path as an inline picture;
+      // paragraph acquisition replaces the sentinel with a retained drawing
+      // placement at the resolved pen position.
+      segs.push({
+        imagePath: '',
+        mimeType: '',
+        widthPt: run.widthPt,
+        heightPt: run.heightPt,
+        anchor: false,
+        anchorXPt: 0,
+        anchorYPt: 0,
+        anchorXFromMargin: false,
+        anchorYFromPara: false,
+        inlineShape: true,
         measuredWidth: 0,
       });
     } else if (run.type === 'unavailableDrawing') {
@@ -3558,6 +3645,45 @@ export function layoutLines(
     nextStart?: LineBoundary,
   ) => {
     applyBidiTabs();
+    // §17.3.2.24 defines `position` relative to surrounding non-positioned
+    // text. A line whose every metric-bearing item shares the same inherited
+    // position has no differently-positioned peer to pin the resulting extra
+    // line height to one side. `word-uniform-run-position-leading` owns Word's
+    // observed placement of that surplus above and below the glyphs. Keep mixed
+    // lines relative to zero so their authored displacement and ink union
+    // remain unchanged. Images/math
+    // provide a zero-position reference; tabs do not contribute vertical
+    // metrics. The fixed drop-cap path intentionally keeps its paint-only
+    // lowering and therefore opts out of this normalization.
+    let commonPositionPt: number | undefined;
+    let hasPositionReference = false;
+    for (const segment of currentLine) {
+      if ('isTab' in segment) continue;
+      const positionPt = 'text' in segment ? (segment.position ?? 0) : 0;
+      if ('text' in segment && segment.positionExtendsLineBox === false) {
+        commonPositionPt = 0;
+        hasPositionReference = true;
+        break;
+      }
+      if (!hasPositionReference) {
+        commonPositionPt = positionPt;
+        hasPositionReference = true;
+      } else if (commonPositionPt !== positionPt) {
+        commonPositionPt = 0;
+        break;
+      }
+    }
+    const linePositionReferencePt = hasPositionReference ? (commonPositionPt ?? 0) : 0;
+    if (linePositionReferencePt !== 0) {
+      for (const segment of currentLine) {
+        if ('text' in segment) {
+          segment.lineRelativePosition = wordUniformRunPositionPaintPt(
+            segment.position ?? 0,
+            linePositionReferencePt,
+          );
+        }
+      }
+    }
     // §17.3.3.1 — the break is one run among the line's runs: its own size
     // participates in the line height but must not override a taller peer.
     const h = forceHeight !== undefined ? Math.max(lineHeight, forceHeight) : (lineHeight || 10);
@@ -4284,7 +4410,18 @@ export function layoutLines(
       (s.metricEastAsian === true || EAST_ASIAN_RE.test(s.text)) && !s.ruby,
     );
     let asc = corrected.ascent;
-    const desc = corrected.descent;
+    let desc = corrected.descent;
+    // ECMA-376 §17.3.2.24 positions the run relative to the surrounding
+    // default baseline. Its shifted ink therefore contributes to the line's
+    // visible block extent: a raised run extends the ascent, while a lowered
+    // run extends the descent. Keeping the shift paint-only made an all-raised
+    // paragraph start above its retained line box, so table borders crossed the
+    // glyphs and row/body pagination under-counted the painted extent.
+    if (s.positionExtendsLineBox !== false) {
+      const positionPx = (s.position ?? 0) * scale;
+      if (positionPx > 0) asc += positionPx;
+      else if (positionPx < 0) desc -= positionPx;
+    }
     // Ruby annotation: reserve exact authored hpsRaise or selected-face
     // base/guide ink before the paragraph-wide docGrid pitch snap.
     if (s.ruby && (!s.textBoxLineFloor || s.textBoxVertical)) {

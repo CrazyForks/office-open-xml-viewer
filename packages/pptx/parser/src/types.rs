@@ -526,10 +526,6 @@ pub(crate) struct PictureElement {
     pub(crate) sp3d: Option<Sp3d>,
 }
 
-pub(crate) fn is_zero_f64(v: &f64) -> bool {
-    v.abs() < 1e-9
-}
-
 /// ECMA-376 §19.3.1.17/18 a:audioFile / a:videoFile and the
 /// p14:media extension (embed attribute).
 /// Represents a p:pic that acts as an audio/video placeholder.
@@ -560,25 +556,7 @@ pub(crate) struct MediaElement {
     pub(crate) mime_type: String,
 }
 
-/// ECMA-376 §20.1.8.58 (CT_TileInfoProperties) — tiled blip-fill placement.
-/// Mutually exclusive with `stretch` inside a single `a:blipFill`.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct TileInfo {
-    /// Horizontal offset of the first tile, EMU (`tx`). Default 0.
-    pub(crate) tx: i64,
-    /// Vertical offset of the first tile, EMU (`ty`). Default 0.
-    pub(crate) ty: i64,
-    /// Horizontal tile scale as a fraction (`sx` / 100000). Default 1.0.
-    pub(crate) sx: f64,
-    /// Vertical tile scale as a fraction (`sy` / 100000). Default 1.0.
-    pub(crate) sy: f64,
-    /// Mirror mode: "none" | "x" | "y" | "xy" (`flip`). Default "none".
-    pub(crate) flip: String,
-    /// Anchor corner the tile grid registers against: tl|t|tr|l|ctr|r|bl|b|br
-    /// (`algn`). Default "tl".
-    pub(crate) algn: String,
-}
+pub(crate) use ooxml_common::fill::{FillRect, TileInfo};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -705,23 +683,6 @@ pub(crate) enum Fill {
         #[serde(skip_serializing_if = "Option::is_none")]
         duotone: Option<Duotone>,
     },
-}
-
-/// ECMA-376 §20.1.8.30 `a:fillRect` (CT_RelativeRect) — the destination
-/// rectangle a stretched blip is mapped into, expressed as edge insets relative
-/// to the fill region. Values are fractions (ST_Percentage / 100000); negative
-/// values push the edge outward so the image bleeds past the box (overscan).
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct FillRect {
-    #[serde(skip_serializing_if = "is_zero_f64", default)]
-    pub(crate) l: f64,
-    #[serde(skip_serializing_if = "is_zero_f64", default)]
-    pub(crate) t: f64,
-    #[serde(skip_serializing_if = "is_zero_f64", default)]
-    pub(crate) r: f64,
-    #[serde(skip_serializing_if = "is_zero_f64", default)]
-    pub(crate) b: f64,
 }
 
 /// Arrow end descriptor for headEnd / tailEnd on a line.

@@ -173,7 +173,7 @@ function requireCoordinateSpace(
 }
 
 function requireDrawingMLShapePlan(
-  command: Extract<DrawingPaintCommand, { kind: 'drawingml-shape' }>,
+  command: Extract<DrawingPaintCommand, { kind: 'drawingml-shape' | 'drawingml-image-fill' }>,
   path: string,
 ): void {
   const { plan } = command;
@@ -463,6 +463,18 @@ function requireDrawingGeometry(node: DrawingLayout, path: string): void {
     if (command.kind === 'noop') return;
     if (command.kind === 'drawingml-shape') {
       requireDrawingMLShapePlan(command, commandPath);
+      return;
+    }
+    if (command.kind === 'drawingml-image-fill') {
+      requireDrawingMLShapePlan(command, commandPath);
+      if (command.resourceKey.length === 0) {
+        throw new LayoutInvariantError('INVALID_GEOMETRY', `${commandPath}.resourceKey is empty`);
+      }
+      if (command.fillRect) {
+        for (const edge of ['l', 't', 'r', 'b'] as const) {
+          requireFinite(command.fillRect[edge], `${commandPath}.fillRect.${edge}`);
+        }
+      }
       return;
     }
     requireRect(command.rect, `${commandPath}.rect`);
