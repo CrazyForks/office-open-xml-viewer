@@ -35,6 +35,15 @@ describe('framework integration guides', () => {
     expect(index).toContain('React, Vue, Svelte, and Solid');
   });
 
+  it('uses the standard site footer on the chooser and framework detail pages', () => {
+    const index = readFileSync(new URL('pages/frameworks/index.astro', siteRoot), 'utf8');
+    const guide = readFileSync(new URL('components/FrameworkGuide.astro', siteRoot), 'utf8');
+
+    expect(index).toContain('<SiteFooter />');
+    expect(guide).toContain('<SiteFooter />');
+    expect(guide).not.toContain('guide-footer');
+  });
+
   it.each(['docx', 'xlsx', 'pptx'])('keeps %s framework guidance on the dedicated pages', (format) => {
     const formatPage = readFileSync(new URL(`pages/${format}.astro`, siteRoot), 'utf8');
 

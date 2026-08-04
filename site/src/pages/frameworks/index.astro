@@ -1,6 +1,7 @@
 ---
 import Base from '../../layouts/Base.astro';
 import Nav from '../../components/Nav.astro';
+import SiteFooter from '../../components/SiteFooter.astro';
 import { frameworkGuides } from '../../lib/framework-guides';
 
 const title = 'Office file viewer examples for React, Vue, Svelte, and Solid';
@@ -27,6 +28,7 @@ const description = 'Choose a TypeScript integration guide for rendering DOCX, X
       ))}
     </section>
   </main>
+  <SiteFooter />
 </Base>
 
 <style>

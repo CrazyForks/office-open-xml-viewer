@@ -1,7 +1,7 @@
 ---
 import Base from './Base.astro';
 import Nav from '../components/Nav.astro';
-import BrandIcon from '../components/BrandIcon.astro';
+import SiteFooter from '../components/SiteFooter.astro';
 interface Props {
   format: 'pptx' | 'docx' | 'xlsx';
   name: string;   // "PowerPoint"
@@ -31,23 +31,7 @@ const fileNoun = { docx: 'Word document', xlsx: 'Excel workbook', pptx: 'PowerPo
     <slot />
   </main>
 
-  <footer class="footer">
-    <div class="wrap footer-inner">
-      <div class="footer-brand">
-        <BrandIcon />
-        <div>
-          <strong>@silurus/ooxml</strong>
-          <span>Browser-based OOXML viewer · Rust/WASM + Canvas</span>
-        </div>
-      </div>
-      <div class="footer-links">
-        <a href="/">Home</a>
-        <a href="/announcements">Announcements</a>
-        <a href="https://www.npmjs.com/package/@silurus/ooxml">npm</a>
-        <a href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub</a>
-      </div>
-    </div>
-  </footer>
+  <SiteFooter />
 
   <script>
     import { mountDemoInto, type DemoKind, type Format } from '../lib/demos';
