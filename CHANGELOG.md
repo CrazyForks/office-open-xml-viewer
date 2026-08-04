@@ -4,6 +4,27 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.75.5 — 2026-08-05
+
+Patch. Improves Word-compatible paragraph layout and makes framework examples
+usable as both embedded source references and top-level live projects.
+
+- **docx pagination:** carry an explicit `splittable` / `indivisible`
+  fragmentation contract from paragraph acquisition through page selection.
+  Marker-only and otherwise indivisible paragraphs now paginate atomically,
+  while incomplete retained line boundaries fail closed instead of being
+  guessed by the renderer. (#1151)
+- **docx text:** resolve numbering marker fonts and colours once from numbering
+  level and paragraph-mark properties for both body text and text boxes; retain
+  the selected font geometry for run highlights; and give positive authored
+  character spacing precedence over document-level punctuation compression.
+  (§§17.3.2.15, 17.3.2.23, 17.9.24, 17.15.1.18; observed Word inheritance and
+  pitch precedence; #1151)
+- **website / examples:** present embedded StackBlitz projects as code browsers
+  without auto-starting WebContainers, keep top-level links runnable, and use
+  the standard shared footer on the framework chooser, framework guides, and
+  format pages. (#1150)
+
 ## 0.75.4 — 2026-08-04
 
 Patch. Improves Word DrawingML fidelity, safely handles malformed style
