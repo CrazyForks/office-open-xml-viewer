@@ -13,20 +13,20 @@ export interface FrameworkGuide {
 const repository = 'yukiyokotani/office-open-xml-viewer';
 
 function stackBlitz(framework: FrameworkId, file: string): string {
-  const params = new URLSearchParams({ file, startScript: `dev:${framework}` });
-  return `https://stackblitz.com/github/${repository}/tree/main/examples/frameworks?${params}`;
+  const params = new URLSearchParams({ file, startScript: 'dev' });
+  return `https://stackblitz.com/github/${repository}/tree/main/examples/frameworks/${framework}?${params}`;
 }
 
 function stackBlitzEmbed(framework: FrameworkId, file: string): string {
   const params = new URLSearchParams({
     embed: '1',
     file,
-    startScript: `dev:${framework}`,
+    startScript: 'dev',
     view: 'both',
     hideNavigation: '1',
     terminalHeight: '0',
   });
-  return `https://stackblitz.com/github/${repository}/tree/main/examples/frameworks?${params}`;
+  return `https://stackblitz.com/github/${repository}/tree/main/examples/frameworks/${framework}?${params}`;
 }
 
 export const frameworkGuides: FrameworkGuide[] = [
@@ -36,8 +36,8 @@ export const frameworkGuides: FrameworkGuide[] = [
     title: 'How to render Office files in the browser with React | DOCX, XLSX, and PPTX',
     description: 'Render DOCX, XLSX, and PPTX Office files in a React and TypeScript application with a reusable custom hook, Canvas viewer controls, and correct effect cleanup.',
     integrationName: 'useOfficeViewer',
-    stackBlitzUrl: stackBlitz('react', 'react/src/useOfficeViewer.tsx'),
-    stackBlitzEmbedUrl: stackBlitzEmbed('react', 'react/src/useOfficeViewer.tsx'),
+    stackBlitzUrl: stackBlitz('react', 'src/useOfficeViewer.tsx'),
+    stackBlitzEmbedUrl: stackBlitzEmbed('react', 'src/useOfficeViewer.tsx'),
   },
   {
     id: 'vue',
@@ -45,8 +45,8 @@ export const frameworkGuides: FrameworkGuide[] = [
     title: 'How to render Office files in the browser with Vue | DOCX, XLSX, and PPTX',
     description: 'Render DOCX, XLSX, and PPTX Office files in Vue 3 with TypeScript, a reusable Composition API composable, template refs, viewer controls, and automatic cleanup.',
     integrationName: 'useOfficeViewer',
-    stackBlitzUrl: stackBlitz('vue', 'vue/src/useOfficeViewer.ts'),
-    stackBlitzEmbedUrl: stackBlitzEmbed('vue', 'vue/src/useOfficeViewer.ts'),
+    stackBlitzUrl: stackBlitz('vue', 'src/useOfficeViewer.ts'),
+    stackBlitzEmbedUrl: stackBlitzEmbed('vue', 'src/useOfficeViewer.ts'),
   },
   {
     id: 'svelte',
@@ -54,8 +54,8 @@ export const frameworkGuides: FrameworkGuide[] = [
     title: 'How to render Office files in the browser with Svelte | DOCX, XLSX, and PPTX',
     description: 'Render DOCX, XLSX, and PPTX Office files in Svelte with TypeScript, a reusable action, readable status stores, viewer controls, and reliable teardown.',
     integrationName: 'createOfficeViewer',
-    stackBlitzUrl: stackBlitz('svelte', 'svelte/src/createOfficeViewer.ts'),
-    stackBlitzEmbedUrl: stackBlitzEmbed('svelte', 'svelte/src/createOfficeViewer.ts'),
+    stackBlitzUrl: stackBlitz('svelte', 'src/createOfficeViewer.ts'),
+    stackBlitzEmbedUrl: stackBlitzEmbed('svelte', 'src/createOfficeViewer.ts'),
   },
   {
     id: 'solid',
@@ -63,8 +63,8 @@ export const frameworkGuides: FrameworkGuide[] = [
     title: 'How to render Office files in the browser with Solid | DOCX, XLSX, and PPTX',
     description: 'Render DOCX, XLSX, and PPTX Office files in Solid with TypeScript, a reusable reactive primitive, signal-based status, viewer controls, and cleanup.',
     integrationName: 'createOfficeViewer',
-    stackBlitzUrl: stackBlitz('solid', 'solid/src/createOfficeViewer.ts'),
-    stackBlitzEmbedUrl: stackBlitzEmbed('solid', 'solid/src/createOfficeViewer.ts'),
+    stackBlitzUrl: stackBlitz('solid', 'src/createOfficeViewer.ts'),
+    stackBlitzEmbedUrl: stackBlitzEmbed('solid', 'src/createOfficeViewer.ts'),
   },
 ];
 
