@@ -8,7 +8,7 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@ooxml-framework-examples/shared": "workspace:*",
+    "@silurus/ooxml": "^0.75.3",
     "solid-js": "^1.9.14"
   },
   "devDependencies": {

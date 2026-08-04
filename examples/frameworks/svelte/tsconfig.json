@@ -10,5 +10,5 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte", "../shared/src/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.svelte"]
 }

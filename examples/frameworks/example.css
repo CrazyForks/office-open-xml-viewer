@@ -6,7 +6,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; }
-button { font: inherit; }
+button, input { font: inherit; }
 
 .app {
   width: min(1040px, 100%);
@@ -31,22 +31,14 @@ button { font: inherit; }
 }
 
 .toolbar button:hover { border-color: #087e8f; }
+.file-input { max-width: 220px; font-size: 12px; }
 .status { margin-left: auto; font: 12px ui-monospace, monospace; }
 .error { color: #b42318; }
 
 .stage {
+  width: 100%;
+  height: min(74vh, 680px);
   min-height: 480px;
-  padding: 24px;
-  overflow: auto;
-  display: grid;
-  place-items: start center;
+  overflow: hidden;
   background: #53606d;
-}
-
-.stage canvas {
-  display: block;
-  max-width: 100%;
-  height: auto;
-  background: #fff;
-  box-shadow: 0 8px 30px rgb(0 0 0 / 22%);
 }

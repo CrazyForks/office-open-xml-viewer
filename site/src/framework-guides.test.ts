@@ -42,12 +42,16 @@ describe('framework integration guides', () => {
     }
   });
 
-  it('keeps one format-aware mount implementation shared by every adapter', () => {
-    const common = readFileSync(new URL('examples/frameworks/shared/src/office-viewer.ts', repositoryRoot), 'utf8');
-    expect(common).toContain("import('@silurus/ooxml/docx')");
-    expect(common).toContain("import('@silurus/ooxml/xlsx')");
-    expect(common).toContain("import('@silurus/ooxml/pptx')");
-    expect(common).toContain('viewer.destroy();');
+  it('keeps every integration module portable outside the examples workspace', async () => {
+    const { frameworkGuides } = await import('./lib/framework-guides');
+    for (const guide of frameworkGuides) {
+      expect(guide.adapterCode).not.toContain('@ooxml-framework-examples');
+      expect(guide.adapterCode).not.toContain('../shared');
+      expect(guide.adapterCode).toContain('createViewer');
+      expect(guide.adapterCode).toContain('destroy');
+      expect(guide.adapterCode).not.toMatch(/\blet\s+/);
+      expect(guide.adapterCode).not.toMatch(/\bvoid\s+[A-Za-z_(]/);
+    }
   });
 
   it('implements the React integration as a render hook with an internal ref and cleanup', () => {
@@ -56,8 +60,23 @@ describe('framework integration guides', () => {
     expect(hook).toContain('const renderOfficeViewer = useCallback(');
     expect(hook).toContain('<div {...props} ref={mountRef} />');
     expect(hook).toContain('useEffect(() =>');
-    expect(hook).toContain('mountedViewer?.destroy();');
+    expect(hook).toContain('const controller = new AbortController();');
+    expect(hook).toContain('viewer?.destroy();');
+    expect(hook).not.toMatch(/\blet\s+/);
+    expect(hook).not.toMatch(/\bvoid\s+mountOfficeViewer/);
     expect(hook).not.toContain('targetRef:');
+  });
+
+  it('uses one div-backed viewer surface and a replaceable local file source', async () => {
+    const { frameworkGuides } = await import('./lib/framework-guides');
+    for (const guide of frameworkGuides) {
+      expect(guide.appCode).toContain('DocxScrollViewer');
+      expect(guide.appCode).toContain('PptxScrollViewer');
+      expect(guide.appCode).toContain('XlsxViewer');
+      expect(guide.appCode).toContain('file.arrayBuffer()');
+      expect(guide.appCode).toContain('.docx,.xlsx,.pptx');
+      expect(guide.appCode).not.toContain('<canvas');
+    }
   });
 
   it('documents and performs DOCX teardown in the existing snippets', () => {
@@ -65,6 +84,7 @@ describe('framework integration guides', () => {
     expect(snippets).toContain("const fwDocx: FwCfg = { Viewer: 'DocxViewer'");
     expect(snippets).toContain('return () => viewer.destroy();');
     expect(snippets).toContain('onBeforeUnmount(() => viewer?.destroy());');
+    expect(snippets).not.toMatch(/\bvoid\s+viewer\.load/);
     expect(snippets).not.toContain('destroy: false');
     expect(snippets).not.toContain('docx renders into the canvas you own and needs no teardown');
   });

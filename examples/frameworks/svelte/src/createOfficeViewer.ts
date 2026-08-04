@@ -1,17 +1,31 @@
 import { writable, type Readable } from 'svelte/store';
 import type { Action } from 'svelte/action';
-import {
-  mountOfficeViewer,
-  type OfficeFormat,
-  type OfficeViewerByFormat,
-  type OfficeViewerConfig,
-  type OfficeViewerTargetByFormat,
-} from '@ooxml-framework-examples/shared';
 
+export type OfficeSource = string | ArrayBuffer;
 export type OfficeViewerStatus = 'idle' | 'loading' | 'ready' | 'error';
 
-export interface OfficeViewerAction<F extends OfficeFormat> {
-  action: Action<OfficeViewerTargetByFormat[F], OfficeViewerConfig<F>>;
+export interface OfficeViewerHandle {
+  load: (source: OfficeSource) => Promise<unknown>;
+  destroy: () => void;
+  getScale: () => number;
+  setScale: (scale: number) => void;
+  zoomIn: () => void;
+  zoomOut: () => void;
+  fitWidth: () => void;
+  fitPage: () => void;
+}
+
+export type OfficeViewerFactory<V extends OfficeViewerHandle> = (
+  container: HTMLElement,
+) => V | Promise<V>;
+
+export interface OfficeViewerConfig<V extends OfficeViewerHandle> {
+  source: OfficeSource;
+  createViewer: OfficeViewerFactory<V>;
+}
+
+export interface OfficeViewerAction<V extends OfficeViewerHandle> {
+  action: Action<HTMLElement, OfficeViewerConfig<V>>;
   status: Readable<OfficeViewerStatus>;
   error: Readable<Error | null>;
   reload: () => void;
@@ -23,58 +37,79 @@ export interface OfficeViewerAction<F extends OfficeFormat> {
   fitPage: () => void;
 }
 
-export function createOfficeViewer<F extends OfficeFormat>(): OfficeViewerAction<F> {
+export function createOfficeViewer<V extends OfficeViewerHandle>(): OfficeViewerAction<V> {
   const status = writable<OfficeViewerStatus>('idle');
   const error = writable<Error | null>(null);
-  let node: OfficeViewerTargetByFormat[F] | null = null;
-  let config: OfficeViewerConfig<F> | null = null;
-  let viewer: OfficeViewerByFormat[F] | null = null;
-  let generation = 0;
+  const state = {
+    node: null as HTMLElement | null,
+    config: null as OfficeViewerConfig<V> | null,
+    viewer: null as V | null,
+    controller: null as AbortController | null,
+  };
 
-  function destroyViewer(): void {
-    generation += 1;
+  const destroyViewer = () => {
+    state.controller?.abort();
+    state.controller = null;
+    const viewer = state.viewer;
+    state.viewer = null;
     viewer?.destroy();
-    viewer = null;
-  }
+  };
 
-  function mount(): void {
+  const mount = () => {
     destroyViewer();
+    const { node, config } = state;
     if (!node || !config) {
       status.set('idle');
       return;
     }
 
-    const currentGeneration = generation;
+    const controller = new AbortController();
+    state.controller = controller;
     status.set('loading');
     error.set(null);
-    void mountOfficeViewer({ ...config, target: node }).then((nextViewer) => {
-      if (generation !== currentGeneration) {
-        nextViewer.destroy();
-        return;
-      }
-      viewer = nextViewer;
-      status.set('ready');
-    }).catch((reason: unknown) => {
-      if (generation !== currentGeneration) return;
-      error.set(reason instanceof Error ? reason : new Error(String(reason)));
-      status.set('error');
-    });
-  }
+    Promise.resolve(config.createViewer(node))
+      .then(async (viewer) => {
+        if (controller.signal.aborted) {
+          viewer.destroy();
+          return null;
+        }
+        try {
+          await viewer.load(config.source);
+          return viewer;
+        } catch (reason) {
+          viewer.destroy();
+          throw reason;
+        }
+      })
+      .then((viewer) => {
+        if (!viewer || controller.signal.aborted) {
+          viewer?.destroy();
+          return;
+        }
+        state.viewer = viewer;
+        status.set('ready');
+      })
+      .catch((reason: unknown) => {
+        if (controller.signal.aborted) return;
+        error.set(reason instanceof Error ? reason : new Error(String(reason)));
+        status.set('error');
+      });
+  };
 
-  const action: Action<OfficeViewerTargetByFormat[F], OfficeViewerConfig<F>> = (element, initialConfig) => {
-    node = element;
-    config = initialConfig;
+  const action: Action<HTMLElement, OfficeViewerConfig<V>> = (element, initialConfig) => {
+    state.node = element;
+    state.config = initialConfig;
     mount();
 
     return {
       update(nextConfig) {
-        config = nextConfig;
+        state.config = nextConfig;
         mount();
       },
       destroy() {
         destroyViewer();
-        node = null;
-        config = null;
+        state.node = null;
+        state.config = null;
         status.set('idle');
       },
     };
@@ -85,11 +120,11 @@ export function createOfficeViewer<F extends OfficeFormat>(): OfficeViewerAction
     status,
     error,
     reload: mount,
-    getScale: () => viewer?.getScale(),
-    setScale: (scale) => viewer?.setScale(scale),
-    zoomIn: () => viewer?.zoomIn(),
-    zoomOut: () => viewer?.zoomOut(),
-    fitWidth: () => viewer?.fitWidth(),
-    fitPage: () => viewer?.fitPage(),
+    getScale: () => state.viewer?.getScale(),
+    setScale: (scale) => state.viewer?.setScale(scale),
+    zoomIn: () => state.viewer?.zoomIn(),
+    zoomOut: () => state.viewer?.zoomOut(),
+    fitWidth: () => state.viewer?.fitWidth(),
+    fitPage: () => state.viewer?.fitPage(),
   };
 }

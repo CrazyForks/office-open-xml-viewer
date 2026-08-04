@@ -10,9 +10,9 @@ importers:
 
   react:
     dependencies:
-      '@ooxml-framework-examples/shared':
-        specifier: workspace:*
-        version: link:../shared
+      '@silurus/ooxml':
+        specifier: ^0.75.3
+        version: 0.75.3
       react:
         specifier: ^19.2.8
         version: 19.2.8
@@ -36,17 +36,11 @@ importers:
         specifier: ^8.0.8
         version: 8.2.0
 
-  shared:
+  solid:
     dependencies:
       '@silurus/ooxml':
         specifier: ^0.75.3
         version: 0.75.3
-
-  solid:
-    dependencies:
-      '@ooxml-framework-examples/shared':
-        specifier: workspace:*
-        version: link:../shared
       solid-js:
         specifier: ^1.9.14
         version: 1.9.14
@@ -63,9 +57,9 @@ importers:
 
   svelte:
     dependencies:
-      '@ooxml-framework-examples/shared':
-        specifier: workspace:*
-        version: link:../shared
+      '@silurus/ooxml':
+        specifier: ^0.75.3
+        version: 0.75.3
       svelte:
         specifier: ^5.56.8
         version: 5.56.8
@@ -85,9 +79,9 @@ importers:
 
   vue:
     dependencies:
-      '@ooxml-framework-examples/shared':
-        specifier: workspace:*
-        version: link:../shared
+      '@silurus/ooxml':
+        specifier: ^0.75.3
+        version: 0.75.3
       vue:
         specifier: ^3.5.40
         version: 3.5.40(typescript@6.0.3)

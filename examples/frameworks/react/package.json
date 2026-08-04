@@ -8,7 +8,7 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@ooxml-framework-examples/shared": "workspace:*",
+    "@silurus/ooxml": "^0.75.3",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

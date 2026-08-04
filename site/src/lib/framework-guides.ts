@@ -33,8 +33,6 @@ function stackBlitz(framework: FrameworkId, file: string): string {
   return `https://stackblitz.com/github/${repository}/tree/main/examples/frameworks?${params}`;
 }
 
-export const sharedViewerCode = source('shared/src/office-viewer.ts');
-
 export const frameworkGuides: FrameworkGuide[] = [
   {
     id: 'react',
@@ -42,7 +40,7 @@ export const frameworkGuides: FrameworkGuide[] = [
     title: 'How to render Office files in the browser with React | DOCX, XLSX, and PPTX',
     description: 'Render DOCX, XLSX, and PPTX Office files in a React and TypeScript application with a reusable custom hook, Canvas viewer controls, and correct effect cleanup.',
     integrationName: 'useOfficeViewer',
-    integrationSummary: 'A custom hook accepts a targetRef, owns the viewer instance, and returns stable zoom, fit, reload, status, and error controls.',
+    integrationSummary: 'A custom render hook owns its container ref and viewer instance, accepts a replaceable source plus a public viewer factory, and returns stable zoom, fit, reload, status, and error controls.',
     lifecycle: 'useEffect mirrors viewer setup with destroy() cleanup, including React Strict Mode’s development setup/cleanup cycle.',
     adapterFilename: 'useOfficeViewer.tsx',
     adapterLanguage: 'tsx',
@@ -58,7 +56,7 @@ export const frameworkGuides: FrameworkGuide[] = [
     title: 'How to render Office files in the browser with Vue | DOCX, XLSX, and PPTX',
     description: 'Render DOCX, XLSX, and PPTX Office files in Vue 3 with TypeScript, a reusable Composition API composable, template refs, viewer controls, and automatic cleanup.',
     integrationName: 'useOfficeViewer',
-    integrationSummary: 'A Composition API composable watches the template ref and reactive inputs while exposing readonly status and the common viewer controls.',
+    integrationSummary: 'A Composition API composable watches the template ref, replaceable source, and public viewer factory while exposing readonly status and common viewer controls.',
     lifecycle: 'watchEffect invalidation destroys the previous viewer before a new source or format mounts, and also runs when the component scope is disposed.',
     adapterFilename: 'useOfficeViewer.ts',
     adapterLanguage: 'ts',
@@ -74,7 +72,7 @@ export const frameworkGuides: FrameworkGuide[] = [
     title: 'How to render Office files in the browser with Svelte | DOCX, XLSX, and PPTX',
     description: 'Render DOCX, XLSX, and PPTX Office files in Svelte with TypeScript, a reusable action, readable status stores, viewer controls, and reliable teardown.',
     integrationName: 'createOfficeViewer',
-    integrationSummary: 'A Svelte action mounts directly on the canvas or container and returns readable status stores plus imperative viewer controls.',
+    integrationSummary: 'A self-contained Svelte action mounts on one div, reacts to a replaceable source and viewer factory, and returns readable status stores plus imperative controls.',
     lifecycle: 'The action update and destroy callbacks replace or release the viewer, while a generation token rejects stale asynchronous mounts.',
     adapterFilename: 'createOfficeViewer.ts',
     adapterLanguage: 'ts',
@@ -90,7 +88,7 @@ export const frameworkGuides: FrameworkGuide[] = [
     title: 'How to render Office files in the browser with Solid | DOCX, XLSX, and PPTX',
     description: 'Render DOCX, XLSX, and PPTX Office files in Solid with TypeScript, a reusable reactive primitive, signal-based status, viewer controls, and cleanup.',
     integrationName: 'createOfficeViewer',
-    integrationSummary: 'A Solid primitive reads target and source accessors, exposes signals for status and errors, and returns the common viewer controls.',
+    integrationSummary: 'A self-contained Solid primitive reads target, source, and viewer-factory accessors, exposes status and error signals, and returns common viewer controls.',
     lifecycle: 'createEffect tracks reactive inputs and onCleanup releases each viewer before the effect reruns or the owner is disposed.',
     adapterFilename: 'createOfficeViewer.ts',
     adapterLanguage: 'ts',

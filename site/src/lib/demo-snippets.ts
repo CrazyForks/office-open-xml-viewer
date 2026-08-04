@@ -130,7 +130,7 @@ export function Viewer({ src }: { src: string }) {
     const ${c.el} = ref.current;
     if (!${c.el}) return;
     const viewer = new ${c.Viewer}(${c.el}, ${c.opts});
-    void viewer.load(src);
+    viewer.load(src).catch((error) => console.error(error));
     return () => viewer.destroy();
   }, [src]);
 
@@ -147,7 +147,7 @@ let viewer: ${c.Viewer} | undefined;
 
 onMounted(() => {
   viewer = new ${c.Viewer}(${c.el}.value as ${c.RefType}, ${c.opts});
-  void viewer.load(props.src);
+  viewer.load(props.src).catch((error) => console.error(error));
 });
 onBeforeUnmount(() => viewer?.destroy());
 <\/script>
@@ -165,7 +165,7 @@ onBeforeUnmount(() => viewer?.destroy());
 
   onMount(() => {
     const viewer = new ${c.Viewer}(${c.el}, ${c.opts});
-    void viewer.load(src);
+    viewer.load(src).catch((error) => console.error(error));
     return () => viewer.destroy();
   });
 <\/script>

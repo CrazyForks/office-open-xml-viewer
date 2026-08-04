@@ -6,22 +6,29 @@ import {
   type HTMLAttributes,
   type ReactElement,
 } from 'react';
-import {
-  mountOfficeViewer,
-  type OfficeFormat,
-  type OfficeSource,
-  type OfficeViewerByFormat,
-  type OfficeViewerOptionsByFormat,
-  type OfficeViewerTargetByFormat,
-} from '@ooxml-framework-examples/shared';
 
+export type OfficeSource = string | ArrayBuffer;
 export type OfficeViewerStatus = 'idle' | 'loading' | 'ready' | 'error';
 
-export interface UseOfficeViewerOptions<F extends OfficeFormat> {
-  format: F;
+export interface OfficeViewerHandle {
+  load: (source: OfficeSource) => Promise<unknown>;
+  destroy: () => void;
+  getScale: () => number;
+  setScale: (scale: number) => void;
+  zoomIn: () => void;
+  zoomOut: () => void;
+  fitWidth: () => void;
+  fitPage: () => void;
+}
+
+export type OfficeViewerFactory<V extends OfficeViewerHandle> = (
+  container: HTMLElement,
+) => V | Promise<V>;
+
+export interface UseOfficeViewerOptions<V extends OfficeViewerHandle> {
   source: OfficeSource;
-  /** Keep this object referentially stable (for example, with useMemo). */
-  viewerOptions?: OfficeViewerOptionsByFormat[F];
+  /** Keep this factory referentially stable with useCallback. */
+  createViewer: OfficeViewerFactory<V>;
 }
 
 export interface UseOfficeViewerResult {
@@ -37,13 +44,12 @@ export interface UseOfficeViewerResult {
   fitPage: () => void;
 }
 
-export function useOfficeViewer<F extends OfficeFormat>({
-  format,
+export function useOfficeViewer<V extends OfficeViewerHandle>({
   source,
-  viewerOptions,
-}: UseOfficeViewerOptions<F>): UseOfficeViewerResult {
+  createViewer,
+}: UseOfficeViewerOptions<V>): UseOfficeViewerResult {
   const mountRef = useRef<HTMLDivElement>(null);
-  const viewerRef = useRef<OfficeViewerByFormat[F] | null>(null);
+  const viewerRef = useRef<V | null>(null);
   const [status, setStatus] = useState<OfficeViewerStatus>('idle');
   const [error, setError] = useState<Error | null>(null);
   const [reloadVersion, setReloadVersion] = useState(0);
@@ -54,46 +60,51 @@ export function useOfficeViewer<F extends OfficeFormat>({
   );
 
   useEffect(() => {
-    const mountPoint = mountRef.current;
-    if (!mountPoint) {
+    const container = mountRef.current;
+    if (!container) {
       setStatus('idle');
       return;
     }
 
-    const canvasTarget = format === 'xlsx'
-      ? null
-      : mountPoint.appendChild(document.createElement('canvas'));
-    const target = (canvasTarget ?? mountPoint) as OfficeViewerTargetByFormat[F];
-    let active = true;
-    let mountedViewer: OfficeViewerByFormat[F] | null = null;
+    const controller = new AbortController();
     setStatus('loading');
     setError(null);
 
-    void mountOfficeViewer({ format, target, source, options: viewerOptions })
-      .then((viewer) => {
-        if (!active) {
+    Promise.resolve(createViewer(container))
+      .then(async (viewer) => {
+        if (controller.signal.aborted) {
           viewer.destroy();
-          canvasTarget?.remove();
+          return null;
+        }
+        try {
+          await viewer.load(source);
+          return viewer;
+        } catch (reason) {
+          viewer.destroy();
+          throw reason;
+        }
+      })
+      .then((viewer) => {
+        if (!viewer || controller.signal.aborted) {
+          viewer?.destroy();
           return;
         }
-        mountedViewer = viewer;
         viewerRef.current = viewer;
         setStatus('ready');
       })
       .catch((reason: unknown) => {
-        canvasTarget?.remove();
-        if (!active) return;
+        if (controller.signal.aborted) return;
         setError(reason instanceof Error ? reason : new Error(String(reason)));
         setStatus('error');
       });
 
     return () => {
-      active = false;
-      if (viewerRef.current === mountedViewer) viewerRef.current = null;
-      mountedViewer?.destroy();
-      canvasTarget?.remove();
+      controller.abort();
+      const viewer = viewerRef.current;
+      viewerRef.current = null;
+      viewer?.destroy();
     };
-  }, [format, reloadVersion, source, viewerOptions]);
+  }, [createViewer, reloadVersion, source]);
 
   const reload = useCallback(() => setReloadVersion((version) => version + 1), []);
   const getScale = useCallback(() => viewerRef.current?.getScale(), []);

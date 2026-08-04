@@ -1,5 +1,5 @@
 import { render } from 'solid-js/web';
 import { App } from './App';
-import '@ooxml-framework-examples/shared/example.css';
+import '../../example.css';
 
 render(() => <App />, document.getElementById('root') as HTMLElement);

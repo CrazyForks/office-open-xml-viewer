@@ -8,7 +8,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
-    "@ooxml-framework-examples/shared": "workspace:*",
+    "@silurus/ooxml": "^0.75.3",
     "svelte": "^5.56.8"
   },
   "devDependencies": {

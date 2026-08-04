@@ -6,7 +6,6 @@ import LiveShowcase from './LiveShowcase.astro';
 import {
   frameworkGuides,
   getFrameworkGuide,
-  sharedViewerCode,
   type FrameworkId,
 } from '../lib/framework-guides';
 
@@ -64,7 +63,7 @@ const structuredData = JSON.stringify({
           <p class="section-lead">{guide.integrationSummary}</p>
         </div>
         <div class="approach-grid">
-          <article><span>01</span><h3>One mount boundary</h3><p>The component owns one host element. DOCX and PPTX receive an internal canvas; XLSX receives a container.</p></article>
+          <article><span>01</span><h3>One div for every format</h3><p>DOCX and PPTX use their ScrollViewer APIs, while XLSX uses its container viewer. Every factory receives the same host element.</p></article>
           <article><span>02</span><h3>Safe async replacement</h3><p>A new source or format releases the previous viewer, and a late promise cannot revive an unmounted instance.</p></article>
           <article><span>03</span><h3>Framework lifecycle</h3><p>{guide.lifecycle}</p></article>
         </div>
@@ -114,20 +113,6 @@ const structuredData = JSON.stringify({
       </div>
     </section>
 
-    <section class="section shared-section">
-      <div class="wrap shared-layout">
-        <div>
-          <p class="eyebrow">Shared, typed loader</p>
-          <h2 class="section-title">Keep format loading in one place.</h2>
-          <p class="section-lead">The small framework-independent module dynamically imports only the selected format entry point and preserves each viewer’s native option types.</p>
-        </div>
-        <details>
-          <summary>View office-viewer.ts</summary>
-          <CodeTabs filename="office-viewer.ts" tabs={[{ id: 'shared', label: 'Shared module', lang: 'ts', code: sharedViewerCode }]} />
-        </details>
-      </div>
-    </section>
-
     <nav class="framework-rail wrap" aria-label="Framework integration guides">
       <span>Other framework guides</span>
       {frameworkGuides.filter((candidate) => candidate.id !== guide.id).map((candidate) => (
@@ -172,10 +157,6 @@ const structuredData = JSON.stringify({
   .code-layout > :global(.codetabs) { grid-column: 5 / 13; min-width: 0; }
   .usage-section { border-bottom: 1px solid var(--border); }
   .live-section { background: var(--showcase-bg); }
-  .shared-layout { display: grid; grid-template-columns: 4fr 8fr; gap: 42px; align-items: start; }
-  details { min-width: 0; }
-  summary { padding: 14px 0; border-top: 1px solid var(--border-bright); border-bottom: 1px solid var(--border); cursor: pointer; font: 13px var(--mono); }
-  details[open] summary { margin-bottom: 16px; }
   .framework-rail { display: flex; align-items: center; gap: 22px; padding-top: 28px; padding-bottom: 28px; border-top: 1px solid var(--border); font: 12px var(--mono); }
   .framework-rail span { margin-right: auto; color: var(--text-faint); text-transform: uppercase; letter-spacing: .08em; }
   .framework-rail a { border-bottom: 1px solid var(--signal); }
@@ -183,7 +164,6 @@ const structuredData = JSON.stringify({
   @media (max-width: 900px) {
     .guide-copy { grid-column: 1 / 10; }.guide-facts { grid-column: 10 / 13; }
     .code-intro { grid-column: 1 / 13; position: static; }.code-layout > :global(.codetabs) { grid-column: 1 / 13; }
-    .shared-layout { grid-template-columns: 1fr; }
   }
   @media (max-width: 680px) {
     .guide-hero { padding: 58px 0 64px; }.guide-copy, .guide-facts { grid-column: 1 / 13; }.guide-facts { margin-top: 20px; }
