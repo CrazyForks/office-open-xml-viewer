@@ -1,8 +1,7 @@
 ---
 import Base from '../layouts/Base.astro';
 import Nav from './Nav.astro';
-import CodeTabs from './CodeTabs.astro';
-import FrameworkTryYours from './FrameworkTryYours.astro';
+import FrameworkStackBlitz from './FrameworkStackBlitz.astro';
 import {
   frameworkGuides,
   getFrameworkGuide,
@@ -38,8 +37,7 @@ const structuredData = JSON.stringify({
           <h1>Render Office files in the browser with <em>{guide.name}.</em></h1>
           <p class="guide-lead">
             A portable {guide.name} integration for displaying DOCX, XLSX, and PPTX files with
-            <code>@silurus/ooxml</code>. It keeps documents in the browser and handles loading,
-            stale async work, viewer controls, and teardown.
+            <code>@silurus/ooxml</code>. Choose a local file and render it without uploading it.
           </p>
           <div class="guide-actions">
             <span class="install-command">{installCommand}</span>
@@ -55,61 +53,14 @@ const structuredData = JSON.stringify({
       </div>
     </header>
 
-    <section class="section approach-section">
-      <div class="wrap">
-        <div class="section-intro">
-          <p class="eyebrow">Designed for {guide.name}</p>
-          <h2 class="section-title">A module you can keep.</h2>
-          <p class="section-lead">{guide.integrationSummary}</p>
-        </div>
-        <div class="approach-grid">
-          <article><span>01</span><h3>One div for every format</h3><p>DOCX and PPTX use their ScrollViewer APIs, while XLSX uses its container viewer. Every factory receives the same host element.</p></article>
-          <article><span>02</span><h3>Safe async replacement</h3><p>A new source or format releases the previous viewer, and a late promise cannot revive an unmounted instance.</p></article>
-          <article><span>03</span><h3>Framework lifecycle</h3><p>{guide.lifecycle}</p></article>
-        </div>
-      </div>
-    </section>
-
-    <section class="section code-section">
-      <div class="wrap code-layout">
-        <div class="code-intro">
-          <p class="eyebrow">Step 1</p>
-          <h2>Copy the {guide.name} integration.</h2>
-          <p>This is the actual module used by the runnable example—not a shortened documentation-only snippet.</p>
-        </div>
-        <CodeTabs filename={guide.adapterFilename} tabs={[{
-          id: 'integration',
-          label: guide.integrationName,
-          lang: guide.adapterLanguage,
-          code: guide.adapterCode,
-        }]} />
-      </div>
-    </section>
-
-    <section class="section usage-section">
-      <div class="wrap code-layout">
-        <div class="code-intro">
-          <p class="eyebrow">Step 2</p>
-          <h2>Use it in a component.</h2>
-          <p>The example adds loading and error status plus zoom, fit, and reload controls without turning the integration into a UI kit.</p>
-        </div>
-        <CodeTabs filename={guide.appFilename} tabs={[{
-          id: 'component',
-          label: 'Component',
-          lang: guide.appLanguage,
-          code: guide.appCode,
-        }]} />
-      </div>
-    </section>
-
     <section class="section live-section">
       <div class="wrap">
         <div class="section-intro">
-          <p class="eyebrow">Try yours</p>
-          <h2 class="section-title">Choose a local Office file.</h2>
-          <p class="section-lead">Render a DOCX, XLSX, or PPTX file locally. Nothing is displayed until you choose a file, and the document never leaves your browser.</p>
+          <p class="eyebrow">Live project</p>
+          <h2 class="section-title">Run it on StackBlitz.</h2>
+          <p class="section-lead">Edit the real {guide.name} project and choose a local DOCX, XLSX, or PPTX file in its preview.</p>
         </div>
-        <FrameworkTryYours />
+        <FrameworkStackBlitz framework={guide.name} src={guide.stackBlitzEmbedUrl} openUrl={guide.stackBlitzUrl} />
       </div>
     </section>
 
@@ -141,21 +92,8 @@ const structuredData = JSON.stringify({
   .guide-facts div { padding: 15px 0; border-bottom: 1px solid var(--hero-line); }
   .guide-facts dt { color: var(--hero-faint); font: 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
   .guide-facts dd { margin: 5px 0 0; font-size: 14px; }
-  .section-intro { margin-bottom: 48px; }
+  .section-intro { margin-bottom: 40px; }
   .section-intro .section-title { max-width: none; }
-  .approach-grid { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--border-bright); }
-  .approach-grid article { min-height: 260px; padding: 20px 28px 24px 0; border-right: 1px solid var(--border); }
-  .approach-grid article + article { padding-left: 28px; }
-  .approach-grid article:last-child { border-right: 0; }
-  .approach-grid span { font: 11px var(--mono); color: var(--accent); }
-  .approach-grid h3 { margin-top: 58px; font-size: 23px; }
-  .approach-grid p, .code-intro p { color: var(--text-dim); font-size: 14px; }
-  .code-section { background: var(--surface-muted); }
-  .code-layout { display: grid; grid-template-columns: repeat(12, 1fr); gap: 18px; align-items: start; }
-  .code-intro { grid-column: 1 / 5; position: sticky; top: 90px; }
-  .code-intro h2 { margin: 18px 0; font-size: clamp(30px, 4vw, 46px); }
-  .code-layout > :global(.codetabs) { grid-column: 5 / 13; min-width: 0; }
-  .usage-section { border-bottom: 1px solid var(--border); }
   .live-section { background: var(--showcase-bg); }
   .framework-rail { display: flex; align-items: center; gap: 22px; padding-top: 28px; padding-bottom: 28px; border-top: 1px solid var(--border); font: 12px var(--mono); }
   .framework-rail span { margin-right: auto; color: var(--text-faint); text-transform: uppercase; letter-spacing: .08em; }
@@ -163,12 +101,10 @@ const structuredData = JSON.stringify({
   .guide-footer { padding: 28px 0; background: var(--hero-bg); color: var(--hero-muted); font: 11px var(--mono); }
   @media (max-width: 900px) {
     .guide-copy { grid-column: 1 / 10; }.guide-facts { grid-column: 10 / 13; }
-    .code-intro { grid-column: 1 / 13; position: static; }.code-layout > :global(.codetabs) { grid-column: 1 / 13; }
   }
   @media (max-width: 680px) {
     .guide-hero { padding: 58px 0 64px; }.guide-copy, .guide-facts { grid-column: 1 / 13; }.guide-facts { margin-top: 20px; }
     .guide-copy h1 { font-size: clamp(42px, 13vw, 58px); }
-    .approach-grid { grid-template-columns: 1fr; }.approach-grid article { min-height: auto; padding: 22px 0 !important; border-right: 0; border-bottom: 1px solid var(--border); }
-    .approach-grid h3 { margin-top: 24px; }.framework-rail { align-items: flex-start; flex-direction: column; gap: 12px; }.framework-rail span { margin-right: 0; }
+    .framework-rail { align-items: flex-start; flex-direction: column; gap: 12px; }.framework-rail span { margin-right: 0; }
   }
 </style>
