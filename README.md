@@ -79,7 +79,7 @@ pnpm add @silurus/ooxml
 
 ```typescript
 import { DocxViewer } from '@silurus/ooxml/docx';
-import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { XlsxSheetViewer, XlsxViewer } from '@silurus/ooxml/xlsx';
 import { PptxViewer } from '@silurus/ooxml/pptx';
 
 // DOCX — caller provides the <canvas>
@@ -92,6 +92,12 @@ docx.nextPage();
 const container = document.getElementById('xlsx-container') as HTMLElement;
 const xlsx = new XlsxViewer(container);
 await xlsx.load('/workbook.xlsx');
+
+// XLSX active-sheet surface only — caller provides the <canvas>
+const sheetCanvas = document.getElementById('xlsx-canvas') as HTMLCanvasElement;
+const sheet = new XlsxSheetViewer(sheetCanvas);
+await sheet.load('/workbook.xlsx');
+await sheet.goToSheet(1);
 
 // PPTX — caller provides the <canvas>
 const canvas = document.getElementById('pptx-canvas') as HTMLCanvasElement;
@@ -636,7 +642,8 @@ file without uploading it.
 ## Companion packages
 
 - **[`packages/markdown/`](packages/markdown/)** — `@silurus/ooxml-markdown` and the `ooxml-md` CLI convert `.pptx` / `.docx` / `.xlsx` to GitHub-flavoured markdown via the workspace WASM parsers. Same projection used by the MCP server (~21× smaller than the raw XML on the demo deck, ~8% bigger than a flat-text extractor). Includes a node20-based GitHub Action for bulk repo-wide conversion.
-- **[`packages/node/`](packages/node/)** — the implementation behind the public Node-only `@silurus/ooxml/node` subpath. It exposes materializing `parsePptx` / `parseDocx` / `parseXlsx` / `parseXlsxAllSheets` helpers plus uniformly owned, bounded `openPptxPresentation`, `openDocxDocument`, and `openXlsxWorkbook` sessions, with no DOM or Web Worker dependency. Each `open*` call returns an explicit `close()`-able session; PPTX streams `slides()` and can render each yielded slide through the same bounded archive, DOCX completes format-required sequential pagination before streaming `pages()`, and XLSX parses its workbook index once before sequential `worksheetRows(sheetIndex)` streams reuse the retained archive. Useful for CI checks and headless rendering pipelines; canvas rendering accepts a user-supplied backend such as `skia-canvas` without making it a runtime dependency.
+- **[`packages/node/`](packages/node/)** — the implementation behind the public Node-only `@silurus/ooxml/node` subpath. Its canonical APIs are the explicitly owned, bounded `openPptxPresentation`, `openDocxDocument`, and `openXlsxWorkbook` sessions. Async `materializePptxPresentation`, `materializeDocxDocument`, `materializeXlsxWorkbookIndex`, `materializeXlsxWorksheet`, and `materializeXlsxWorkbook` are provided when a complete caller-owned graph is actually needed. Each `open*` call returns an explicit, idempotent `close()`-able session; PPTX streams `slides()`, DOCX completes format-required sequential pagination before streaming `pages()`, and XLSX parses its workbook index once before sequential `worksheetRows(sheetIndex)` streams reuse the retained archive. Useful for CI checks and headless rendering pipelines; canvas rendering accepts a user-supplied backend such as `skia-canvas` without making it a runtime dependency.
+  See the [0.75 to 0.76 migration guide](docs/migration-0.76.md) for every removed synchronous helper and its replacement.
 - **[`packages/vscode-extension/`](packages/vscode-extension/)** — VS Code extension (`ooxml-viewer`) that registers `CustomEditorProvider`s for `.docx`, `.xlsx`, and `.pptx`, and (opt-in) auto-installs and registers the `ooxml-mcp-server` so AI coding agents in the same window (Copilot Agent mode, Claude, …) can read those files via dedicated tools. The preview is offline by default; an opt-in `ooxmlViewer.useGoogleFonts` setting (off, and force-disabled in untrusted workspaces) surfaces the library's metric-compatible font substitution, widening the webview CSP to the Google Fonts CDN only while enabled.
 - **[`packages/mcp-server/`](packages/mcp-server/)** — Rust MCP server (`ooxml-mcp-server`) exposing the parsers as tools for AI agents (Claude, Copilot, Codex, etc.). Provides structured queries (`docx_get_structure`, `xlsx_get_cell_range`, `pptx_get_slide_structure`, …) so agents can inspect OOXML files without shelling out to `unzip`. Prebuilt binaries are attached to each [GitHub Release](https://github.com/yukiyokotani/office-open-xml-viewer/releases) for macOS / Linux / Windows; the VS Code extension downloads them on demand.
 
@@ -738,16 +745,17 @@ await viewer.load(file);
 ## Security & Privacy
 
 - **Canvas-only rendering.** Documents are decoded and drawn to an `HTMLCanvasElement`. No script, link, form, or other active content from the source file is executed or injected into the DOM.
-- **Bounded OOXML package expansion.** DOCX, XLSX, and PPTX use the same resource policy. By default, one archive entry may inflate to at most 128 MiB and the distinct entries visited during one package session may inflate to at most 256 MiB. Override either budget with a plain `resourceLimits` object on a viewer or `load(...)` call:
+- **Bounded OOXML package expansion.** DOCX, XLSX, and PPTX use the same resource policy. By default, one archive entry may inflate to at most 128 MiB, the distinct entries visited during one package session may inflate to at most 256 MiB, and an archive may contain at most 4,096 entries. Override these budgets with a plain `resourceLimits` object on a viewer or `load(...)` call:
   ```ts
   new XlsxViewer(container, {
     resourceLimits: {
       maxArchiveEntryBytes: 64 * 1024 * 1024,
       maxTotalInflatedBytes: 192 * 1024 * 1024,
+      maxArchiveEntries: 2048,
     },
   });
   ```
-  `maxArchiveEntryBytes` applies to every XML, text, image, media, and other package part that the parser reads. `maxTotalInflatedBytes` counts the largest amount actually read from each distinct part during the lifetime of the loaded package; reading the same part again does not consume that budget twice. Set an individual field to `null` to disable that configurable budget. Internal hard safety ceilings still apply, so disabling a budget does not make arbitrary archives acceptable. Values other than `null` must be positive safe-integer byte counts.
+  `maxArchiveEntryBytes` applies to every XML, text, image, media, and other package part that the parser reads. `maxTotalInflatedBytes` counts the largest amount actually read from each distinct part during the lifetime of the loaded package; reading the same part again does not consume that budget twice. `maxArchiveEntries` bounds central-directory entries before the ZIP library allocates its owned index. Set an individual field to `null` to disable that configurable budget. Internal hard safety ceilings still apply, so disabling a budget does not make arbitrary archives acceptable. Values other than `null` must be positive safe integers; byte fields are expressed in bytes and the entry field is a count.
 
   A violation rejects with `OoxmlResourceLimitError` (`code === 'ooxml-resource-limit'`). Its structured `details.violation` reports the resource, metric, limit, observed value, usage snapshot, and part name when a particular part caused the failure. The deprecated `maxZipEntryBytes` option remains as a compatibility alias for `resourceLimits.maxArchiveEntryBytes`, but is scheduled for removal in a future breaking release; new code should use `resourceLimits`.
 
@@ -769,6 +777,7 @@ await viewer.load(file);
     resourceLimits: {
       maxArchiveEntryBytes: 128 * 1024 * 1024,
       maxTotalInflatedBytes: 256 * 1024 * 1024,
+      maxArchiveEntries: 4096,
     },
   });
   ```

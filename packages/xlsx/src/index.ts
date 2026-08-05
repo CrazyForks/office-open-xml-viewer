@@ -1,9 +1,18 @@
 export { XlsxWorkbook, type LoadOptions } from './workbook.js';
 export type { WireRenderViewportOptions, WireSizeOverrides } from './worker-protocol.js';
-export { XlsxViewer } from './viewer.js';
+export { XlsxViewer, XlsxSheetViewer } from './viewer.js';
 // Resolved list-validation values (reachable via XlsxWorkbook.resolveValidationList).
 export type { ResolvedList } from './validation-list.js';
-export type { XlsxViewerOptions, HiddenSheetMode, CellAddress, CellRange, SelectionMode } from './viewer.js';
+export type {
+  XlsxViewerOptions,
+  XlsxSheetViewerOptions,
+  XlsxViewportOffset,
+  XlsxScrollToCellOptions,
+  HiddenSheetMode,
+  CellAddress,
+  CellRange,
+  SelectionMode,
+} from './viewer.js';
 // IX2 find-in-document: the xlsx match-location shape (sheet + A1 cell ref).
 // `FindMatch` / `FindMatchesOptions` come from core (shared across formats).
 export type { XlsxMatchLocation } from './find.js';
@@ -14,7 +23,7 @@ export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core';
 // Resolve `{type:'shared',si}` cells against a workbook's sharedStrings table
 // (ECMA-376 §18.4.8). Exported so headless callers that parse a Worksheet
-// directly (e.g. @silurus/ooxml-node's parseXlsxSheet) can concretize cell text.
+// directly (for example a bounded Node worksheet session) can concretize cell text.
 export { resolveSharedStrings } from './shared-strings.js';
 // Typed load-time error surfaced by XlsxWorkbook.load (e.g. a password-protected
 // or legacy-binary .xls file). Re-exported so `@silurus/ooxml/xlsx` consumers can

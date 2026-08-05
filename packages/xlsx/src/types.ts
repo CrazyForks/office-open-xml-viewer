@@ -1086,17 +1086,6 @@ export type WorkerRequest =
       data: ArrayBuffer;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
     }
-  /** Parse one sheet lazily. Deliberately carries NO `data`: the worker already
-   *  retained the whole-workbook buffer on the preceding `parse`, so re-sending
-   *  it here would structured-clone the entire file per sheet switch for no
-   *  gain. `parseSheet` is therefore only valid AFTER a `parse` (a `parseSheet`
-   *  with no retained buffer is a protocol violation). */
-  | {
-      type: 'parseSheet';
-      id: number;
-      sheetIndex: number;
-      sheetName: string;
-    }
   | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } &
       PullSessionIdentity<number>)
   /** Pull one embedded image's raw bytes by zip path from the buffer the worker
@@ -1121,7 +1110,6 @@ export type WorkerResponse =
       workbookJson: ArrayBuffer;
       usage?: OoxmlResourceUsageSnapshot;
     }
-  | { type: 'parsedSheet'; id: number; worksheetJson: ArrayBuffer }
   | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>)
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'resourceUsage'; id: number; usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot }

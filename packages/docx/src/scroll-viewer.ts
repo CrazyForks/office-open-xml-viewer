@@ -1,5 +1,6 @@
 import { computeVisibleRange, openExternalHyperlink, PT_TO_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type VisibleRange } from '@silurus/ooxml-core';
 import type { FindHighlightColors, FindMatch, FindMatchesOptions, HyperlinkTarget, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
+import { StaticCanvasRenderDispatcher } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import { DocxDocument } from './document';
 import type { LoadOptions } from './document';
 import type { DocxTextRunInfo } from './renderer';
@@ -173,14 +174,8 @@ interface PageSlot {
    *  scales the text overlay by `newScale / renderedScale`; the debounced settle
    *  re-render then repaints at the new scale and updates this to match. */
   renderedScale: number;
-  /** worker-mode: a transient hold on a just-received ImageBitmap, set only
-   *  between receipt from the worker and its `transferFromImageBitmap` (which
-   *  consumes it, after which we null the field). Its purpose is the throw path:
-   *  if the transfer throws, `destroy()`/`_recycleSlot` can still find and
-   *  `.close()` the bitmap. Normally null once transfer completes. */
-  bitmap: ImageBitmap | null;
-  /** bitmaprenderer ctx (worker mode), grabbed once per canvas. */
-  bitmapCtx: ImageBitmapRenderingContext | null;
+  /** Shared single-canvas generation and worker-bitmap ownership primitive. */
+  dispatcher: StaticCanvasRenderDispatcher;
 }
 
 export class DocxScrollViewer implements ZoomableViewer {
@@ -757,18 +752,16 @@ export class DocxScrollViewer implements ZoomableViewer {
       highlightLayer,
       renderedPage: -1,
       renderedScale: -1,
-      bitmap: null,
-      bitmapCtx: null,
+      dispatcher: new StaticCanvasRenderDispatcher(canvas, this._mode === 'worker'),
     };
     return slot;
   }
 
   private _recycleSlot(idx: number, slot: PageSlot): void {
     this._slots.delete(idx);
-    // Close any worker bitmap held by this slot (T3 sets slot.bitmap).
-    if (slot.bitmap) {
-      slot.bitmap.close();
-      slot.bitmap = null;
+    slot.dispatcher.destroy();
+    if (!this._destroyed) {
+      slot.dispatcher = new StaticCanvasRenderDispatcher(slot.canvas, this._mode === 'worker');
     }
     // Clear the per-slot text overlay so a slot sitting in the free pool holds no
     // stale spans. buildDocxTextLayer also clears on its next build, but an
@@ -845,9 +838,11 @@ export class DocxScrollViewer implements ZoomableViewer {
     const widthPx = this._pageWidthPx(i);
     const epoch = this._renderEpoch;
     const scale = this._scale;
+    const dispatcher = slot.dispatcher;
+    const generation = dispatcher.begin();
 
     if (this._mode === 'worker') {
-      void this._renderSlotBitmap(i, slot, widthPx, dpr, scale);
+      void this._renderSlotBitmap(i, slot, widthPx, dpr, scale, dispatcher, generation);
       return;
     }
 
@@ -869,7 +864,12 @@ export class DocxScrollViewer implements ZoomableViewer {
         // geometry is at the old scale), or a recycle re-purposed this slot for a
         // different page / freed it. Either way: skip the (stale) overlay build.
         // The engine's per-canvas token already discards the superseded pixels.
-        if (epoch !== this._renderEpoch || this._slots.get(i) !== slot || slot.renderedPage !== i) return;
+        if (
+          !dispatcher.isCurrent(generation) ||
+          epoch !== this._renderEpoch ||
+          this._slots.get(i) !== slot ||
+          slot.renderedPage !== i
+        ) return;
         // This fresh render defines the scale the on-screen bitmap now lives at,
         // so a subsequent zoom preview stretches from HERE.
         slot.renderedScale = scale;
@@ -986,6 +986,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     widthPx: number,
     dpr: number,
     scale: number,
+    dispatcher = slot.dispatcher,
+    generation = dispatcher.begin(),
   ): Promise<void> {
     if (this._bitmapInFlight.has(i)) return; // coalesce: already dispatched
     // Drop-stale before dispatch: if this page already scrolled out of the
@@ -996,15 +998,6 @@ export class DocxScrollViewer implements ZoomableViewer {
     // Whether this invocation actually painted its slot. When it did NOT (stale
     // epoch or moved identity), the `finally` may need to re-dispatch a live slot.
     let painted = false;
-    // Grab the bitmaprenderer ctx ONCE per canvas — a canvas holds one context
-    // type for its lifetime. A recycled canvas keeps the ctx grabbed on its
-    // first worker render (bitmapCtx survives recycle), so we never re-getContext
-    // a canvas that already has one. (getContext for a conflicting type returns
-    // null rather than throwing; caching the first non-null ctx avoids relying on
-    // that and skips redundant lookups.)
-    if (!slot.bitmapCtx) {
-      slot.bitmapCtx = slot.canvas.getContext('bitmaprenderer') as ImageBitmapRenderingContext | null;
-    }
     // IX6 — harvest the page's run geometry alongside the bitmap so the
     // worker-mode selection overlay is built from the SAME data main mode uses.
     // The runs ride back beside the bitmap (one round-trip), collected only when
@@ -1025,24 +1018,19 @@ export class DocxScrollViewer implements ZoomableViewer {
       // the SAME slot object is re-mounted for page `i`, which the identity check
       // below cannot), or (b) the slot recycled to a different page / page `i`
       // re-mounted onto a DIFFERENT slot. Either way: close + skip the paint.
-      if (epoch !== this._renderEpoch || this._slots.get(i) !== slot || slot.renderedPage !== i) {
+      if (
+        !dispatcher.isCurrent(generation) ||
+        epoch !== this._renderEpoch ||
+        this._slots.get(i) !== slot ||
+        slot.renderedPage !== i
+      ) {
         bmp.close();
         return;
       }
-      // Close any prior bitmap, then hold the new one on the slot BEFORE the
-      // transfer. JS is single-threaded so nothing recycles between here and the
-      // transfer; the hold's real value is the throw path — if
-      // transferFromImageBitmap throws, `destroy()`/`_recycleSlot` can still find
-      // and close this bitmap. transferFromImageBitmap consumes the bitmap, so we
-      // null the field immediately after — leaving nothing to double-close.
-      if (slot.bitmap) slot.bitmap.close();
-      slot.bitmap = bmp;
-      slot.canvas.width = bmp.width;
-      slot.canvas.height = bmp.height;
-      slot.canvas.style.width = `${Math.round(bmp.width / dpr)}px`;
-      slot.canvas.style.height = `${Math.round(bmp.height / dpr)}px`;
-      slot.bitmapCtx?.transferFromImageBitmap(bmp);
-      slot.bitmap = null; // transfer consumed it
+      if (!dispatcher.commitBitmap(generation, bmp, {
+        cssWidth: Math.round(bmp.width / dpr),
+        cssHeight: Math.round(bmp.height / dpr),
+      })) return;
       // This bitmap now defines the scale the on-screen canvas lives at, so a
       // later zoom preview stretches from HERE (design §7 renderedScale).
       slot.renderedScale = scale;
@@ -1098,7 +1086,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       if (
         !painted &&
         live &&
-        (live !== slot || epoch !== this._renderEpoch) &&
+        (live !== slot || epoch !== this._renderEpoch || !dispatcher.isCurrent(generation)) &&
         !this._bitmapInFlight.has(i) &&
         !this._destroyed
       ) {
@@ -1438,6 +1426,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     const spare = document.createElement('canvas');
     spare.style.cssText = 'display:block;background:#fff;';
     this._applyPageShadow(spare);
+    const spareDispatcher = new StaticCanvasRenderDispatcher(spare, false);
+    const generation = spareDispatcher.begin();
     const runs: DocxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
     const wantRuns = wantOverlay || this._findActive;
@@ -1454,17 +1444,24 @@ export class DocxScrollViewer implements ZoomableViewer {
         // Discard if superseded: a later setScale bumped the epoch (this spare is
         // at a stale scale), or the slot recycled / moved to another page. Drop
         // the spare (it is off-DOM, so GC reclaims it) and do NOT swap.
-        if (epoch !== this._renderEpoch || this._slots.get(i) !== slot || slot.renderedPage !== i) return;
+        if (
+          !spareDispatcher.isCurrent(generation) ||
+          epoch !== this._renderEpoch ||
+          this._slots.get(i) !== slot ||
+          slot.renderedPage !== i
+        ) {
+          spareDispatcher.destroy();
+          return;
+        }
         // Swap the freshly-painted spare in for the old (stretched-preview) canvas.
         // The old canvas was the only child that showed content; replacing it in
         // one DOM op means the screen goes from preview → crisp with no blank tick.
         const old = slot.canvas;
+        slot.dispatcher.destroy();
         slot.wrapper.insertBefore(spare, old);
         old.remove();
         slot.canvas = spare;
-        // The retired canvas held a 2d context; keep the pool clean by dropping any
-        // bitmaprenderer handle association (main-mode canvases never had one).
-        slot.bitmapCtx = null;
+        slot.dispatcher = spareDispatcher;
         slot.renderedScale = scale;
         // Rebuild the overlay at the full resolution and CLEAR the preview
         // transform (the crisp render no longer needs the scale()).

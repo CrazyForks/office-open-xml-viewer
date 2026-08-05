@@ -1076,6 +1076,7 @@ export declare interface OoxmlResourceLimitErrorDetails {
 export declare interface OoxmlResourceLimits {
     maxArchiveEntryBytes?: OoxmlResourceLimit;
     maxTotalInflatedBytes?: OoxmlResourceLimit;
+    maxArchiveEntries?: OoxmlResourceLimit;
 }
 export declare type OoxmlResourceMetric = ExtensibleLiteral<'declared-inflated-bytes' | 'actual-inflated-bytes' | 'entry-count' | 'central-directory-bytes' | 'distinct-inflated-bytes' | 'bytes' | 'depth' | 'projected-bytes'>;
 export declare interface OoxmlResourceMetrics {
@@ -1106,6 +1107,7 @@ export declare type OoxmlResourceName = ExtensibleLiteral<'archive' | 'archive-e
 export declare interface OoxmlResourcePolicySnapshot {
     readonly maxArchiveEntryBytes: number | null;
     readonly maxTotalInflatedBytes: number | null;
+    readonly maxArchiveEntries: number | null;
 }
 export declare interface OoxmlResourceUsageSnapshot {
     readonly archiveEntryCount: number;

@@ -7,6 +7,12 @@ import { buildDocxHighlightLayer, type DocxHighlightMatch } from './find-highlig
 import { DocxFindController, type DocxMatchLocation } from './find';
 import { openExternalHyperlink, PT_TO_PX, nextZoomStep, prevZoomStep, clampScale, fitScale } from '@silurus/ooxml-core';
 import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
+import {
+  CallerCanvasMount,
+  CanvasOverlayHost,
+  CanvasViewerErrorRouter,
+  StaticCanvasRenderDispatcher,
+} from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 
 export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   container?: HTMLElement;
@@ -74,15 +80,7 @@ export class DocxViewer implements ZoomableViewer {
   private _scale: number | null = null;
   private _canvas: HTMLCanvasElement;
   private _wrapper: HTMLDivElement;
-  /** The canvas's DOM position BEFORE the constructor reparented it into
-   *  {@link _wrapper}, captured so {@link destroy} can return the caller-owned
-   *  canvas to exactly where it was. `null` parent = canvas was passed
-   *  detached. */
-  private _originalParent: Node | null = null;
-  private _originalNextSibling: Node | null = null;
-  /** The canvas's inline `display` before the constructor forced `block`
-   *  (empty string if it was unset), restored on {@link destroy}. */
-  private _originalDisplay = '';
+  private readonly _canvasMount: CallerCanvasMount;
   private _textLayer: HTMLDivElement | null = null;
   /** IX2 — the find-highlight overlay layer. Always created (independent of
    *  `enableTextSelection`): highlights ride the same positioned-DOM overlay
@@ -97,15 +95,8 @@ export class DocxViewer implements ZoomableViewer {
   private _measureCtx: CanvasRenderingContext2D | null = null;
   private _opts: DocxViewerOptions;
   private readonly _mode: 'main' | 'worker';
-  /** The canvas's bitmaprenderer context, used only in worker mode (a canvas
-   *  holds one context type for its lifetime; the main-mode 2d render path is
-   *  never used on the same canvas). */
-  private _bitmapCtx: ImageBitmapRenderingContext | null = null;
-  /** Set by {@link destroy} (first line). Guards {@link _reportRenderError} so a
-   *  render rejection that lands AFTER teardown is swallowed rather than surfaced
-   *  to an `onError` / `console.error` on a dead viewer — parity with the scroll
-   *  viewers' `_destroyed` flag. */
-  private _destroyed = false;
+  private readonly _renderDispatcher: StaticCanvasRenderDispatcher;
+  private readonly _errorRouter: CanvasViewerErrorRouter;
   /**
    * Concurrent-load latch (generation token). Every {@link load} increments this
    * and captures the value; after its engine finishes loading it re-checks the
@@ -127,51 +118,16 @@ export class DocxViewer implements ZoomableViewer {
     this._opts = opts;
     this._mode = opts.mode ?? 'main';
 
-    // Wrap canvas in a positioned container for the optional text layer overlay
-    const parent = canvas.parentElement;
-    // Capture the canvas's DOM position and inline display BEFORE reparenting so
-    // destroy() can put the caller-owned canvas back exactly where it was.
-    this._originalParent = parent;
-    this._originalNextSibling = canvas.nextSibling;
-    this._originalDisplay = canvas.style.display;
-    this._wrapper = document.createElement('div');
-    // vertical-align:top removes the inline-block baseline descender gap that
-    // otherwise lets the host container's background show through below the
-    // canvas (~6 px on default font metrics).
-    this._wrapper.style.cssText = 'position:relative;display:inline-block;vertical-align:top;';
-    // Force `display:block` on the canvas so it does not inherit the inline
-    // baseline of the wrapper, which would otherwise leave a 4–6px descender
-    // gap between the canvas bottom and the wrapper bottom — the host
-    // container's background would show through that strip.
-    if (!canvas.style.display) canvas.style.display = 'block';
-    if (parent) {
-      parent.insertBefore(this._wrapper, canvas);
-    }
-    this._wrapper.appendChild(canvas);
-
-    // Worker mode paints worker-produced bitmaps via a bitmaprenderer context,
-    // grabbed once (a canvas holds one context type for its lifetime).
-    if (this._mode === 'worker') {
-      this._bitmapCtx = canvas.getContext('bitmaprenderer');
-    }
-
-    if (opts.enableTextSelection) {
-      this._textLayer = document.createElement('div');
-      this._textLayer.style.cssText =
-        'position:absolute;top:0;left:0;width:100%;height:100%;' +
-        'overflow:hidden;pointer-events:none;user-select:text;-webkit-user-select:text;';
-      this._wrapper.appendChild(this._textLayer);
-    }
-
-    // IX2 — the find-highlight overlay layer. Appended last so it stacks above
-    // the text/selection layer; `pointer-events:none` keeps selection + link
-    // clicks working through it. IX6 — populated in BOTH render modes (worker
-    // mode ships the run geometry back beside the bitmap).
-    this._highlightLayer = document.createElement('div');
-    this._highlightLayer.style.cssText =
-      'position:absolute;top:0;left:0;width:100%;height:100%;' +
-      'overflow:hidden;pointer-events:none;';
-    this._wrapper.appendChild(this._highlightLayer);
+    this._canvasMount = new CallerCanvasMount(canvas, {
+      wrapperCssText: 'position:relative;display:inline-block;vertical-align:top;',
+      forceDisplayBlock: true,
+    });
+    this._wrapper = this._canvasMount.wrapper;
+    this._renderDispatcher = new StaticCanvasRenderDispatcher(canvas, this._mode === 'worker');
+    this._errorRouter = new CanvasViewerErrorRouter('DocxViewer', opts.onError);
+    const overlays = new CanvasOverlayHost(this._wrapper, opts.enableTextSelection === true);
+    this._textLayer = overlays.textLayer;
+    this._highlightLayer = overlays.highlightLayer;
 
     this._find = new DocxFindController(
       () => this.pageCount,
@@ -459,7 +415,8 @@ export class DocxViewer implements ZoomableViewer {
     // viewer (checked at the top of _reportRenderError). Bump the load generation
     // too so a load() still in flight is treated as superseded and its engine is
     // cleaned up rather than installed onto a torn-down viewer.
-    this._destroyed = true;
+    this._errorRouter.close();
+    this._renderDispatcher.destroy();
     this._loadGen++;
     this._doc?.destroy();
     this._doc = null;
@@ -467,24 +424,7 @@ export class DocxViewer implements ZoomableViewer {
     // findNext()/findPrev() after teardown returns null instead of a match
     // pointing into a dead viewer.
     this._find.invalidate();
-    // Return the caller-owned canvas to its original DOM slot before discarding
-    // the wrapper. insertBefore still works if the original parent was itself
-    // detached; when there was no original parent the canvas is left detached
-    // (just pulled out of the wrapper). The recorded next-sibling may have been
-    // removed or moved by the caller since construction — insertBefore throws
-    // NotFoundError for a reference that is no longer a child of the parent, so
-    // fall back to appending at the end in that case.
-    if (this._originalParent) {
-      const ref =
-        this._originalNextSibling && this._originalNextSibling.parentNode === this._originalParent
-          ? this._originalNextSibling
-          : null;
-      this._originalParent.insertBefore(this._canvas, ref);
-    } else if (this._canvas.parentNode) {
-      this._canvas.parentNode.removeChild(this._canvas);
-    }
-    this._canvas.style.display = this._originalDisplay;
-    this._wrapper.remove();
+    this._canvasMount.restore();
   }
 
   private async _render(): Promise<void> {
@@ -493,10 +433,11 @@ export class DocxViewer implements ZoomableViewer {
     // unguarded throw would surface as an unhandled promise rejection. Catch here
     // and route to `onError` (or `console.error` — never silent) so a page render
     // failure is handled the same way in `load()` and every navigation.
+    const generation = this._renderDispatcher.begin();
     try {
-      await this._renderPage();
+      await this._renderPage(generation);
     } catch (err) {
-      this._reportRenderError(err);
+      if (this._renderDispatcher.isCurrent(generation)) this._reportRenderError(err);
     }
   }
 
@@ -504,13 +445,10 @@ export class DocxViewer implements ZoomableViewer {
    *  (never fully silent), and never after teardown. Mirrors the scroll viewers'
    *  `_reportRenderError`. */
   private _reportRenderError(err: unknown): void {
-    if (this._destroyed) return;
-    const e = err instanceof Error ? err : new Error(String(err));
-    if (this._opts.onError) this._opts.onError(e);
-    else console.error('[ooxml] DocxViewer render failed:', e);
+    this._errorRouter.report(err);
   }
 
-  private async _renderPage(): Promise<void> {
+  private async _renderPage(generation: number): Promise<void> {
     if (!this._doc) return;
     const isWorker = this._mode === 'worker';
     // IX9: the width to render at. When no zoom method was ever called
@@ -541,15 +479,15 @@ export class DocxViewer implements ZoomableViewer {
         currentDate: this._opts.currentDate,
         onTextRun,
       });
-      this._canvas.width = bmp.width;
-      this._canvas.height = bmp.height;
       // The bitmap is sized in device px; mirror the main renderer by setting
       // the CSS size to the logical (÷dpr) dimensions so it isn't 2× on HiDPI.
-      this._canvas.style.width = `${Math.round(bmp.width / dpr)}px`;
-      this._canvas.style.height = `${Math.round(bmp.height / dpr)}px`;
-      this._bitmapCtx?.transferFromImageBitmap(bmp);
+      if (!this._renderDispatcher.commitBitmap(generation, bmp, {
+        cssWidth: Math.round(bmp.width / dpr),
+        cssHeight: Math.round(bmp.height / dpr),
+      })) return;
     } else {
       await this._doc.renderPage(this._canvas, this._currentPage, { ...this._opts, width: renderWidth, onTextRun });
+      if (!this._renderDispatcher.isCurrent(generation)) return;
     }
     // IX6 — identical overlay build for both modes: the run geometry the worker
     // shipped is the same shape `onTextRun` emits in main mode.

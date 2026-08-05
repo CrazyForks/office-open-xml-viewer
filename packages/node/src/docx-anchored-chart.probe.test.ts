@@ -64,10 +64,10 @@ function collectRuns(body: Any[], type: string): Any[] {
 // Private sample numbers are local workspace slots, not stable fixture ids.
 // Run this probe only when the slot still contains the chart fixture this test
 // describes; another valid private document at the same path must skip cleanly.
-const haveExpectedChartSample = (() => {
+const haveExpectedChartSample = await (async () => {
   if (!docxMod || !sampleBytes) return false;
   try {
-    const doc = docxMod.parseDocx(sampleBytes) as Any;
+    const doc = await docxMod.materializeDocxDocument(sampleBytes) as Any;
     return collectRuns(doc.body, 'chart').length === 6
       && collectRuns(doc.body, 'image').length === 0;
   } catch {
@@ -137,9 +137,9 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveExpectedChartSample)(
     // (live chartEx chart) and drops the Fallback picture — so the correct
     // parse is 6 charts + 0 image runs (no double-emit). Word renders the same
     // two charts, NOT the static snapshots.
-    it('sample-24 parses 6 chart runs and 0 image runs (MCE Choice, not Fallback)', () => {
-      const { parseDocx } = docxMod!;
-      const doc = parseDocx(sampleBytes!) as Any;
+    it('sample-24 parses 6 chart runs and 0 image runs (MCE Choice, not Fallback)', async () => {
+      const { materializeDocxDocument } = docxMod!;
+      const doc = await materializeDocxDocument(sampleBytes!) as Any;
       const charts = collectRuns(doc.body, 'chart');
       const images = collectRuns(doc.body, 'image');
       expect(charts.length).toBe(6);
@@ -153,8 +153,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveExpectedChartSample)(
     // draw — proving the whole zip → parse → renderChart pipeline paints ink
     // where Word's PDF ground truth shows the two charts.
     it('sample-24 pages paint ink for every chart box (charts draw, not blank)', async () => {
-      const { parseDocx } = docxMod!;
-      const doc = parseDocx(sampleBytes!) as Any;
+      const { materializeDocxDocument } = docxMod!;
+      const doc = await materializeDocxDocument(sampleBytes!) as Any;
       const restoreImg = installImageBitmapShim(factory);
       const restoreOff = installOffscreenCanvasShim(factory);
       let pageCount: number;
@@ -184,8 +184,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveExpectedChartSample)(
     // (`if (chartRun.anchor) continue;`) and renderAnchorImages had no chart
     // branch, so the box stayed blank.
     it('an anchored chart draws at its absolute page box (#752)', async () => {
-      const { parseDocx } = docxMod!;
-      const base = parseDocx(sampleBytes!) as Any;
+      const { materializeDocxDocument } = docxMod!;
+      const base = await materializeDocxDocument(sampleBytes!) as Any;
 
       // Find a REAL parsed paragraph that carries an inline chart (keeps every
       // paragraph prop the layout/pagination path reads), and flip that chart

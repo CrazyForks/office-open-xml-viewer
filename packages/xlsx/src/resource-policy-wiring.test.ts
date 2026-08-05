@@ -68,6 +68,7 @@ describe('XlsxWorkbook resource-policy wiring', () => {
     const policy = {
       maxArchiveEntryBytes: 64,
       maxTotalInflatedBytes: null,
+      maxArchiveEntries: 19,
     } as const;
 
     await (

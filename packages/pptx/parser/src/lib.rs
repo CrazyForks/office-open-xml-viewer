@@ -558,12 +558,18 @@ impl PptxArchive {
         data: Vec<u8>,
         max_archive_entry_bytes: Option<u64>,
         max_total_inflated_bytes: Option<u64>,
+        max_archive_entries: Option<u64>,
     ) -> Result<PptxArchive, JsValue> {
         console_error_panic_hook::set_once();
         // #774 (RB7 MAJOR): a truncated / corrupt CONTAINER is deferred, not
         // thrown, so `parse()` can degrade it to a placeholder presentation
         // instead of the constructor failing with an opaque error.
-        let archive = open_zip_with_limits(data, max_archive_entry_bytes, max_total_inflated_bytes);
+        let archive = open_zip_with_policy(
+            data,
+            max_archive_entry_bytes,
+            max_total_inflated_bytes,
+            max_archive_entries,
+        );
         if let Err(error) = &archive {
             if error.starts_with("OOXML_RESOURCE_LIMIT:") {
                 return Err(JsValue::from_str(error));
@@ -1857,11 +1863,26 @@ fn open_zip_with_limits(
     max_archive_entry_bytes: Option<u64>,
     max_total_inflated_bytes: Option<u64>,
 ) -> Result<PptxZip, String> {
+    open_zip_with_policy(
+        data,
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+        None,
+    )
+}
+
+fn open_zip_with_policy(
+    data: Vec<u8>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+    max_archive_entries: Option<u64>,
+) -> Result<PptxZip, String> {
     PackageSessionHandle::open(
         data,
         ooxml_common::resource::OoxmlFormat::Pptx,
         max_archive_entry_bytes,
         max_total_inflated_bytes,
+        max_archive_entries,
     )
     .map(|session| PptxZip {
         session,
@@ -8676,7 +8697,7 @@ mod tests {
     fn slide_cursor_random_access_credit_replay_ack_and_fixed_oracle() {
         let data = build_three_slide_deck(usize::MAX, "");
         let legacy_data = data.clone();
-        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        let mut archive = PptxArchive::new(data, None, None, None).unwrap();
 
         let bootstrap: serde_json::Value =
             serde_json::from_slice(&archive.presentation_bootstrap().unwrap()).unwrap();
@@ -8717,7 +8738,7 @@ mod tests {
             serde_json::from_str(&parse_pptx_native(&legacy_data).unwrap()).unwrap();
         let fixed: serde_json::Value = serde_json::from_str(FIXED_SLIDE_3).unwrap();
         assert_eq!(legacy["slides"][2], fixed);
-        let mut materializing = PptxArchive::new(legacy_data, None, None).unwrap();
+        let mut materializing = PptxArchive::new(legacy_data, None, None, None).unwrap();
         materializing.parse().unwrap();
         assert!(
             materializing.presentation.is_none(),
@@ -8766,7 +8787,7 @@ mod tests {
     #[test]
     fn slide_cursor_journal_preserves_old_cache_and_removes_only_current_insertions() {
         let mut archive =
-            PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None).unwrap();
+            PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None, None).unwrap();
         archive.presentation_bootstrap().unwrap();
         let shared = archive.presentation.as_mut().unwrap();
         shared
@@ -8793,7 +8814,7 @@ mod tests {
     #[test]
     fn bootstrap_projection_and_descriptor_limits_accept_exact_and_reject_plus_one() {
         let data = build_three_slide_deck(usize::MAX, "");
-        let mut baseline = PptxArchive::new(data.clone(), None, None).unwrap();
+        let mut baseline = PptxArchive::new(data.clone(), None, None, None).unwrap();
         baseline.presentation_bootstrap().unwrap();
         let shared = baseline.presentation.as_ref().unwrap();
         assert!(
@@ -8818,7 +8839,7 @@ mod tests {
                 bootstrap_projection_bytes: exact_projection,
                 ..PptxInternalLimits::default()
             });
-            let mut exact = PptxArchive::new(data.clone(), None, None).unwrap();
+            let mut exact = PptxArchive::new(data.clone(), None, None, None).unwrap();
             exact.presentation_bootstrap().unwrap();
         }
         {
@@ -8827,7 +8848,7 @@ mod tests {
                 bootstrap_projection_bytes: exact_projection,
                 ..PptxInternalLimits::default()
             });
-            let mut over = PptxArchive::new(data.clone(), None, None).unwrap();
+            let mut over = PptxArchive::new(data.clone(), None, None, None).unwrap();
             let error = over.ensure_presentation().unwrap_err();
             assert!(error.contains("pptx-bootstrap"), "{error}");
             assert!(error.contains(r#""metric":"slides""#), "{error}");
@@ -8838,7 +8859,7 @@ mod tests {
                 bootstrap_projection_bytes: exact_projection - 1,
                 ..PptxInternalLimits::default()
             });
-            let mut over = PptxArchive::new(data, None, None).unwrap();
+            let mut over = PptxArchive::new(data, None, None, None).unwrap();
             let error = over.ensure_presentation().unwrap_err();
             assert!(error.contains("pptx-bootstrap"), "{error}");
             assert!(error.contains("projected-bytes"), "{error}");
@@ -8857,7 +8878,7 @@ mod tests {
             xml.replacen("slides/slide1.xml", &long_target, 1)
         });
 
-        let mut baseline = PptxArchive::new(data.clone(), None, None).unwrap();
+        let mut baseline = PptxArchive::new(data.clone(), None, None, None).unwrap();
         let exact_bytes = baseline.presentation_bootstrap().unwrap().len() as u64;
 
         BOOTSTRAP_OUTPUT_SLIDES_RETAINED.with(|count| count.set(0));
@@ -8866,7 +8887,7 @@ mod tests {
                 bootstrap_json_bytes: exact_bytes,
                 ..PptxInternalLimits::default()
             });
-            let mut exact = PptxArchive::new(data.clone(), None, None).unwrap();
+            let mut exact = PptxArchive::new(data.clone(), None, None, None).unwrap();
             let bytes = exact
                 .presentation_bootstrap()
                 .expect("the exact bootstrap JSON ceiling is inclusive");
@@ -8882,7 +8903,7 @@ mod tests {
             bootstrap_json_bytes: exact_bytes - 1,
             ..PptxInternalLimits::default()
         });
-        let mut over = PptxArchive::new(data, None, None).unwrap();
+        let mut over = PptxArchive::new(data, None, None, None).unwrap();
         let error = over.presentation_bootstrap_inner().unwrap_err();
         assert!(error.starts_with("OOXML_RESOURCE_LIMIT:"), "{error}");
         assert!(error.contains("pptx-bootstrap-json"), "{error}");
@@ -8897,7 +8918,7 @@ mod tests {
     #[test]
     fn shared_cache_accounting_is_transactional_and_projection_cap_accumulates() {
         let data = build_three_slide_deck(usize::MAX, "");
-        let mut baseline = PptxArchive::new(data.clone(), None, None).unwrap();
+        let mut baseline = PptxArchive::new(data.clone(), None, None, None).unwrap();
         baseline.presentation_bootstrap().unwrap();
         baseline
             .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -8966,7 +8987,7 @@ mod tests {
                 shared_dependency_projection_bytes: max_dependency_projection,
                 ..PptxInternalLimits::default()
             });
-            let mut exact = PptxArchive::new(data.clone(), None, None).unwrap();
+            let mut exact = PptxArchive::new(data.clone(), None, None, None).unwrap();
             exact.presentation_bootstrap().unwrap();
             exact
                 .pull_slide_inner(0, 2, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -8993,7 +9014,7 @@ mod tests {
                 shared_dependency_projection_bytes: max_dependency_projection,
                 ..PptxInternalLimits::default()
             });
-            let mut over = PptxArchive::new(data, None, None).unwrap();
+            let mut over = PptxArchive::new(data, None, None, None).unwrap();
             over.presentation_bootstrap().unwrap();
             let error = over
                 .pull_slide_inner(0, 4, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -9010,7 +9031,7 @@ mod tests {
                 ..PptxInternalLimits::default()
             });
             let mut over =
-                PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None).unwrap();
+                PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None, None).unwrap();
             over.presentation_bootstrap().unwrap();
             let error = over
                 .pull_slide_inner(0, 5, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -9055,7 +9076,7 @@ mod tests {
                 materialized_slide_json_bytes: 1,
                 ..PptxInternalLimits::default()
             });
-            let mut cursor = PptxArchive::new(data, None, None).unwrap();
+            let mut cursor = PptxArchive::new(data, None, None, None).unwrap();
             cursor
                 .pull_slide_inner(0, 5, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
                 .unwrap();
@@ -9079,7 +9100,7 @@ mod tests {
             expected,
         );
 
-        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        let mut archive = PptxArchive::new(data, None, None, None).unwrap();
         archive.presentation_bootstrap().unwrap();
         archive
             .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -9112,7 +9133,7 @@ mod tests {
     #[test]
     fn slide_cursor_rejects_bad_identity_index_and_poison_before_ack() {
         let data = build_three_slide_deck(usize::MAX, "");
-        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        let mut archive = PptxArchive::new(data, None, None, None).unwrap();
         assert!(archive.pull_slide_inner(0, 0, 1, 1).is_err());
         assert!(archive.pull_slide_inner(99, 1, 1, 1024).is_err());
         assert!(archive.prepared_slide.is_none());
@@ -9193,7 +9214,7 @@ mod tests {
 
         {
             let _limit = SlideXmlLimitOverride::set(exact);
-            let mut archive = PptxArchive::new(data.clone(), None, None).unwrap();
+            let mut archive = PptxArchive::new(data.clone(), None, None, None).unwrap();
             archive.presentation_bootstrap().unwrap();
             archive
                 .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -9203,7 +9224,7 @@ mod tests {
 
         let limit = exact - 1;
         let _limit = SlideXmlLimitOverride::set(limit);
-        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        let mut archive = PptxArchive::new(data, None, None, None).unwrap();
         archive.presentation_bootstrap().unwrap();
         let parses_before = LAYOUT_MASTER_PARSE_COUNT.with(std::cell::Cell::get);
         let error = archive
@@ -9242,7 +9263,7 @@ mod tests {
                 xml_dom_complexity: exact,
                 ..PptxInternalLimits::default()
             });
-            let mut archive = PptxArchive::new(data.clone(), None, None).unwrap();
+            let mut archive = PptxArchive::new(data.clone(), None, None, None).unwrap();
             archive
                 .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
                 .expect("the exact XML DOM complexity ceiling is inclusive");
@@ -9253,7 +9274,7 @@ mod tests {
             xml_dom_complexity: exact - 1,
             ..PptxInternalLimits::default()
         });
-        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        let mut archive = PptxArchive::new(data, None, None, None).unwrap();
         archive.presentation_bootstrap().unwrap();
         let parses_before = LAYOUT_MASTER_PARSE_COUNT.with(std::cell::Cell::get);
         let error = archive
@@ -9297,7 +9318,7 @@ mod tests {
                 shared_dependency_xml_bytes: exact,
                 ..PptxInternalLimits::default()
             });
-            let mut archive = PptxArchive::new(oversized.clone(), None, None).unwrap();
+            let mut archive = PptxArchive::new(oversized.clone(), None, None, None).unwrap();
             archive
                 .pull_slide_inner(0, 3, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
                 .expect("the exact dependency XML byte ceiling includes EOF/CRC validation");
@@ -9307,7 +9328,7 @@ mod tests {
             shared_dependency_xml_bytes: exact - 1,
             ..PptxInternalLimits::default()
         });
-        let mut archive = PptxArchive::new(oversized, None, None).unwrap();
+        let mut archive = PptxArchive::new(oversized, None, None, None).unwrap();
         archive.presentation_bootstrap().unwrap();
         let error = archive
             .pull_slide_inner(0, 4, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -9407,7 +9428,7 @@ mod tests {
         };
         let cursor_error = {
             let _limit = SlideJsonLimitOverride::set(limit);
-            let mut archive = PptxArchive::new(data, None, None).unwrap();
+            let mut archive = PptxArchive::new(data, None, None, None).unwrap();
             let error = archive
                 .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
                 .unwrap_err();
@@ -9417,7 +9438,7 @@ mod tests {
         };
         let archive_error = {
             let _limit = SlideJsonLimitOverride::set(limit);
-            PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None)
+            PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None, None)
                 .unwrap()
                 .parse_inner()
                 .unwrap_err()
@@ -9432,7 +9453,7 @@ mod tests {
 
     #[test]
     fn corrupt_container_bootstrap_and_slide_preserve_degraded_contract() {
-        let mut archive = PptxArchive::new(vec![1, 2, 3], None, None).unwrap();
+        let mut archive = PptxArchive::new(vec![1, 2, 3], None, None, None).unwrap();
         let bootstrap: serde_json::Value =
             serde_json::from_slice(&archive.presentation_bootstrap().unwrap()).unwrap();
         assert_eq!(bootstrap["slideCount"], 1);
@@ -10072,7 +10093,7 @@ mod tests {
             extract_media;
         let _: fn(&[u8], &str, Option<u64>, Option<u64>) -> Result<Vec<u8>, JsValue> =
             extract_image;
-        let _: fn(Vec<u8>, Option<u64>, Option<u64>) -> Result<PptxArchive, JsValue> =
+        let _: fn(Vec<u8>, Option<u64>, Option<u64>, Option<u64>) -> Result<PptxArchive, JsValue> =
             PptxArchive::new;
         let _: fn(&mut PptxArchive) -> Result<Vec<u8>, JsValue> = PptxArchive::parse;
         let _: fn(&mut PptxArchive, &str) -> Result<Vec<u8>, JsValue> = PptxArchive::extract_media;

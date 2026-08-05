@@ -62,8 +62,8 @@ interface VisLine { y: number; x0: number; x1: number; text: string }
 
 type DocxLayout = ReturnType<DocxRendererModule['layoutDocument']>;
 
-function parse(path: string): DocxDocumentModel {
-  return docxMod!.parseDocx(readFileSync(path));
+async function parse(path: string): Promise<DocxDocumentModel> {
+  return await docxMod!.materializeDocxDocument(readFileSync(path));
 }
 
 /** Recording ctx proxy: forwards everything to the real skia ctx but records
@@ -191,7 +191,7 @@ const gate = baseGate && !!SAMPLE && !!PDF && existsSync(SAMPLE!) && existsSync(
 
 describe.skipIf(!gate)('issue #991 — SEA justified line-fit adjudication', () => {
   it('per-page line-break divergence report', async () => {
-    const doc = parse(SAMPLE!);
+    const doc = await parse(SAMPLE!);
     const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
     let layout: DocxLayout;
     let layoutServices: DocxLayoutServices;
@@ -308,7 +308,7 @@ describe.skipIf(!baseGate || !havePdfinfo)('issue #991 — private fixture line-
     it.skipIf(!pair || !privatePairHasRequiredFont(name))(
       `${name}: per-page visible-line counts match the Word PDF`,
       async () => {
-        const doc = parse(pair!.docx);
+        const doc = await parse(pair!.docx);
         const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
         let layout: DocxLayout;
         let layoutServices: DocxLayoutServices;

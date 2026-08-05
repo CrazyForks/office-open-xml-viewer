@@ -116,7 +116,7 @@ describe('WasmParserHost', () => {
     expect(host.archive).toBe(a2);
   });
 
-  it('NEUTRALIZATION: a trap poisons the instance, frees + nulls the archive, and REINITS (not init) on the next request', async () => {
+  it('NEUTRALIZATION: a trap poisons the instance, detaches the archive without re-entering WASM, and REINITS on the next request', async () => {
     const init = vi.fn().mockResolvedValue(undefined);
     const reinit = vi.fn().mockResolvedValue(undefined);
     const freeArchive = vi.fn();
@@ -133,9 +133,10 @@ describe('WasmParserHost', () => {
         throw makeTrap('unreachable');
       }),
     ).toThrow(WasmTrapError);
-    // The instance is flagged dead, and the crashing handle was freed + nulled.
+    // The instance is flagged dead and the crashing handle is detached. A
+    // destructor must not run against the discarded runtime generation.
     expect(host.poisoned).toBe(true);
-    expect(freeArchive).toHaveBeenCalledWith(badArchive);
+    expect(freeArchive).not.toHaveBeenCalled();
     expect(host.archive).toBeNull();
     expect(init).toHaveBeenCalledTimes(1); // recovery is LAZY, not yet fired
     expect(reinit).toHaveBeenCalledTimes(0);
@@ -179,7 +180,7 @@ describe('WasmParserHost', () => {
     expect(reinit).toHaveBeenCalledTimes(1);
   });
 
-  it('does not double-free: after a trap frees the handle, the next parse frees only the NEW one', async () => {
+  it('does not call a destructor from either the discarded or replacement generation after a trap', async () => {
     const init = vi.fn().mockResolvedValue(undefined);
     const reinit = vi.fn().mockResolvedValue(undefined);
     const freed: string[] = [];
@@ -194,10 +195,10 @@ describe('WasmParserHost', () => {
       }),
     ).toThrow(WasmTrapError);
     await host.ensureReady();
-    // The next parse's setArchive must NOT re-free 'first' (already freed on the
-    // trap and nulled) — it frees nothing (host.archive is null), then adopts.
+    // The trapped archive was detached, so adopting a replacement does not call
+    // either generation's destructor.
     host.setArchive({ id: 'second' });
-    expect(freed).toEqual(['first']); // exactly once, no double-free
+    expect(freed).toEqual([]);
   });
 
   it('rebuilds from the SAME wasm url that was set originally', async () => {
@@ -257,7 +258,7 @@ describe('WasmParserHost', () => {
     expect(reinit).toHaveBeenCalledTimes(2);
   });
 
-  it('a throwing freeArchive during poison does not mask the WasmTrapError', async () => {
+  it('never invokes freeArchive during poison', async () => {
     const init = vi.fn().mockResolvedValue(undefined);
     const freeArchive = vi.fn(() => {
       throw new Error('free() on poisoned memory');
@@ -273,6 +274,7 @@ describe('WasmParserHost', () => {
     ).toThrow(WasmTrapError);
     expect(host.poisoned).toBe(true);
     expect(host.archive).toBeNull();
+    expect(freeArchive).not.toHaveBeenCalled();
   });
 });
 

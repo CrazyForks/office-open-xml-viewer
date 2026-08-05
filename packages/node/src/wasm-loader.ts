@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 
 const initializedWasm = new WeakMap<object, unknown>();
 
@@ -10,10 +11,16 @@ const initializedWasm = new WeakMap<object, unknown>();
  *  we sidestep that path by reading the .wasm bytes off disk and feeding them
  *  into the generated `initSync` helper. */
 export function loadWasmModule<T>(jsModule: T & { initSync: (init: { module: WebAssembly.Module }) => unknown }, wasmPath: string): T {
-  const bytes = readFileSync(wasmPath);
-  const module = new WebAssembly.Module(bytes);
+  const module = compileWasmModule(wasmPath);
   initializedWasm.set(jsModule as object, jsModule.initSync({ module }));
   return jsModule;
+}
+
+/** Compile a shipped parser module once so a realm runtime can use the same
+ * immutable module for its initial synchronous instantiation and every forced
+ * fresh re-instantiation after a trap. */
+export function compileWasmModule(wasmPath: string): WebAssembly.Module {
+  return new WebAssembly.Module(readFileSync(wasmPath));
 }
 
 /** Diagnostic linear-memory size for fresh-process benchmarks. */
@@ -25,11 +32,18 @@ export function wasmMemoryPages(jsModule: object): number | undefined {
 /** Resolve a path relative to a workspace-package source file. Used by the
  *  per-format entry points to locate the `.wasm` artifact emitted by
  *  `wasm-pack build --out-dir ../src/wasm`. */
-export function resolveWasm(metaUrl: string, relPath: string): string {
+export function resolveWasm(
+  metaUrl: string,
+  relPath: string,
+  workspaceSpecifier?: string,
+): string {
   const here = dirname(fileURLToPath(metaUrl));
   const workspacePath = resolve(here, relPath);
   // Source/workspace execution keeps WASM under each format package. The
   // published `@silurus/ooxml/node` bundle places the same emitted assets next
   // to node.mjs, so fall back to that sibling without embedding machine paths.
-  return existsSync(workspacePath) ? workspacePath : resolve(here, basename(relPath));
+  if (existsSync(workspacePath)) return workspacePath;
+  const shippedPath = resolve(here, basename(relPath));
+  if (existsSync(shippedPath) || !workspaceSpecifier) return shippedPath;
+  return createRequire(metaUrl).resolve(workspaceSpecifier);
 }

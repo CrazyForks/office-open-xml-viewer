@@ -1,0 +1,106 @@
+import { isWasmTrap, WasmTrapError } from '../worker/wasm-guard.js';
+import { RuntimeGeneration } from './runtime-generation.js';
+
+export interface WasmModuleRuntime {
+  initSync(input: { module: WebAssembly.Module }): unknown;
+  reinit(input: { module_or_path: WebAssembly.Module }): Promise<unknown>;
+}
+
+function normalizeTrap(error: unknown): WasmTrapError | null {
+  if (!isWasmTrap(error)) return null;
+  const detail = error instanceof Error ? error.message : String(error);
+  return new WasmTrapError(`WASM parser trapped and was recycled: ${detail}`);
+}
+
+/** Realm-local multi-archive owner used by format-owned in-process sessions. */
+export class WasmRuntimeGenerationHost<TArchive extends object> {
+  private readonly realm: RuntimeGeneration<WasmTrapError>;
+  private readonly live = new Set<WasmArchiveHandle<TArchive>>();
+
+  constructor(runtime: WasmModuleRuntime, module: WebAssembly.Module) {
+    this.realm = new RuntimeGeneration(
+      () => runtime.initSync({ module }),
+      () => runtime.reinit({ module_or_path: module }),
+      normalizeTrap,
+    );
+    this.realm.onPoison((error) => {
+      for (const handle of this.live) handle.poison(error);
+      this.live.clear();
+    });
+  }
+
+  async open(create: () => TArchive): Promise<WasmArchiveHandle<TArchive>> {
+    await this.realm.ensureReady();
+    const archive = this.realm.run(create);
+    const handle = new WasmArchiveHandle(this, archive, this.realm.generation);
+    this.live.add(handle);
+    return handle;
+  }
+
+  async ensureReady(): Promise<void> {
+    await this.realm.ensureReady();
+  }
+
+  run<TResult>(handle: WasmArchiveHandle<TArchive>, operation: (archive: TArchive) => TResult): TResult {
+    const archive = handle.requireLive(this.realm);
+    return this.realm.run(() => operation(archive));
+  }
+
+  close(handle: WasmArchiveHandle<TArchive>, free: (archive: TArchive) => void): void {
+    const archive = handle.detachForClose();
+    this.live.delete(handle);
+    if (archive) this.realm.run(() => free(archive));
+  }
+}
+
+export class WasmArchiveHandle<TArchive extends object> {
+  private archive: TArchive | undefined;
+  private failure: WasmTrapError | undefined;
+  readonly proxy: TArchive;
+
+  constructor(
+    private readonly host: WasmRuntimeGenerationHost<TArchive>,
+    archive: TArchive,
+    private readonly generation: number,
+  ) {
+    this.archive = archive;
+    this.proxy = new Proxy(archive, {
+      get: (_target, property) => {
+        const value = this.host.run(this, (current) => Reflect.get(current, property, current));
+        if (typeof value !== 'function') return value;
+        return (...args: unknown[]) => this.host.run(this, (current) => {
+          const method = Reflect.get(current, property, current) as (...values: unknown[]) => unknown;
+          return Reflect.apply(method, current, args);
+        });
+      },
+    }) as TArchive;
+  }
+
+  run<TResult>(operation: (archive: TArchive) => TResult): TResult {
+    return this.host.run(this, operation);
+  }
+
+  close(free: (archive: TArchive) => void): void {
+    this.host.close(this, free);
+  }
+
+  requireLive(realm: RuntimeGeneration<WasmTrapError>): TArchive {
+    if (this.failure) throw this.failure;
+    realm.assertCurrent(this.generation);
+    if (!this.archive) {
+      throw new Error('WASM archive session belongs to a discarded runtime generation');
+    }
+    return this.archive;
+  }
+
+  detachForClose(): TArchive | undefined {
+    const archive = this.archive;
+    this.archive = undefined;
+    return this.failure ? undefined : archive;
+  }
+
+  poison(error: WasmTrapError): void {
+    this.failure = error;
+    this.archive = undefined;
+  }
+}
