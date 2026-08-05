@@ -51,11 +51,10 @@ function createViewer(
     return new XlsxViewer(container, { showZoomSlider: true });
   }
   if (format === 'pptx') {
-    return new PptxScrollViewer(container, { background: '#53606d' });
+    return new PptxScrollViewer(container);
   }
   return new DocxScrollViewer(container, {
     enableTextSelection: true,
-    background: '#53606d',
   });
 }
 

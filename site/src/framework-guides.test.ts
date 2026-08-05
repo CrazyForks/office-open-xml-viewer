@@ -177,4 +177,15 @@ describe('framework integration guides', () => {
     expect(packageJson.stackblitz?.startCommand).toBe(false);
   });
 
+  it.each(['react', 'vue', 'svelte', 'solid'])(
+    'keeps the %s viewer surface transparent and owns the desk background in CSS',
+    (framework) => {
+      const integration = exampleSource(exampleFiles[framework].integration);
+      const css = exampleSource(`${framework}/src/example.css`);
+
+      expect(integration).not.toMatch(/\bbackground\s*:/);
+      expect(css).toMatch(/\.stage\s*\{[\s\S]*?background:\s*#53606d;/);
+    },
+  );
+
 });
