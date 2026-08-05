@@ -14,7 +14,11 @@ export function getStaticPaths() {
 
 const { announcement } = Astro.props as { announcement: Announcement };
 ---
-<Base title={`${announcement.title} — @silurus/ooxml`} description={announcement.summary}>
+<Base
+  title={`${announcement.title} — @silurus/ooxml`}
+  description={announcement.summary}
+  canonicalPath={`/announcements/${announcement.slug}/`}
+>
   <Nav active="announcements" />
   <main>
     <header class="article-hero">

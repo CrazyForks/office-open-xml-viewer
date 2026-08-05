@@ -6,15 +6,28 @@ import LiveShowcase from '../components/LiveShowcase.astro';
 import Pitch from '../components/Pitch.astro';
 import Capabilities from '../components/Capabilities.astro';
 import { latestAnnouncements, formatAnnouncementDate } from '../lib/announcements';
+import { canonicalPageUrl, siteMetadata } from '../lib/seo';
 const base = import.meta.env.BASE_URL;
+const websiteStructuredData = JSON.stringify({
+  '@context': 'https://schema.org',
+  '@type': 'WebSite',
+  name: siteMetadata.name,
+  alternateName: siteMetadata.alternateName,
+  url: canonicalPageUrl('/'),
+});
 ---
-<Base>
+<Base
+  title={siteMetadata.title}
+  description={siteMetadata.description}
+  canonicalPath="/"
+>
   <Nav />
+  <script type="application/ld+json" set:html={websiteStructuredData}></script>
 
   <header class="hero" id="top">
     <div class="wrap hero-frame">
       <div class="hero-overline">
-        <span>Open-source OOXML rendering</span>
+        <span>Open-source JavaScript Office file viewer</span>
         <span>Rust / WebAssembly / Canvas 2D</span>
       </div>
 
@@ -23,10 +36,10 @@ const base = import.meta.env.BASE_URL;
           <p class="eyebrow">Rust · WebAssembly · Canvas 2D</p>
           <h1>Office documents,<br />rendered in the<br /><em>browser.</em></h1>
           <p class="hero-lead">
-            <code>@silurus/ooxml</code> parses <strong>.docx</strong>, <strong>.xlsx</strong> and
-            <strong>.pptx</strong> with a Rust/WASM engine and renders them to Canvas. Parsing
-            and rendering run in the browser; no server-side document conversion, native
-            application or iframe is required.
+            <code>@silurus/ooxml</code> is an open-source JavaScript Office file viewer library
+            for <strong>.docx</strong>, <strong>.xlsx</strong> and <strong>.pptx</strong>. Its
+            Rust/WASM engine parses and renders each file to Canvas in the browser; no server-side
+            document conversion, native application or iframe is required.
           </p>
           <div class="hero-cta">
             <a class="btn btn-primary" href="https://www.npmjs.com/package/@silurus/ooxml">npm install @silurus/ooxml</a>
