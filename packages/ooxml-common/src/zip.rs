@@ -1775,8 +1775,14 @@ mod tests {
         // Preflight must continue scanning and use the real record above.
         let error = preflight_archive_limits(&eocd).unwrap_err();
         let json = details(&error);
-        assert_eq!(json["details"]["violation"]["metric"], "entry-count");
-        assert_eq!(json["details"]["violation"]["observed"], 20_001);
+        let violation = &json["details"]["violation"];
+        assert_eq!(violation["metric"], "entry-count");
+        assert_eq!(violation["limit"], resource::STANDARD_MAX_ARCHIVE_ENTRIES);
+        assert_eq!(
+            violation["observed"],
+            resource::STANDARD_MAX_ARCHIVE_ENTRIES + 1
+        );
+        assert_eq!(violation["configurable"], true);
     }
 
     #[test]
@@ -1817,8 +1823,14 @@ mod tests {
 
         let error = preflight_archive_limits(&bytes).unwrap_err();
         let json = details(&error);
-        assert_eq!(json["details"]["violation"]["metric"], "entry-count");
-        assert_eq!(json["details"]["violation"]["observed"], 20_001);
+        let violation = &json["details"]["violation"];
+        assert_eq!(violation["metric"], "entry-count");
+        assert_eq!(violation["limit"], resource::STANDARD_MAX_ARCHIVE_ENTRIES);
+        assert_eq!(
+            violation["observed"],
+            resource::STANDARD_MAX_ARCHIVE_ENTRIES + 1
+        );
+        assert_eq!(violation["configurable"], true);
     }
 
     #[test]
