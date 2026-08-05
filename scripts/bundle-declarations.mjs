@@ -1,19 +1,14 @@
 #!/usr/bin/env node
 
-import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import process from 'node:process';
 import { rolldown } from 'rolldown';
 import { dts } from 'rolldown-plugin-dts';
-import { API } from 'typescript/unstable/sync';
-import {
-  SyntaxKind,
-  createScanner,
-  getJSDocTags,
-  isClassDeclaration,
-  isClassExpression,
-  isInterfaceDeclaration,
-} from 'typescript/unstable/ast';
+
+const require = createRequire(new URL('../package.json', import.meta.url));
+const ts = require('typescript-compiler-api');
 
 const entries = ['index', 'docx', 'xlsx', 'pptx', 'math', 'node'];
 const dist = path.resolve(process.cwd(), 'dist');
@@ -21,16 +16,16 @@ const workDir = path.join(dist, '.types-work');
 const outDir = path.join(dist, 'types');
 
 function stripInternalMembers(sourceFile) {
-  const isInternal = (node) => getJSDocTags(node)
+  const isInternal = (node) => ts.getJSDocTags(node)
     .some((tag) => tag.tagName.text === 'internal');
   const ranges = [];
   const visit = (node) => {
-    if (isClassDeclaration(node) || isClassExpression(node) || isInterfaceDeclaration(node)) {
+    if (ts.isClassDeclaration(node) || ts.isClassExpression(node) || ts.isInterfaceDeclaration(node)) {
       for (const member of node.members) {
         if (isInternal(member)) ranges.push([member.getFullStart(), member.getEnd()]);
       }
     }
-    node.forEachChild(visit);
+    ts.forEachChild(node, visit);
   };
   visit(sourceFile);
   return ranges
@@ -47,10 +42,11 @@ function stripComments(source) {
   // Strip comments only after @internal members have been identified and
   // removed; the declarations themselves remain the compiler-owned source of
   // truth and are compiled again by check-public-type-exports.mjs.
-  const scanner = createScanner(false, undefined, source);
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, undefined, source);
   const tokens = [];
-  for (let kind = scanner.scan(); kind !== SyntaxKind.EndOfFile; kind = scanner.scan()) {
-    if (kind !== SyntaxKind.SingleLineCommentTrivia && kind !== SyntaxKind.MultiLineCommentTrivia) {
+  for (let kind = scanner.scan(); kind !== ts.SyntaxKind.EndOfFileToken; kind = scanner.scan()) {
+    if (kind !== ts.SyntaxKind.SingleLineCommentTrivia
+        && kind !== ts.SyntaxKind.MultiLineCommentTrivia) {
       tokens.push(scanner.getTokenText());
     }
   }
@@ -65,20 +61,18 @@ async function declarationFiles(root) {
 }
 
 async function prepareDeclarationInputs(files) {
-  const api = new API({ cwd: workDir });
-  const snapshot = api.updateSnapshot({ openFiles: files });
-  try {
-    for (const file of files) {
-      const project = snapshot.getDefaultProjectForFile(file);
-      const sourceFile = project?.program.getSourceFile(file);
-      if (!project || !sourceFile) throw new Error(`Could not load declaration: ${file}`);
-      const withoutInternals = stripInternalMembers(sourceFile);
-      await writeFile(file, stripComments(withoutInternals));
-    }
-  } finally {
-    snapshot.dispose();
-    api.close();
-  }
+  await Promise.all(files.map(async (file) => {
+    const source = await readFile(file, 'utf8');
+    const sourceFile = ts.createSourceFile(
+      file,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const withoutInternals = stripInternalMembers(sourceFile);
+    await writeFile(file, stripComments(withoutInternals));
+  }));
 }
 
 await mkdir(outDir, { recursive: true });

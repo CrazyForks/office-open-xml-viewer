@@ -28,25 +28,9 @@
  * This is test-only tooling and is never re-exported from the package barrels,
  * so it does not enter the published bundle.
  */
-import {
-  API,
-  SignatureKind,
-  SymbolFlags,
-  type Symbol as TypeScriptSymbol,
-  type Type,
-} from 'typescript/unstable/sync';
-import {
-  ModifierFlags,
-  type Declaration,
-  type Node,
-} from 'typescript/unstable/ast';
-import {
-  isClassDeclaration,
-  isEnumDeclaration,
-  isInterfaceDeclaration,
-  isPrivateIdentifier,
-  isTypeAliasDeclaration,
-} from 'typescript/unstable/ast/is';
+// TypeScript 7 has no stable Compiler API yet. This test-only analyzer uses the
+// explicitly named compatibility dependency; package builds still use TS 7.
+import ts from 'typescript-compiler-api';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -75,6 +59,15 @@ export interface CheckOptions {
   allowlist?: readonly string[];
 }
 
+const COMPILER_OPTIONS: ts.CompilerOptions = {
+  target: ts.ScriptTarget.ES2022,
+  module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.Bundler,
+  strict: true,
+  skipLibCheck: true,
+  noEmit: true,
+};
+
 /** Normalise a fs path for cross-platform prefix comparison. */
 function norm(p: string): string {
   return path.normalize(p).split(path.sep).join('/');
@@ -92,202 +85,184 @@ function isUnder(file: string, dir: string): boolean {
  * package's `src/` tree but are not themselves exported from the barrel.
  */
 export function findMissingExports(opts: CheckOptions): MissingExport[] {
-  const indexPath = path.resolve(opts.indexPath);
+  const indexPath = norm(opts.indexPath);
   const srcDir = norm(opts.srcDir ?? path.dirname(opts.indexPath));
   const allow = new Set(opts.allowlist ?? []);
-  const api = new API({ cwd: path.dirname(indexPath) });
-  const snapshot = api.updateSnapshot({ openFiles: [indexPath] });
 
-  try {
-    const project = snapshot.getDefaultProjectForFile(indexPath);
-    if (!project) throw new Error(`Could not resolve TypeScript project for: ${indexPath}`);
-    const program = project.program;
-    const checker = project.checker;
+  const program = ts.createProgram([indexPath], COMPILER_OPTIONS);
+  const checker = program.getTypeChecker();
 
-    const indexSource = program.getSourceFile(indexPath);
-    if (!indexSource) throw new Error(`Could not load index source file: ${indexPath}`);
-    const moduleSymbol = checker.getSymbolAtLocation(indexSource);
-    if (!moduleSymbol) throw new Error(`Could not resolve module symbol for: ${indexPath}`);
+  const indexSource = program.getSourceFile(indexPath);
+  if (!indexSource) throw new Error(`Could not load index source file: ${indexPath}`);
+  const moduleSymbol = checker.getSymbolAtLocation(indexSource);
+  if (!moduleSymbol) throw new Error(`Could not resolve module symbol for: ${indexPath}`);
 
-    const exports = checker.getExportsOfModule(moduleSymbol);
-    const exportedNames = new Set<string>(exports.map((symbol) => symbol.name));
+  const exports = checker.getExportsOfModule(moduleSymbol);
+  const exportedNames = new Set<string>(exports.map((s) => s.getName()));
 
-    const missing = new Map<string, MissingExport>();
-    // TypeScript 7 exposes stable type IDs through its native sync API.
-    const visitedTypeIds = new Set<number>();
-    const MAX_DEPTH = 64;
+  const missing = new Map<string, MissingExport>();
+  // Guard against cycles. The checker mints fresh `ts.Type` objects for derived
+  // types (apparent props, `T | null` wrappers), so identity-based Set guarding
+  // does not converge — key on the stable internal numeric type id, with an
+  // object-identity WeakSet fallback for the rare type that lacks an id.
+  const visitedTypeIds = new Set<number>();
+  const visitedTypeObjs = new WeakSet<object>();
+  const MAX_DEPTH = 64;
 
-    const resolveDeclaration = (
-      handle: TypeScriptSymbol['valueDeclaration'],
-    ): Declaration | undefined => handle?.resolve(project) as Declaration | undefined;
-
-    const declarationsOf = (symbol: TypeScriptSymbol): Declaration[] =>
-      symbol.declarations
-        .map((handle) => handle.resolve(project) as Declaration | undefined)
-        .filter((declaration): declaration is Declaration => declaration !== undefined);
-
-    function resolveAlias(symbol: TypeScriptSymbol): TypeScriptSymbol {
-      return symbol.flags & SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
-    }
-
-    /** Where is a type's naming symbol declared? */
-    type Origin =
-      | { kind: 'in-package'; name: string; file: string }
-      | { kind: 'external' } // named, but declared outside the package src (core, lib.dom, …)
-      | { kind: 'anonymous' }; // inline object literal / union / primitive — no naming symbol
-
-    /**
-     * True for class members that are not part of the public surface: explicit
-     * `private`/`protected` modifiers, ECMAScript `#private` names, or
-     * `@internal`-style underscore-prefixed members are NOT treated as private
-     * here (only real access modifiers / `#` names are). The Compiler API leaks
-     * private members through `getProperties()`, so we must filter them.
-     */
-    function isNonPublicMember(symbol: TypeScriptSymbol): boolean {
-      for (const declaration of declarationsOf(symbol)) {
-        const modifierFlags = (
-          declaration as Declaration & { readonly modifierFlags?: ModifierFlags }
-        ).modifierFlags ?? ModifierFlags.None;
-        if (
-          modifierFlags &
-          (ModifierFlags.Private | ModifierFlags.Protected)
-        ) {
-          return true;
-        }
-        // `#private` fields/methods.
-        const name = (declaration as Declaration & { readonly name?: Node }).name;
-        if (name && isPrivateIdentifier(name)) return true;
-      }
-      return false;
-    }
-
-    /** Only these declaration kinds introduce a *named type* in the API surface. */
-    function isTypeDeclaration(declaration: Declaration): boolean {
-      return (
-        isInterfaceDeclaration(declaration) ||
-        isTypeAliasDeclaration(declaration) ||
-        isClassDeclaration(declaration) ||
-        isEnumDeclaration(declaration)
-      );
-    }
-
-    function originOf(type: Type): Origin {
-      const symbol = type.getAliasSymbol() ?? type.getSymbol();
-      if (!symbol || symbol.flags & SymbolFlags.TypeParameter) return { kind: 'anonymous' };
-      const name = symbol.name;
-      if (!name || name === '__type' || name === '__object') return { kind: 'anonymous' };
-      const declarations = declarationsOf(symbol);
-      if (declarations.length === 0) return { kind: 'external' };
-      // A symbol whose declarations are functions/methods/variables (not a type
-      // declaration) does not name a *type* — it is an anonymous structural type
-      // for our purposes (we still descend into its signature via the caller).
-      const typeDeclarations = declarations.filter(isTypeDeclaration);
-      if (typeDeclarations.length === 0) return { kind: 'anonymous' };
-      for (const declaration of typeDeclarations) {
-        const file = declaration.getSourceFile().fileName;
-        if (isUnder(file, srcDir)) return { kind: 'in-package', name, file: norm(file) };
-      }
-      return { kind: 'external' };
-    }
-
-    function record(name: string, file: string, root: string): void {
-      const existing = missing.get(name);
-      if (existing) {
-        if (!existing.reachableFrom.includes(root)) existing.reachableFrom.push(root);
-      } else {
-        missing.set(name, { name, declaredIn: file, reachableFrom: [root] });
-      }
-    }
-
-    function typeArgumentsOf(type: Type): readonly Type[] {
-      const typeArguments = [...type.getAliasTypeArguments()];
-      if (type.isTypeReference()) typeArguments.push(...checker.getTypeArguments(type));
-      return Array.from(new Map(typeArguments.map((argument) => [argument.id, argument])).values());
-    }
-
-    /** Recurse through a type's public surface, recording in-package types. */
-    function walkType(type: Type, root: string, depth: number): void {
-      if (depth > MAX_DEPTH || visitedTypeIds.has(type.id)) return;
-      visitedTypeIds.add(type.id);
-
-      const origin = originOf(type);
-
-      // External named type (core, lib.dom, Node, …): record nothing and DO NOT
-      // descend into its members. This is the critical pruning step — without it
-      // the walk would explore the entire DOM/lib type graph and OOM.
-      if (origin.kind === 'external') {
-        // Type arguments still matter: an external container like `Array<Foo>` or
-        // `Promise<Foo>` may carry an in-package `Foo`. Descend only into those.
-        for (const argument of typeArgumentsOf(type)) walkType(argument, root, depth + 1);
-        return;
-      }
-
-      // In-package named type: check + record if unexported, then keep walking
-      // its structure (it may reach further in-package types).
-      if (origin.kind === 'in-package') {
-        if (!exportedNames.has(origin.name) && !allow.has(origin.name)) {
-          record(origin.name, origin.file, root);
-        }
-      }
-
-      // Union / intersection constituents.
-      if (type.isUnionType() || type.isIntersectionType()) {
-        for (const member of type.getTypes()) walkType(member, root, depth + 1);
-      }
-
-      // Type arguments (Array<T>, Map<K,V>, generics on in-package aliases …).
-      for (const argument of typeArgumentsOf(type)) walkType(argument, root, depth + 1);
-
-      // Own properties — only descend for in-package and anonymous (inline
-      // object-literal) types. NB: the Compiler API's `getProperties()` DOES
-      // include `private`/`protected` class members (privacy is enforced at
-      // check time, not stripped from the symbol table), so they must be
-      // filtered out explicitly — otherwise the walk leaks through a viewer's
-      // private worker bridge into the internal message protocol types.
-      for (const property of checker.getPropertiesOfType(type)) {
-        if (isNonPublicMember(property)) continue;
-        const declaration =
-          resolveDeclaration(property.valueDeclaration) ?? declarationsOf(property)[0];
-        if (!declaration) continue;
-        walkType(checker.getTypeOfSymbolAtLocation(property, declaration), root, depth + 1);
-      }
-
-      // Call / construct signatures: parameter and return types.
-      const signatures = [
-        ...checker.getSignaturesOfType(type, SignatureKind.Call),
-        ...checker.getSignaturesOfType(type, SignatureKind.Construct),
-      ];
-      for (const signature of signatures) {
-        for (const parameter of signature.getParameters()) {
-          const declaration =
-            resolveDeclaration(parameter.valueDeclaration) ?? declarationsOf(parameter)[0];
-          if (!declaration) continue;
-          walkType(checker.getTypeOfSymbolAtLocation(parameter, declaration), root, depth + 1);
-        }
-        const returnType = checker.getReturnTypeOfSignature(signature);
-        if (returnType) walkType(returnType, root, depth + 1);
-      }
-    }
-
-    for (const exported of exports) {
-      const symbol = resolveAlias(exported);
-      const declaration = declarationsOf(symbol)[0];
-      if (!declaration) continue;
-      // Use the declared type at its declaration site so type aliases resolve to
-      // their target (unions, object literals, …) and classes/interfaces to their
-      // instance type.
-      const type = checker.getTypeOfSymbolAtLocation(symbol, declaration);
-      walkType(type, exported.name, 0);
-      // For interfaces / type aliases the symbol type above may be the *type* of
-      // a value; also walk the declared type to be safe.
-      walkType(checker.getDeclaredTypeOfSymbol(symbol), exported.name, 0);
-    }
-
-    return Array.from(missing.values()).sort((a, b) => a.name.localeCompare(b.name));
-  } finally {
-    snapshot.dispose();
-    api.close();
+  function resolveAlias(sym: ts.Symbol): ts.Symbol {
+    return sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
   }
+
+  /** Where is a type's naming symbol declared? */
+  type Origin =
+    | { kind: 'in-package'; name: string; file: string }
+    | { kind: 'external' } // named, but declared outside the package src (core, lib.dom, …)
+    | { kind: 'anonymous' }; // inline object literal / union / primitive — no naming symbol
+
+  /**
+   * True for class members that are not part of the public surface: explicit
+   * `private`/`protected` modifiers, ECMAScript `#private` names, or
+   * `@internal`-style underscore-prefixed members are NOT treated as private
+   * here (only real access modifiers / `#` names are). The Compiler API leaks
+   * private members through `getProperties()`, so we must filter them.
+   */
+  function isNonPublicMember(sym: ts.Symbol): boolean {
+    const decls = sym.getDeclarations();
+    if (!decls) return false;
+    for (const d of decls) {
+      const mods = ts.getCombinedModifierFlags(d);
+      if (mods & (ts.ModifierFlags.Private | ts.ModifierFlags.Protected)) return true;
+      // `#private` fields/methods.
+      const nameNode = (d as ts.NamedDeclaration).name;
+      if (nameNode && ts.isPrivateIdentifier(nameNode)) return true;
+    }
+    return false;
+  }
+
+  /** Only these declaration kinds introduce a *named type* in the API surface. */
+  function isTypeDeclaration(d: ts.Declaration): boolean {
+    return (
+      ts.isInterfaceDeclaration(d) ||
+      ts.isTypeAliasDeclaration(d) ||
+      ts.isClassDeclaration(d) ||
+      ts.isEnumDeclaration(d)
+    );
+  }
+
+  function originOf(type: ts.Type): Origin {
+    const sym = type.aliasSymbol ?? type.getSymbol();
+    if (!sym) return { kind: 'anonymous' };
+    if (sym.flags & ts.SymbolFlags.TypeParameter) return { kind: 'anonymous' };
+    const name = sym.getName();
+    if (!name || name === '__type' || name === '__object') return { kind: 'anonymous' };
+    const decls = sym.getDeclarations();
+    if (!decls || decls.length === 0) return { kind: 'external' };
+    // A symbol whose declarations are functions/methods/variables (not a type
+    // declaration) does not name a *type* — it is an anonymous structural type
+    // for our purposes (we still descend into its signature via the caller).
+    const typeDecls = decls.filter(isTypeDeclaration);
+    if (typeDecls.length === 0) return { kind: 'anonymous' };
+    for (const d of typeDecls) {
+      const file = d.getSourceFile().fileName;
+      if (isUnder(file, srcDir)) return { kind: 'in-package', name, file: norm(file) };
+    }
+    return { kind: 'external' };
+  }
+
+  function record(name: string, file: string, root: string): void {
+    const existing = missing.get(name);
+    if (existing) {
+      if (!existing.reachableFrom.includes(root)) existing.reachableFrom.push(root);
+    } else {
+      missing.set(name, { name, declaredIn: file, reachableFrom: [root] });
+    }
+  }
+
+  /** Recurse through a type's public surface, recording in-package types. */
+  function walkType(type: ts.Type, root: string, depth: number): void {
+    if (depth > MAX_DEPTH) return;
+    const id = (type as ts.Type & { id?: number }).id;
+    if (id !== undefined) {
+      if (visitedTypeIds.has(id)) return;
+      visitedTypeIds.add(id);
+    } else {
+      if (visitedTypeObjs.has(type)) return;
+      visitedTypeObjs.add(type);
+    }
+
+    const origin = originOf(type);
+
+    // External named type (core, lib.dom, Node, …): record nothing and DO NOT
+    // descend into its members. This is the critical pruning step — without it
+    // the walk would explore the entire DOM/lib type graph and OOM.
+    if (origin.kind === 'external') {
+      // Type arguments still matter: an external container like `Array<Foo>` or
+      // `Promise<Foo>` may carry an in-package `Foo`. Descend only into those.
+      const typeArgs = checker.getTypeArguments(type as ts.TypeReference);
+      if (typeArgs) for (const ta of typeArgs) walkType(ta, root, depth + 1);
+      return;
+    }
+
+    // In-package named type: check + record if unexported, then keep walking
+    // its structure (it may reach further in-package types).
+    if (origin.kind === 'in-package') {
+      if (!exportedNames.has(origin.name) && !allow.has(origin.name)) {
+        record(origin.name, origin.file, root);
+      }
+    }
+
+    // Union / intersection constituents.
+    if (type.isUnionOrIntersection()) {
+      for (const t of type.types) walkType(t, root, depth + 1);
+    }
+
+    // Type arguments (Array<T>, Map<K,V>, generics on in-package aliases …).
+    const typeArgs = checker.getTypeArguments(type as ts.TypeReference);
+    if (typeArgs && typeArgs.length) {
+      for (const ta of typeArgs) walkType(ta, root, depth + 1);
+    }
+
+    // Own properties — only descend for in-package and anonymous (inline
+    // object-literal) types. NB: the Compiler API's `getProperties()` DOES
+    // include `private`/`protected` class members (privacy is enforced at
+    // check time, not stripped from the symbol table), so they must be
+    // filtered out explicitly — otherwise the walk leaks through a viewer's
+    // private worker bridge into the internal message protocol types.
+    for (const prop of type.getProperties()) {
+      if (isNonPublicMember(prop)) continue;
+      const propDecl = prop.valueDeclaration ?? prop.getDeclarations()?.[0];
+      if (!propDecl) continue;
+      const propType = checker.getTypeOfSymbolAtLocation(prop, propDecl);
+      walkType(propType, root, depth + 1);
+    }
+
+    // Call / construct signatures: parameter and return types.
+    for (const sig of [...type.getCallSignatures(), ...type.getConstructSignatures()]) {
+      for (const p of sig.getParameters()) {
+        const pDecl = p.valueDeclaration ?? p.getDeclarations()?.[0];
+        if (!pDecl) continue;
+        walkType(checker.getTypeOfSymbolAtLocation(p, pDecl), root, depth + 1);
+      }
+      walkType(sig.getReturnType(), root, depth + 1);
+    }
+  }
+
+  for (const exp of exports) {
+    const sym = resolveAlias(exp);
+    const decl = sym.getDeclarations()?.[0];
+    if (!decl) continue;
+    // Use the declared type at its declaration site so type aliases resolve to
+    // their target (unions, object literals, …) and classes/interfaces to their
+    // instance type.
+    const type = checker.getTypeOfSymbolAtLocation(sym, decl);
+    walkType(type, exp.getName(), 0);
+    // For interfaces / type aliases the symbol type above may be the *type* of
+    // a value; also walk the declared type to be safe.
+    const declared = checker.getDeclaredTypeOfSymbol(sym);
+    if (declared) walkType(declared, exp.getName(), 0);
+  }
+
+  return Array.from(missing.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**

@@ -113,6 +113,7 @@
     "rolldown": "^1.2.0",
     "storybook": "^10.3.5",
     "typescript": "^7.0.2",
+    "typescript-compiler-api": "npm:@typescript/typescript6@^6.0.2",
     "vite": "^8.0.8",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.6.0",
