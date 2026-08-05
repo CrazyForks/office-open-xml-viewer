@@ -1,14 +1,65 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { createRequire } from 'node:module';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-
-const toolRequire = createRequire(new URL('../packages/docx/package.json', import.meta.url));
-const ts = toolRequire('typescript');
+import { API } from 'typescript/unstable/sync';
+import {
+  SyntaxKind,
+  TokenFlags,
+  createScanner,
+  isClassDeclaration,
+  isClassExpression,
+  isConstructorDeclaration,
+  isEnumDeclaration,
+  isExportDeclaration,
+  isFunctionDeclaration,
+  isIdentifier,
+  isImportEqualsDeclaration,
+  isIntersectionTypeNode,
+  isInterfaceDeclaration,
+  isModuleDeclaration,
+  isNamedExports,
+  isParenthesizedTypeNode,
+  isPrivateIdentifier,
+  isSourceFile,
+  isStringLiteral,
+  isTypeAliasDeclaration,
+  isUnionTypeNode,
+  isVariableStatement,
+  visitEachChild,
+} from 'typescript/unstable/ast';
+import {
+  createConstructorDeclaration,
+  createIdentifier,
+  createIntersectionTypeNode,
+  createNodeArray,
+  createPrivateIdentifier,
+  createPropertyDeclaration,
+  createStringLiteral,
+  createToken,
+  createUnionTypeNode,
+  updateClassDeclaration,
+  updateClassExpression,
+  updateEnumDeclaration,
+  updateFunctionDeclaration,
+  updateImportEqualsDeclaration,
+  updateInterfaceDeclaration,
+  updateModuleDeclaration,
+  updateSourceFile,
+  updateTypeAliasDeclaration,
+  updateVariableStatement,
+} from 'typescript/unstable/ast/factory';
 
 function parseArgs(argv) {
   const result = {
@@ -42,48 +93,69 @@ function normalizeText(source) {
     .trimEnd();
 }
 
-export function normalizeDeclaration(source, fileName) {
-  const parsed = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  const localExportNames = new Set();
-  const exportAliases = new Map();
-  for (const statement of parsed.statements) {
-    if (!ts.isExportDeclaration(statement) || statement.moduleSpecifier || !statement.exportClause
-        || !ts.isNamedExports(statement.exportClause)) continue;
-    for (const element of statement.exportClause.elements) {
-      const localName = element.propertyName?.text ?? element.name.text;
-      localExportNames.add(element.name.text);
-      if (localName !== element.name.text) exportAliases.set(localName, element.name.text);
+function canonicalTokens(source) {
+  const scanner = createScanner(false, undefined, source);
+  const tokens = [];
+  for (let kind = scanner.scan(); kind !== SyntaxKind.EndOfFile; kind = scanner.scan()) {
+    if (
+      kind !== SyntaxKind.WhitespaceTrivia
+      && kind !== SyntaxKind.NewLineTrivia
+      && kind !== SyntaxKind.SingleLineCommentTrivia
+      && kind !== SyntaxKind.MultiLineCommentTrivia
+    ) {
+      tokens.push(`${kind}:${scanner.getTokenText()}`);
     }
   }
-  const collisionGroups = new Map();
-  for (const statement of parsed.statements) {
-    if (!('name' in statement) || !statement.name || !ts.isIdentifier(statement.name)) continue;
-    if (localExportNames.has(statement.name.text)) continue;
-    const match = /^(.*?)(?:_|\$)\d+$/.exec(statement.name.text);
-    if (!match) continue;
-    const names = collisionGroups.get(match[1]) ?? [];
-    names.push(statement.name.text);
-    collisionGroups.set(match[1], names);
-  }
-  const collisionAliases = new Map();
-  for (const [base, names] of collisionGroups) {
-    names.sort((left, right) => {
-      const leftOrdinal = Number(/\d+$/.exec(left)?.[0]);
-      const rightOrdinal = Number(/\d+$/.exec(right)?.[0]);
-      return leftOrdinal - rightOrdinal || left.localeCompare(right);
-    });
-    names.forEach((name, index) => {
-      collisionAliases.set(name, `${base}__emitterCollision${index + 1}`);
-    });
-  }
-  const transformed = ts.transform(parsed, [(context) => {
-    const hasModifier = (member, kind) => ts.getModifiers(member)?.some(
+  return tokens.join('\n');
+}
+
+export function normalizeDeclaration(source, fileName) {
+  const workDir = mkdtempSync(path.join(tmpdir(), 'ooxml-public-api-'));
+  const sourcePath = path.join(workDir, path.basename(fileName).endsWith('.ts')
+    ? path.basename(fileName)
+    : 'declaration.d.ts');
+  writeFileSync(sourcePath, source);
+  const api = new API({ cwd: workDir });
+  const snapshot = api.updateSnapshot({ openFiles: [sourcePath] });
+  try {
+    const project = snapshot.getDefaultProjectForFile(sourcePath);
+    const parsed = project?.program.getSourceFile(sourcePath);
+    if (!project || !parsed) throw new Error(`Could not parse declaration: ${fileName}`);
+
+    const localExportNames = new Set();
+    const exportAliases = new Map();
+    for (const statement of parsed.statements) {
+      if (!isExportDeclaration(statement) || statement.moduleSpecifier || !statement.exportClause
+          || !isNamedExports(statement.exportClause)) continue;
+      for (const element of statement.exportClause.elements) {
+        const localName = element.propertyName?.text ?? element.name.text;
+        localExportNames.add(element.name.text);
+        if (localName !== element.name.text) exportAliases.set(localName, element.name.text);
+      }
+    }
+    const collisionGroups = new Map();
+    for (const statement of parsed.statements) {
+      if (!('name' in statement) || !statement.name || !isIdentifier(statement.name)) continue;
+      if (localExportNames.has(statement.name.text)) continue;
+      const match = /^(.*?)(?:_|\$)\d+$/.exec(statement.name.text);
+      if (!match) continue;
+      const names = collisionGroups.get(match[1]) ?? [];
+      names.push(statement.name.text);
+      collisionGroups.set(match[1], names);
+    }
+    const collisionAliases = new Map();
+    for (const [base, names] of collisionGroups) {
+      names.sort((left, right) => {
+        const leftOrdinal = Number(/\d+$/.exec(left)?.[0]);
+        const rightOrdinal = Number(/\d+$/.exec(right)?.[0]);
+        return leftOrdinal - rightOrdinal || left.localeCompare(right);
+      });
+      names.forEach((name, index) => {
+        collisionAliases.set(name, `${base}__emitterCollision${index + 1}`);
+      });
+    }
+
+    const hasModifier = (member, kind) => member.modifiers?.some(
       (modifier) => modifier.kind === kind,
     ) ?? false;
     const normalizeClassMembers = (members) => {
@@ -92,57 +164,118 @@ export function normalizeDeclaration(source, fileName) {
       let hasHardPrivate = false;
       let hasPrivateConstructor = false;
       const visibleMembers = members.filter((member) => {
-        if (member.name && ts.isPrivateIdentifier(member.name)) {
+        if (member.name && isPrivateIdentifier(member.name)) {
           hasHardPrivate = true;
           return false;
         }
-        if (!hasModifier(member, ts.SyntaxKind.PrivateKeyword)) return true;
-        if (ts.isConstructorDeclaration(member)) hasPrivateConstructor = true;
-        else if (hasModifier(member, ts.SyntaxKind.StaticKeyword)) hasStaticPrivate = true;
+        if (!hasModifier(member, SyntaxKind.PrivateKeyword)) return true;
+        if (isConstructorDeclaration(member)) hasPrivateConstructor = true;
+        else if (hasModifier(member, SyntaxKind.StaticKeyword)) hasStaticPrivate = true;
         else hasInstancePrivate = true;
         return false;
       });
       if (visibleMembers.length === members.length) return members;
       if (hasInstancePrivate) {
-        visibleMembers.push(ts.factory.createPropertyDeclaration(
-          [ts.factory.createModifier(ts.SyntaxKind.PrivateKeyword)],
-          '__privatePresence',
+        visibleMembers.push(createPropertyDeclaration(
+          [createToken(SyntaxKind.PrivateKeyword)],
+          createIdentifier('__privatePresence'),
         ));
       }
       if (hasStaticPrivate) {
-        visibleMembers.push(ts.factory.createPropertyDeclaration(
+        visibleMembers.push(createPropertyDeclaration(
           [
-            ts.factory.createModifier(ts.SyntaxKind.PrivateKeyword),
-            ts.factory.createModifier(ts.SyntaxKind.StaticKeyword),
+            createToken(SyntaxKind.PrivateKeyword),
+            createToken(SyntaxKind.StaticKeyword),
           ],
-          '__staticPrivatePresence',
+          createIdentifier('__staticPrivatePresence'),
         ));
       }
       if (hasHardPrivate) {
-        visibleMembers.push(ts.factory.createPropertyDeclaration(
+        visibleMembers.push(createPropertyDeclaration(
           undefined,
-          ts.factory.createPrivateIdentifier('#private'),
+          createPrivateIdentifier('#private'),
         ));
       }
       if (hasPrivateConstructor) {
-        visibleMembers.push(ts.factory.createConstructorDeclaration(
-          [ts.factory.createModifier(ts.SyntaxKind.PrivateKeyword)],
-          [],
+        visibleMembers.push(createConstructorDeclaration(
+          [createToken(SyntaxKind.PrivateKeyword)],
           undefined,
+          [],
         ));
       }
-      return ts.factory.createNodeArray(visibleMembers);
+      return createNodeArray(visibleMembers);
     };
     const statementName = (statement) => {
-      if ('name' in statement && statement.name && ts.isIdentifier(statement.name)) {
+      if ('name' in statement && statement.name && isIdentifier(statement.name)) {
         return statement.name.text;
       }
-      if (ts.isVariableStatement(statement)) {
+      if (isVariableStatement(statement)) {
         return statement.declarationList.declarations
-          .map((declaration) => ts.isIdentifier(declaration.name) ? declaration.name.text : '')
+          .map((declaration) => isIdentifier(declaration.name) ? declaration.name.text : '')
           .join(',');
       }
       return '';
+    };
+    const updateModifiers = (statement, modifiers) => {
+      if (isVariableStatement(statement)) {
+        return updateVariableStatement(statement, modifiers, statement.declarationList);
+      }
+      if (isFunctionDeclaration(statement)) {
+        return updateFunctionDeclaration(
+          statement,
+          modifiers,
+          statement.asteriskToken,
+          statement.name,
+          statement.typeParameters,
+          statement.parameters,
+          statement.type,
+          statement.body,
+        );
+      }
+      if (isClassDeclaration(statement)) {
+        return updateClassDeclaration(
+          statement,
+          modifiers,
+          statement.name,
+          statement.typeParameters,
+          statement.heritageClauses,
+          statement.members,
+        );
+      }
+      if (isInterfaceDeclaration(statement)) {
+        return updateInterfaceDeclaration(
+          statement,
+          modifiers,
+          statement.name,
+          statement.typeParameters,
+          statement.heritageClauses,
+          statement.members,
+        );
+      }
+      if (isTypeAliasDeclaration(statement)) {
+        return updateTypeAliasDeclaration(
+          statement,
+          modifiers,
+          statement.name,
+          statement.typeParameters,
+          statement.type,
+        );
+      }
+      if (isEnumDeclaration(statement)) {
+        return updateEnumDeclaration(statement, modifiers, statement.name, statement.members);
+      }
+      if (isModuleDeclaration(statement)) {
+        return updateModuleDeclaration(statement, modifiers, statement.name, statement.body);
+      }
+      if (isImportEqualsDeclaration(statement)) {
+        return updateImportEqualsDeclaration(
+          statement,
+          modifiers,
+          statement.name,
+          statement.moduleReference,
+        );
+      }
+      return statement;
     };
     const normalizeSourceFile = (sourceFile) => {
       // API Extractor emits `export declare interface Foo`, whereas Rolldown's
@@ -151,8 +284,8 @@ export function normalizeDeclaration(source, fileName) {
       // than coupling the project to one declaration emitter.
       const localExports = new Set();
       for (const statement of sourceFile.statements) {
-        if (!ts.isExportDeclaration(statement) || statement.moduleSpecifier || !statement.exportClause) continue;
-        if (!ts.isNamedExports(statement.exportClause)) continue;
+        if (!isExportDeclaration(statement) || statement.moduleSpecifier || !statement.exportClause) continue;
+        if (!isNamedExports(statement.exportClause)) continue;
         for (const element of statement.exportClause.elements) {
           const localName = element.propertyName?.text ?? element.name.text;
           if (localName === element.name.text) localExports.add(localName);
@@ -161,8 +294,8 @@ export function normalizeDeclaration(source, fileName) {
 
       const statements = [];
       for (const statement of sourceFile.statements) {
-        if (ts.isExportDeclaration(statement) && !statement.moduleSpecifier && statement.exportClause
-            && ts.isNamedExports(statement.exportClause)
+        if (isExportDeclaration(statement) && !statement.moduleSpecifier && statement.exportClause
+            && isNamedExports(statement.exportClause)
             && statement.exportClause.elements.every((element) => {
               const localName = element.propertyName?.text ?? element.name.text;
               return localName === element.name.text;
@@ -170,20 +303,20 @@ export function normalizeDeclaration(source, fileName) {
           continue;
         }
         const name = statementName(statement);
-        if (ts.canHaveModifiers(statement)) {
+        if ('modifiers' in statement) {
           // `declare` is optional in an ambient .d.ts module and emitters differ
           // on whether they spell it explicitly.
-          const modifiers = (ts.getModifiers(statement) ?? [])
-            .filter((modifier) => modifier.kind !== ts.SyntaxKind.DeclareKeyword);
+          const modifiers = (statement.modifiers ?? [])
+            .filter((modifier) => modifier.kind !== SyntaxKind.DeclareKeyword);
           if (name && localExports.has(name)
-              && !modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
-            statements.push(ts.factory.replaceModifiers(statement, [
-              ts.factory.createModifier(ts.SyntaxKind.ExportKeyword),
+              && !modifiers.some((modifier) => modifier.kind === SyntaxKind.ExportKeyword)) {
+            statements.push(updateModifiers(statement, [
+              createToken(SyntaxKind.ExportKeyword),
               ...modifiers,
             ]));
             continue;
           }
-          statements.push(ts.factory.replaceModifiers(statement, modifiers));
+          statements.push(updateModifiers(statement, modifiers));
           continue;
         }
         statements.push(statement);
@@ -199,23 +332,34 @@ export function normalizeDeclaration(source, fileName) {
         const byName = leftName.localeCompare(rightName);
         return byName || left.index - right.index;
       });
-      return ts.factory.updateSourceFile(
+      return updateSourceFile(
         sourceFile,
-        ts.factory.createNodeArray(indexed.map(({ statement }) => statement)),
+        createNodeArray(indexed.map(({ statement }) => statement)),
+        sourceFile.endOfFileToken,
       );
     };
     const visit = (node) => {
-      if (ts.isIdentifier(node) && exportAliases.has(node.text)) {
-        return ts.factory.createIdentifier(exportAliases.get(node.text));
+      if (isIdentifier(node) && exportAliases.has(node.text)) {
+        return createIdentifier(exportAliases.get(node.text));
       }
-      if (ts.isIdentifier(node) && collisionAliases.has(node.text)) {
-        return ts.factory.createIdentifier(collisionAliases.get(node.text));
+      if (isIdentifier(node) && collisionAliases.has(node.text)) {
+        return createIdentifier(collisionAliases.get(node.text));
       }
-      if (ts.isParenthesizedTypeNode(node)) return ts.visitNode(node.type, visit);
-      if (ts.isStringLiteral(node)) return ts.factory.createStringLiteral(node.text, true);
-      const visited = ts.visitEachChild(node, visit, context);
-      if (ts.isClassDeclaration(visited)) {
-        return ts.factory.updateClassDeclaration(
+      if (isParenthesizedTypeNode(node)) return visit(node.type);
+      if (isStringLiteral(node)) return createStringLiteral(node.text, TokenFlags.SingleQuote);
+      const visited = visitEachChild(node, visit);
+      if (isUnionTypeNode(visited)) {
+        return createUnionTypeNode(visited.types.flatMap(
+          (type) => isUnionTypeNode(type) ? [...type.types] : [type],
+        ));
+      }
+      if (isIntersectionTypeNode(visited)) {
+        return createIntersectionTypeNode(visited.types.flatMap(
+          (type) => isIntersectionTypeNode(type) ? [...type.types] : [type],
+        ));
+      }
+      if (isClassDeclaration(visited)) {
+        return updateClassDeclaration(
           visited,
           visited.modifiers,
           visited.name,
@@ -224,8 +368,8 @@ export function normalizeDeclaration(source, fileName) {
           normalizeClassMembers(visited.members),
         );
       }
-      if (ts.isClassExpression(visited)) {
-        return ts.factory.updateClassExpression(
+      if (isClassExpression(visited)) {
+        return updateClassExpression(
           visited,
           visited.modifiers,
           visited.name,
@@ -234,26 +378,36 @@ export function normalizeDeclaration(source, fileName) {
           normalizeClassMembers(visited.members),
         );
       }
-      if (ts.isSourceFile(visited)) return normalizeSourceFile(visited);
+      if (isSourceFile(visited)) return normalizeSourceFile(visited);
       return visited;
     };
-    return (root) => ts.visitNode(root, visit);
-  }]);
-  const printer = ts.createPrinter({
-    newLine: ts.NewLineKind.LineFeed,
-    removeComments: true,
-  });
-  const normalized = normalizeText(printer.printFile(transformed.transformed[0]));
-  transformed.dispose();
-  return normalized;
+    const printed = project.emitter.printNode(visit(parsed));
+    const scanner = createScanner(false, undefined, printed);
+    const uncommented = [];
+    for (let kind = scanner.scan(); kind !== SyntaxKind.EndOfFile; kind = scanner.scan()) {
+      if (kind !== SyntaxKind.SingleLineCommentTrivia && kind !== SyntaxKind.MultiLineCommentTrivia) {
+        uncommented.push(scanner.getTokenText());
+      }
+    }
+    return normalizeText(uncommented.join(''));
+  } finally {
+    snapshot.dispose();
+    api.close();
+    rmSync(workDir, { recursive: true, force: true });
+  }
 }
 
 function localSpecifiers(source) {
-  const info = ts.preProcessFile(source, true, true);
-  const values = [
-    ...info.importedFiles,
-    ...info.referencedFiles,
-  ].map((reference) => reference.fileName);
+  const values = [];
+  for (const match of source.matchAll(/\b(?:from|import\s*\()\s*(['"])([^'"]+)\1/g)) {
+    values.push(match[2]);
+  }
+  for (const match of source.matchAll(/^\s*import\s*(['"])([^'"]+)\1/gm)) {
+    values.push(match[2]);
+  }
+  for (const match of source.matchAll(/^\s*\/\/\/\s*<reference\s+path=(['"])([^'"]+)\1/gm)) {
+    values.push(match[2]);
+  }
   return [...new Set(values.filter((specifier) => specifier.startsWith('.')))];
 }
 
@@ -320,7 +474,8 @@ function normalizeRenderedBaseline(source) {
       const declarationStart = section.indexOf('\n');
       const heading = section.slice(0, declarationStart);
       const fileName = heading.slice('// --- file: '.length, -' ---'.length);
-      return `${heading}\n${normalizeDeclaration(section.slice(declarationStart + 1), fileName)}`;
+      const normalized = normalizeDeclaration(section.slice(declarationStart + 1), fileName);
+      return `${heading}\n${canonicalTokens(normalized)}`;
     })
     .join('\n\n');
 }

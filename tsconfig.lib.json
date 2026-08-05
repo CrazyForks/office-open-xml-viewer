@@ -1,15 +1,12 @@
 {
   "extends": "./tsconfig.base.json",
   "include": [
-    "src/**/*",
-    "packages/core/src/**/*",
-    "packages/pptx/src/**/*",
-    "packages/xlsx/src/**/*",
-    "packages/docx/src/**/*"
+    "src/**/*"
   ],
   "compilerOptions": {
-    "outDir": "./dist",
-    "declarationDir": "./dist/types",
+    "composite": false,
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
     "emitDeclarationOnly": true,
     "paths": {
       "@silurus/ooxml-core": ["./packages/core/src/index.ts"],
