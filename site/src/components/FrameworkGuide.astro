@@ -8,6 +8,7 @@ import {
   getFrameworkGuide,
   type FrameworkId,
 } from '../lib/framework-guides';
+import { canonicalPageUrl } from '../lib/seo';
 
 interface Props {
   framework: FrameworkId;
@@ -22,7 +23,7 @@ const structuredData = JSON.stringify({
   '@type': 'TechArticle',
   headline: guide.title,
   description: guide.description,
-  url: `https://ooxml.silurus.dev${canonicalPath}`,
+  url: canonicalPageUrl(canonicalPath),
   proficiencyLevel: 'Beginner',
   dependencies: `${guide.name}, TypeScript, @silurus/ooxml`,
 });
