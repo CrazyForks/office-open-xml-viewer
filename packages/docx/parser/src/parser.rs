@@ -688,11 +688,26 @@ pub(crate) fn open_zip_with_limits(
     max_archive_entry_bytes: Option<u64>,
     max_total_inflated_bytes: Option<u64>,
 ) -> Result<Zip, String> {
+    open_zip_with_policy(
+        data,
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+        None,
+    )
+}
+
+pub(crate) fn open_zip_with_policy(
+    data: Vec<u8>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+    max_archive_entries: Option<u64>,
+) -> Result<Zip, String> {
     PackageSessionHandle::open(
         data,
         ooxml_common::resource::OoxmlFormat::Docx,
         max_archive_entry_bytes,
         max_total_inflated_bytes,
+        max_archive_entries,
     )
     .map(|session| Zip {
         session,

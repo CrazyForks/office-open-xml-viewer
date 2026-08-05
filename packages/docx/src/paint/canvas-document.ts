@@ -46,6 +46,14 @@ export interface CanvasDocumentPaintOptions<TTextRun> {
  * may paint after rapid navigation reuses the same canvas. */
 const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
 
+/** Invalidate an in-flight main-thread render before restoring or reusing its
+ * caller-owned target. The renderer observes the same token after every await. */
+export function invalidateDocxRenderTarget(
+  target: HTMLCanvasElement | OffscreenCanvas,
+): void {
+  renderTokens.set(target, (renderTokens.get(target) ?? 0) + 1);
+}
+
 export function canvasPageScale(page: LayoutPage, width?: number): number {
   return (width ?? page.geometry.widthPt * PT_TO_PX) / page.geometry.widthPt;
 }

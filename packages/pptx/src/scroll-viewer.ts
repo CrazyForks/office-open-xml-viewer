@@ -1,4 +1,5 @@
 import { computeVisibleRange, EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindHighlightColors, type FindMatch, type FindMatchesOptions, type VisibleRange, type HyperlinkTarget, type OoxmlResourceMetrics, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
+import { StaticCanvasRenderDispatcher } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
@@ -199,14 +200,8 @@ interface SlideSlot {
    *  scales the text overlay by `newScale / renderedScale`; the debounced settle
    *  re-render then repaints at the new scale and updates this to match. */
   renderedScale: number;
-  /** worker-mode: a transient hold on a just-received ImageBitmap, set only
-   *  between receipt from the worker and its `transferFromImageBitmap` (which
-   *  consumes it, after which we null the field). Its purpose is the throw path:
-   *  if the transfer throws, `destroy()`/`_recycleSlot` can still find and
-   *  `.close()` the bitmap. Normally null once transfer completes. */
-  bitmap: ImageBitmap | null;
-  /** bitmaprenderer ctx (worker mode), grabbed once per canvas. */
-  bitmapCtx: ImageBitmapRenderingContext | null;
+  /** Shared single-canvas generation and worker-bitmap ownership primitive. */
+  dispatcher: StaticCanvasRenderDispatcher;
   /** Interactive media handle for the canvas currently mounted in this slot. */
   presentationHandle: PresentationHandle | null;
   /** Whether this slot currently owns or awaits an interactive media handle. */
@@ -817,8 +812,7 @@ export class PptxScrollViewer implements ZoomableViewer {
       highlightLayer,
       renderedSlide: -1,
       renderedScale: -1,
-      bitmap: null,
-      bitmapCtx: null,
+      dispatcher: new StaticCanvasRenderDispatcher(canvas, this._mode === 'worker'),
       presentationHandle: null,
       mediaInteractive: false,
       renderGeneration: 0,
@@ -837,10 +831,9 @@ export class PptxScrollViewer implements ZoomableViewer {
     slot.presentationHandle?.destroy();
     slot.presentationHandle = null;
     slot.mediaInteractive = false;
-    // Close any worker bitmap held by this slot (T3 sets slot.bitmap).
-    if (slot.bitmap) {
-      slot.bitmap.close();
-      slot.bitmap = null;
+    slot.dispatcher.destroy();
+    if (!this._destroyed) {
+      slot.dispatcher = new StaticCanvasRenderDispatcher(slot.canvas, this._mode === 'worker');
     }
     // Clear the per-slot text overlay so a slot sitting in the free pool holds no
     // stale spans. buildPptxTextLayer also clears on its next build, but an
@@ -923,6 +916,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     const widthPx = this._slideWidthPx();
     const epoch = this._renderEpoch;
     const scale = this._scale;
+    const dispatcher = slot.dispatcher;
+    const generation = dispatcher.begin();
 
     if (this._opts.enableMediaPlayback && mediaInteractive) {
       slot.mediaInteractive = true;
@@ -932,7 +927,16 @@ export class PptxScrollViewer implements ZoomableViewer {
     slot.mediaInteractive = false;
 
     if (this._mode === 'worker') {
-      void this._renderSlotBitmap(i, slot, widthPx, dpr, scale, renderGeneration);
+      void this._renderSlotBitmap(
+        i,
+        slot,
+        widthPx,
+        dpr,
+        scale,
+        renderGeneration,
+        dispatcher,
+        generation,
+      );
       return;
     }
 
@@ -955,6 +959,7 @@ export class PptxScrollViewer implements ZoomableViewer {
         // The engine's per-canvas token already discards the superseded pixels.
         if (
           renderGeneration !== slot.renderGeneration ||
+          !dispatcher.isCurrent(generation) ||
           canvas !== slot.canvas ||
           epoch !== this._renderEpoch ||
           this._slots.get(i) !== slot ||
@@ -1121,6 +1126,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     dpr: number,
     scale: number,
     renderGeneration = ++slot.renderGeneration,
+    dispatcher = slot.dispatcher,
+    generation = dispatcher.begin(),
   ): Promise<void> {
     if (this._slideInFlight.has(i)) return; // coalesce: already dispatched
     // Drop-stale before dispatch: if this slide already scrolled out of the
@@ -1135,16 +1142,6 @@ export class PptxScrollViewer implements ZoomableViewer {
     // Whether this invocation actually painted its slot. When it did NOT (stale
     // epoch or moved identity), the `finally` may need to re-dispatch a live slot.
     let painted = false;
-    // Grab the bitmaprenderer ctx ONCE per canvas — a canvas holds one context
-    // type for its lifetime. A recycled canvas keeps the ctx grabbed on its
-    // first worker render (bitmapCtx survives recycle), so we never re-getContext
-    // a canvas that already has one. (getContext for a conflicting type returns
-    // null rather than throwing; caching the first non-null ctx avoids relying on
-    // that and skips redundant lookups.)
-    if (!slot.bitmapCtx) {
-      slot.bitmapCtx = canvas.getContext('bitmaprenderer') as ImageBitmapRenderingContext | null;
-    }
-    const bitmapCtx = slot.bitmapCtx;
     // IX6 — harvest the slide's run geometry alongside the bitmap so the
     // worker-mode selection overlay is built from the SAME data main mode uses.
     // The runs ride back beside the bitmap (one round-trip), collected only when
@@ -1165,6 +1162,7 @@ export class PptxScrollViewer implements ZoomableViewer {
       // re-mounted onto a DIFFERENT slot. Either way: close + skip the paint.
       if (
         renderGeneration !== slot.renderGeneration ||
+        !dispatcher.isCurrent(generation) ||
         canvas !== slot.canvas ||
         epoch !== this._renderEpoch ||
         this._slots.get(i) !== slot ||
@@ -1173,24 +1171,10 @@ export class PptxScrollViewer implements ZoomableViewer {
         bmp.close();
         return;
       }
-      if (!bitmapCtx) {
-        bmp.close();
-        throw new Error('bitmaprenderer context not available');
-      }
-      // Close any prior bitmap, then hold the new one on the slot BEFORE the
-      // transfer. JS is single-threaded so nothing recycles between here and the
-      // transfer; the hold's real value is the throw path — if
-      // transferFromImageBitmap throws, `destroy()`/`_recycleSlot` can still find
-      // and close this bitmap. transferFromImageBitmap consumes the bitmap, so we
-      // null the field immediately after — leaving nothing to double-close.
-      if (slot.bitmap) slot.bitmap.close();
-      slot.bitmap = bmp;
-      canvas.width = bmp.width;
-      canvas.height = bmp.height;
-      canvas.style.width = `${Math.round(bmp.width / dpr)}px`;
-      canvas.style.height = `${Math.round(bmp.height / dpr)}px`;
-      bitmapCtx.transferFromImageBitmap(bmp);
-      slot.bitmap = null; // transfer consumed it
+      if (!dispatcher.commitBitmap(generation, bmp, {
+        cssWidth: Math.round(bmp.width / dpr),
+        cssHeight: Math.round(bmp.height / dpr),
+      })) return;
       // This bitmap now defines the scale the on-screen canvas lives at, so a
       // later zoom preview stretches from HERE (design §7 renderedScale).
       slot.renderedScale = scale;
@@ -1246,7 +1230,8 @@ export class PptxScrollViewer implements ZoomableViewer {
         (
           live !== slot ||
           epoch !== this._renderEpoch ||
-          renderGeneration !== live.renderGeneration
+          renderGeneration !== live.renderGeneration ||
+          !dispatcher.isCurrent(generation)
         ) &&
         !this._slideInFlight.has(i) &&
         !this._destroyed &&
@@ -1602,6 +1587,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     const renderGeneration = ++slot.renderGeneration;
     spare.style.cssText = 'display:block;background:#fff;';
     this._applyPageShadow(spare);
+    const spareDispatcher = new StaticCanvasRenderDispatcher(spare, false);
+    const generation = spareDispatcher.begin();
     const runs: PptxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
     const wantRuns = wantOverlay || this._findActive;
@@ -1618,6 +1605,7 @@ export class PptxScrollViewer implements ZoomableViewer {
         // the spare (it is off-DOM, so GC reclaims it) and do NOT swap.
         if (
           renderGeneration !== slot.renderGeneration ||
+          !spareDispatcher.isCurrent(generation) ||
           epoch !== this._renderEpoch ||
           this._slots.get(i) !== slot ||
           slot.renderedSlide !== i
@@ -1626,12 +1614,11 @@ export class PptxScrollViewer implements ZoomableViewer {
         // The old canvas was the only child that showed content; replacing it in
         // one DOM op means the screen goes from preview → crisp with no blank tick.
         const old = slot.canvas;
+        slot.dispatcher.destroy();
         slot.wrapper.insertBefore(spare, old);
         old.remove();
         slot.canvas = spare;
-        // The retired canvas held a 2d context; keep the pool clean by dropping any
-        // bitmaprenderer handle association (main-mode canvases never had one).
-        slot.bitmapCtx = null;
+        slot.dispatcher = spareDispatcher;
         slot.renderedScale = scale;
         // Rebuild the overlay at the full resolution and CLEAR the preview
         // transform (the crisp render no longer needs the scale()).
@@ -1698,10 +1685,11 @@ export class PptxScrollViewer implements ZoomableViewer {
 
         const oldCanvas = slot.canvas;
         const oldHandle = slot.presentationHandle;
+        slot.dispatcher.destroy();
         slot.wrapper.insertBefore(spare, oldCanvas);
         oldCanvas.remove();
         slot.canvas = spare;
-        slot.bitmapCtx = null;
+        slot.dispatcher = new StaticCanvasRenderDispatcher(spare, false);
         slot.presentationHandle = handle;
         slot.renderedScale = scale;
         oldHandle?.destroy();

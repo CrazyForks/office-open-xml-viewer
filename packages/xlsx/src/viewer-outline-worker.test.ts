@@ -14,7 +14,7 @@ afterEach(() => {
  * Worker-mode model-sync for view-only size mutations.
  *
  * The render worker draws from its own worker-local parsed-sheet cache
- * (render-worker.ts parseSheetLocally), so a main-thread Worksheet mutation —
+ * (the render worker's worksheet-cursor cache), so a main-thread Worksheet mutation —
  * outline collapse/expand mapping bands to the size-0 hidden encoding, or
  * drag-to-resize (#567) — never reaches the worker on its own: the gutter and
  * overlays would update while the grid bitmap kept the file's original sizes

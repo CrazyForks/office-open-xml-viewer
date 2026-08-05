@@ -134,11 +134,12 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   fontsLoaded = Promise.resolve();
   resourceUsage = undefined;
 
-  const [maxEntry, maxTotal] = resourcePolicyForWasm(request.resourcePolicy);
+  const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(request.resourcePolicy);
   const bootstrap = await slidePull.run(() => executeArchiveFromNew(
     request.buffer,
     maxEntry,
     maxTotal,
+    maxEntries,
   ));
   preflightBuilder = new PresentationPreflightBuilder(bootstrap);
   slides = new PptxSlideRepository({
@@ -162,9 +163,15 @@ function executeArchiveFromNew(
   buffer: ArrayBuffer,
   maxEntry: bigint | null | undefined,
   maxTotal: bigint | null | undefined,
+  maxEntries: bigint | null | undefined,
 ): PresentationBootstrap {
   return host.run(() => {
-    const archive = new PptxArchive(new Uint8Array(buffer), maxEntry, maxTotal);
+    const archive = new PptxArchive(
+      new Uint8Array(buffer),
+      maxEntry,
+      maxTotal,
+      maxEntries,
+    );
     host.setArchive(archive);
     return JSON.parse(
       new TextDecoder().decode(archive.presentation_bootstrap()),

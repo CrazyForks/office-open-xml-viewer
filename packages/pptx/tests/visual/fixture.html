@@ -23,6 +23,11 @@
   <script type="module">
     import { PptxViewer } from '/src/index.ts';
 
+    // Text rasterization must not depend on how quickly Vite serves the
+    // fontsource CSS and weight-specific WOFF files. Regression baselines compare
+    // renderer output, so wait for the declared fixture fonts before painting.
+    await document.fonts.ready;
+
     const params   = new URLSearchParams(location.search);
     const slideIdx = Math.max(0, parseInt(params.get('slide') ?? '0', 10));
     const pptxName = params.get('pptx') ?? 'sample';

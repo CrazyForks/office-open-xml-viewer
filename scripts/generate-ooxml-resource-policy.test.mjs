@@ -4,11 +4,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { synchronizeResourcePolicy } from './generate-ooxml-resource-policy.mjs';
+import { readArchiveEntryCount } from './measure-ooxml-archive-entries.mjs';
 
 function fixture(policy = {
   defaults: {
     maxArchiveEntryBytes: 128,
     maxTotalInflatedBytes: 256,
+    maxArchiveEntries: 12,
   },
   hardCeilings: {
     maxArchiveEntryBytes: 512,
@@ -55,6 +57,18 @@ function fixture(policy = {
   return root;
 }
 
+test('reads the exact classic ZIP central-directory entry count for calibration', () => {
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(12, 8);
+  eocd.writeUInt16LE(12, 10);
+  expectArchiveEntryCount(eocd, 12);
+});
+
+function expectArchiveEntryCount(bytes, expected) {
+  assert.equal(readArchiveEntryCount(bytes), expected);
+}
+
 test('generates matching TypeScript and Rust constants from one policy source', (context) => {
   const root = fixture();
   context.after(() => rmSync(root, { recursive: true, force: true }));
@@ -69,6 +83,14 @@ test('generates matching TypeScript and Rust constants from one policy source', 
   assert.match(
     readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
     /STANDARD_MAX_TOTAL_INFLATED_BYTES: u64 = 256/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
+    /STANDARD_MAX_ARCHIVE_ENTRIES = 12/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
+    /STANDARD_MAX_ARCHIVE_ENTRIES: u64 = 12/,
   );
   assert.match(
     readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
@@ -144,6 +166,7 @@ test('rejects invalid or internally inconsistent policy values', (context) => {
     defaults: {
       maxArchiveEntryBytes: 513,
       maxTotalInflatedBytes: 1024,
+      maxArchiveEntries: 12,
     },
     hardCeilings: {
       maxArchiveEntryBytes: 512,

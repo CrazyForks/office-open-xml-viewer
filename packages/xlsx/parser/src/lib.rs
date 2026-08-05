@@ -294,11 +294,26 @@ fn open_zip_with_limits(
     max_archive_entry_bytes: Option<u64>,
     max_total_inflated_bytes: Option<u64>,
 ) -> Result<XlsxZip, String> {
+    open_zip_with_policy(
+        data,
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+        None,
+    )
+}
+
+fn open_zip_with_policy(
+    data: Vec<u8>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+    max_archive_entries: Option<u64>,
+) -> Result<XlsxZip, String> {
     PackageSessionHandle::open(
         data,
         ooxml_common::resource::OoxmlFormat::Xlsx,
         max_archive_entry_bytes,
         max_total_inflated_bytes,
+        max_archive_entries,
     )
     .map(|session| XlsxZip {
         session,
@@ -380,14 +395,13 @@ pub fn parse_xlsx(
         .map_err(|error| JsValue::from_str(&error))
 }
 
-/// Workbook-level parts that every `parse_sheet` needs but that do NOT change
+/// Workbook-level parts that every worksheet projection needs but that do NOT change
 /// between sheets: the workbook.xml / workbook.xml.rels source strings, the
 /// resolved sheet list, the theme palette, and the shared-string table.
 ///
 /// Building these is the bulk of a sheet parse's fixed cost — `sharedStrings.xml`
-/// in particular is decompressed and walked in full. The free `parse_sheet`
-/// rebuilds them on every call (unchanged behavior); the stateful `XlsxArchive`
-/// builds them ONCE and reuses them for every sheet switch (the D3 win).
+/// in particular is decompressed and walked in full. The stateful `XlsxArchive`
+/// builds them once and reuses them for every worksheet cursor.
 ///
 /// The XML is kept as owned `String`s rather than as `roxmltree::Document`s: a
 /// `Document` borrows its source, so it can't be cached across calls, but
@@ -421,7 +435,7 @@ impl WorkbookShared {
     /// `workbook.xml` is mandatory (a workbook without it is unparseable), but
     /// `workbook.xml.rels` is read leniently (empty on absence): the original
     /// `parse_xlsx` tolerated a missing rels part (tab colors skipped), while
-    /// `parse_sheet` required it — so the mandatory-rels enforcement stays in
+    /// worksheet projection requires it — so the mandatory-rels enforcement stays in
     /// `parse_sheet_with`, where an empty rels string fails `resolve_sheet_path`
     /// exactly as the old `?` on the rels read did.
     fn load(archive: &mut XlsxZip) -> Result<WorkbookShared, String> {
@@ -452,9 +466,8 @@ impl WorkbookShared {
 }
 
 /// Parse one worksheet from an opened archive, reusing already-loaded
-/// [`WorkbookShared`] parts. This is the shared core of the free `parse_sheet`
-/// and `XlsxArchive::parse_sheet`; the only difference between them is whether
-/// `shared` was built fresh for this call or cached across sheet switches.
+/// [`WorkbookShared`] parts. Native MCP materialization and the cursor projection
+/// both use this implementation, so worksheet semantics have one source.
 ///
 /// `wb_doc` / `rels_doc` are re-parsed here from the cached source strings (cheap
 /// in-memory roxmltree parses, no zip inflate) because a `roxmltree::Document`
@@ -466,7 +479,7 @@ fn parse_sheet_with(
     name: &str,
 ) -> Result<Vec<u8>, String> {
     // `workbook.xml.rels` is mandatory for a sheet parse (the original
-    // `parse_sheet` read it with `?`). `WorkbookShared` caches it leniently for
+    // the historical worksheet path read it with `?`). `WorkbookShared` caches it leniently for
     // the `parse_xlsx` path, so on the (defensive) missing-rels case re-read it
     // here to surface the identical "entry not found" error the old code raised.
     if shared.rels_xml.is_empty() {
@@ -598,43 +611,6 @@ fn finalize_projected_sheet(
     ws.date1904 = shared.date1904;
 
     Ok(ws)
-}
-
-/// Parse one worksheet's cell data + layout and return it as UTF-8 JSON
-/// **bytes** (see `parse_xlsx` for the bytes-return rationale).
-#[wasm_bindgen]
-pub fn parse_sheet(
-    data: &[u8],
-    sheet_index: u32,
-    name: &str,
-    max_archive_entry_bytes: Option<u64>,
-    max_total_inflated_bytes: Option<u64>,
-) -> Result<Vec<u8>, JsValue> {
-    console_error_panic_hook::set_once();
-    let mut archive = match open_zip_with_limits(
-        data.to_vec(),
-        max_archive_entry_bytes,
-        max_total_inflated_bytes,
-    ) {
-        Ok(archive) => archive,
-        Err(error) if error.starts_with("OOXML_RESOURCE_LIMIT:") => {
-            return Err(JsValue::from_str(&error));
-        }
-        Err(error) => {
-            let worksheet = degraded_container_sheet(error);
-            return serde_json::to_vec(&worksheet)
-                .map_err(|error| JsValue::from_str(&error.to_string()));
-        }
-    };
-    archive
-        .run_operation("parse-sheet", |archive| {
-            // The free function rebuilds the shared parts per call (behavior
-            // unchanged). `XlsxArchive::parse_sheet` reuses a cached
-            // `WorkbookShared` instead.
-            let shared = WorkbookShared::load(archive)?;
-            parse_sheet_with(archive, &shared, sheet_index, name)
-        })
-        .map_err(|error| JsValue::from_str(&error))
 }
 
 fn parse_xlsx_inner_with(
@@ -3142,17 +3118,14 @@ pub fn extract_image(
 
 /// A stateful handle over an opened xlsx archive.
 ///
-/// Two costs the free functions pay on every call are eliminated here:
+/// The retained package session eliminates repeated archive and shared-part work:
 ///
 /// 1. **Buffer copy + central-directory scan** (like docx / pptx): `new` moves
 ///    the WASM-owned bytes into one package session and indexes the ZIP once;
-///    `parse` / `parse_sheet` / `extract_image` reuse that session.
-/// 2. **Shared-part re-parse (D3)**: the free `parse_sheet` re-reads and re-parses
-///    `xl/workbook.xml`, `xl/sharedStrings.xml`, and the theme on EVERY sheet
-///    switch — decompressing + walking `sharedStrings.xml` in full each time. The
-///    handle parses those [`WorkbookShared`] parts ONCE (on the first `parse` or
-///    `parse_sheet`) and reuses them for every subsequent sheet, so switching
-///    sheets only reads that one sheet's XML + its drawings.
+///    the workbook index, worksheet cursors, and image reads reuse that session.
+/// 2. **Shared-part reuse (D3)**: the handle parses `xl/workbook.xml`,
+///    `xl/sharedStrings.xml`, and the theme once, then each worksheet cursor reads
+///    only that sheet's XML and drawings.
 ///
 /// The package session and every cached part are fully owned (no borrow into the
 /// input), which is what lets them live in a `#[wasm_bindgen]` struct. Limits and
@@ -3161,13 +3134,13 @@ pub fn extract_image(
 pub struct XlsxArchive {
     /// The opened archive, or the container-open error string when the ZIP itself
     /// was truncated / corrupt (#774, RB7 MAJOR). Deferring the failure here —
-    /// instead of erroring out of `new` — lets `parse()` / `parse_sheet()` return a
+    /// instead of erroring out of `new` — lets `parse()` and worksheet cursors return a
     /// degraded placeholder (symmetric with a corrupt inner sheet) rather than the
     /// constructor throwing an opaque error the viewer can't turn into a
     /// placeholder tab.
     archive: Result<XlsxZip, String>,
     /// Workbook-level parts parsed once and reused across sheet switches. Loaded
-    /// lazily on the first `parse` / `parse_sheet` (see [`XlsxArchive::shared`]).
+    /// lazily on the first workbook-index or worksheet operation.
     shared: Option<WorkbookShared>,
     /// At most one worksheet decoder can hold the package operation lease.
     /// The cursor owns its entry stream; it does not borrow `archive`.
@@ -3241,12 +3214,18 @@ impl XlsxArchive {
         data: Vec<u8>,
         max_archive_entry_bytes: Option<u64>,
         max_total_inflated_bytes: Option<u64>,
+        max_archive_entries: Option<u64>,
     ) -> Result<XlsxArchive, JsValue> {
         console_error_panic_hook::set_once();
         // #774 (RB7 MAJOR): a truncated / corrupt CONTAINER is deferred, not
         // thrown, so `parse()` / `parse_sheet()` can degrade it to a placeholder
         // instead of the constructor failing with an opaque error.
-        let archive = open_zip_with_limits(data, max_archive_entry_bytes, max_total_inflated_bytes);
+        let archive = open_zip_with_policy(
+            data,
+            max_archive_entry_bytes,
+            max_total_inflated_bytes,
+            max_archive_entries,
+        );
         if let Err(error) = &archive {
             if error.starts_with("OOXML_RESOURCE_LIMIT:") {
                 return Err(JsValue::from_str(error));
@@ -3328,36 +3307,6 @@ impl XlsxArchive {
             .map_err(|_| JsValue::from_str("xlsx resource usage is unavailable"))?;
         serde_json::to_vec(&usage)
             .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
-    }
-
-    /// Parse one worksheet by 0-based index and return it as UTF-8 JSON bytes.
-    /// Byte-for-byte identical to `parse_sheet`, but the workbook / sharedStrings
-    /// / theme parts are taken from the cache instead of re-parsed (the D3 win).
-    /// When the CONTAINER failed to open (#774) the sheet is the container-tagged
-    /// placeholder.
-    pub fn parse_sheet(&mut self, sheet_index: u32, name: &str) -> Result<Vec<u8>, JsValue> {
-        if let Err(error) = &self.archive {
-            let worksheet = degraded_container_sheet(error.clone());
-            return serde_json::to_vec(&worksheet)
-                .map_err(|error| JsValue::from_str(&error.to_string()));
-        }
-        self.archive
-            .as_mut()
-            .expect("container open checked above")
-            .begin_operation("parse-sheet")
-            .map_err(|error| JsValue::from_str(&error))?;
-        let result = (|| -> Result<Vec<u8>, String> {
-            self.ensure_shared()?;
-            let shared = self.shared.as_ref().expect("shared loaded above");
-            let zip = self.archive.as_mut().expect("container open checked above");
-            parse_sheet_with(zip, shared, sheet_index, name)
-        })();
-        let zip = self.archive.as_mut().expect("container open checked above");
-        let result = settle_xlsx_operation(zip, result);
-        if result.is_err() && zip.assert_healthy().is_err() {
-            self.shared = None;
-        }
-        result.map_err(|error| JsValue::from_str(&error))
     }
 
     /// Open the resumable production worksheet pipeline. Only one cursor may
@@ -5544,7 +5493,7 @@ mod rb7_partial_degradation_tests {
     }
 
     fn drain_cursor_model(data: Vec<u8>) -> serde_json::Value {
-        let mut archive = XlsxArchive::new(data, None, None).unwrap();
+        let mut archive = XlsxArchive::new(data, None, None, None).unwrap();
         archive.open_sheet_cursor(0, "Sheet1").unwrap();
         let mut rows = Vec::new();
         loop {
@@ -5618,7 +5567,8 @@ mod rb7_partial_degradation_tests {
 
     #[test]
     fn wasm_cursor_commits_operation_only_after_terminal_ack() {
-        let mut archive = XlsxArchive::new(build_implicit_ref_workbook(), None, None).unwrap();
+        let mut archive =
+            XlsxArchive::new(build_implicit_ref_workbook(), None, None, None).unwrap();
         archive.open_sheet_cursor(0, "Sheet1").unwrap();
         loop {
             let payload = archive.pull_sheet_cursor(1).unwrap();
@@ -5644,7 +5594,8 @@ mod rb7_partial_degradation_tests {
 
     #[test]
     fn wasm_cursor_close_before_terminal_ack_cancels_idempotently() {
-        let mut archive = XlsxArchive::new(build_implicit_ref_workbook(), None, None).unwrap();
+        let mut archive =
+            XlsxArchive::new(build_implicit_ref_workbook(), None, None, None).unwrap();
         archive.open_sheet_cursor(0, "Sheet1").unwrap();
         while !archive.sheet_cursor_pull_finished() {
             archive.pull_sheet_cursor(128).unwrap();
@@ -5661,7 +5612,8 @@ mod rb7_partial_degradation_tests {
 
     #[test]
     fn wasm_cursor_missing_sheet_is_a_provisional_placeholder_until_ack() {
-        let mut archive = XlsxArchive::new(build_missing_sheet_workbook(), None, None).unwrap();
+        let mut archive =
+            XlsxArchive::new(build_missing_sheet_workbook(), None, None, None).unwrap();
         archive.open_sheet_cursor(0, "Sheet1").unwrap();
         let payload = archive.pull_sheet_cursor(128).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
@@ -5677,7 +5629,7 @@ mod rb7_partial_degradation_tests {
 
     #[test]
     fn wasm_cursor_corrupt_container_matches_legacy_placeholder_and_commits_on_ack() {
-        let mut archive = XlsxArchive::new(b"not a zip".to_vec(), None, None).unwrap();
+        let mut archive = XlsxArchive::new(b"not a zip".to_vec(), None, None, None).unwrap();
         let container_error = match &archive.archive {
             Err(error) => error.clone(),
             Ok(_) => panic!("corrupt container must be deferred"),
@@ -5700,7 +5652,7 @@ mod rb7_partial_degradation_tests {
     #[test]
     fn wasm_cursor_resource_poison_never_prepares_or_allows_terminal_ack() {
         let data = super::package_streaming_integration_tests::forged_worksheet_package();
-        let mut archive = XlsxArchive::new(data, Some(1024), Some(16 * 1024)).unwrap();
+        let mut archive = XlsxArchive::new(data, Some(1024), Some(16 * 1024), None).unwrap();
         archive.open_sheet_cursor(0, "Sheet1").unwrap();
         assert!(archive.pull_sheet_cursor_inner(128).is_err());
         assert!(!archive.sheet_cursor_pull_finished());
@@ -5718,6 +5670,7 @@ mod rb7_partial_degradation_tests {
             build_forged_ancillary_workbook(),
             Some(1024),
             Some(16 * 1024),
+            None,
         )
         .expect("forged ancillary declaration passes metadata preflight");
         archive.open_sheet_cursor(0, "Sheet1").unwrap();

@@ -491,6 +491,7 @@ export interface ImageAnchor {
     alpha?: number;
     duotone?: Duotone;
 }
+export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
 export interface LegendManualLayout {
     xMode: string;
     yMode: string;
@@ -638,15 +639,14 @@ export interface NumFmt {
     numFmtId: number;
     formatCode: string;
 }
-export type OoxmlDecodedImageLimitMetric = 'image-pixels' | 'active-decoded-bytes';
 export class OoxmlDecodedImageLimitError extends RangeError {
     readonly metric: OoxmlDecodedImageLimitMetric;
     readonly limit: number;
     readonly observed: number;
-    readonly code: "ooxml-decoded-image-limit";
+    readonly code: 'ooxml-decoded-image-limit';
     constructor(metric: OoxmlDecodedImageLimitMetric, limit: number, observed: number);
 }
-export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
+export type OoxmlDecodedImageLimitMetric = 'image-pixels' | 'active-decoded-bytes';
 export class OoxmlError extends Error {
     readonly code: OoxmlErrorCode;
     constructor(code: OoxmlErrorCode, message: string);
@@ -668,6 +668,7 @@ export interface OoxmlResourceLimitErrorDetails {
 export interface OoxmlResourceLimits {
     maxArchiveEntryBytes?: OoxmlResourceLimit;
     maxTotalInflatedBytes?: OoxmlResourceLimit;
+    maxArchiveEntries?: OoxmlResourceLimit;
 }
 export type OoxmlResourceMetric = ExtensibleLiteral<'declared-inflated-bytes' | 'actual-inflated-bytes' | 'entry-count' | 'central-directory-bytes' | 'distinct-inflated-bytes' | 'bytes' | 'depth' | 'projected-bytes'>;
 export interface OoxmlResourceMetrics {
@@ -698,11 +699,11 @@ export type OoxmlResourceName = ExtensibleLiteral<'archive' | 'archive-entry' | 
 export interface OoxmlResourcePolicySnapshot {
     readonly maxArchiveEntryBytes: number | null;
     readonly maxTotalInflatedBytes: number | null;
+    readonly maxArchiveEntries: number | null;
 }
 export interface OoxmlResourceUsageSnapshot {
     readonly archiveEntryCount: number;
     readonly declaredInflatedBytes: number;
-    /** Largest actual decompressed size observed for one ZIP entry. */
     readonly largestInflatedEntryBytes?: number;
     readonly distinctInflatedBytes: number;
     readonly operationInflatedBytes: number;
@@ -1220,6 +1221,62 @@ export interface XlsxMatchLocation {
     row: number;
     col: number;
 }
+export interface XlsxScrollToCellOptions {
+    readonly align?: 'nearest' | 'start' | 'center' | 'end';
+}
+export class XlsxSheetViewer implements ZoomableViewer {
+    readonly canvasElement: HTMLCanvasElement;
+    constructor(canvasElement: HTMLCanvasElement, options?: XlsxSheetViewerOptions);
+    load(source: string | ArrayBuffer): Promise<void>;
+    get sheetIndex(): number;
+    get sheetCount(): number;
+    get sheetNames(): string[];
+    goToSheet(index: number): Promise<void>;
+    nextSheet(): Promise<void>;
+    prevSheet(): Promise<void>;
+    getViewportOffset(): XlsxViewportOffset;
+    setViewportOffset(offset: XlsxViewportOffset): Promise<void>;
+    scrollToCell(ref: string, options?: XlsxScrollToCellOptions): Promise<void>;
+    relayout(): Promise<void>;
+    getScale(): number;
+    setScale(scale: number): void;
+    zoomIn(): void;
+    zoomOut(): void;
+    fitWidth(): void;
+    fitPage(): void;
+    getCellAt(clientX: number, clientY: number): CellAddress | null;
+    get selection(): CellRange | null;
+    select(ref: string): void;
+    setSelectionColor(color: string): void;
+    setHiddenSheetMode(mode: HiddenSheetMode): Promise<void>;
+    get hiddenSheetMode(): HiddenSheetMode;
+    get visibleSheetCount(): number;
+    findText(query: string, options?: FindMatchesOptions): Promise<FindMatch<XlsxMatchLocation>[]>;
+    findNext(): Promise<FindMatch<XlsxMatchLocation> | null>;
+    findPrev(): Promise<FindMatch<XlsxMatchLocation> | null>;
+    clearFind(): void;
+    getResourceMetrics(): Promise<OoxmlResourceMetrics>;
+    destroy(): void;
+    private __privatePresence;
+}
+export interface XlsxSheetViewerOptions extends LoadOptions__emitterCollision1 {
+    cellScale?: number;
+    resizable?: boolean;
+    zoomMin?: number;
+    zoomMax?: number;
+    onScaleChange?: (scale: number) => void;
+    onReady?: (sheetNames: string[]) => void;
+    onSheetChange?: (index: number, total: number) => void;
+    onError?: (err: Error) => void;
+    onSelectionChange?: (selection: CellRange | null) => void;
+    onHyperlinkClick?: (target: HyperlinkTarget) => void;
+    enableHyperlinks?: boolean;
+    selectionColor?: string;
+    findHighlightColors?: FindHighlightColors;
+    mode?: 'main' | 'worker';
+    hiddenSheetMode?: HiddenSheetMode;
+    onViewportChange?: (offset: XlsxViewportOffset) => void;
+}
 export interface XlsxTextRunInfo {
     sheetName: string;
     cellRef: string;
@@ -1231,8 +1288,11 @@ export interface XlsxTextRunInfo {
     row: number;
     col: number;
 }
-export class XlsxViewer implements ZoomableViewer {
+export class XlsxViewer extends XlsxViewerEngine {
     constructor(container: HTMLElement, opts?: XlsxViewerOptions);
+}
+class XlsxViewerEngine implements ZoomableViewer {
+    constructor(container: HTMLElement, opts: (XlsxViewerOptions | XlsxSheetViewerOptions) | undefined, mount: XlsxViewerMount);
     load(source: string | ArrayBuffer): Promise<void>;
     showSheet(index: number): Promise<void>;
     get sheetIndex(): number;
@@ -1240,6 +1300,10 @@ export class XlsxViewer implements ZoomableViewer {
     goToSheet(index: number): Promise<void>;
     nextSheet(): Promise<void>;
     prevSheet(): Promise<void>;
+    getViewportOffset(): XlsxViewportOffset;
+    setViewportOffset(offset: XlsxViewportOffset): Promise<void>;
+    relayout(): Promise<void>;
+    scrollToCell(ref: string, options?: XlsxScrollToCellOptions): Promise<void>;
     getCellAt(clientX: number, clientY: number): CellAddress | null;
     get selection(): CellRange | null;
     select(ref: string): void;
@@ -1263,23 +1327,18 @@ export class XlsxViewer implements ZoomableViewer {
     destroy(): void;
     private __privatePresence;
 }
-export interface XlsxViewerOptions extends LoadOptions__emitterCollision1 {
-    cellScale?: number;
-    resizable?: boolean;
+type XlsxViewerMount = {
+    readonly kind: 'composite';
+} | {
+    readonly kind: 'sheet';
+    readonly canvas: HTMLCanvasElement;
+};
+export interface XlsxViewerOptions extends XlsxSheetViewerOptions {
     showZoomSlider?: boolean;
-    zoomMin?: number;
-    zoomMax?: number;
-    onScaleChange?: (scale: number) => void;
-    onReady?: (sheetNames: string[]) => void;
-    onSheetChange?: (index: number, total: number) => void;
-    onError?: (err: Error) => void;
-    onSelectionChange?: (selection: CellRange | null) => void;
-    onHyperlinkClick?: (target: HyperlinkTarget) => void;
-    enableHyperlinks?: boolean;
-    selectionColor?: string;
-    findHighlightColors?: FindHighlightColors;
-    mode?: 'main' | 'worker';
-    hiddenSheetMode?: HiddenSheetMode;
+}
+export interface XlsxViewportOffset {
+    readonly x: number;
+    readonly y: number;
 }
 export class XlsxWorkbook {
     static load(source: string | ArrayBuffer, opts?: LoadOptions): Promise<XlsxWorkbook>;

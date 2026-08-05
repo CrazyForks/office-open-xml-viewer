@@ -56,6 +56,7 @@ export interface FakeEl {
   remove(): void;
   insertBefore(n: FakeEl, ref: FakeEl | null): FakeEl;
   setAttribute(name: string, value: string): void;
+  removeAttribute(name: string): void;
   getAttribute(name: string): string | null;
   hasAttribute(name: string): boolean;
   contains(other: FakeEl | null): boolean;
@@ -182,6 +183,9 @@ export function makeEl(tag: string): FakeEl {
     },
     setAttribute(name: string, value: string) {
       this._attrs.set(name, value);
+    },
+    removeAttribute(name: string) {
+      this._attrs.delete(name);
     },
     getAttribute(name: string) {
       return this._attrs.has(name) ? (this._attrs.get(name) as string) : null;

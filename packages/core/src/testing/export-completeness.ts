@@ -28,7 +28,9 @@
  * This is test-only tooling and is never re-exported from the package barrels,
  * so it does not enter the published bundle.
  */
-import ts from 'typescript';
+// TypeScript 7 has no stable Compiler API yet. This test-only analyzer uses the
+// explicitly named compatibility dependency; package builds still use TS 7.
+import ts from 'typescript-compiler-api';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 

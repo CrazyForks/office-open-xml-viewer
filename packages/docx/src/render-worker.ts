@@ -150,13 +150,13 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       // workers (issue #781).
       dropDecodedBitmapCache(getImage);
       dropSvgImageCache(getImage);
-      const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
+      const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(req.resourcePolicy);
       const bytes = new Uint8Array(req.data);
       // Construction and every later cursor call run under `host.run`. Render
       // mode drains the same pull/ACK state machine locally, so it avoids both a
       // monolithic Rust model JSON value and an unnecessary Worker transfer.
       host.run(() => {
-        const archive = new DocxArchive(bytes, maxEntry, maxTotal);
+        const archive = new DocxArchive(bytes, maxEntry, maxTotal, maxEntries);
         host.setArchive(archive);
       });
       documentGeneration += 1;

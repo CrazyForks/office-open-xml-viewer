@@ -1,4 +1,8 @@
-import type { RenderOptions, PptxTextRunInfo } from './renderer';
+import {
+  invalidatePptxRenderTarget,
+  type RenderOptions,
+  type PptxTextRunInfo,
+} from './renderer';
 import { buildPptxTextLayer } from './text-layer';
 import { buildPptxHighlightLayer, type PptxHighlightMatch } from './find-highlight-layer';
 import { PptxFindController, type PptxMatchLocation } from './find';
@@ -20,6 +24,12 @@ import {
   clampScale,
   fitScale,
 } from '@silurus/ooxml-core';
+import {
+  CallerCanvasMount,
+  CanvasOverlayHost,
+  CanvasViewerErrorRouter,
+  StaticCanvasRenderDispatcher,
+} from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 
 /** How {@link PptxViewer} presents hidden slides (`<p:sld show="0">`). */
 export type HiddenSlideMode = 'show' | 'skip' | 'dim';
@@ -122,6 +132,7 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
 export class PptxViewer implements ZoomableViewer {
   private readonly canvas: HTMLCanvasElement;
   private readonly wrapper: HTMLDivElement;
+  private readonly canvasMount: CallerCanvasMount;
   /**
    * IX9 explicit zoom factor (`1` = 100% = the slide at its natural EMU→px
    * width), or `null` when the caller has never invoked a zoom method. `null`
@@ -131,15 +142,6 @@ export class PptxViewer implements ZoomableViewer {
    * {@link _targetWidth} derives the render width from it.
    */
   private _scale: number | null = null;
-  /** The canvas's DOM position BEFORE the constructor reparented it into
-   *  {@link wrapper}, captured so {@link destroy} can return the caller-owned
-   *  canvas to exactly where it was. `null` parent = canvas was passed
-   *  detached. */
-  private readonly _originalParent: Node | null;
-  private readonly _originalNextSibling: Node | null;
-  /** The canvas's inline `display` before the constructor forced `block`
-   *  (empty string if it was unset), restored on {@link destroy}. */
-  private readonly _originalDisplay: string;
   private textLayer: HTMLDivElement | null = null;
   /** IX2 — the find-highlight overlay layer (always created, above the text
    *  layer, `pointer-events:none`). */
@@ -154,15 +156,8 @@ export class PptxViewer implements ZoomableViewer {
   private _hiddenMode: HiddenSlideMode;
   private handle: PresentationHandle | null = null;
   private readonly _mode: 'main' | 'worker';
-  /** The canvas's bitmaprenderer context, used only by the static worker-mode
-   *  render path. The media-playback path keeps a 2d context (via presentSlide),
-   *  so this is obtained only when worker mode renders without media playback. */
-  private _bitmapCtx: ImageBitmapRenderingContext | null = null;
-  /** Set by {@link destroy} (first line). Guards {@link _reportRenderError} so a
-   *  render rejection that lands AFTER teardown is swallowed rather than surfaced
-   *  to an `onError` / `console.error` on a dead viewer — parity with the scroll
-   *  viewers' `_destroyed` flag. */
-  private _destroyed = false;
+  private readonly renderDispatcher: StaticCanvasRenderDispatcher;
+  private readonly errorRouter: CanvasViewerErrorRouter;
   /**
    * Concurrent-load latch (generation token). Every {@link load} increments this
    * and captures the value; after its engine finishes loading it re-checks the
@@ -185,49 +180,19 @@ export class PptxViewer implements ZoomableViewer {
     this._mode = opts.mode ?? 'main';
     this._hiddenMode = opts.hiddenSlideMode ?? 'show';
 
-    const parent = canvas.parentElement;
-    // Capture the canvas's DOM position and inline display BEFORE reparenting so
-    // destroy() can put the caller-owned canvas back exactly where it was.
-    this._originalParent = parent;
-    this._originalNextSibling = canvas.nextSibling;
-    this._originalDisplay = canvas.style.display;
-    this.wrapper = document.createElement('div');
-    // vertical-align:top removes the inline-block baseline descender gap that
-    // otherwise lets the host container's background show through below the
-    // canvas (~6 px on default font metrics).
-    this.wrapper.style.cssText = 'position:relative;display:inline-block;vertical-align:top;';
-    // Force `display:block` on the canvas so it does not inherit the inline
-    // baseline of an enclosing wrapper, which would otherwise leave a 4–6px
-    // descender gap between the canvas bottom and the wrapper bottom — the
-    // host container's background would show through that strip.
-    if (!canvas.style.display) canvas.style.display = 'block';
-    if (parent) parent.insertBefore(this.wrapper, canvas);
-    this.wrapper.appendChild(canvas);
-
-    // Static worker-mode rendering paints worker-produced bitmaps via a
-    // bitmaprenderer context (grabbed once — a canvas holds one context type for
-    // its lifetime). The media-playback path uses presentSlide, which keeps a 2d
-    // context, so skip bitmaprenderer there.
-    if (this._mode === 'worker' && !opts.enableMediaPlayback) {
-      this._bitmapCtx = canvas.getContext('bitmaprenderer');
-    }
-
-    if (opts.enableTextSelection) {
-      this.textLayer = document.createElement('div');
-      this.textLayer.style.cssText =
-        'position:absolute;top:0;left:0;width:100%;height:100%;' +
-        'overflow:hidden;pointer-events:none;user-select:text;-webkit-user-select:text;';
-      this.wrapper.appendChild(this.textLayer);
-    }
-
-    // IX2 — find-highlight overlay layer, appended last (stacks above the text
-    // layer). `pointer-events:none` keeps selection + link clicks working
-    // through it. IX6 — populated in BOTH render modes (worker mode ships the
-    // run geometry back beside the bitmap).
-    this.highlightLayer = document.createElement('div');
-    this.highlightLayer.style.cssText =
-      'position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden;pointer-events:none;';
-    this.wrapper.appendChild(this.highlightLayer);
+    this.canvasMount = new CallerCanvasMount(canvas, {
+      wrapperCssText: 'position:relative;display:inline-block;vertical-align:top;',
+      forceDisplayBlock: true,
+    });
+    this.wrapper = this.canvasMount.wrapper;
+    this.renderDispatcher = new StaticCanvasRenderDispatcher(
+      canvas,
+      this._mode === 'worker' && !opts.enableMediaPlayback,
+    );
+    this.errorRouter = new CanvasViewerErrorRouter('PptxViewer', opts.onError);
+    const overlays = new CanvasOverlayHost(this.wrapper, opts.enableTextSelection === true);
+    this.textLayer = overlays.textLayer;
+    this.highlightLayer = overlays.highlightLayer;
 
     this._find = new PptxFindController(
       () => this.slideCount,
@@ -476,6 +441,7 @@ export class PptxViewer implements ZoomableViewer {
 
   private async renderCurrentSlide(): Promise<void> {
     if (!this.engine) return;
+    const generation = this.renderDispatcher.begin();
     const dim =
       this._hiddenMode === 'dim' && this.engine.isHidden(this.currentSlide)
         ? this._dim()
@@ -504,24 +470,29 @@ export class PptxViewer implements ZoomableViewer {
       if (this.opts.enableMediaPlayback) {
         // presentSlide supports both modes (worker: base off-thread, video
         // overlay composited on the main thread).
-        this.handle = await this.engine.presentSlide(this.canvas, this.currentSlide, {
+        const handle = await this.engine.presentSlide(this.canvas, this.currentSlide, {
           width: targetWidth,
           dpr,
           dim,
           onTextRun,
           onError: (error) => this._reportRenderError(error),
         });
+        if (!this.renderDispatcher.isCurrent(generation)) {
+          handle.destroy();
+          return;
+        }
+        this.handle = handle;
       } else if (isWorker) {
         const bmp = await this.engine.renderSlideToBitmap(this.currentSlide, { width: targetWidth, dpr, dim, onTextRun });
-        this.canvas.width = bmp.width;
-        this.canvas.height = bmp.height;
-        this._bitmapCtx?.transferFromImageBitmap(bmp);
+        if (!this.renderDispatcher.commitBitmap(generation, bmp)) return;
       } else {
         await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr, onTextRun, dim });
+        if (!this.renderDispatcher.isCurrent(generation)) return;
       }
       this.opts.onSlideChange?.(this.currentSlide, this.slideCount);
     } catch (err) {
-      this._reportRenderError(err);
+      if (this.renderDispatcher.isCurrent(generation)) this._reportRenderError(err);
+      return;
     }
 
     // IX6 — identical overlay build for both modes: the run geometry the worker
@@ -702,10 +673,7 @@ export class PptxViewer implements ZoomableViewer {
    *  teardown. Mirrors the scroll viewers' `_reportRenderError` so all three
    *  single-canvas viewers agree. */
   private _reportRenderError(err: unknown): void {
-    if (this._destroyed) return;
-    const e = err instanceof Error ? err : new Error(String(err));
-    if (this.opts.onError) this.opts.onError(e);
-    else console.error('[ooxml] PptxViewer render failed:', e);
+    this.errorRouter.report(err);
   }
 
   /** Latest content-free resource metrics for the loaded presentation. */
@@ -728,7 +696,9 @@ export class PptxViewer implements ZoomableViewer {
     // viewer (checked at the top of _reportRenderError). Bump the load generation
     // too so a load() still in flight is treated as superseded and its engine is
     // cleaned up rather than installed onto a torn-down viewer.
-    this._destroyed = true;
+    this.errorRouter.close();
+    this.renderDispatcher.destroy();
+    invalidatePptxRenderTarget(this.canvas);
     this._loadGen++;
     this.handle?.destroy();
     this.handle = null;
@@ -737,23 +707,6 @@ export class PptxViewer implements ZoomableViewer {
     // findNext()/findPrev() after teardown returns null instead of a match
     // pointing into a dead viewer.
     this._find.invalidate();
-    // Return the caller-owned canvas to its original DOM slot before discarding
-    // the wrapper. insertBefore still works if the original parent was itself
-    // detached; when there was no original parent the canvas is left detached
-    // (just pulled out of the wrapper). The recorded next-sibling may have been
-    // removed or moved by the caller since construction — insertBefore throws
-    // NotFoundError for a reference that is no longer a child of the parent, so
-    // fall back to appending at the end in that case.
-    if (this._originalParent) {
-      const ref =
-        this._originalNextSibling && this._originalNextSibling.parentNode === this._originalParent
-          ? this._originalNextSibling
-          : null;
-      this._originalParent.insertBefore(this.canvas, ref);
-    } else if (this.canvas.parentNode) {
-      this.canvas.parentNode.removeChild(this.canvas);
-    }
-    this.canvas.style.display = this._originalDisplay;
-    this.wrapper.remove();
+    this.canvasMount.restore();
   }
 }

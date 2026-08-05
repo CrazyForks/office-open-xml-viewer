@@ -22,6 +22,24 @@ import {
   imageCacheKey,
 } from './renderer.js';
 
+/** Internal viewer-to-renderer commit latch. It is intentionally not re-exported
+ * from the package API: standalone renderer callers do not own viewer lifecycle. */
+export const XLSX_RENDER_COMMIT_GUARD: unique symbol = Symbol('xlsx-render-commit-guard');
+
+type GuardedRenderViewportOptions = RenderViewportOptions & {
+  readonly [XLSX_RENDER_COMMIT_GUARD]?: () => boolean;
+};
+
+/** Attach the internal lifecycle latch without widening the public renderer
+ * option type. Kept format-local because only the XLSX viewer has this frame
+ * preparation/commit split. */
+export function withXlsxRenderCommitGuard(
+  options: RenderViewportOptions,
+  guard: () => boolean,
+): RenderViewportOptions {
+  return { ...options, [XLSX_RENDER_COMMIT_GUARD]: guard } as RenderViewportOptions;
+}
+
 /** What `prefetchImages` needs to decode one picture: the raster `imagePath`
  *  (also the cache key), its `mimeType`, the optional svgBlip vector path, and
  *  the picture's intended draw size in points (sizes a metafile raster; 0 ⇒
@@ -300,6 +318,11 @@ async function renderWorksheetViewportLeased(
   if (deps.math && worksheetHasUncachedMath(ws)) {
     await prepareWorksheetMath(ws, deps.math);
   }
+
+  // Resource preparation above may yield. A viewer can be destroyed or a newer
+  // frame can supersede this one while it waits; never mutate the caller-owned
+  // canvas after that lifecycle generation is stale.
+  if ((opts as GuardedRenderViewportOptions)[XLSX_RENDER_COMMIT_GUARD]?.() === false) return;
 
   // ── Step 2: Resize + draw, all synchronous from here.
   const dpr = opts.dpr ?? defaultDpr();

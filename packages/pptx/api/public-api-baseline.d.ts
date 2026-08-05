@@ -551,6 +551,7 @@ export interface OoxmlResourceLimitErrorDetails {
 export interface OoxmlResourceLimits {
     maxArchiveEntryBytes?: OoxmlResourceLimit;
     maxTotalInflatedBytes?: OoxmlResourceLimit;
+    maxArchiveEntries?: OoxmlResourceLimit;
 }
 export type OoxmlResourceMetric = ExtensibleLiteral<'declared-inflated-bytes' | 'actual-inflated-bytes' | 'entry-count' | 'central-directory-bytes' | 'distinct-inflated-bytes' | 'bytes' | 'depth' | 'projected-bytes'>;
 export interface OoxmlResourceMetrics {
@@ -581,6 +582,7 @@ export type OoxmlResourceName = ExtensibleLiteral<'archive' | 'archive-entry' | 
 export interface OoxmlResourcePolicySnapshot {
     readonly maxArchiveEntryBytes: number | null;
     readonly maxTotalInflatedBytes: number | null;
+    readonly maxArchiveEntries: number | null;
 }
 export interface OoxmlResourceUsageSnapshot {
     readonly archiveEntryCount: number;

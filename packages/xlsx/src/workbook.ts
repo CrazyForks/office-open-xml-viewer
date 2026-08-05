@@ -16,7 +16,6 @@ import {
 } from '@silurus/ooxml-core';
 import {
   deserializeWorkerError,
-  BoundedPullSession,
   disposeRejectedLoad,
   normalizeLoadResourceOptions,
   OoxmlResourceMetricsSession,
@@ -34,7 +33,6 @@ import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
-import { resolveSharedStringRows } from './shared-strings.js';
 import {
   addWorksheetUsage,
   addWorksheetCacheUsage,
@@ -56,7 +54,10 @@ import type {
   RenderWorkerResponse,
   WireRenderViewportOptions,
 } from './worker-protocol.js';
-import { XLSX_WORKSHEET_PULL_BYTES } from './worksheet-pull-worker.js';
+import {
+  isXlsxWorksheetPullResponse,
+  XlsxWorksheetPullClient,
+} from './worksheet-pull-client.js';
 
 /** Options for {@link XlsxWorkbook.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, the
@@ -70,12 +71,6 @@ export interface LoadOptions extends CoreLoadOptions {
    * The math engine is unavailable in this mode (equations are skipped).
    */
   mode?: 'main' | 'worker';
-}
-
-function isWorksheetPullResponse(
-  response: WorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>,
-): response is PullSessionResponse<ArrayBuffer, number> {
-  return 'protocol' in response && response.protocol === PULL_SESSION_PROTOCOL;
 }
 
 export class XlsxWorkbook {
@@ -119,9 +114,8 @@ export class XlsxWorkbook {
   private googleFontFaces: FontFace[] = [];
   private _mode: 'main' | 'worker' = 'main';
   private generation = 0;
-  private nextSheetSessionId = 1;
   private archiveOperationTail: Promise<void> = Promise.resolve();
-  private sheetSessions = new Set<BoundedPullSession<ArrayBuffer, number>>();
+  private worksheetPullClient: XlsxWorksheetPullClient | null = null;
   private workerTimeoutMs: number | undefined;
   private retainedSheetUsage: WorksheetCacheUsage = { rows: 0, cells: 0 };
   /** First fatal model/package violation. Compatibility materialization happens
@@ -235,10 +229,8 @@ export class XlsxWorkbook {
     this.resourceFailure = null;
     this.retainedSheetUsage = { rows: 0, cells: 0 };
     this.sheetCache.clear();
-    for (const session of this.sheetSessions ?? []) {
-      await session.cancel('closed').catch(() => undefined);
-    }
-    this.sheetSessions?.clear();
+    await this.worksheetPullClient?.cancelAll('closed');
+    this.worksheetPullClient = null;
     this.generation = (this.generation ?? 0) + 1;
     this.resourcePolicy = resourcePolicy;
     this.workerTimeoutMs = opts.workerTimeoutMs;
@@ -288,6 +280,7 @@ export class XlsxWorkbook {
         new TextDecoder().decode(new Uint8Array(workbookJson)),
       ) as ParsedWorkbook;
     }
+    this.ensureWorksheetPullClient();
     // #773: a workbook-level degradation (a present-but-corrupt shared part such
     // as `xl/sharedStrings.xml`, which blanks every string cell across all sheets)
     // still opens the workbook, but must not be SILENT. Surface it once at load —
@@ -384,48 +377,31 @@ export class XlsxWorkbook {
   }
 
   private async loadWorksheetStream(sheetIndex: number, sheetName: string): Promise<Worksheet> {
-    const sessionId = this.nextSheetSessionId ?? 1;
-    this.nextSheetSessionId = sessionId + 1;
-    const identity = { sessionId, operationId: sessionId, generation: this.generation ?? 1 };
-    const session = new BoundedPullSession(
-      this.bridge.transport(isWorksheetPullResponse),
-      { ...identity, maxByteCredit: XLSX_WORKSHEET_PULL_BYTES, timeoutMs: this.workerTimeoutMs },
-    );
-    this.sheetSessions ??= new Set();
-    this.sheetSessions.add(session);
+    const client = this.ensureWorksheetPullClient();
     const rows: Worksheet['rows'] = [];
     let modelUsage: WorksheetModelUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0 };
+    let terminal: Worksheet | undefined;
+    let nextCacheUsage: WorksheetCacheUsage | undefined;
     // The compatibility adapter knows the workbook sheet index/name but not
     // the resolved OPC relationship target. Omit `part` rather than fabricate
     // a package address; Rust-originated violations carry the real xl/... path.
     const part = undefined;
     try {
-      await this.bridge.request(
-        (id) => ({ type: 'openSheetSession', id, sheetIndex, sheetName, ...identity }),
-        undefined,
-        { timeoutMs: this.workerTimeoutMs },
-      );
-      for (;;) {
-        const chunk = await session.pull(XLSX_WORKSHEET_PULL_BYTES);
-        const decoded = JSON.parse(
-          new TextDecoder().decode(new Uint8Array(chunk.payload)),
-        ) as { kind: 'rows'; rows: Worksheet['rows'] } | { kind: 'finished'; worksheet: Worksheet };
-        if (decoded.kind === 'rows') {
-          resolveSharedStringRows(decoded.rows, this.parsedWorkbook?.sharedStrings ?? []);
-          const nextUsage = addWorksheetUsage(modelUsage, measureRows(decoded.rows));
+      for await (const unit of client.stream(sheetIndex, sheetName)) {
+        if (unit.kind === 'rows') {
+          const nextUsage = addWorksheetUsage(modelUsage, measureRows(unit.rows));
           assertWorksheetModelUsage(
             nextUsage,
             'get-worksheet',
             part,
-            chunk.usage ?? session.usageCheckpoint,
+            unit.usage,
           );
-          rows.push(...decoded.rows);
+          rows.push(...unit.rows);
           modelUsage = nextUsage;
-          await chunk.ack();
           continue;
         }
-        const worksheet = decoded.worksheet;
-        worksheet.rows = rows;
+        const worksheet = unit.worksheet;
+        worksheet.rows = worksheet.parseError ? [] : rows;
         // Terminal metadata contains no rows, but measure the final public model
         // to cover exact monolithic JSON before its cache admission.
         const measured = measureWorksheet(worksheet);
@@ -433,13 +409,13 @@ export class XlsxWorkbook {
           measured,
           'get-worksheet',
           part,
-          chunk.usage ?? session.usageCheckpoint,
+          unit.usage,
         );
         assertWorksheetJsonBytes(
           measured.jsonBytes,
           'get-worksheet',
           part,
-          chunk.usage ?? session.usageCheckpoint,
+          unit.usage,
         );
         const retainedUsage = this.retainedSheetUsage ?? { rows: 0, cells: 0 };
         const nextCache = addWorksheetCacheUsage(retainedUsage, measured);
@@ -447,22 +423,42 @@ export class XlsxWorkbook {
           nextCache,
           'get-worksheet',
           part,
-          chunk.usage ?? session.usageCheckpoint,
+          unit.usage,
         );
-        // Decoding and assembly above is the consumer's acceptance point. The
-        // terminal ACK may now commit the prepared Rust operation.
-        await chunk.ack();
-        this.retainedSheetUsage = nextCache;
-        this.sheetCache.set(sheetIndex, worksheet);
-        return worksheet;
+        terminal = worksheet;
+        nextCacheUsage = nextCache;
       }
+      if (!terminal || !nextCacheUsage) {
+        throw new Error(`XLSX worksheet ${sheetIndex} did not produce a terminal model`);
+      }
+      // The coordinator has ACKed the accepted terminal before it completes.
+      // Only now commit Browser-retained cache ownership/accounting.
+      this.retainedSheetUsage = nextCacheUsage;
+      this.sheetCache.set(sheetIndex, terminal);
+      return terminal;
     } catch (error) {
-      await session.cancel('request-error').catch(() => undefined);
       if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
       throw error;
-    } finally {
-      this.sheetSessions.delete(session);
     }
+  }
+
+  private ensureWorksheetPullClient(): XlsxWorksheetPullClient {
+    if (this.worksheetPullClient) return this.worksheetPullClient;
+    if (!this.parsedWorkbook) throw new Error('Workbook not loaded');
+    this.worksheetPullClient = new XlsxWorksheetPullClient({
+      generation: this.generation || 1,
+      transport: this.bridge.transport(isXlsxWorksheetPullResponse),
+      sharedStrings: this.parsedWorkbook.sharedStrings,
+      timeoutMs: this.workerTimeoutMs,
+      open: async (sheetIndex, sheetName, identity, timeoutMs) => {
+        await this.bridge.request(
+          (id) => ({ type: 'openSheetSession', id, sheetIndex, sheetName, ...identity }),
+          undefined,
+          { timeoutMs },
+        );
+      },
+    });
+    return this.worksheetPullClient;
   }
 
   private runArchiveOperation<T>(operation: () => Promise<T>): Promise<T> {
@@ -726,8 +722,8 @@ export class XlsxWorkbook {
 
   destroy(): void {
     this.generation = (this.generation ?? 1) + 1;
-    for (const session of this.sheetSessions ?? []) void session.cancel('closed').catch(() => undefined);
-    this.sheetSessions?.clear();
+    void this.worksheetPullClient?.cancelAll('closed').catch(() => undefined);
+    this.worksheetPullClient = null;
     this.bridge.terminate();
     this.parsedWorkbook = null;
     this.sheetCache.clear();

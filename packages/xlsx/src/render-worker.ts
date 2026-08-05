@@ -29,12 +29,10 @@ import {
 } from '@silurus/ooxml-core/worker';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
-import { resolveSharedStringRows, resolveSharedStrings } from './shared-strings.js';
+import { resolveSharedStringRows } from './shared-strings.js';
 import {
   addWorksheetCacheUsage,
   assertWorksheetCacheUsage,
-  assertWorksheetJsonBytes,
-  assertWorksheetModelUsage,
   measureWorksheet,
   type WorksheetCacheUsage,
   type WorksheetModelUsage,
@@ -48,8 +46,8 @@ import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-wo
 // read recycles the instance so the next workbook renders on clean linear
 // memory. The host owns the `XlsxArchive` handle (`host.archive`): copies the
 // file into WASM ONCE; the workbook / sharedStrings / theme parts are parsed
-// ONCE and reused on every `parse_sheet`. Freed + replaced on a re-parse, freed +
-// nulled by the host on a trap.
+// ONCE and reused by every worksheet cursor. Freed + replaced on a new workbook,
+// freed + nulled by the host on a trap.
 const host = new WasmParserHost<XlsxArchive>(init, {
   freeArchive: (a) => a.free(),
   // RB6 recovery must re-instantiate, not re-`init` (a no-op against the
@@ -124,38 +122,6 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
   });
 }
 
-/** Lazily parse one worksheet directly via WASM and cache it — the worker-side
- *  equivalent of XlsxWorkbook.getWorksheet (same `parse_sheet` call, same
- *  decode cache). The handle's own shared-part cache means repeat sheet switches
- *  no longer re-parse the workbook / sharedStrings / theme. Shared by the
- *  `renderViewport` handler. */
-function parseSheetLocally(sheetIndex: number): Worksheet {
-  const cached = sheetCache.get(sheetIndex);
-  if (cached) return cached;
-  const loaded = host.archive;
-  if (!workbook || !loaded) throw new Error('Workbook not loaded');
-  const sheetMeta = workbook.workbook.sheets[sheetIndex];
-  if (!sheetMeta) throw new Error(`Sheet index ${sheetIndex} out of range`);
-  // `parse_sheet` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); the
-  // render worker consumes the model in-worker, so decode + parse here. Guarded
-  // so a trap on ONE sheet recycles the instance instead of wedging the workbook.
-  const json = host.run(() => loaded.parse_sheet(sheetIndex, sheetMeta.name));
-  const ws = JSON.parse(new TextDecoder().decode(json)) as Worksheet;
-  // Resolve `{ type: 'shared', si }` cells against the dedup'd sharedStrings
-  // table so the renderer only ever sees fully-materialized text (worker-mode
-  // twin of workbook.ts getWorksheet).
-  resolveSharedStrings(ws, workbook.sharedStrings);
-  const measured = measureWorksheet(ws);
-  assertWorksheetModelUsage(measured, 'parse-sheet', undefined);
-  assertWorksheetJsonBytes(measured.jsonBytes, 'parse-sheet', undefined);
-  const nextUsage = addWorksheetCacheUsage(retainedSheetUsage, measured);
-  assertWorksheetCacheUsage(nextUsage, 'parse-sheet', undefined);
-  sheetCache.set(sheetIndex, ws);
-  sheetCacheUsage.set(sheetIndex, measured);
-  retainedSheetUsage = nextUsage;
-  return ws;
-}
-
 self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand<number>>) => {
   const req = e.data;
   if (isWorksheetPullCommand(req)) {
@@ -212,7 +178,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
       dropDecodedBitmapCache(getImage);
       dropSvgImageCache(getImage);
       rawParts.clear();
-      const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
+      const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(req.resourcePolicy);
       // Construction + `parse()` run under `host.run` so a trap in EITHER poisons
       // + recycles the instance (and frees the archive). `setArchive` frees any
       // prior handle first — the re-parse dispose. `parse()` returns UTF-8 JSON
@@ -223,6 +189,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
           new Uint8Array(req.data),
           maxEntry,
           maxTotal,
+          maxEntries,
         );
         host.setArchive(archive);
         return JSON.parse(new TextDecoder().decode(archive.parse())) as ParsedWorkbook;
@@ -238,17 +205,6 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
         host.archive!.resource_usage(),
       ));
       post({ type: 'parsed', id, workbook, usage });
-      return;
-    }
-    if (req.type === 'parseSheet') {
-      // Worker-side equivalent of the slim worker.ts `parseSheet` arm, so
-      // XlsxWorkbook.getWorksheet / resolveValidationList resolve in worker
-      // mode instead of hanging forever. Reuses parseSheetLocally (which parses
-      // from the worker-owned archive and cache); the main-mode message's
-      // `sheetName` field is ignored. Reply shape matches worker.ts.
-      if (!workbook) throw new Error('Workbook not loaded');
-      const worksheet = parseSheetLocally(req.sheetIndex);
-      post({ type: 'parsedSheet', id, worksheet });
       return;
     }
     if (req.type === 'renderViewport') {

@@ -27,7 +27,7 @@ export interface ApiClass {
   methods: ApiMethod[];
 }
 
-const RESOURCE_LIMITS = { name: 'resourceLimits', type: 'OoxmlResourceLimits', def: '128 MiB per entry / 256 MiB distinct total', desc: 'Shared DOCX/XLSX/PPTX inflated-byte budgets. maxArchiveEntryBytes caps each package part; maxTotalInflatedBytes counts the largest amount read from every distinct part in the package session, without charging repeat reads twice. Supply positive safe-integer byte counts, or null to disable one configurable budget (internal hard ceilings remain). Violations reject with OoxmlResourceLimitError. These deterministic counters reduce OOM risk but do not measure or guarantee peak memory.', emphasis: 'Violations reject with OoxmlResourceLimitError.', detailsHref: '/errors#ooxml-resource-limit-error', detailsLabel: 'Error fields' };
+const RESOURCE_LIMITS = { name: 'resourceLimits', type: 'OoxmlResourceLimits', def: '128 MiB per entry / 256 MiB distinct total / 4,096 entries', desc: 'Shared DOCX/XLSX/PPTX package budgets. maxArchiveEntryBytes caps each package part; maxTotalInflatedBytes counts the largest amount read from every distinct part without charging repeat reads twice; maxArchiveEntries bounds central-directory entries before ZIP index allocation. Supply positive safe integers, or null to disable one configurable budget (internal hard ceilings remain). Violations reject with OoxmlResourceLimitError. These deterministic counters reduce OOM risk but do not measure or guarantee peak memory.', emphasis: 'Violations reject with OoxmlResourceLimitError.', detailsHref: '/errors#ooxml-resource-limit-error', detailsLabel: 'Error fields' };
 const RESOURCE_METRICS = { name: 'onResourceMetrics', type: '(metrics: OoxmlResourceMetrics) => void', desc: 'Receives the content-free initial-load report used by the debug card, without enabling console output. It reports the configured public policy, timing checkpoints, format/mode, success or typed failure discriminants, source bytes, and observed archive counters when available. It does not wait for a Viewer\'s first paint. On success, call getResourceMetrics() on the engine or Viewer for a fresh snapshot after lazy package work. Callback exceptions never change load results.', emphasis: 'Receives the content-free initial-load report used by the debug card, without enabling console output.' };
 const RESOURCE_METRICS_METHOD = { sig: 'getResourceMetrics(): Promise<OoxmlResourceMetrics>', desc: 'Return a fresh, content-free package-usage snapshot, including lazy archive work observed since load. Collection is always active; debug controls only console output.', emphasis: 'Collection is always active; debug controls only console output.' };
 const DEBUG = { name: 'debug', type: 'boolean', def: 'false', desc: 'Print one content-free, Ratatui-inspired resource report when the measured load or Node session finishes or fails. Browser DevTools use typography-only %c styling to keep Unicode borders and gauges aligned without changing foreground or background colours; Node and Worker consoles receive one plain argument. Use onResourceMetrics instead for production collection.', emphasis: 'Use onResourceMetrics instead for production collection.' };
@@ -317,6 +317,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'onReady', type: '(sheetNames: string[]) => void', desc: 'Called once the workbook is parsed.' },
         { name: 'onSheetChange', type: '(index: number, total: number) => void', desc: 'Called when the active sheet changes; `total` is the sheet count. Read the name via `sheetNames[index]`.' },
         { name: 'onSelectionChange', type: '(sel: CellRange | null) => void', desc: 'Called when the selected range changes; null clears it.' },
+        { name: 'onViewportChange', type: '(offset: XlsxViewportOffset) => void', desc: 'Called with the clamped logical CSS-pixel offset after the active viewport moves. Horizontal x is measured from column A in both LTR and RTL sheets.' },
         VIEWER_ON_ERROR,
       ],
       methods: [
@@ -328,6 +329,10 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get sheetCount(): number', desc: 'Total sheets (0 until loaded).' },
         { sig: 'get sheetNames(): string[]', desc: 'Names of all sheets.' },
         { sig: 'get selection(): CellRange | null', desc: 'The current selected range.' },
+        { sig: 'getViewportOffset(): XlsxViewportOffset', desc: 'Return the active sheet viewport offset in logical CSS pixels.' },
+        { sig: 'setViewportOffset(offset: XlsxViewportOffset): Promise<void>', desc: 'Move the active viewport to a finite offset, clamped to the used scroll extent.' },
+        { sig: 'scrollToCell(ref: string, options?: XlsxScrollToCellOptions): Promise<void>', desc: 'Scroll a cell reference into view, optionally aligning it to the start, center, end, or nearest edge.' },
+        { sig: 'relayout(): Promise<void>', desc: 'Re-read the viewport box, clamp the current offset, and render again after an external layout change.' },
         { sig: 'getScale(): number', desc: 'The current zoom factor (1 = 100%).' },
         { sig: 'setScale(scale: number): void', desc: 'Set the zoom factor (1 = 100%), clamped to [zoomMin, zoomMax] and snapped to whole percent; re-renders and fires onScaleChange when it changes. View-only.' },
         { sig: 'fitWidth(): void', desc: 'Fit the used data range WIDTH (row header + used columns) to the canvas area (routes through setScale). Defers when unloaded / unlaid-out.' },
@@ -340,6 +345,57 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas the grid is drawn on.' },
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Tear down the worker and release resources.' },
+      ],
+    },
+    {
+      name: 'XlsxSheetViewer',
+      ctor: 'new XlsxSheetViewer(canvas: HTMLCanvasElement, options?: XlsxSheetViewerOptions)',
+      note: 'Canvas-mounted active-sheet viewport. It uses the caller canvas and the same sheet rendering, selection, find and navigation mechanics as XlsxViewer, but creates no sheet-tab/footer chrome or visible scrollbar.',
+      options: [
+        { name: 'cellScale', type: 'number', def: '1', desc: 'Scale factor for cell/header dimensions (0.5 = half size).' },
+        { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom bounds as scale factors (10%–400%).' },
+        { name: 'resizable', type: 'boolean', def: 'true', desc: 'Allow resizing columns/rows by dragging header borders. View-only.' },
+        { name: 'selectionColor', type: 'string', def: "'#1a73e8'", desc: 'Accent color for the cell-selection rectangle.' },
+        FIND_HIGHLIGHT_COLORS,
+        { name: 'hiddenSheetMode', type: "'show' | 'skip' | 'dim'", def: "'show'", desc: 'Controls sequential navigation and hidden-sheet visibility without adding tab chrome.' },
+        { name: 'onViewportChange', type: '(offset: XlsxViewportOffset) => void', desc: 'Called with the clamped logical CSS-pixel offset after the active viewport moves. Horizontal x is measured from column A independently of browser RTL scrollLeft conventions.' },
+        GFONTS,
+        WASM_URL,
+        ZIP,
+        RESOURCE_LIMITS,
+        RESOURCE_METRICS,
+        DEBUG,
+        WORKER_TIMEOUT,
+        MATH,
+        VIEWER_MODE,
+        ON_SCALE_CHANGE,
+        ON_HYPERLINK_CLICK,
+        ENABLE_HYPERLINKS,
+        { name: 'onReady', type: '(sheetNames: string[]) => void', desc: 'Called once the workbook is parsed.' },
+        { name: 'onSheetChange', type: '(index: number, total: number) => void', desc: 'Called when the active sheet changes.' },
+        { name: 'onSelectionChange', type: '(sel: CellRange | null) => void', desc: 'Called when the selected range changes.' },
+        VIEWER_ON_ERROR,
+      ],
+      methods: [
+        { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a workbook and render its first active sheet viewport.' },
+        { sig: 'goToSheet(index: number): Promise<void>', desc: 'Show a specific sheet (0-indexed, clamped).' },
+        { sig: 'nextSheet(): Promise<void>', desc: 'Advance one sheet.' },
+        { sig: 'prevSheet(): Promise<void>', desc: 'Go back one sheet.' },
+        { sig: 'get sheetIndex(): number', desc: 'Current sheet index.' },
+        { sig: 'get sheetCount(): number', desc: 'Total sheets (0 until loaded).' },
+        { sig: 'get sheetNames(): string[]', desc: 'Names of all sheets.' },
+        { sig: 'getViewportOffset(): XlsxViewportOffset', desc: 'Read the logical start-anchored viewport offset in CSS pixels at the current scale.' },
+        { sig: 'setViewportOffset(offset: XlsxViewportOffset): Promise<void>', desc: 'Move to a finite logical offset, clamped to the used scroll extent.' },
+        { sig: 'scrollToCell(ref: string, options?: { align?: "nearest" | "start" | "center" | "end" }): Promise<void>', desc: 'Move the viewport to an A1 cell reference with the requested alignment.' },
+        { sig: 'relayout(): Promise<void>', desc: 'Re-read the canvas CSS box and repaint the current viewport.' },
+        ...zoomMethods(false),
+        ...findMethods('XlsxMatchLocation'),
+        { sig: 'get selection(): CellRange | null', desc: 'The current selected range.' },
+        { sig: 'select(ref: string): void', desc: 'Select an A1 cell or range.' },
+        { sig: 'getCellAt(clientX: number, clientY: number): CellAddress | null', desc: 'Hit-test a viewport coordinate to a cell address.' },
+        { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The caller-owned canvas used by the viewer.' },
+        RESOURCE_METRICS_METHOD,
+        { sig: 'destroy(): void', desc: 'Permanently close the viewer, release resources, and restore the caller canvas to its original DOM slot and style.' },
       ],
     },
     {

@@ -1346,6 +1346,7 @@ async function renderBackground(
   canvasW: number,
   canvasH: number,
   scale: number,
+  superseded: () => boolean,
   fetchImage?: (path: string, mime: string) => Promise<Blob>,
 ) {
   // ECMA-376 §20.1.8.14 — image (blipFill) background. Paint an opaque white
@@ -1373,6 +1374,7 @@ async function renderBackground(
           heightPt: canvasH / scale / PT_TO_EMU,
         },
       );
+      if (superseded()) return;
       // A null bitmap (unsupported metafile, e.g. true EMF) → keep the white
       // base painted above as the fallback, exactly like a decode failure.
       if (!bitmap) return;
@@ -4309,6 +4311,7 @@ async function renderPicture(
   ctx: CanvasRenderingContext2D,
   el: PictureElement,
   scale: number,
+  superseded: () => boolean,
   fetchImage?: (path: string, mime: string) => Promise<Blob>,
 ) {
   // No byte source → nothing to draw (the lazy pipeline always supplies one in
@@ -4378,7 +4381,7 @@ async function renderPicture(
     // Skip a picture whose blip is an unsupported metafile (null bitmap), the
     // same way an SVG-decode failure that also fails its raster fallback would
     // throw out of this try — here we simply return without painting.
-    if (!bitmap) return;
+    if (!bitmap || superseded()) return;
     ctx.save();
     if (el.alpha != null) ctx.globalAlpha *= el.alpha;
     const x = emuToPx(el.x, scale);
@@ -4772,6 +4775,7 @@ async function renderMedia(
   ctx: CanvasRenderingContext2D,
   el: MediaElement,
   scale: number,
+  superseded: () => boolean,
   fetchMedia?: (path: string) => Promise<Blob>,
   skipControls?: boolean,
   bitmapOwner?: PosterFetchImage,
@@ -4792,6 +4796,8 @@ async function renderMedia(
       // fall through to plain fill
     }
   }
+
+  if (superseded()) return;
 
   // Do not retain a saved canvas state across the asynchronous poster decode:
   // a newer render may reuse the same context while the promise is pending.
@@ -5295,6 +5301,14 @@ type SlideRenderOptions = RenderOptions & { math?: MathRenderer; dim?: DimOption
  */
 const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
 
+/** Invalidate an in-flight main-thread render before restoring or reusing its
+ * caller-owned target. The renderer observes the same token after every await. */
+export function invalidatePptxRenderTarget(
+  target: HTMLCanvasElement | OffscreenCanvas,
+): void {
+  renderTokens.set(target, (renderTokens.get(target) ?? 0) + 1);
+}
+
 /**
  * RB7: paint a placeholder for a slide whose part failed to parse. A neutral
  * card with a warning glyph, a heading, and the part-tagged error — so a viewer
@@ -5481,7 +5495,15 @@ async function renderSlideLeased(
     smartArtFallbackTextColor: smartArtFallbackTextColor(slide.background, themeDefaultColor),
   };
 
-  await renderBackground(ctx, slide.background, canvasW, canvasH, scale, opts.fetchImage);
+  await renderBackground(
+    ctx,
+    slide.background,
+    canvasW,
+    canvasH,
+    scale,
+    superseded,
+    opts.fetchImage,
+  );
   if (superseded()) return canvas;
 
   // Pre-rasterize any equations so the synchronous text layout can place them.
@@ -5576,11 +5598,19 @@ async function renderSlideLeased(
     if (el.type === 'shape') {
       renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc, onTextRun, opts.fetchImage);
     } else if (el.type === 'picture') {
-      await renderPicture(ctx, el, scale, opts.fetchImage);
+      await renderPicture(ctx, el, scale, superseded, opts.fetchImage);
     } else if (el.type === 'table') {
       renderTable(ctx, el, scale, slideNumber, rc);
     } else if (el.type === 'media') {
-      await renderMedia(ctx, el, scale, opts.fetchMedia, opts.skipMediaControls, opts.fetchImage);
+      await renderMedia(
+        ctx,
+        el,
+        scale,
+        superseded,
+        opts.fetchMedia,
+        opts.skipMediaControls,
+        opts.fetchImage,
+      );
     } else if (el.type === 'chart') {
       // OOXML: 1pt = 12700 EMU. The slide renderer's `scale` is px-per-EMU,
       // so PT_TO_EMU * scale gives pixels-per-point at the current display size.

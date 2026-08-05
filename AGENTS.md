@@ -208,18 +208,31 @@ verification is acceptable when the user asks to view it.
 
 VRT is local-only because private samples are not redistributable.
 
+Regression detection must compare the changed renderer with images produced by
+the previous renderer. It must not use Word/Excel/PowerPoint or PDF reference
+images as the regression oracle. Keep Office-reference fidelity evaluation as a
+separate run:
+
 ```bash
 pnpm build:wasm
+pnpm vrt:snapshot # run from main / the merge-base before the renderer change
 pnpm vrt
 pnpm --filter @silurus/ooxml-docx vrt
 pnpm --filter @silurus/ooxml-xlsx vrt
 pnpm --filter @silurus/ooxml-pptx vrt
+pnpm vrt:fidelity # separate Office/PDF reference fidelity evaluation
 ```
+
+If the change is already in progress and no trustworthy self-baseline exists,
+capture `vrt:snapshot` in a temporary worktree at the merge-base, then run `vrt`
+from the changed worktree against those images. A missing baseline is not a
+successful regression check; report or correct stale sample/page manifests
+instead of treating their skips as coverage.
 
 Only update references when the user explicitly asks:
 
 ```bash
-UPDATE_REFS=1 pnpm vrt
+UPDATE_REFS=1 pnpm vrt:fidelity
 ```
 
 Do not automatically update files under `packages/*/tests/visual/references/`.

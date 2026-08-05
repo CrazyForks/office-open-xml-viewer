@@ -1993,6 +1993,7 @@ mod worksheet_streaming_tests {
             ooxml_common::resource::OoxmlFormat::Xlsx,
             None,
             None,
+            None,
         );
         let _scope = governor.scope("parse-sheet");
         let error = report_projector_limit(
@@ -2032,6 +2033,7 @@ mod worksheet_streaming_tests {
             OoxmlFormat::Xlsx,
             Some(2 * 1024 * 1024),
             Some(2 * 1024 * 1024),
+            None,
         )
         .expect("package opens");
         let operation = package
