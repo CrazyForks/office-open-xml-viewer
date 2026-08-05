@@ -15,7 +15,7 @@ import {
 import {
   acquireDocxNodeDocument,
   normalizeDocxDocumentModel,
-  materializeDocumentPullAdapterSession,
+  materializeDocumentPullLayoutSession,
   materializeDocumentPullSession,
   type DocxNodeArchive,
   createLayoutServices,
@@ -28,10 +28,10 @@ import {
   type NodeCanvasLike,
   withNodeCanvasRuntime,
 } from './render.ts';
-import { compileWasmModule, resolveWasm } from './wasm-loader.ts';
+import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
 import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
 
-const docxWasmModule = compileWasmModule(resolveWasm(
+const getDocxWasmModule = createLazyWasmModule(() => resolveWasm(
     import.meta.url,
     'docx_parser_bg.wasm',
     '@silurus/ooxml-docx/wasm-binary',
@@ -88,20 +88,20 @@ export async function openDocxDocument(
   if (!options?.factory) throw new TypeError('openDocxDocument requires a canvas factory');
   const acquired = await acquireDocxNodeDocument(
     toUint8(buffer),
-    docxWasmModule,
+    getDocxWasmModule(),
     options,
     (transport, identity, pullOptions) =>
-      materializeDocumentPullAdapterSession(transport, identity, pullOptions),
+      materializeDocumentPullLayoutSession(transport, identity, pullOptions),
   );
   try {
     throwIfAborted(options.signal);
     const measurementCanvas = options.factory.createCanvas(1, 1);
-    const services = createLayoutServices(acquired.result.source, {
+    const services = createLayoutServices(acquired.result, {
       measureContext: measurementCanvas.getContext('2d'),
     });
     const defaultCurrentDateMs = normalizeCurrentDate(options.currentDate);
     const retained = retainRenderWorkerDocumentLayout(
-      acquired.result.source,
+      acquired.result,
       services,
       defaultCurrentDateMs,
     );
@@ -109,7 +109,7 @@ export async function openDocxDocument(
     const session = new DocxDocumentSessionImpl(
       acquired.closeArchive,
       acquired.archive,
-      acquired.result.source,
+      acquired.result,
       services,
       layout,
       options.factory,
@@ -143,7 +143,7 @@ export async function materializeDocxDocument(
     async () => {
       const acquired = await acquireDocxNodeDocument(
         toUint8(buffer),
-        docxWasmModule,
+        getDocxWasmModule(),
         options,
         (transport, identity, pullOptions) =>
           materializeDocumentPullSession(transport, identity, pullOptions),
@@ -178,7 +178,7 @@ export async function materializeDocxDocument(
 }
 
 type SessionState = Readonly<{
-  source: Awaited<ReturnType<typeof materializeDocumentPullAdapterSession>>['source'];
+  source: Awaited<ReturnType<typeof materializeDocumentPullLayoutSession>>;
   services: ReturnType<typeof createLayoutServices>;
 }>;
 

@@ -34,15 +34,21 @@ have one owner. The PR is therefore complementary prior art rather than a patch
 to stack or copy; its currently conflicting format-local wiring is superseded
 by the shared control plane here.
 
-Two proposed public-policy details are intentionally not copied from #1119.
-Archive entry count is protected by a non-configurable hard ceiling rather than
-another user-tuned option, because it is an implementation-complexity guard for
-which ordinary applications have no stable calibration signal. Aggregate
-declared inflated bytes are recorded for diagnostics but do not reject a package:
+One proposed public-policy detail is intentionally not copied from #1119.
+Aggregate declared inflated bytes are recorded for diagnostics but do not reject a package:
 central-directory declarations are untrusted, and charging entries that a lazy
 viewer never reads would make the public policy depend on unused media. The
 public aggregate limit therefore uses actual bytes observed across distinct
 visited entries; actual decompressor output remains authoritative.
+
+Archive entry count uses two distinct admission layers. The public
+`resourceLimits.maxArchiveEntries` policy defaults to the calibrated standard
+limit, accepts a lower positive limit, and can be disabled with `null`. A
+separate implementation hard ceiling remains non-configurable and cannot be
+disabled. ECMA-376 Part 2 §7.3 and Annex B define the ZIP-backed OPC package
+model and its format constraints, but do not prescribe either of these lower
+resource-safety limits; both are implementation admission policy rather than
+OOXML conformance rules.
 
 PR #1124 closes a separate ownership leak: XLSX and PPTX workers survived some
 rejected loads. This branch adopts that behavior through the shared

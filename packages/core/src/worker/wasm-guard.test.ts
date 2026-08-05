@@ -120,13 +120,17 @@ describe('WasmParserHost', () => {
     const init = vi.fn().mockResolvedValue(undefined);
     const reinit = vi.fn().mockResolvedValue(undefined);
     const freeArchive = vi.fn();
-    const host = new WasmParserHost<{ id: string }>(init, { freeArchive, reinit });
+    const detachArchive = vi.fn(() => 1);
+    const host = new WasmParserHost<{ id: string; __destroy_into_raw(): number }>(
+      init,
+      { freeArchive, reinit },
+    );
     host.setWasmUrl('wasm://x');
     await host.ensureReady();
 
     // File #1: construct the archive inside the trapping closure (mirrors the
     // real parse path where `new PptxArchive(...)` then `.parse()` traps).
-    const badArchive = { id: 'poisoned' };
+    const badArchive = { id: 'poisoned', __destroy_into_raw: detachArchive };
     expect(() =>
       host.run(() => {
         host.setArchive(badArchive);
@@ -137,6 +141,7 @@ describe('WasmParserHost', () => {
     // destructor must not run against the discarded runtime generation.
     expect(host.poisoned).toBe(true);
     expect(freeArchive).not.toHaveBeenCalled();
+    expect(detachArchive).toHaveBeenCalledOnce();
     expect(host.archive).toBeNull();
     expect(init).toHaveBeenCalledTimes(1); // recovery is LAZY, not yet fired
     expect(reinit).toHaveBeenCalledTimes(0);
@@ -153,11 +158,11 @@ describe('WasmParserHost', () => {
     expect(host.poisoned).toBe(false);
     // ...and the next parse succeeds on clean linear memory.
     const good = host.run(() => {
-      host.setArchive({ id: 'clean' });
+      host.setArchive({ id: 'clean', __destroy_into_raw: vi.fn(() => 2) });
       return 'parsed';
     });
     expect(good).toBe('parsed');
-    expect(host.archive).toEqual({ id: 'clean' });
+    expect(host.archive?.id).toBe('clean');
   });
 
   it('MUTATION GUARD: removing the reinit hook would recover via a no-op init — this test would then see init re-called', async () => {

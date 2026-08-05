@@ -23,6 +23,17 @@ export function compileWasmModule(wasmPath: string): WebAssembly.Module {
   return new WebAssembly.Module(readFileSync(wasmPath));
 }
 
+/** Defer synchronous filesystem access and compilation until a format is first
+ * opened. The Node root entry re-exports all format APIs, so eager module-level
+ * compilation would otherwise charge every consumer for all parser binaries. */
+export function createLazyWasmModule(
+  resolvePath: () => string,
+  compile: (wasmPath: string) => WebAssembly.Module = compileWasmModule,
+): () => WebAssembly.Module {
+  const cache: { value?: WebAssembly.Module } = {};
+  return () => cache.value ??= compile(resolvePath());
+}
+
 /** Diagnostic linear-memory size for fresh-process benchmarks. */
 export function wasmMemoryPages(jsModule: object): number | undefined {
   const initialized = initializedWasm.get(jsModule) as { memory?: WebAssembly.Memory } | undefined;

@@ -35,6 +35,7 @@ import {
   ViewportState,
 } from './internal/sheet-viewer-runtime.js';
 import { CanvasSurface, SheetOverlayHost } from './internal/sheet-surface.js';
+import { withXlsxRenderCommitGuard } from './render-orchestrator.js';
 
 // Re-exported for the existing xlsx zoom tests (resize-zoom.test.ts imports it
 // from this module) and any consumer that referenced it here before it moved to
@@ -390,6 +391,9 @@ class XlsxViewerEngine implements ZoomableViewer {
   private zoomSlider: HTMLInputElement | null = null;
   private zoomLabel: HTMLSpanElement | null = null;
   private currentSheet = 0;
+  /** Atomically commits an asynchronously acquired worksheet with its index.
+   * Incremented by every navigation and teardown so late acquisitions are no-ops. */
+  private sheetRequestGeneration = 0;
   private _hiddenSheetMode: HiddenSheetMode;
   private currentWorksheet: Worksheet | null = null;
   private opts: XlsxViewerOptions;
@@ -792,14 +796,19 @@ class XlsxViewerEngine implements ZoomableViewer {
   }
 
   async showSheet(index: number): Promise<void> {
+    const generation = ++this.sheetRequestGeneration;
+    const workbook = this.workbook;
+    const worksheet = await workbook.getWorksheet(index);
+    if (!this.isCurrentSheetRequest(generation, workbook)) return;
+
     this.currentSheet = index;
+    this.currentWorksheet = worksheet;
     this.viewportTop = 0;
     this.selectionController.reset();
     this.hideCommentPopup();
     this.hideValidationPanel();
     this.updateSelectionOverlay();
     this.updateTabActive(index);
-    this.currentWorksheet = await this.workbook.getWorksheet(index);
     this.buildCommentMap(this.currentWorksheet);
     this.buildHyperlinkMap(this.currentWorksheet);
     // XL4: build the outline layout for this sheet and size the gutters. Must run
@@ -815,11 +824,16 @@ class XlsxViewerEngine implements ZoomableViewer {
     // so scrollWidth reflects the new sheet before we read the max offset.
     this.resetHorizontalScroll();
     await this.renderCurrentSheet();
+    if (!this.isCurrentSheetRequest(generation, workbook)) return;
     // Redraw find highlights for the newly shown sheet (the find state survives
     // a sheet switch; only the visible sheet's boxes are drawn).
     this.updateFindOverlay();
     this.emitViewportChange();
     this.opts.onSheetChange?.(index, this.workbook.sheetNames.length);
+  }
+
+  private isCurrentSheetRequest(generation: number, workbook: XlsxWorkbook): boolean {
+    return !this._destroyed && generation === this.sheetRequestGeneration && this.wb === workbook;
   }
 
   // ─── Outline gutter (XL4: row/column grouping) ────────────────────────────
@@ -3497,7 +3511,15 @@ class XlsxViewerEngine implements ZoomableViewer {
       );
       if (!this.renderDispatcher.commitBitmap(seq, bmp, w, h)) return;
     } else {
-      await this.workbook.renderViewport(this.canvas, this.currentSheet, viewport, renderOpts);
+      await this.workbook.renderViewport(
+        this.canvas,
+        this.currentSheet,
+        viewport,
+        withXlsxRenderCommitGuard(renderOpts, () =>
+          !this._destroyed && this.renderDispatcher.isCurrent(seq),
+        ),
+      );
+      if (!this.renderDispatcher.isCurrent(seq) || this._destroyed) return;
     }
     // XL4: repaint the outline gutters over the fresh grid frame, aligned to the
     // same scroll offset. No-op when the sheet has no outlining.
@@ -3547,6 +3569,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     // viewer (checked at the top of _reportRenderError). The acquisition owner
     // invalidates any load still in flight below.
     this._destroyed = true;
+    this.sheetRequestGeneration++;
     this.resizeObserver?.disconnect();
     this.renderDispatcher.destroy();
     this.surface.destroy();

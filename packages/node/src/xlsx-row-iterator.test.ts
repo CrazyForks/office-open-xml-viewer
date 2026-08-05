@@ -340,7 +340,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
     for await (const _chunk of streamWorksheetRows(bytes, 0)) { /* drain */ }
   });
 
-  it('drains more than 250,000 cells without adding a Node-global cell cap', async () => {
+  it('keeps streaming above the retained cell cap but rejects Node materialization', async () => {
     const output = join(directory, 'over-retained-model-cap.xlsx');
     await generateSyntheticXlsx(output, { rows: 7_813, columns: 32 });
     const large = await readFile(output);
@@ -353,6 +353,17 @@ describe('Node bounded XLSX worksheet row iterator', () => {
     }
     expect(rows).toBe(7_813);
     expect(cells).toBe(250_016);
+    await expect(materializeXlsxWorksheet(large, 0)).rejects.toMatchObject({
+      name: 'OoxmlResourceLimitError',
+      code: 'ooxml-resource-limit',
+      details: {
+        violation: expect.objectContaining({
+          resource: 'worksheet-model',
+          metric: 'cells',
+          limit: 250_000,
+        }),
+      },
+    });
   }, 30_000);
 
   it('materializes the workbook index asynchronously', async () => {

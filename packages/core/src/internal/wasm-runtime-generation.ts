@@ -1,4 +1,8 @@
-import { isWasmTrap, WasmTrapError } from '../worker/wasm-guard.js';
+import {
+  detachWasmBindgenResource,
+  isWasmTrap,
+  WasmTrapError,
+} from '../worker/wasm-guard.js';
 import { RuntimeGeneration } from './runtime-generation.js';
 
 export interface WasmModuleRuntime {
@@ -30,11 +34,14 @@ export class WasmRuntimeGenerationHost<TArchive extends object> {
   }
 
   async open(create: () => TArchive): Promise<WasmArchiveHandle<TArchive>> {
-    await this.realm.ensureReady();
-    const archive = this.realm.run(create);
-    const handle = new WasmArchiveHandle(this, archive, this.realm.generation);
-    this.live.add(handle);
-    return handle;
+    for (;;) {
+      await this.realm.ensureReady();
+      const opened = this.realm.tryRunReady(create);
+      if (!opened.current) continue;
+      const handle = new WasmArchiveHandle(this, opened.value, opened.generation);
+      this.live.add(handle);
+      return handle;
+    }
   }
 
   async ensureReady(): Promise<void> {
@@ -100,7 +107,9 @@ export class WasmArchiveHandle<TArchive extends object> {
   }
 
   poison(error: WasmTrapError): void {
+    const archive = this.archive;
     this.failure = error;
     this.archive = undefined;
+    detachWasmBindgenResource(archive);
   }
 }

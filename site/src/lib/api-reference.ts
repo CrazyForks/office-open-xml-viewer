@@ -317,6 +317,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'onReady', type: '(sheetNames: string[]) => void', desc: 'Called once the workbook is parsed.' },
         { name: 'onSheetChange', type: '(index: number, total: number) => void', desc: 'Called when the active sheet changes; `total` is the sheet count. Read the name via `sheetNames[index]`.' },
         { name: 'onSelectionChange', type: '(sel: CellRange | null) => void', desc: 'Called when the selected range changes; null clears it.' },
+        { name: 'onViewportChange', type: '(offset: XlsxViewportOffset) => void', desc: 'Called with the clamped logical CSS-pixel offset after the active viewport moves. Horizontal x is measured from column A in both LTR and RTL sheets.' },
         VIEWER_ON_ERROR,
       ],
       methods: [
@@ -328,6 +329,10 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get sheetCount(): number', desc: 'Total sheets (0 until loaded).' },
         { sig: 'get sheetNames(): string[]', desc: 'Names of all sheets.' },
         { sig: 'get selection(): CellRange | null', desc: 'The current selected range.' },
+        { sig: 'getViewportOffset(): XlsxViewportOffset', desc: 'Return the active sheet viewport offset in logical CSS pixels.' },
+        { sig: 'setViewportOffset(offset: XlsxViewportOffset): Promise<void>', desc: 'Move the active viewport to a finite offset, clamped to the used scroll extent.' },
+        { sig: 'scrollToCell(ref: string, options?: XlsxScrollToCellOptions): Promise<void>', desc: 'Scroll a cell reference into view, optionally aligning it to the start, center, end, or nearest edge.' },
+        { sig: 'relayout(): Promise<void>', desc: 'Re-read the viewport box, clamp the current offset, and render again after an external layout change.' },
         { sig: 'getScale(): number', desc: 'The current zoom factor (1 = 100%).' },
         { sig: 'setScale(scale: number): void', desc: 'Set the zoom factor (1 = 100%), clamped to [zoomMin, zoomMax] and snapped to whole percent; re-renders and fires onScaleChange when it changes. View-only.' },
         { sig: 'fitWidth(): void', desc: 'Fit the used data range WIDTH (row header + used columns) to the canvas area (routes through setScale). Defers when unloaded / unlaid-out.' },

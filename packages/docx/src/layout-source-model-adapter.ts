@@ -398,6 +398,23 @@ export function layoutSourceModelAdapterFromOwnedModel(
   return buildLayoutSourceModelAdapter(normalizedPublic, normalizedPrivate, true, publicInput);
 }
 
+/** Consume one exclusively-owned parser graph directly into the immutable
+ * layout store. This is the Node render-session sink: unlike the compatibility
+ * adapter it never constructs or retains a second public document graph. */
+export function layoutSourceStoreFromOwnedModel(
+  ownedLayoutInput: DocxDocumentModel,
+): LayoutSourceStore {
+  const normalized = normalizeOwnedInternalDocumentModel(
+    compatibleDocumentModel(ownedLayoutInput),
+  );
+  return buildLayoutSourceModelAdapter(
+    normalized,
+    normalized,
+    true,
+    ownedLayoutInput,
+  ).source;
+}
+
 function buildLayoutSourceModelAdapter(
   publicInput: NormalizedDocumentInput,
   privateInput: NormalizedDocumentInput,

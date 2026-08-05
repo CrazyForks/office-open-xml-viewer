@@ -460,17 +460,6 @@ pub(crate) fn observe_archive_metadata(
     state.assert_healthy()?;
     state.usage.archive_entry_count = state.usage.archive_entry_count.max(entry_count);
     state.usage.declared_inflated_bytes = declared_inflated_bytes;
-    if entry_count > HARD_MAX_ARCHIVE_ENTRIES {
-        return Err(state.fail(LimitCrossing {
-            stage: "container",
-            resource: "archive",
-            metric: "entry-count",
-            part: None,
-            limit: HARD_MAX_ARCHIVE_ENTRIES,
-            observed: entry_count,
-            configurable: false,
-        }));
-    }
     if let Some(limit) = state.policy.public_entries {
         if entry_count > limit {
             return Err(state.fail(LimitCrossing {
@@ -483,6 +472,17 @@ pub(crate) fn observe_archive_metadata(
                 configurable: true,
             }));
         }
+    }
+    if entry_count > HARD_MAX_ARCHIVE_ENTRIES {
+        return Err(state.fail(LimitCrossing {
+            stage: "container",
+            resource: "archive",
+            metric: "entry-count",
+            part: None,
+            limit: HARD_MAX_ARCHIVE_ENTRIES,
+            observed: entry_count,
+            configurable: false,
+        }));
     }
     Ok(())
 }
@@ -657,6 +657,18 @@ mod tests {
         assert_eq!(violation["observed"], 3);
         assert_eq!(violation["configurable"], true);
         assert!(violation.get("part").is_none());
+    }
+
+    #[test]
+    fn entry_count_reports_the_public_policy_before_the_hard_ceiling() {
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(0), Some(0), Some(2));
+        let _scope = governor.scope("open");
+        let error = observe_archive_metadata(HARD_MAX_ARCHIVE_ENTRIES + 1, 0).unwrap_err();
+        let envelope: serde_json::Value =
+            serde_json::from_str(error.strip_prefix("OOXML_RESOURCE_LIMIT:").unwrap()).unwrap();
+        let violation = &envelope["details"]["violation"];
+        assert_eq!(violation["limit"], 2);
+        assert_eq!(violation["configurable"], true);
     }
 
     #[test]

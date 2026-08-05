@@ -13,6 +13,7 @@ import {
   CanvasViewerErrorRouter,
   StaticCanvasRenderDispatcher,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
+import { invalidateDocxRenderTarget } from './paint/canvas-document';
 
 export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   container?: HTMLElement;
@@ -417,6 +418,7 @@ export class DocxViewer implements ZoomableViewer {
     // cleaned up rather than installed onto a torn-down viewer.
     this._errorRouter.close();
     this._renderDispatcher.destroy();
+    invalidateDocxRenderTarget(this._canvas);
     this._loadGen++;
     this._doc?.destroy();
     this._doc = null;

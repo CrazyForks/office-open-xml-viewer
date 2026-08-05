@@ -7,6 +7,7 @@
 export { normalizeDocxDocumentModel } from '../parser-model.js';
 export {
   materializeDocumentPullAdapterSession,
+  materializeDocumentPullLayoutSession,
   materializeDocumentPullSession,
 } from '../document-pull-client.js';
 export { DocumentPullWorker, type DocxDocumentCursorArchive } from '../document-pull-worker.js';

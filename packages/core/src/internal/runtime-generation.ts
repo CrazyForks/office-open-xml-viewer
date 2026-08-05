@@ -48,6 +48,25 @@ export class RuntimeGeneration<TFailure extends Error> {
     }
   }
 
+  /**
+   * Run an operation only while the currently observed generation is ready.
+   * JavaScript run-to-completion makes the readiness check, generation capture,
+   * and synchronous operation one acquisition step relative to sibling promise
+   * continuations. A trap thrown by `operation` still propagates through `run`
+   * and is never reported as a retryable stale-generation result.
+   */
+  tryRunReady<TResult>(operation: () => TResult):
+    | { readonly current: false }
+    | { readonly current: true; readonly generation: number; readonly value: TResult } {
+    if (this.state !== 'ready') return { current: false };
+    const generation = this.generationValue;
+    const value = this.run(operation);
+    if (this.state !== 'ready' || generation !== this.generationValue) {
+      return { current: false };
+    }
+    return { current: true, generation, value };
+  }
+
   poison(error: TFailure): void {
     this.state = 'poisoned';
     this.readiness = undefined;

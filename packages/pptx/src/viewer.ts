@@ -1,4 +1,8 @@
-import type { RenderOptions, PptxTextRunInfo } from './renderer';
+import {
+  invalidatePptxRenderTarget,
+  type RenderOptions,
+  type PptxTextRunInfo,
+} from './renderer';
 import { buildPptxTextLayer } from './text-layer';
 import { buildPptxHighlightLayer, type PptxHighlightMatch } from './find-highlight-layer';
 import { PptxFindController, type PptxMatchLocation } from './find';
@@ -694,6 +698,7 @@ export class PptxViewer implements ZoomableViewer {
     // cleaned up rather than installed onto a torn-down viewer.
     this.errorRouter.close();
     this.renderDispatcher.destroy();
+    invalidatePptxRenderTarget(this.canvas);
     this._loadGen++;
     this.handle?.destroy();
     this.handle = null;

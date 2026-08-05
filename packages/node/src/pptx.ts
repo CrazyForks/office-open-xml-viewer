@@ -28,9 +28,9 @@ import {
 import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-pull-transport';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import type { NodeCanvasFactory, NodeCanvasLike } from './render.ts';
-import { compileWasmModule, resolveWasm } from './wasm-loader.ts';
+import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
 
-const pptxWasmModule = compileWasmModule(resolveWasm(
+const getPptxWasmModule = createLazyWasmModule(() => resolveWasm(
     import.meta.url,
     'pptx_parser_bg.wasm',
     '@silurus/ooxml-pptx/wasm-binary',
@@ -85,7 +85,7 @@ async function openPptxPresentationImpl(
   buffer: ArrayBuffer | Uint8Array | Buffer,
   options: OpenPptxPresentationOptions = {},
 ): Promise<PptxPresentationSessionImpl> {
-  const acquired = await acquirePptxNodeSession(toUint8(buffer), pptxWasmModule, options);
+  const acquired = await acquirePptxNodeSession(toUint8(buffer), getPptxWasmModule(), options);
   return new PptxPresentationSessionImpl(
     acquired.closeArchive,
     acquired.archive,

@@ -27,6 +27,28 @@ export function isWasmTrap(error: unknown): boolean {
     || error.name === 'OOMError';
 }
 
+/**
+ * Remove a wasm-bindgen object's GC finalizer without invoking its Rust
+ * destructor. The generated `__destroy_into_raw()` method only clears the JS
+ * pointer and unregisters the wrapper from its `FinalizationRegistry`; the
+ * discarded runtime generation continues to own the underlying allocation.
+ *
+ * This must run before `reinit()` replaces wasm-bindgen's module-level `wasm`
+ * binding. Otherwise a stale wrapper collected later calls its finalizer with
+ * an old-generation pointer against the new instance's linear memory.
+ */
+export function detachWasmBindgenResource(resource: unknown): void {
+  try {
+    if ((typeof resource !== 'object' || resource === null) && typeof resource !== 'function') return;
+    const detach = Reflect.get(resource as object, '__destroy_into_raw');
+    if (typeof detach === 'function') Reflect.apply(detach, resource, []);
+  } catch {
+    // Poison fan-out must still invalidate every sibling and preserve the
+    // original trap. Production wasm-bindgen wrappers use a JS-only method here;
+    // focused integration coverage pins that generated contract.
+  }
+}
+
 export type WasmInitInput =
   | string
   | URL
@@ -137,7 +159,9 @@ export class WasmParserHost<TArchive = unknown> {
     // A trap invalidates the entire runtime generation. Calling a wasm-bindgen
     // destructor here would re-enter poisoned linear memory and may trap again;
     // detach the JS handle and let the discarded instance be collected whole.
+    const archive = this.currentArchive;
     this.currentArchive = null;
+    detachWasmBindgenResource(archive);
   }
 }
 
