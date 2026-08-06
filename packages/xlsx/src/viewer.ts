@@ -390,6 +390,9 @@ class XlsxViewerEngine implements ZoomableViewer {
    *  container-mounted workbook viewer; sheet mounts create no footer DOM. */
   private tabBar!: HTMLDivElement;
   private tabStrip!: HTMLDivElement;
+  /** Direction-aware flex row inside the LTR scroll host. Keeping direction on
+   *  this inner row avoids browser-specific negative scrollLeft semantics. */
+  private tabList!: HTMLDivElement;
   private navPrev!: HTMLButtonElement;
   private navNext!: HTMLButtonElement;
   private tabs: HTMLButtonElement[] = [];
@@ -620,14 +623,23 @@ class XlsxViewerEngine implements ZoomableViewer {
       // The scrollable strip that actually holds the sheet tabs. position:relative
       // so each tab's offsetLeft is measured against the strip's scroll content.
       this.tabStrip = document.createElement('div');
-      // margin-left (not padding) keeps the leading gap OUTSIDE the scroll content
-      // so each tab's offsetLeft / scrollLeft math is unaffected and scrolling
-      // still returns to exactly 0.
+      // Keep the scroll host itself LTR so scrollLeft is consistently 0..max in
+      // every browser. The inner tabList owns visual LTR/RTL ordering.
       this.tabStrip.style.cssText =
-        `position:relative;display:flex;align-items:flex-end;flex:1;min-width:0;height:100%;` +
-        `margin-left:${TAB_GAP}px;overflow-x:auto;overflow-y:hidden;gap:${TAB_GAP}px;scrollbar-width:none;`;
+        `position:relative;display:block;flex:1;min-width:0;height:100%;` +
+        `margin-left:${TAB_GAP}px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;`;
       this.tabStrip.classList.add('xlsx-tab-strip');
       this.tabStrip.addEventListener('scroll', () => this.updateNavButtons());
+
+      // width:max-content preserves overflow scrolling; min-width:100% makes a
+      // short RTL tab row fill the strip so row-reverse can right-align it.
+      this.tabList = document.createElement('div');
+      this.tabList.style.cssText =
+        `display:flex;align-items:flex-end;height:100%;` +
+        `gap:${TAB_GAP}px;box-sizing:border-box;`;
+      this.tabList.style.width = 'max-content';
+      this.tabList.style.minWidth = '100%';
+      this.tabStrip.appendChild(this.tabList);
 
       this.tabBar.appendChild(navGroup);
       this.tabBar.appendChild(this.tabStrip);
@@ -828,6 +840,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
     this.currentSheet = index;
     this.currentWorksheet = worksheet;
+    this.updateFooterDirection();
     this.viewportTop = 0;
     this.selectionController.reset();
     this.hideCommentPopup();
@@ -1319,6 +1332,18 @@ class XlsxViewerEngine implements ZoomableViewer {
   /** True when the current sheet's grid is laid out right-to-left. */
   private get isRtl(): boolean {
     return this.currentWorksheet?.rightToLeft === true;
+  }
+
+  /** Mirror the workbook footer around the sheet-tab strip for an RTL sheet.
+   *  The DOM order remains navigation → tabs → zoom, which is also the
+   *  logical reading order; `row-reverse` places that sequence right-to-left.
+   *  Move the strip's leading gap with it so the spacing stays symmetric. */
+  private updateFooterDirection(): void {
+    if (this._mountKind !== 'composite') return;
+    this.tabBar.style.flexDirection = this.isRtl ? 'row-reverse' : 'row';
+    this.tabStrip.style.marginLeft = this.isRtl ? '0' : `${TAB_GAP}px`;
+    this.tabStrip.style.marginRight = this.isRtl ? `${TAB_GAP}px` : '0';
+    this.tabList.style.flexDirection = this.isRtl ? 'row-reverse' : 'row';
   }
 
   /** Maximum horizontal logical viewport offset (≥ 0). */
@@ -2801,7 +2826,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
   private buildTabs(): void {
     if (this._mountKind === 'sheet') return;
-    this.tabStrip.innerHTML = '';
+    this.tabList.innerHTML = '';
     this.tabs = [];
     this.tabColors = this.workbook.tabColors;
     this.workbook.sheetNames.forEach((name, i) => {
@@ -2810,7 +2835,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       btn.title = name;
       btn.style.cssText = this.tabCss(i, false);
       btn.addEventListener('click', () => this.showSheet(i));
-      this.tabStrip.appendChild(btn);
+      this.tabList.appendChild(btn);
       this.tabs.push(btn);
     });
     this.updateNavButtons();
@@ -2847,28 +2872,27 @@ class XlsxViewerEngine implements ZoomableViewer {
     const viewRight = viewLeft + strip.clientWidth;
     let target: number | null = null;
     if (dir === 1) {
-      // First tab clipped on the right; align its right edge to the viewport.
+      // Nearest tab clipped on the physical right; align its right edge.
+      let nearestRight = Number.POSITIVE_INFINITY;
       for (const tab of this.tabs) {
         const right = tab.offsetLeft + tab.offsetWidth;
-        if (right > viewRight + 1) {
-          target = right - strip.clientWidth;
-          break;
-        }
+        if (right > viewRight + 1) nearestRight = Math.min(nearestRight, right);
       }
+      if (Number.isFinite(nearestRight)) target = nearestRight - strip.clientWidth;
     } else {
-      // Last tab clipped on the left; align its left edge to the viewport.
-      for (let i = this.tabs.length - 1; i >= 0; i--) {
-        const left = this.tabs[i].offsetLeft;
-        if (left < viewLeft - 1) {
-          target = left;
-          break;
-        }
+      // Nearest tab clipped on the physical left; align its left edge. Search
+      // by geometry, not DOM order, because RTL reverses the visual tab row.
+      let nearestLeft = Number.NEGATIVE_INFINITY;
+      for (const tab of this.tabs) {
+        const left = tab.offsetLeft;
+        if (left < viewLeft - 1) nearestLeft = Math.max(nearestLeft, left);
       }
+      if (Number.isFinite(nearestLeft)) target = nearestLeft;
     }
     if (target !== null) {
       // Instant (not smooth) so the disabled state is consistent the moment the
       // click resolves — keeps the interaction deterministic to drive/test.
-      strip.scrollLeft = Math.max(0, target);
+      strip.scrollLeft = Math.max(0, Math.min(target, strip.scrollWidth - strip.clientWidth));
     }
     this.updateNavButtons();
   }
@@ -2906,6 +2930,7 @@ class XlsxViewerEngine implements ZoomableViewer {
         strip.scrollLeft += tabRect.right - stripRect.right;
       }
     }
+    this.updateNavButtons();
   }
 
   private tabStyle(active: boolean, tabColor?: string | null): string {

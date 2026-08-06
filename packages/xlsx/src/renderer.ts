@@ -2556,8 +2556,16 @@ function renderQuadrant(
           }
           if (extendRight > 0) {
             let budget = extendRight;
-            const startOci = isCenterCont ? centerContinuousLastCi + 1 : ci + 1;
-            for (let oci = startOci; oci < numCols && budget > 0; oci++) {
+            // Column indices increase to the physical right in LTR sheets but
+            // to the physical left in RTL sheets (§18.3.1.87). Overflow is
+            // based on the physical alignment direction, so mirror the walk as
+            // well as the cell geometry. centerContinuous retains its existing
+            // logical-range walk here; its range is authored across columns.
+            const step = rc.rtl && !isCenterCont ? -1 : 1;
+            const startOci = isCenterCont ? centerContinuousLastCi + 1 : ci + step;
+            for (let oci = startOci;
+              oci >= 0 && oci < numCols && budget > 0;
+              oci += step) {
               const adjKey = `${rowIndex}:${colIndices[oci]}`;
               if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
               const adjCell = cellMap.get(adjKey);
@@ -2568,7 +2576,10 @@ function renderQuadrant(
           }
           if (extendLeft > 0) {
             let budget = extendLeft;
-            for (let oci = ci - 1; oci >= 0 && budget > 0; oci--) {
+            const step = rc.rtl ? 1 : -1;
+            for (let oci = ci + step;
+              oci >= 0 && oci < numCols && budget > 0;
+              oci += step) {
               const adjKey = `${rowIndex}:${colIndices[oci]}`;
               if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
               const adjCell = cellMap.get(adjKey);
