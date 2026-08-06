@@ -2506,7 +2506,6 @@ function renderQuadrant(
       // centering uses the combined width. Walk right collecting empty
       // centerContinuous neighbours so we know how wide to center over.
       let centerContinuousW = cellW;
-      let centerContinuousX = cx;
       let centerContinuousLastCi = ci;
       if (alignH === 'centerContinuous' && !mergeInfo) {
         for (let oci = ci + 1; oci < numCols; oci++) {
@@ -2521,11 +2520,16 @@ function renderQuadrant(
           centerContinuousLastCi = oci;
         }
       }
+      const centerContinuousX = rc.rtl
+        ? cx - (centerContinuousW - cellW)
+        : cx;
 
-      // Text overflow into adjacent empty cells (ECMA-376 §18.3.1.4 "spans"
-      // — Excel behavior when `wrapText=false`). Left-aligned text flows
-      // rightward, right-aligned flows leftward, and centered splits evenly.
-      // We only extend the clip rect; the text itself is still drawn once.
+      // Text overflow into adjacent empty cells is observed Excel display
+      // behavior when `wrapText=false`; OOXML persists the cell's alignment
+      // and wrapping state but does not specify this paint-time spill rule.
+      // Left-aligned text flows rightward, right-aligned flows leftward, and
+      // centered text splits evenly. We only extend the clip rect; the text
+      // itself is still drawn once.
       // Stops at merge-cell boundaries, non-empty cells, and iconSet-left
       // overrun (since an icon sits inside this cell's left padding).
       let drawX = alignH === 'centerContinuous' ? centerContinuousX : cx;
@@ -2554,10 +2558,23 @@ function renderQuadrant(
           } else {
             extendRight = overflow;
           }
+          // Resolve the logical range to its physical outside neighbours once.
+          // In an RTL sheet (§18.3.1.87), increasing column indices move left,
+          // so the range's physical right edge is `ci` and its physical left
+          // edge is `centerContinuousLastCi`.
+          const physicalRightStep = rc.rtl ? -1 : 1;
+          const physicalRightStartOci = rc.rtl
+            ? ci - 1
+            : centerContinuousLastCi + 1;
+          const physicalLeftStep = rc.rtl ? 1 : -1;
+          const physicalLeftStartOci = rc.rtl
+            ? centerContinuousLastCi + 1
+            : ci - 1;
           if (extendRight > 0) {
             let budget = extendRight;
-            const startOci = isCenterCont ? centerContinuousLastCi + 1 : ci + 1;
-            for (let oci = startOci; oci < numCols && budget > 0; oci++) {
+            for (let oci = physicalRightStartOci;
+              oci >= 0 && oci < numCols && budget > 0;
+              oci += physicalRightStep) {
               const adjKey = `${rowIndex}:${colIndices[oci]}`;
               if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
               const adjCell = cellMap.get(adjKey);
@@ -2568,7 +2585,9 @@ function renderQuadrant(
           }
           if (extendLeft > 0) {
             let budget = extendLeft;
-            for (let oci = ci - 1; oci >= 0 && budget > 0; oci--) {
+            for (let oci = physicalLeftStartOci;
+              oci >= 0 && oci < numCols && budget > 0;
+              oci += physicalLeftStep) {
               const adjKey = `${rowIndex}:${colIndices[oci]}`;
               if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
               const adjCell = cellMap.get(adjKey);
