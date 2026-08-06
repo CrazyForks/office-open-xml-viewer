@@ -16,6 +16,7 @@ export {
   assertWorksheetCacheUsage,
   assertWorksheetJsonBytes,
   assertWorksheetModelUsage,
+  completeWorksheetUsage,
   measureRows,
   measureWorksheet,
   type WorksheetCacheUsage,

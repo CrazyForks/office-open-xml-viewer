@@ -14,6 +14,7 @@ import {
   assertWorksheetCacheUsage,
   assertWorksheetJsonBytes,
   assertWorksheetModelUsage,
+  completeWorksheetUsage,
   measureRows,
   measureWorksheet,
   addWorksheetCacheUsage,
@@ -84,6 +85,16 @@ describe('worksheet retained resource measurements', () => {
     } as Worksheet;
     const expected = new TextEncoder().encode(JSON.stringify(worksheet)).byteLength;
     expect(measureWorksheet(worksheet).jsonBytes).toBe(expected);
+    expect(completeWorksheetUsage(worksheet, {
+      rows: 7,
+      cells: 9,
+      ownedUtf8Bytes: 11,
+    })).toEqual({
+      rows: 7,
+      cells: 9,
+      ownedUtf8Bytes: 11,
+      jsonBytes: expected,
+    });
     expect(() => assertWorksheetJsonBytes(XLSX_MAX_MATERIALIZED_JSON_BYTES, 'x', 'worksheet/0'))
       .not.toThrow();
     expect(() => assertWorksheetJsonBytes(XLSX_MAX_MATERIALIZED_JSON_BYTES + 1, 'x', 'worksheet/0'))

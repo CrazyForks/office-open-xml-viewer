@@ -16,8 +16,8 @@ import {
   assertWorksheetCacheUsage,
   assertWorksheetJsonBytes,
   assertWorksheetModelUsage,
+  completeWorksheetUsage,
   measureRows,
-  measureWorksheet,
   XlsxWorksheetPullClient,
   WorksheetPullWorker,
   type WorksheetCacheUsage,
@@ -383,7 +383,12 @@ async function materializeWorksheetFromSession(
     } else {
       terminal = chunk.worksheet;
       terminal.rows = terminal.parseError ? [] : rows;
-      const measured = measureWorksheet(terminal);
+      const measured = completeWorksheetUsage(
+        terminal,
+        terminal.parseError
+          ? { rows: 0, cells: 0, ownedUtf8Bytes: 0 }
+          : modelUsage,
+      );
       assertWorksheetModelUsage(
         measured,
         'materialize-worksheet',

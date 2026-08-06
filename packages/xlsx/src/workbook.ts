@@ -39,8 +39,8 @@ import {
   assertWorksheetCacheUsage,
   assertWorksheetJsonBytes,
   assertWorksheetModelUsage,
+  completeWorksheetUsage,
   measureRows,
-  measureWorksheet,
   type WorksheetCacheUsage,
   type WorksheetModelUsage,
 } from './worksheet-resource-limits.js';
@@ -411,7 +411,12 @@ export class XlsxWorkbook {
         worksheet.rows = worksheet.parseError ? [] : rows;
         // Terminal metadata contains no rows, but measure the final public model
         // to cover exact monolithic JSON before its cache admission.
-        const measured = measureWorksheet(worksheet);
+        const measured = completeWorksheetUsage(
+          worksheet,
+          worksheet.parseError
+            ? { rows: 0, cells: 0, ownedUtf8Bytes: 0 }
+            : modelUsage,
+        );
         assertWorksheetModelUsage(
           measured,
           'get-worksheet',

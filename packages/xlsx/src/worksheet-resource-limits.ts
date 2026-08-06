@@ -81,7 +81,16 @@ export function measureRows(rows: readonly Row[]): WorksheetModelUsage {
 }
 
 export function measureWorksheet(worksheet: Worksheet): WorksheetModelUsage & { jsonBytes: number } {
-  const model = measureRows(worksheet.rows);
+  return completeWorksheetUsage(worksheet, measureRows(worksheet.rows));
+}
+
+/** Complete an incrementally accumulated row/cell measurement with the exact
+ * retained JSON size. Streaming callers already measured each row chunk, so
+ * repeating that full traversal at terminal admission adds cost but no safety. */
+export function completeWorksheetUsage(
+  worksheet: Worksheet,
+  model: WorksheetModelUsage,
+): WorksheetCacheUsage {
   const measured = measureStructuralJson(worksheet, Math.max(
     XLSX_MAX_MATERIALIZED_OWNED_UTF8_BYTES,
     XLSX_MAX_MATERIALIZED_JSON_BYTES,

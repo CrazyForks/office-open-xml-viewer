@@ -33,9 +33,7 @@ import { resolveSharedStringRows } from './shared-strings.js';
 import {
   addWorksheetCacheUsage,
   assertWorksheetCacheUsage,
-  measureWorksheet,
   type WorksheetCacheUsage,
-  type WorksheetModelUsage,
 } from './worksheet-resource-limits.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
 import { applySizeOverrides } from './worker-protocol.js';
@@ -75,10 +73,9 @@ const rawParts = new BoundedRawPartCache({
 });
 const worksheetPull = new WorksheetPullWorker(
   () => host.archive,
-  (sheetIndex, worksheet, resourceUsage) => {
+  (sheetIndex, worksheet, measured, resourceUsage) => {
     const previous = sheetCache.get(sheetIndex);
     const previousUsage = sheetCacheUsage.get(sheetIndex);
-    const measured = measureWorksheet(worksheet);
     const nextUsage = addWorksheetCacheUsage(retainedSheetUsage, measured, previousUsage);
     assertWorksheetCacheUsage(
       nextUsage,
