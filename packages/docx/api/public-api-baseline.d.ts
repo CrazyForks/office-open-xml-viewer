@@ -491,6 +491,7 @@ export interface DocxRunBorder {
     space: number;
 }
 export class DocxScrollViewer implements ZoomableViewer {
+    static fromDocument(container: HTMLElement, document: DocxDocument, opts?: Omit<DocxScrollViewerOptions, keyof LoadOptions>): Omit<DocxScrollViewer, 'load'>;
     constructor(container: HTMLElement, opts?: DocxScrollViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     get pageCount(): number;
@@ -529,7 +530,6 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
     refitOnResize?: boolean;
     background?: string;
     pageShadow?: string | false;
-    document?: DocxDocument;
     onVisiblePageChange?: (topIndex: number, total: number) => void;
     onScaleChange?: (scale: number) => void;
     onHyperlinkClick?: (target: HyperlinkTarget) => void;
@@ -597,6 +597,7 @@ export interface DocxTextRunInfo {
     eastAsianVert?: boolean;
 }
 export class DocxViewer implements ZoomableViewer {
+    static fromDocument(canvas: HTMLCanvasElement, document: DocxDocument, opts?: Omit<DocxViewerOptions, keyof LoadOptions>): Omit<DocxViewer, 'load'>;
     constructor(canvas: HTMLCanvasElement, opts?: DocxViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     get pageCount(): number;
@@ -620,7 +621,6 @@ export class DocxViewer implements ZoomableViewer {
     private __privatePresence;
 }
 export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
-    document?: DocxDocument;
     container?: HTMLElement;
     enableTextSelection?: boolean;
     findHighlightColors?: FindHighlightColors;

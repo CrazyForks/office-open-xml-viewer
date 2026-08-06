@@ -104,8 +104,8 @@ await sheet.goToSheet(1);
 const workbook = await XlsxWorkbook.load('/workbook.xlsx');
 const firstCanvas = document.getElementById('xlsx-first-canvas') as HTMLCanvasElement;
 const secondCanvas = document.getElementById('xlsx-second-canvas') as HTMLCanvasElement;
-const firstSheet = new XlsxSheetViewer(firstCanvas, { workbook });
-const secondSheet = new XlsxSheetViewer(secondCanvas, { workbook });
+const firstSheet = XlsxSheetViewer.fromWorkbook(firstCanvas, workbook);
+const secondSheet = XlsxSheetViewer.fromWorkbook(secondCanvas, workbook);
 await Promise.all([
   firstSheet.goToSheet(0),
   secondSheet.goToSheet(1),
@@ -226,7 +226,7 @@ The container must have a bounded height (e.g. `height: 100vh` or a flex child)
 so the viewer can size its scroll host to it. Base zoom fits the first page/slide
 width to the container width and re-fits on resize; a `0`-width container defers
 layout until it has width. Call `destroy()` to tear down (a self-loaded engine is
-destroyed with it; an injected one is not — see below).
+destroyed with it; a borrowed one is not — see below).
 
 Pass `refitOnResize: false` when the viewport must not determine the document's
 physical display size. An explicit pre-load `setScale(1)` then keeps the same
@@ -281,27 +281,35 @@ This applies to every viewer that supports hyperlinks (`DocxViewer`,
 `DocxScrollViewer`, `PptxViewer`, `PptxScrollViewer`, `XlsxViewer`,
 `XlsxSheetViewer`).
 
-**Master–detail / shared engine.** Inject an already-loaded headless engine so a
-paged viewer and a scroll viewer (or several panes) share **one** parse. When you
-inject, `load()` is unsupported (the engine is already loaded), the engine's own
-`mode` wins, and `destroy()` leaves the injected engine intact — the caller owns
-its lifecycle:
+**Choose one loading mode.** For the normal one-view case, construct a Viewer and
+call `viewer.load(source)`: the Viewer owns the parsed engine, may replace it on a
+later load, and destroys it during teardown. For master–detail, multi-pane, or
+multi-window UIs, create the Viewer from an already-loaded headless engine so
+every view shares **one** parse. The two modes are mutually exclusive: on a
+Viewer returned by a `from*()` factory, `load()` is unsupported, the engine's
+own `mode` wins, and `destroy()` leaves the borrowed engine intact — the caller
+owns its lifecycle.
+
+| Use case | Acquisition | Engine owner |
+| --- | --- | --- |
+| One Viewer | `new Viewer(target)` then `viewer.load(source)` | Viewer |
+| Shared parse | `Engine.load(source)` then `Viewer.fromDocument / fromPresentation / fromWorkbook(...)` | Caller |
 
 ```typescript
 import { DocxDocument, DocxScrollViewer, DocxViewer } from '@silurus/ooxml/docx';
 
-const doc = await DocxDocument.load('/document.docx'); // parse once
-const scroll = new DocxScrollViewer(container, { document: doc });
-const page = new DocxViewer(canvas, { document: doc });
+const document = await DocxDocument.load('/document.docx'); // parse once
+const scroll = DocxScrollViewer.fromDocument(container, document);
+const page = DocxViewer.fromDocument(canvas, document);
 await page.goToPage(0);
-// ...also drive a thumbnail grid or more panes from the same `doc`.
+// ...also drive a thumbnail grid or more panes from the same document.
 page.destroy();
-scroll.destroy(); // the injected `doc` is NOT destroyed — you own it
-doc.destroy();    // release it yourself when every pane is gone
+scroll.destroy();  // the borrowed document is NOT destroyed — you own it
+document.destroy(); // release it yourself when every pane is gone
 ```
 
-`PptxViewer` and `PptxScrollViewer` take the same shape with
-`{ presentation: pres }` (`await PptxPresentation.load(...)`).
+`PptxViewer` and `PptxScrollViewer` use `fromPresentation(...)`; `XlsxViewer`
+and `XlsxSheetViewer` use `fromWorkbook(...)`.
 
 For presentations, `enableMediaPlayback: true` makes embedded audio and video
 interactive inside the real viewport plus `mediaOverscan` slides. Other mounted
@@ -490,7 +498,7 @@ file without uploading it.
 | | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — full-text search, all hits highlighted, each match tagged with its page) | ✅ |
 | | Runtime zoom (`getScale` / `setScale` / `fitWidth` / `fitPage`) | ✅ |
 | | Clickable hyperlinks (overlay hit-test, `onHyperlinkClick`; internal bookmark / anchor navigation) | ✅ |
-| | Continuous scroll viewer (`DocxScrollViewer` — virtualized page list, desk background / shadow, Ctrl/⌘+wheel zoom, engine injection) | ✅ |
+| | Continuous scroll viewer (`DocxScrollViewer` — virtualized page list, desk background / shadow, Ctrl/⌘+wheel zoom, borrowed-engine factory) | ✅ |
 | **Loading** | Password-protected files ([MS-OFFCRYPTO] Agile Encryption — `load(bytes, { password })`, decrypted client-side via WebCrypto; legacy Standard / Extensible encryption → typed `unsupported-encryption`) | ✅ |
 
 ---
@@ -651,7 +659,7 @@ file without uploading it.
 | | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — matches tagged with slide) | ✅ |
 | | Runtime zoom (`getScale` / `setScale` / `fitWidth` / `fitPage`) | ✅ |
 | | Clickable hyperlinks (`onHyperlinkClick`; internal slide-jump navigation) | ✅ |
-| | Continuous scroll viewer (`PptxScrollViewer` — virtualized slide list, desk background / shadow, Ctrl/⌘+wheel zoom, engine injection) | ✅ |
+| | Continuous scroll viewer (`PptxScrollViewer` — virtualized slide list, desk background / shadow, Ctrl/⌘+wheel zoom, borrowed-engine factory) | ✅ |
 | **Loading** | Password-protected files ([MS-OFFCRYPTO] Agile Encryption — `load(bytes, { password })`, decrypted client-side via WebCrypto; legacy Standard / Extensible encryption → typed `unsupported-encryption`) | ✅ |
 
 ---

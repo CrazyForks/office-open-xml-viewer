@@ -3,7 +3,9 @@
 
 interface Cfg {
   Viewer: string;
-  Doc: string;
+  Engine: string;
+  engineVariable: 'document' | 'presentation';
+  fromEngine: 'fromDocument' | 'fromPresentation';
   sub: 'pptx' | 'docx';
   count: string;
   render: string;
@@ -13,11 +15,11 @@ interface Cfg {
 }
 
 const pptx: Cfg = {
-  Viewer: 'PptxViewer', Doc: 'PptxPresentation', sub: 'pptx',
+  Viewer: 'PptxViewer', Engine: 'PptxPresentation', engineVariable: 'presentation', fromEngine: 'fromPresentation', sub: 'pptx',
   count: 'slideCount', render: 'renderSlide', next: 'nextSlide', prev: 'prevSlide', go: 'goToSlide',
 };
 const docx: Cfg = {
-  Viewer: 'DocxViewer', Doc: 'DocxDocument', sub: 'docx',
+  Viewer: 'DocxViewer', Engine: 'DocxDocument', engineVariable: 'document', fromEngine: 'fromDocument', sub: 'docx',
   count: 'pageCount', render: 'renderPage', next: 'nextPage', prev: 'prevPage', go: 'goToPage',
 };
 
@@ -39,46 +41,53 @@ await viewer.load('/sample.${c.sub}');
 nextBtn.addEventListener('click', () => viewer.${c.next}());
 prevBtn.addEventListener('click', () => viewer.${c.prev}());`,
 
-    scroll: `import { ${c.Doc} } from '@silurus/ooxml/${c.sub}';
+    scroll: `import { ${c.Engine} } from '@silurus/ooxml/${c.sub}';
 
 // Headless engine — render every ${c.sub === 'pptx' ? 'slide' : 'page'} into a canvas you control.
-const doc = await ${c.Doc}.load('/sample.${c.sub}');
+const ${c.engineVariable} = await ${c.Engine}.load('/sample.${c.sub}');
 
-for (let i = 0; i < doc.${c.count}; i++) {
+for (let i = 0; i < ${c.engineVariable}.${c.count}; i++) {
   const canvas = document.createElement('canvas');
   scroller.appendChild(canvas);
-  await doc.${c.render}(canvas, i, { width: 1100 });
+  await ${c.engineVariable}.${c.render}(canvas, i, { width: 1100 });
 }`,
 
-    thumbnails: `import { ${c.Doc} } from '@silurus/ooxml/${c.sub}';
+    thumbnails: `import { ${c.Engine} } from '@silurus/ooxml/${c.sub}';
 
 // Render each ${c.sub === 'pptx' ? 'slide' : 'page'} small, wire up navigation.
-const doc = await ${c.Doc}.load('/sample.${c.sub}');
+const ${c.engineVariable} = await ${c.Engine}.load('/sample.${c.sub}');
 
-for (let i = 0; i < doc.${c.count}; i++) {
+for (let i = 0; i < ${c.engineVariable}.${c.count}; i++) {
   const thumb = document.createElement('canvas');
   thumb.addEventListener('click', () => open(i));
   grid.appendChild(thumb);
-  await doc.${c.render}(thumb, i, { width: 320 });
+  await ${c.engineVariable}.${c.render}(thumb, i, { width: 320 });
 }`,
 
-    masterdetail: `import { ${c.Doc}, ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
+    masterdetail: `import { ${c.Engine}, ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
 
-// A large preview viewer on the right…
-const viewer = new ${c.Viewer}(detailCanvas, { width: 960, enableTextSelection: true });
+// Parse once, then lend the loaded engine to every view that needs it.
+const ${c.engineVariable} = await ${c.Engine}.load('/sample.${c.sub}');
 
-// …and a thumbnail rail on the left, sharing the same file.
-const [doc] = await Promise.all([
-  ${c.Doc}.load('/sample.${c.sub}'),
-  viewer.load('/sample.${c.sub}'),
-]);
+// A large preview on the right borrows the engine and cannot acquire another source.
+const viewer = ${c.Viewer}.${c.fromEngine}(detailCanvas, ${c.engineVariable}, {
+  width: 960,
+  enableTextSelection: true,
+});
+await viewer.${c.go}(0);
 
-for (let i = 0; i < doc.${c.count}; i++) {
+// The thumbnail rail on the left renders from that same engine.
+for (let i = 0; i < ${c.engineVariable}.${c.count}; i++) {
   const thumb = document.createElement('canvas');
   thumb.addEventListener('click', () => viewer.${c.go}(i));  // jump the preview
   rail.appendChild(thumb);
-  await doc.${c.render}(thumb, i, { width: 200 });
-}`,
+  await ${c.engineVariable}.${c.render}(thumb, i, { width: 200 });
+}
+
+window.addEventListener('pagehide', () => {
+  viewer.destroy();
+  ${c.engineVariable}.destroy(); // borrowed engines remain caller-owned
+}, { once: true });`,
   };
 }
 
@@ -100,7 +109,7 @@ async function openSheetInWindow(sheetIndex: number): Promise<void> {
   popup.document.body.style.margin = '0';
   popup.document.body.appendChild(canvas);
 
-  const viewer = new XlsxSheetViewer(canvas, { workbook });
+  const viewer = XlsxSheetViewer.fromWorkbook(canvas, workbook);
   viewers.set(popup, viewer);
   popup.addEventListener('pagehide', () => {
     viewer.destroy();

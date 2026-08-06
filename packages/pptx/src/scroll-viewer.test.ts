@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { PptxScrollViewer } from './scroll-viewer.js';
 import { PptxPresentation } from './presentation.js';
-import { installDom, makeContainer, makeEl, FakePptxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
+import { installDom, makeContainer, makeEl, makeBorrowedPptxScrollViewer, FakePptxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 import * as pptxIndex from './index.js';
 
 afterEach(() => {
@@ -14,7 +14,7 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
     installDom();
     const container = makeContainer();
     const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
+    const v = PptxScrollViewer.fromPresentation(container as unknown as HTMLElement, engine.asPres());
     // container → wrapper
     const wrapper = container.children[0];
     expect(wrapper.tag).toBe('div');
@@ -29,34 +29,40 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
     v.destroy();
   });
 
-  it('exposes slideCount from the injected engine', () => {
+  it('exposes slideCount from the borrowed engine', () => {
     installDom();
     const engine = new FakePptxEngine(5, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(makeContainer() as unknown as HTMLElement, { presentation: engine.asPres() });
+    const v = PptxScrollViewer.fromPresentation(
+      makeContainer() as unknown as HTMLElement,
+      engine.asPres(),
+    );
     expect(v.slideCount).toBe(5);
     v.destroy();
   });
 
-  it('load() is unsupported when an engine is injected', async () => {
+  it('load() is unsupported when an engine is borrowed', async () => {
     installDom();
     const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(makeContainer() as unknown as HTMLElement, { presentation: engine.asPres() });
-    await expect(v.load('x.pptx')).rejects.toThrow(/injected/i);
+    const v = PptxScrollViewer.fromPresentation(
+      makeContainer() as unknown as HTMLElement,
+      engine.asPres(),
+    );
+    await expect((v as PptxScrollViewer).load('x.pptx')).rejects.toThrow(/fromPresentation/i);
     v.destroy();
   });
 
-  it('destroy() removes the DOM and does NOT destroy an injected engine', () => {
+  it('destroy() removes the DOM and does NOT destroy an borrowed engine', () => {
     installDom();
     const container = makeContainer();
     const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
+    const v = PptxScrollViewer.fromPresentation(container as unknown as HTMLElement, engine.asPres());
     expect(container.children.length).toBe(1); // wrapper mounted
     v.destroy();
     expect(container.children.length).toBe(0); // wrapper removed
-    expect(engine.destroyed).toBe(false); // injected engine preserved (caller owns it)
+    expect(engine.destroyed).toBe(false); // borrowed engine preserved (caller owns it)
   });
 
-  it('slideCount is 0 before load resolves (no injected engine)', () => {
+  it('slideCount is 0 before load resolves (no borrowed engine)', () => {
     installDom();
     const v = new PptxScrollViewer(makeContainer() as unknown as HTMLElement, {});
     expect(v.slideCount).toBe(0);
@@ -76,45 +82,45 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
     v.destroy();
   });
 
-  // O1 (design §11): an injected engine's own `mode` is authoritative. An
+  // O1 (design §11): an borrowed engine's own `mode` is authoritative. An
   // EXPLICITLY conflicting opts.mode is a mis-configuration rejected at
   // construction; a matching or absent opts.mode constructs fine.
-  it('throws when opts.mode conflicts with an injected worker-mode engine', () => {
+  it('throws when opts.mode conflicts with an borrowed worker-mode engine', () => {
     installDom();
     const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU, 'worker');
     expect(
       () =>
-        new PptxScrollViewer(makeContainer() as unknown as HTMLElement, {
+        makeBorrowedPptxScrollViewer(makeContainer() as unknown as HTMLElement, {
           presentation: engine.asPres(),
           mode: 'main',
         }),
     ).toThrow(/mode/i);
   });
 
-  it('does NOT throw when opts.mode matches an injected worker-mode engine', () => {
+  it('does NOT throw when opts.mode matches an borrowed worker-mode engine', () => {
     installDom();
     const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU, 'worker');
-    const v = new PptxScrollViewer(makeContainer() as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(makeContainer() as unknown as HTMLElement, {
       presentation: engine.asPres(),
       mode: 'worker',
     });
     expect(v.slideCount).toBe(1);
     v.destroy();
-    // Injected engine is caller-owned even in the worker case: destroy() leaves it intact.
+    // Borrowed engine is caller-owned even in the worker case: destroy() leaves it intact.
     expect(engine.destroyed).toBe(false);
   });
 
-  it('constructs a default-main injected engine with absent opts.mode (load still rejects; destroy preserves engine)', async () => {
+  it('constructs a default-main borrowed engine with absent opts.mode (load still rejects; destroy preserves engine)', async () => {
     installDom();
     // Default mode is 'main'; opts.mode is absent ⇒ no conflict, resolved path is main.
     const engine = new FakePptxEngine(2, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(makeContainer() as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(makeContainer() as unknown as HTMLElement, {
       presentation: engine.asPres(),
     });
     expect(v.slideCount).toBe(2);
-    await expect(v.load('x.pptx')).rejects.toThrow(/injected/i);
+    await expect(v.load('x.pptx')).rejects.toThrow(/borrowed/i);
     v.destroy();
-    // Injected engine is caller-owned: destroy() must not tear it down.
+    // Borrowed engine is caller-owned: destroy() must not tear it down.
     expect(engine.destroyed).toBe(false);
   });
 
@@ -124,7 +130,7 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
     installDom();
     const container = makeContainer();
     const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       background: '#525659',
     });
@@ -137,7 +143,7 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
     installDom();
     const container = makeContainer();
     const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
     });
     const scrollHost = container.children[0].children[0];
@@ -169,7 +175,7 @@ describe('PptxScrollViewer — layout + virtualization (T2)', () => {
     const dom = installDom();
     const container = makeContainer(200, 400); // clientWidth 200, clientHeight 400
     const engine = new FakePptxEngine(slideCount, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       overscan: 1,
@@ -210,7 +216,7 @@ describe('PptxScrollViewer — layout + virtualization (T2)', () => {
     const dom = installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       overscan: 1,
@@ -292,7 +298,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(10, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       paddingLeft: 0, // full-width fit → slide width px = 200 (asserted below)
@@ -323,7 +329,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     // slide renders at the SAME px width. The per-call width contract still holds:
     // each mounted slide receives its own width argument, equal to the uniform px.
     const engine = new FakePptxEngine(2, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       paddingLeft: 0, // full-width fit → base scale 1.0 (slide width px = 200)
@@ -351,7 +357,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(10, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
     });
@@ -373,7 +379,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     // worker mode; a viewer that mis-routed would blow up (and renderCalls would
     // record the attempt). The direct _mode routing must never touch renderSlide.
     const engine = new FakePptxEngine(10, SLIDE_W_EMU, SLIDE_H_EMU, 'worker');
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
     });
@@ -395,7 +401,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(10, SLIDE_W_EMU, SLIDE_H_EMU, 'worker');
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
     });
@@ -425,7 +431,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
     });
@@ -453,7 +459,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     // Deferred: renderSlideToBitmap resolves only when the test calls resolve(),
     // so we can scroll a slot's slide out of the window BEFORE the bitmap arrives.
     const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
     });
@@ -492,7 +498,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     // re-dispatch. (A short-slide window packs several slots, whose LIFO reuse can
     // hand slide 0 back its own in-flight slot — an epoch-only case not under test.)
     const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_TALL_EMU, 'worker', true);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       paddingTop: 0, // flush top so slide 0's slot sits at top:0px (asserted below)
@@ -547,7 +553,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
     const onError = vi.fn();
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       overscan: 1,
@@ -586,7 +592,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     // Deferred so a render is genuinely in flight when we destroy the viewer.
     const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
     const onError = vi.fn();
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       onError,
@@ -616,7 +622,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       paddingTop: 0, // flush top so slide 0's slot sits at top:0px (asserted below)
@@ -680,7 +686,7 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
     const onError = vi.fn();
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       paddingTop: 0, // flush top so slide 0's slot sits at top:0px (asserted below)
@@ -744,7 +750,7 @@ describe('PptxScrollViewer — zoom (T4)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(slideCount, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       // Flush top/bottom (paddingTop/Bottom default to `gap`; the T4 offset
@@ -817,7 +823,7 @@ describe('PptxScrollViewer — zoom (T4)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(5, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
     });
@@ -844,7 +850,7 @@ describe('PptxScrollViewer — zoom (T4)', () => {
     // Natural width px = 12,192,000 / 9525 = 1280. Container ~1200px.
     const container = makeContainer(1200, 800);
     const engine = new FakePptxEngine(10, 12192000, 6858000);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 16,
       // No zoomMin/zoomMax ⇒ REAL defaults [0.1, 4].
@@ -963,7 +969,7 @@ describe('PptxScrollViewer — self-load path (T7 story)', () => {
     const container = makeContainer(200, 400);
     // Mock the static loader so load() resolves to a fake engine WITHOUT touching
     // a real Worker / WASM. The viewer must call relayout() after assignment so a
-    // self-loaded (non-injected) viewer is not left blank (I-2).
+    // self-loaded (non-borrowed) viewer is not left blank (I-2).
     const engine = new FakePptxEngine(10, SLIDE_W_EMU, SLIDE_H_EMU);
     const loadSpy = vi.spyOn(PptxPresentation, 'load').mockResolvedValue(engine.asPres());
     const v = new PptxScrollViewer(container as unknown as HTMLElement, { gap: 10 });
@@ -987,7 +993,7 @@ describe('PptxScrollViewer — interactive media lifecycle', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU, mode, deferred);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableMediaPlayback: true,
       gap: 10,
@@ -1020,7 +1026,7 @@ describe('PptxScrollViewer — interactive media lifecycle', () => {
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(2, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
     const onError = vi.fn();
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableMediaPlayback: true,
       onError,
@@ -1048,7 +1054,7 @@ describe('PptxScrollViewer — interactive media lifecycle', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(1_000, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableMediaPlayback: true,
       enableTextSelection: true,
@@ -1094,7 +1100,7 @@ describe('PptxScrollViewer — interactive media lifecycle', () => {
         shapeH: 30,
         rotation: 0,
       }];
-      const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
         presentation: engine.asPres(),
         enableMediaPlayback: true,
         enableTextSelection: true,
@@ -1129,7 +1135,7 @@ describe('PptxScrollViewer — interactive media lifecycle', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(200, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableMediaPlayback: true,
       enableTextSelection: true,
@@ -1166,7 +1172,7 @@ describe('PptxScrollViewer — interactive media lifecycle', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableMediaPlayback: true,
       enableTextSelection: true,
@@ -1229,7 +1235,7 @@ describe('PptxScrollViewer — interactive media lifecycle', () => {
       shapeH: 30,
       rotation: 0,
     }];
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableMediaPlayback: true,
       enableTextSelection: true,
@@ -1279,7 +1285,7 @@ describe('PptxScrollViewer — interactive media lifecycle', () => {
       installDom();
       const container = makeContainer(200, 400);
       const engine = new FakePptxEngine(500, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
-      const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
         presentation: engine.asPres(),
         enableMediaPlayback: true,
         enableTextSelection: true,
@@ -1332,7 +1338,7 @@ describe('PptxScrollViewer — interactive media lifecycle', () => {
       shapeH: 30,
       rotation: 0,
     }];
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableMediaPlayback: true,
       enableTextSelection: true,
@@ -1469,7 +1475,7 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
     engine.feedTextRuns = [RUN];
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableTextSelection: true,
       gap: 10,
@@ -1502,7 +1508,7 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
     // Rotated shape frame: buildPptxTextLayer applies transform:rotate(totalRot).
     engine.feedTextRuns = [{ ...RUN, rotation: 30 }];
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableTextSelection: true,
       gap: 10,
@@ -1527,7 +1533,7 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
     engine.feedTextRuns = [RUN];
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableTextSelection: true,
       gap: 10,
@@ -1564,7 +1570,7 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
     engine.feedTextRuns = [RUN];
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableTextSelection: true,
       gap: 10,
@@ -1598,7 +1604,7 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(50, SLIDE_W_EMU, SLIDE_H_EMU);
     engine.feedTextRuns = [RUN];
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableTextSelection: true,
       gap: 10,
@@ -1627,7 +1633,7 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU, 'worker');
     engine.feedTextRuns = [RUN];
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableTextSelection: true,
       gap: 10,
@@ -1669,7 +1675,7 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     // move the epoch WHILE slide 0's first render is in flight.
     const engine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
     engine.feedTextRuns = [RUN];
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       enableTextSelection: true,
       gap: 10,
@@ -1723,7 +1729,7 @@ describe('PptxScrollViewer — full-presentation find', () => {
     const container = makeContainer(200, 80);
     const engine = new FakePptxEngine(4, SLIDE_W_EMU, SLIDE_H_EMU);
     engine.feedTextRuns = [RUN];
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       findHighlightColors: {
         match: 'rgba(1, 2, 3, 0.4)',
@@ -1784,7 +1790,7 @@ describe('PptxScrollViewer — full-presentation find', () => {
       const container = makeContainer(200, 80);
       const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU, mode);
       engine.feedTextRuns = [RUN];
-      const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
         presentation: engine.asPres(),
         gap: 0,
         paddingTop: 0,
@@ -1831,7 +1837,7 @@ describe('PptxScrollViewer — full-presentation find', () => {
         engine.collectSlideRuns = (slide) => slide === 1
           ? new Promise((resolve) => { resolveSecond = resolve; })
           : Promise.resolve([RUN]);
-        const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+        const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
           presentation: engine.asPres(),
           gap: 0,
           overscan: 0,
@@ -1878,7 +1884,7 @@ describe('PptxScrollViewer — full-presentation find', () => {
       const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
       let resolveRuns!: (runs: NonNullable<typeof engine.feedTextRuns>) => void;
       engine.collectSlideRuns = () => new Promise((resolve) => { resolveRuns = resolve; });
-      const v = new PptxScrollViewer(makeContainer(200, 80) as unknown as HTMLElement, {
+      const v = makeBorrowedPptxScrollViewer(makeContainer(200, 80) as unknown as HTMLElement, {
         presentation: engine.asPres(),
       });
       const pending = v.findText('alpha');
@@ -1931,7 +1937,7 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(slideCount, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: GAP,
       // Flush top/bottom: the T6 STRIDE/offset arithmetic assumes offset[0]===0.
@@ -2135,7 +2141,7 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
     installDom();
     const container = makeContainer(0, 0); // unlaid-out
     const engine = new FakePptxEngine(5, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     expect(v.mountedSlideIndicesForTest().length).toBe(0); // deferred
     container.clientWidth = 300;
@@ -2150,7 +2156,7 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
     installDom();
     const container = makeContainer(300, 400);
     const engine = new FakePptxEngine(0, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
     v.relayout();
     const spacer = (container.children[0] as FakeEl).children[0].children[0] as FakeEl;
     expect(parseFloat(spacer.style.height || '0')).toBe(0);
@@ -2164,7 +2170,7 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
     const container = makeContainer(0, 0);
     const engine = new FakePptxEngine(0, SLIDE_W_EMU, SLIDE_H_EMU);
     const changes: number[] = [];
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       onVisibleSlideChange: (i: number) => changes.push(i),
     });
@@ -2192,7 +2198,7 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
     vi.stubGlobal('ResizeObserver', SpyRO);
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
     v.destroy();
     expect(disconnected).toBe(1);
   });
@@ -2207,7 +2213,7 @@ describe('PptxScrollViewer — paddingTop/paddingBottom (desk margin)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(slideCount, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: GAP,
       // This block tests the VERTICAL desk margin; pin the horizontal gutters to 0
@@ -2306,7 +2312,7 @@ describe('PptxScrollViewer — paddingLeft/paddingRight (horizontal desk gutters
     installDom();
     const container = makeContainer(cw, 400);
     const engine = new FakePptxEngine(slideCount, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 16,
       ...opts,
@@ -2463,7 +2469,7 @@ describe('PptxScrollViewer — flicker-free zoom (T8)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(slideCount, SLIDE_W_EMU, SLIDE_H_EMU, mode, deferred);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       paddingTop: 0,
@@ -2781,7 +2787,7 @@ describe('PptxScrollViewer — pageShadow (T9)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU, mode, deferred);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       paddingTop: 0,

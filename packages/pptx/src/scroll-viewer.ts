@@ -33,6 +33,10 @@ const ZOOM_SETTLE_MS = 150;
  * {@link PptxScrollViewerOptions.pageShadow}.
  */
 const DEFAULT_PAGE_SHADOW = '0 1px 3px rgba(0,0,0,0.2)';
+const borrowedPresentationOption = Symbol('PptxScrollViewer.borrowedPresentation');
+type InternalPptxScrollViewerOptions = PptxScrollViewerOptions & {
+  [borrowedPresentationOption]?: PptxPresentation;
+};
 
 /**
  * Options for {@link PptxScrollViewer}. Extends `RenderSlideOptions` (per-slide
@@ -137,13 +141,6 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    *   here rather than two competing options.
    */
   pageShadow?: string | false;
-  /**
-   * Inject an already-loaded engine to share one parse across panes (design §14).
-   * When set: `load()` is unsupported (throws), the engine's own `mode` wins (an
-   * explicitly conflicting `opts.mode` throws at construction, design §11), and
-   * `destroy()` does NOT destroy this engine (the caller owns its lifecycle).
-   */
-  presentation?: PptxPresentation;
   /** Fires when the top-most visible slide changes. `topIndex` from
    *  `computeVisibleRange` (the first slide intersecting the viewport top,
    *  EXCLUDING overscan). */
@@ -223,13 +220,13 @@ interface SlideSlot {
 export class PptxScrollViewer implements ZoomableViewer {
   private readonly _presentationOwner: TerminalResourceOwner<PptxPresentation>;
   private get _pres(): PptxPresentation | null { return this._presentationOwner.current; }
-  private readonly _injected: boolean;
+  private readonly _borrowed: boolean;
   private readonly _opts: PptxScrollViewerOptions;
   private readonly _container: HTMLElement;
   private readonly _wrapper: HTMLDivElement;
   private readonly _scrollHost: HTMLDivElement;
   private readonly _spacer: HTMLDivElement;
-  /** Resolved render mode. When an engine is injected the engine's own `mode`
+  /** Resolved render mode. When an engine is borrowed the engine's own `mode`
    *  is authoritative (design §11 — no silent mis-pathing / no probing); an
    *  explicitly conflicting `opts.mode` is rejected at construction. When self-
    *  loading, `opts.mode` decides and `load()` passes it to `PptxPresentation.load`. */
@@ -336,6 +333,25 @@ export class PptxScrollViewer implements ZoomableViewer {
   private _findActive = false;
   private _findMeasureCtx: CanvasRenderingContext2D | null | undefined;
 
+  /**
+   * Create a Scroll Viewer that borrows an already-loaded presentation.
+   *
+   * The presentation's render mode is authoritative. The returned Viewer
+   * cannot load another source, and destroying it leaves the caller-owned
+   * presentation open. The initial virtual window is laid out during
+   * construction.
+   */
+  static fromPresentation(
+    container: HTMLElement,
+    presentation: PptxPresentation,
+    opts: Omit<PptxScrollViewerOptions, keyof LoadOptions> = {},
+  ): Omit<PptxScrollViewer, 'load'> {
+    return new PptxScrollViewer(container, {
+      ...opts,
+      [borrowedPresentationOption]: presentation,
+    } as InternalPptxScrollViewerOptions);
+  }
+
   constructor(container: HTMLElement, opts: PptxScrollViewerOptions = {}) {
     // A <canvas> is an HTMLElement too, so the type system cannot stop a caller
     // used to the pager API (PptxViewer takes a canvas) from passing one — but
@@ -353,11 +369,11 @@ export class PptxScrollViewer implements ZoomableViewer {
     // `??` (not `||`): a caller's explicit `false` must disable the shadow, not
     // fall through to the default.
     this._pageShadow = opts.pageShadow ?? DEFAULT_PAGE_SHADOW;
-    this._injected = !!opts.presentation;
-    if (this._injected) {
-      const engine = opts.presentation as PptxPresentation;
-      this._presentationOwner = new TerminalResourceOwner('PptxScrollViewer', engine, false);
-      this._mode = resolveCanvasViewerMode('PptxScrollViewer', opts.mode, engine);
+    const borrowedPresentation = (opts as InternalPptxScrollViewerOptions)[borrowedPresentationOption];
+    this._borrowed = borrowedPresentation !== undefined;
+    if (borrowedPresentation) {
+      this._presentationOwner = new TerminalResourceOwner('PptxScrollViewer', borrowedPresentation, false);
+      this._mode = resolveCanvasViewerMode('PptxScrollViewer', opts.mode, borrowedPresentation);
     } else {
       this._presentationOwner = new TerminalResourceOwner('PptxScrollViewer');
       this._mode = resolveCanvasViewerMode('PptxScrollViewer', opts.mode, undefined);
@@ -420,8 +436,8 @@ export class PptxScrollViewer implements ZoomableViewer {
       this._resizeObserver.observe(this._container);
     }
 
-    if (this._injected) {
-      // An injected engine is already loaded, so lay out + mount the first
+    if (this._borrowed) {
+      // A borrowed engine is already loaded, so lay out + mount the first
       // window immediately. relayout() is idempotent and defers under a
       // zero-width container (the resize path re-runs it once width appears).
       this.relayout();
@@ -430,21 +446,22 @@ export class PptxScrollViewer implements ZoomableViewer {
 
   /**
    * Load a PPTX from URL or ArrayBuffer and render the first window.
-   * UNSUPPORTED when an engine was injected via `opts.presentation` (throws) — the
-   * caller already owns the parsed engine.
+   * Unsupported on a Viewer created by {@link fromPresentation}; the caller
+   * already owns the parsed engine.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
     if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
-    if (this._injected) {
+    if (this._borrowed) {
       throw new Error(
-        'PptxScrollViewer.load() is unsupported when an engine is injected via opts.presentation; the injected engine is already loaded.',
+        'PptxScrollViewer.load() is unsupported on a Viewer created by fromPresentation(); ' +
+          'the borrowed presentation is already loaded.',
       );
     }
-    // SC20 atomic swap: a self-loaded viewer OWNS its engine (destroy() tears it
-    // down when `!_injected`), so a re-load must not orphan the previous one.
+    // SC20 atomic swap: a self-loaded viewer OWNS its engine, so a re-load must
+    // not orphan the previous one.
     // Retain it locally and free it only after the new engine loads — a FAILED
     // re-load then keeps the current deck rendered rather than going blank. (The
-    // injected path returned above can never reach here, so this only ever frees
+    // borrowed path returned above can never reach here, so this only ever frees
     // an engine we created.)
     try {
       const pres = await this._presentationOwner.replace(() => PptxPresentation.load(source, {
@@ -470,7 +487,7 @@ export class PptxScrollViewer implements ZoomableViewer {
       this._find.invalidate();
       this._findActive = false;
       // Lay out + mount the first window now that the engine exists (mirrors the
-      // injected-engine path in the constructor). relayout() is idempotent and
+      // borrowed-engine path in the constructor). relayout() is idempotent and
       // defers under a zero-width container — `_onResize` re-runs it once width
       // appears.
       this.relayout();
@@ -535,7 +552,7 @@ export class PptxScrollViewer implements ZoomableViewer {
   /**
    * Recompute per-slide heights + the spacer and re-mount the visible window.
    *
-   * The viewer already calls this automatically after `load()`, an injected
+   * The viewer already calls this automatically after `load()`, a borrowed
    * engine, a container resize, and a zoom, so most integrations never need it.
    * It is public as a deliberate escape hatch: if the host mutates the layout in
    * a way the `ResizeObserver` cannot observe (e.g. a CSS change on an ancestor
@@ -2027,7 +2044,7 @@ export class PptxScrollViewer implements ZoomableViewer {
 
   /**
    * Tear down the viewer: remove the DOM subtree and (only for a self-loaded
-   * engine) destroy the engine. An injected engine is left intact — the caller
+   * engine) destroy the engine. A borrowed engine is left intact — the caller
    * owns its lifecycle. Per-slot worker ImageBitmaps are closed on recycle.
    */
   destroy(): void {

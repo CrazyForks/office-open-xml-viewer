@@ -9,13 +9,14 @@ const exampleFiles = {
   svelte: { integration: 'svelte/src/createOfficeViewer.ts', app: 'svelte/src/App.svelte' },
   solid: { integration: 'solid/src/createOfficeViewer.ts', app: 'solid/src/App.tsx' },
 } as const;
+const exampleFrameworks = ['react', 'vue', 'svelte', 'solid'] as const;
 const exampleSource = (path: string) => readFileSync(
   new URL(`examples/frameworks/${path}`, repositoryRoot),
   'utf8',
 );
 
 describe('framework integration guides', () => {
-  it.each(['react', 'vue', 'svelte', 'solid'])('publishes an independent SEO page for %s', (framework) => {
+  it.each(exampleFrameworks)('publishes an independent SEO page for %s', (framework) => {
     const pageUrl = new URL(`pages/frameworks/${framework}.astro`, siteRoot);
     expect(existsSync(pageUrl)).toBe(true);
 
@@ -165,7 +166,7 @@ describe('framework integration guides', () => {
     }
   });
 
-  it.each(['react', 'vue', 'svelte', 'solid'])('keeps the %s StackBlitz project self-contained', (framework) => {
+  it.each(exampleFrameworks)('keeps the %s StackBlitz project self-contained', (framework) => {
     const mainExtension = framework === 'react' || framework === 'solid' ? 'tsx' : 'ts';
     const main = exampleSource(`${framework}/src/main.${mainExtension}`);
     const packageJson = JSON.parse(exampleSource(`${framework}/package.json`)) as {
@@ -177,7 +178,7 @@ describe('framework integration guides', () => {
     expect(packageJson.stackblitz?.startCommand).toBe(false);
   });
 
-  it.each(['react', 'vue', 'svelte', 'solid'])(
+  it.each(exampleFrameworks)(
     'keeps the %s viewer surface transparent and owns the desk background in CSS',
     (framework) => {
       const integration = exampleSource(exampleFiles[framework].integration);

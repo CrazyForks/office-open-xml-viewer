@@ -71,8 +71,8 @@ describe('official-site home design', () => {
   });
 
   it('uses selectable scroll viewers for the DOCX and PPTX samples', () => {
-    expect(live).toContain('new DocxScrollViewer');
-    expect(live).toContain('new PptxScrollViewer');
+    expect(live).toContain('DocxScrollViewer.fromDocument');
+    expect(live).toContain('PptxScrollViewer.fromPresentation');
     expect(live.match(/enableTextSelection:\s*true/g)).toHaveLength(2);
   });
 

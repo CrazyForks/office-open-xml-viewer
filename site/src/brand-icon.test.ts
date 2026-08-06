@@ -16,6 +16,7 @@ const sharedFooterSurfaces = [
   read('./layouts/FormatPage.astro'),
   read('./components/FrameworkGuide.astro'),
   read('./pages/frameworks/index.astro'),
+  read('./pages/announcements/[slug].astro'),
 ];
 
 describe('official-site brand icon', () => {

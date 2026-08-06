@@ -9,12 +9,12 @@ import {
 afterEach(() => vi.restoreAllMocks());
 
 describe('resolveCanvasViewerMode', () => {
-  it('uses the injected engine mode and rejects only an explicit conflict', () => {
+  it('uses the borrowed engine mode and rejects only an explicit conflict', () => {
     const engine = { mode: 'worker' as const };
     expect(resolveCanvasViewerMode('Viewer', undefined, engine)).toBe('worker');
     expect(resolveCanvasViewerMode('Viewer', 'worker', engine)).toBe('worker');
     expect(() => resolveCanvasViewerMode('Viewer', 'main', engine)).toThrow(
-      "Viewer: opts.mode='main' conflicts with the injected engine's mode='worker'",
+      "Viewer: opts.mode='main' conflicts with the borrowed engine's mode='worker'",
     );
   });
 

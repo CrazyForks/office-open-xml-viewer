@@ -33,6 +33,11 @@ import {
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 
+const borrowedPresentationOption = Symbol('PptxViewer.borrowedPresentation');
+type InternalPptxViewerOptions = PptxViewerOptions & {
+  [borrowedPresentationOption]?: PptxPresentation;
+};
+
 /** How {@link PptxViewer} presents hidden slides (`<p:sld show="0">`). */
 export type HiddenSlideMode = 'show' | 'skip' | 'dim';
 
@@ -40,11 +45,6 @@ export type HiddenSlideMode = 'show' | 'skip' | 'dim';
 const DEFAULT_HIDDEN_DIM: DimOptions = { color: '#ffffff', opacity: 0.6 };
 
 export interface PptxViewerOptions extends RenderOptions, LoadOptions {
-  /**
-   * Borrow an already-loaded presentation. Its mode is authoritative, `load()`
-   * is unavailable, and `destroy()` leaves the caller-owned presentation open.
-   */
-  presentation?: PptxPresentation;
   /** Called when a slide finishes rendering */
   onSlideChange?: (index: number, total: number) => void;
   /**
@@ -159,7 +159,7 @@ export class PptxViewer implements ZoomableViewer {
   private _measureCtx: CanvasRenderingContext2D | null = null;
   private readonly presentationOwner: TerminalResourceOwner<PptxPresentation>;
   private get engine(): PptxPresentation | null { return this.presentationOwner.current; }
-  private readonly injected: boolean;
+  private readonly borrowed: boolean;
   private readonly hostWindow: Window & typeof globalThis;
   private readonly opts: PptxViewerOptions;
   private currentSlide = 0;
@@ -169,15 +169,33 @@ export class PptxViewer implements ZoomableViewer {
   private readonly renderDispatcher: StaticCanvasRenderDispatcher;
   private readonly errorRouter: CanvasViewerErrorRouter;
   private destroyed = false;
+  /**
+   * Create a Viewer that borrows an already-loaded presentation.
+   *
+   * The presentation's render mode is authoritative. The returned Viewer
+   * cannot load another source, and destroying it leaves the caller-owned
+   * presentation open. Call {@link goToSlide} to render the initial slide.
+   */
+  static fromPresentation(
+    canvas: HTMLCanvasElement,
+    presentation: PptxPresentation,
+    opts: Omit<PptxViewerOptions, keyof LoadOptions> = {},
+  ): Omit<PptxViewer, 'load'> {
+    return new PptxViewer(canvas, {
+      ...opts,
+      [borrowedPresentationOption]: presentation,
+    } as InternalPptxViewerOptions);
+  }
+
   constructor(canvas: HTMLCanvasElement, opts: PptxViewerOptions = {}) {
     this.opts = opts;
     this.canvas = canvas;
-    const injectedPresentation = opts.presentation;
-    this.injected = injectedPresentation !== undefined;
-    this._mode = resolveCanvasViewerMode('PptxViewer', opts.mode, injectedPresentation);
+    const borrowedPresentation = (opts as InternalPptxViewerOptions)[borrowedPresentationOption];
+    this.borrowed = borrowedPresentation !== undefined;
+    this._mode = resolveCanvasViewerMode('PptxViewer', opts.mode, borrowedPresentation);
     this.presentationOwner = new TerminalResourceOwner(
       'PptxViewer',
-      injectedPresentation ?? null,
+      borrowedPresentation ?? null,
       false,
     );
     const hostWindow = canvas.ownerDocument?.defaultView ??
@@ -221,10 +239,10 @@ export class PptxViewer implements ZoomableViewer {
    */
   async load(source: string | ArrayBuffer): Promise<void> {
     if (this.destroyed) throw new Error('PptxViewer is destroyed');
-    if (this.injected) {
+    if (this.borrowed) {
       throw new Error(
-        'PptxViewer.load() is unsupported when an engine is injected via opts.presentation; ' +
-          'the injected engine is already loaded.',
+        'PptxViewer.load() is unsupported on a Viewer created by fromPresentation(); ' +
+          'the borrowed presentation is already loaded.',
       );
     }
     // SC20 atomic swap: retain the previous engine locally and only tear it down

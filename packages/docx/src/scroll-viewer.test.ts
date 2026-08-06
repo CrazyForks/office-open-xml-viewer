@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DocxScrollViewer } from './scroll-viewer.js';
 import { DocxDocument } from './document.js';
-import { installDom, makeContainer, makeEl, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
+import { installDom, makeContainer, makeEl, makeBorrowedDocxScrollViewer, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 import * as docxIndex from './index.js';
 
 afterEach(() => {
@@ -14,7 +14,7 @@ describe('DocxScrollViewer — skeleton (T1)', () => {
     installDom();
     const container = makeContainer();
     const engine = new FakeDocxEngine(3, [{ widthPt: 612, heightPt: 792 }]);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, { document: engine.asDoc() });
+    const v = DocxScrollViewer.fromDocument(container as unknown as HTMLElement, engine.asDoc());
     // container → wrapper
     const wrapper = container.children[0];
     expect(wrapper.tag).toBe('div');
@@ -29,34 +29,40 @@ describe('DocxScrollViewer — skeleton (T1)', () => {
     v.destroy();
   });
 
-  it('exposes pageCount from the injected engine', () => {
+  it('exposes pageCount from the borrowed engine', () => {
     installDom();
     const engine = new FakeDocxEngine(5, [{ widthPt: 612, heightPt: 792 }]);
-    const v = new DocxScrollViewer(makeContainer() as unknown as HTMLElement, { document: engine.asDoc() });
+    const v = DocxScrollViewer.fromDocument(
+      makeContainer() as unknown as HTMLElement,
+      engine.asDoc(),
+    );
     expect(v.pageCount).toBe(5);
     v.destroy();
   });
 
-  it('load() is unsupported when an engine is injected', async () => {
+  it('load() is unsupported when an engine is borrowed', async () => {
     installDom();
     const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
-    const v = new DocxScrollViewer(makeContainer() as unknown as HTMLElement, { document: engine.asDoc() });
-    await expect(v.load('x.docx')).rejects.toThrow(/injected/i);
+    const v = DocxScrollViewer.fromDocument(
+      makeContainer() as unknown as HTMLElement,
+      engine.asDoc(),
+    );
+    await expect((v as DocxScrollViewer).load('x.docx')).rejects.toThrow(/fromDocument/i);
     v.destroy();
   });
 
-  it('destroy() removes the DOM and does NOT destroy an injected engine', () => {
+  it('destroy() removes the DOM and does NOT destroy an borrowed engine', () => {
     installDom();
     const container = makeContainer();
     const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, { document: engine.asDoc() });
+    const v = DocxScrollViewer.fromDocument(container as unknown as HTMLElement, engine.asDoc());
     expect(container.children.length).toBe(1); // wrapper mounted
     v.destroy();
     expect(container.children.length).toBe(0); // wrapper removed
-    expect(engine.destroyed).toBe(false); // injected engine preserved (caller owns it)
+    expect(engine.destroyed).toBe(false); // borrowed engine preserved (caller owns it)
   });
 
-  it('pageCount is 0 before load resolves (no injected engine)', () => {
+  it('pageCount is 0 before load resolves (no borrowed engine)', () => {
     installDom();
     const v = new DocxScrollViewer(makeContainer() as unknown as HTMLElement, {});
     expect(v.pageCount).toBe(0);
@@ -76,45 +82,45 @@ describe('DocxScrollViewer — skeleton (T1)', () => {
     v.destroy();
   });
 
-  // O1 (design §11): an injected engine's own `mode` is authoritative. An
+  // O1 (design §11): an borrowed engine's own `mode` is authoritative. An
   // EXPLICITLY conflicting opts.mode is a mis-configuration rejected at
   // construction; a matching or absent opts.mode constructs fine.
-  it('throws when opts.mode conflicts with an injected worker-mode engine', () => {
+  it('throws when opts.mode conflicts with an borrowed worker-mode engine', () => {
     installDom();
     const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }], 'worker');
     expect(
       () =>
-        new DocxScrollViewer(makeContainer() as unknown as HTMLElement, {
+        makeBorrowedDocxScrollViewer(makeContainer() as unknown as HTMLElement, {
           document: engine.asDoc(),
           mode: 'main',
         }),
     ).toThrow(/mode/i);
   });
 
-  it('does NOT throw when opts.mode matches an injected worker-mode engine', () => {
+  it('does NOT throw when opts.mode matches an borrowed worker-mode engine', () => {
     installDom();
     const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }], 'worker');
-    const v = new DocxScrollViewer(makeContainer() as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(makeContainer() as unknown as HTMLElement, {
       document: engine.asDoc(),
       mode: 'worker',
     });
     expect(v.pageCount).toBe(1);
     v.destroy();
-    // Injected engine is caller-owned even in the worker case: destroy() leaves it intact.
+    // Borrowed engine is caller-owned even in the worker case: destroy() leaves it intact.
     expect(engine.destroyed).toBe(false);
   });
 
-  it('constructs a default-main injected engine with absent opts.mode (load still rejects; destroy preserves engine)', async () => {
+  it('constructs a default-main borrowed engine with absent opts.mode (load still rejects; destroy preserves engine)', async () => {
     installDom();
     // Default mode is 'main'; opts.mode is absent ⇒ no conflict, resolved path is main.
     const engine = new FakeDocxEngine(2, [{ widthPt: 612, heightPt: 792 }]);
-    const v = new DocxScrollViewer(makeContainer() as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(makeContainer() as unknown as HTMLElement, {
       document: engine.asDoc(),
     });
     expect(v.pageCount).toBe(2);
-    await expect(v.load('x.docx')).rejects.toThrow(/injected/i);
+    await expect(v.load('x.docx')).rejects.toThrow(/borrowed/i);
     v.destroy();
-    // Injected engine is caller-owned: destroy() must not tear it down.
+    // Borrowed engine is caller-owned: destroy() must not tear it down.
     expect(engine.destroyed).toBe(false);
   });
 
@@ -124,7 +130,7 @@ describe('DocxScrollViewer — skeleton (T1)', () => {
     installDom();
     const container = makeContainer();
     const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       background: '#525659',
     });
@@ -137,7 +143,7 @@ describe('DocxScrollViewer — skeleton (T1)', () => {
     installDom();
     const container = makeContainer();
     const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
     });
     const scrollHost = container.children[0].children[0];
@@ -161,7 +167,7 @@ describe('DocxScrollViewer — layout + virtualization (T2)', () => {
       // uniform, but T2 passes the full array explicitly).
       Array.from({ length: pageCount }, () => ({ widthPt: 100, heightPt: 200 })),
     );
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       overscan: 1,
@@ -207,7 +213,7 @@ describe('DocxScrollViewer — layout + virtualization (T2)', () => {
       { widthPt: 100, heightPt: 150 },
     ];
     const engine = new FakeDocxEngine(3, sizes);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       overscan: 1,
@@ -290,7 +296,7 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(10, [{ widthPt: 100, heightPt: 200 }]);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       paddingLeft: 0, // full-width fit → page width px = 200 (asserted below)
@@ -323,7 +329,7 @@ describe('DocxScrollViewer — rendering (T3)', () => {
       { widthPt: 100, heightPt: 100 },
       { widthPt: 200, heightPt: 100 },
     ]);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       paddingLeft: 0, // full-width fit → base scale 1.5 (page widths 200 / 400)
@@ -351,7 +357,7 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(10, [{ widthPt: 100, heightPt: 200 }]);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
     });
@@ -373,7 +379,7 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     // worker mode; a viewer that mis-routed would blow up (and renderCalls would
     // record the attempt). The direct _mode routing must never touch renderPage.
     const engine = new FakeDocxEngine(10, [{ widthPt: 100, heightPt: 200 }], 'worker');
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
     });
@@ -395,7 +401,7 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(10, [{ widthPt: 100, heightPt: 200 }], 'worker');
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
     });
@@ -427,7 +433,7 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(50, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
     });
@@ -455,7 +461,7 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     // Deferred: renderPageToBitmap resolves only when the test calls resolve(),
     // so we can scroll a slot's page out of the window BEFORE the bitmap arrives.
     const engine = new FakeDocxEngine(50, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
     });
@@ -488,7 +494,7 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(50, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       paddingTop: 0, // flush top so page 0's slot sits at top:0px (asserted below)
@@ -543,7 +549,7 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(50, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
     const onError = vi.fn();
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       overscan: 1,
@@ -582,7 +588,7 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     // Deferred so a render is genuinely in flight when we destroy the viewer.
     const engine = new FakeDocxEngine(50, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
     const onError = vi.fn();
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       onError,
@@ -621,7 +627,7 @@ describe('DocxScrollViewer — zoom (T4)', () => {
       pageCount,
       Array.from({ length: pageCount }, () => ({ widthPt: 100, heightPt: 200 })),
     );
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       // Flush top/bottom (paddingTop/Bottom default to `gap`; the T4 offset
@@ -695,7 +701,7 @@ describe('DocxScrollViewer — zoom (T4)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(5, [{ widthPt: 100, heightPt: 200 }]);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
     });
@@ -772,7 +778,7 @@ describe('DocxScrollViewer — zoom (T4)', () => {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(20, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       paddingTop: 0, // flush top so page 0's slot sits at top:0px (asserted below)
@@ -836,7 +842,7 @@ describe('DocxScrollViewer — zoom (T4)', () => {
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(20, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
     const onError = vi.fn();
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       paddingTop: 0, // flush top so page 0's slot sits at top:0px (asserted below)
@@ -900,7 +906,7 @@ describe('DocxScrollViewer — self-load path (T7 story)', () => {
     const container = makeContainer(200, 400);
     // Mock the static loader so load() resolves to a fake engine WITHOUT touching
     // a real Worker / WASM. The viewer must call relayout() after assignment so a
-    // self-loaded (non-injected) viewer is not left blank (I-2).
+    // self-loaded (non-borrowed) viewer is not left blank (I-2).
     const engine = new FakeDocxEngine(10, [{ widthPt: 100, heightPt: 200 }]);
     const loadSpy = vi.spyOn(DocxDocument, 'load').mockResolvedValue(engine.asDoc());
     const v = new DocxScrollViewer(container as unknown as HTMLElement, { gap: 10 });
@@ -934,7 +940,7 @@ describe('DocxScrollViewer — text selection (T5)', () => {
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(3, [{ widthPt: 100, heightPt: 200 }]);
     engine.feedTextRuns = [RUN];
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       enableTextSelection: true,
       gap: 10,
@@ -960,7 +966,7 @@ describe('DocxScrollViewer — text selection (T5)', () => {
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(1, [{ widthPt: 100, heightPt: 200 }]);
     engine.feedTextRuns = [RUN];
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       enableTextSelection: true,
       gap: 10,
@@ -988,7 +994,7 @@ describe('DocxScrollViewer — text selection (T5)', () => {
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(50, [{ widthPt: 100, heightPt: 200 }]);
     engine.feedTextRuns = [RUN];
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       enableTextSelection: true,
       gap: 10,
@@ -1017,7 +1023,7 @@ describe('DocxScrollViewer — text selection (T5)', () => {
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(3, [{ widthPt: 100, heightPt: 200 }], 'worker');
     engine.feedTextRuns = [RUN];
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       enableTextSelection: true,
       gap: 10,
@@ -1055,7 +1061,7 @@ describe('DocxScrollViewer — text selection (T5)', () => {
     // move the epoch WHILE page 0's first render is in flight.
     const engine = new FakeDocxEngine(20, [{ widthPt: 100, heightPt: 200 }], 'main', true);
     engine.feedTextRuns = [RUN];
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       enableTextSelection: true,
       gap: 10,
@@ -1105,7 +1111,7 @@ describe('DocxScrollViewer — full-document find', () => {
       Array.from({ length: 4 }, () => ({ widthPt: 100, heightPt: 200 })),
     );
     engine.feedTextRuns = [RUN];
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       findHighlightColors: {
         match: 'rgba(1, 2, 3, 0.4)',
@@ -1164,7 +1170,7 @@ describe('DocxScrollViewer — full-document find', () => {
       const container = makeContainer(200, 120);
       const engine = new FakeDocxEngine(1, [{ widthPt: 100, heightPt: 200 }], mode);
       engine.feedTextRuns = [RUN];
-      const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
         document: engine.asDoc(),
         gap: 0,
         paddingTop: 0,
@@ -1215,7 +1221,7 @@ describe('DocxScrollViewer — full-document find', () => {
         engine.collectPageRuns = (page) => page === 1
           ? new Promise((resolve) => { resolveSecond = resolve; })
           : Promise.resolve([RUN]);
-        const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+        const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
           document: engine.asDoc(),
           gap: 0,
           overscan: 0,
@@ -1262,7 +1268,7 @@ describe('DocxScrollViewer — full-document find', () => {
       const engine = new FakeDocxEngine(1, [{ widthPt: 100, heightPt: 200 }]);
       let resolveRuns!: (runs: NonNullable<typeof engine.feedTextRuns>) => void;
       engine.collectPageRuns = () => new Promise((resolve) => { resolveRuns = resolve; });
-      const v = new DocxScrollViewer(makeContainer(200, 120) as unknown as HTMLElement, {
+      const v = makeBorrowedDocxScrollViewer(makeContainer(200, 120) as unknown as HTMLElement, {
         document: engine.asDoc(),
       });
       const pending = v.findText('alpha');
@@ -1320,7 +1326,7 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
       pageCount,
       Array.from({ length: pageCount }, () => ({ widthPt: 100, heightPt: 200 })),
     );
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: GAP,
       // Flush top/bottom: the T6 STRIDE/offset arithmetic assumes offset[0]===0.
@@ -1530,7 +1536,7 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
     installDom();
     const container = makeContainer(0, 0); // unlaid-out
     const engine = new FakeDocxEngine(5, Array.from({ length: 5 }, () => ({ widthPt: 100, heightPt: 200 })));
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, { document: engine.asDoc() });
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, { document: engine.asDoc() });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     expect(v.mountedPageIndicesForTest().length).toBe(0); // deferred
     container.clientWidth = 300;
@@ -1545,7 +1551,7 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
     installDom();
     const container = makeContainer(300, 400);
     const engine = new FakeDocxEngine(0, []);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, { document: engine.asDoc() });
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, { document: engine.asDoc() });
     v.relayout();
     const spacer = (container.children[0] as FakeEl).children[0].children[0] as FakeEl;
     expect(parseFloat(spacer.style.height || '0')).toBe(0);
@@ -1559,7 +1565,7 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
     const container = makeContainer(0, 0);
     const engine = new FakeDocxEngine(0, []);
     const changes: number[] = [];
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       onVisiblePageChange: (i: number) => changes.push(i),
     });
@@ -1587,7 +1593,7 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
     vi.stubGlobal('ResizeObserver', SpyRO);
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(3, [{ widthPt: 100, heightPt: 200 }]);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, { document: engine.asDoc() });
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, { document: engine.asDoc() });
     v.destroy();
     expect(disconnected).toBe(1);
   });
@@ -1607,7 +1613,7 @@ describe('DocxScrollViewer — paddingTop/paddingBottom (desk margin)', () => {
       pageCount,
       Array.from({ length: pageCount }, () => ({ widthPt: 100, heightPt: 200 })),
     );
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: GAP,
       // This block tests the VERTICAL desk margin; pin the horizontal gutters to 0
@@ -1713,7 +1719,7 @@ describe('DocxScrollViewer — paddingLeft/paddingRight (horizontal desk gutters
       pageCount,
       Array.from({ length: pageCount }, () => ({ widthPt: 100, heightPt: 200 })),
     );
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 16,
       ...opts,
@@ -1826,7 +1832,7 @@ describe('DocxScrollViewer — paddingLeft/paddingRight (horizontal desk gutters
       { widthPt: 100, heightPt: 100 },
       { widthPt: 200, heightPt: 100 },
     ]);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       paddingLeft: 12,
@@ -1896,7 +1902,7 @@ describe('DocxScrollViewer — flicker-free zoom (T8)', () => {
       mode,
       deferred,
     );
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       paddingTop: 0,
@@ -2199,7 +2205,7 @@ describe('DocxScrollViewer — pageShadow (T9)', () => {
       mode,
       deferred,
     );
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       paddingTop: 0,

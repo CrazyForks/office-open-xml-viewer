@@ -12,15 +12,35 @@ export type DemoKind = 'demo' | 'scroll' | 'thumbnails' | 'masterdetail' | 'shee
 const DPR = () => Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2);
 
 // ── headless engine adapter (pptx slides / docx pages) ──────────────
-type Doc = { count: number; render: (c: HTMLCanvasElement, i: number, width: number) => Promise<void> };
+type LoadedDoc = {
+  kind: 'pptx';
+  engine: PptxPresentation;
+  count: number;
+  render: (c: HTMLCanvasElement, i: number, width: number) => Promise<void>;
+} | {
+  kind: 'docx';
+  engine: DocxDocument;
+  count: number;
+  render: (c: HTMLCanvasElement, i: number, width: number) => Promise<void>;
+};
 
-async function loadDoc(format: Format, url: string): Promise<Doc> {
+async function loadDoc(format: Format, url: string): Promise<LoadedDoc> {
   if (format === 'pptx') {
-    const d = await PptxPresentation.load(url, { useGoogleFonts: true });
-    return { count: d.slideCount, render: (c, i, width) => d.renderSlide(c, i, { width, dpr: DPR() }) };
+    const presentation = await PptxPresentation.load(url, { useGoogleFonts: true });
+    return {
+      kind: 'pptx',
+      engine: presentation,
+      count: presentation.slideCount,
+      render: (c, i, width) => presentation.renderSlide(c, i, { width, dpr: DPR() }),
+    };
   }
-  const d = await DocxDocument.load(url, { useGoogleFonts: true });
-  return { count: d.pageCount, render: (c, i, width) => d.renderPage(c, i, { width, dpr: DPR() }) };
+  const document = await DocxDocument.load(url, { useGoogleFonts: true });
+  return {
+    kind: 'docx',
+    engine: document,
+    count: document.pageCount,
+    render: (c, i, width) => document.renderPage(c, i, { width, dpr: DPR() }),
+  };
 }
 
 // ── viewer adapter (pptx / docx built-in viewers) ───────────────────
@@ -32,6 +52,8 @@ type ViewerCtl = {
   index: () => number;
   count: () => number;
 };
+
+type BorrowedViewerCtl = Omit<ViewerCtl, 'load'> & { destroy: () => void };
 
 function makeViewer(format: Format, canvas: HTMLCanvasElement, width: number): ViewerCtl {
   // NB: no enableTextSelection here. The demo canvases are downscaled with CSS
@@ -50,6 +72,21 @@ function makeViewer(format: Format, canvas: HTMLCanvasElement, width: number): V
   return {
     load: (u) => v.load(u), go: (i) => v.goToPage(i), next: () => v.nextPage(),
     prev: () => v.prevPage(), index: () => v.currentPage, count: () => v.pageCount,
+  };
+}
+
+function makeBorrowedViewer(doc: LoadedDoc, canvas: HTMLCanvasElement, width: number): BorrowedViewerCtl {
+  if (doc.kind === 'pptx') {
+    const viewer = PptxViewer.fromPresentation(canvas, doc.engine, { width });
+    return {
+      go: (i) => viewer.goToSlide(i), next: () => viewer.nextSlide(), prev: () => viewer.prevSlide(),
+      index: () => viewer.slideIndex, count: () => viewer.slideCount, destroy: () => viewer.destroy(),
+    };
+  }
+  const viewer = DocxViewer.fromDocument(canvas, doc.engine, { width, dpr: DPR() });
+  return {
+    go: (i) => viewer.goToPage(i), next: () => viewer.nextPage(), prev: () => viewer.prevPage(),
+    index: () => viewer.currentPage, count: () => viewer.pageCount, destroy: () => viewer.destroy(),
   };
 }
 
@@ -74,7 +111,7 @@ export function mountDemoInto(el: HTMLElement, kind: DemoKind, format: Format, u
 
 interface SheetWindowSession {
   readonly popup: Window;
-  readonly viewer: XlsxSheetViewer;
+  readonly viewer: Omit<XlsxSheetViewer, 'load'>;
 }
 
 // Excel — parse once in the parent and project borrowed sheet viewers into
@@ -187,8 +224,7 @@ function mountSheetWindows(el: HTMLElement, url: string): void {
           popupDocument.body.replaceChildren(shell);
 
           const renderState: { error: Error | null } = { error: null };
-          const viewer = new XlsxSheetViewer(canvas, {
-            workbook,
+          const viewer = XlsxSheetViewer.fromWorkbook(canvas, workbook, {
             onError: (error) => {
               renderState.error = error;
               loading.textContent = err(error);
@@ -371,11 +407,16 @@ function mountMasterDetail(el: HTMLElement, format: Format, url: string): void {
   layout.append(rail, detail);
   el.appendChild(layout);
 
-  const viewer = makeViewer(format, detailCanvas, 960);
-  const detailViewerWrapper = detailCanvas.parentElement as HTMLDivElement;
-  detailViewerWrapper.hidden = true;
-  Promise.all([loadDoc(format, url), viewer.load(url)])
-    .then(async ([doc]) => {
+  loadDoc(format, url)
+    .then(async (doc) => {
+      const viewer = makeBorrowedViewer(doc, detailCanvas, 960);
+      const detailViewerWrapper = detailCanvas.parentElement as HTMLDivElement;
+      detailViewerWrapper.hidden = true;
+      window.addEventListener('pagehide', () => {
+        viewer.destroy();
+        doc.engine.destroy();
+      }, { once: true });
+      await viewer.go(0);
       detailCanvas.hidden = false;
       detailViewerWrapper.hidden = false;
       st.remove();

@@ -1,6 +1,7 @@
 ---
 import Base from '../../layouts/Base.astro';
 import Nav from '../../components/Nav.astro';
+import SiteFooter from '../../components/SiteFooter.astro';
 import { Code } from 'astro:components';
 import { codeThemes } from '../../lib/code-theme';
 import { announcements, formatAnnouncementDate, type Announcement } from '../../lib/announcements';
@@ -60,6 +61,7 @@ const { announcement } = Astro.props as { announcement: Announcement };
       </div>
     </article>
   </main>
+  <SiteFooter />
 </Base>
 
 <style>

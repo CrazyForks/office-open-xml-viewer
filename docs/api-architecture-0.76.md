@@ -90,20 +90,20 @@ the behavior stays in the format package.
    not a second WASM free-function parser path.
 5. A materialized result is explicitly documented as caller-owned memory
    proportional to its contents.
-6. Composite viewers compose unit-viewer internals; they do not copy rendering,
+6. Composite viewers compose their format's focused-view internals; they do not copy rendering,
    selection, hit-testing, text-layer, or worker/bitmap dispatch logic.
 7. Shared lifecycle and transport code belongs in `core`; shared OOXML package
    and parser policy belongs in `ooxml-common`; format semantics remain in their
    format package.
 
-## Current Browser architecture
+## Browser architecture before 0.76
 
 ### Public surface
 
 | Layer | DOCX | PPTX | XLSX |
 | --- | --- | --- | --- |
 | Owned rendering engine | `DocxDocument` | `PptxPresentation` | `XlsxWorkbook` |
-| Canvas-mounted unit viewer | `DocxViewer(canvas)` | `PptxViewer(canvas)` | missing |
+| Canvas-mounted focused view | `DocxViewer(canvas)` | `PptxViewer(canvas)` | missing |
 | Container-mounted composite | `DocxScrollViewer(div)` | `PptxScrollViewer(div)` | `XlsxViewer(div)` |
 | Render unit | page | slide | worksheet viewport |
 
@@ -129,27 +129,71 @@ canvas generation guards, zoom, overlay, and error routing. The XLSX viewer is a
 single large class in which sheet drawing and interaction are coupled to the
 container chrome.
 
-## Target Browser architecture
+## Current Browser architecture (0.76+)
 
 ### Public surface
+
+<!-- viewer-api-symmetry-contract -->
 
 | Layer | DOCX | PPTX | XLSX |
 | --- | --- | --- | --- |
 | Owned rendering engine | `DocxDocument` | `PptxPresentation` | `XlsxWorkbook` |
-| Canvas-mounted unit viewer | `DocxViewer(canvas)` | `PptxViewer(canvas)` | `XlsxSheetViewer(canvas)` |
+| Canvas-mounted focused view | `DocxViewer(canvas)` | `PptxViewer(canvas)` | `XlsxSheetViewer(canvas)` |
 | Container-mounted composite | `DocxScrollViewer(div)` | `PptxScrollViewer(div)` | `XlsxViewer(div)` |
-| Unit navigation | `goToPage()` | `goToSlide()` | `goToSheet()` |
-| Unit count | `pageCount` | `slideCount` | `sheetCount` |
+| Primary navigation | `goToPage()` | `goToSlide()` | `goToSheet()` |
+| Primary count | `pageCount` | `slideCount` | `sheetCount` |
+
+This table aligns host integration and lifecycle contracts only. It does not
+claim that a DOCX page, PPTX slide, and XLSX sheet are equivalent domain units,
+or that Viewer boundaries should be forced into one abstraction. Each format
+keeps its natural concern: one DOCX page, one PPTX slide, or one active XLSX
+sheet viewport.
+
+The engine method correspondence is intentionally explicit:
+
+| Contract | DOCX | PPTX | XLSX |
+| --- | --- | --- | --- |
+| Parse and retain package | `DocxDocument.load()` | `PptxPresentation.load()` | `XlsxWorkbook.load()` |
+| Direct Canvas render | `renderPage(target, pageIndex, options)` | `renderSlide(target, slideIndex, options)` | `renderViewport(target, sheetIndex, range, options)` |
+| Bitmap render | `renderPageToBitmap(pageIndex, options)` | `renderSlideToBitmap(slideIndex, options)` | `renderViewportToBitmap(sheetIndex, range, options)` |
+| Render-mode owner | `DocxDocument.mode` | `PptxPresentation.mode` | `XlsxWorkbook.mode` |
+| Release retained resources | `destroy()` | `destroy()` | `destroy()` |
+
+The two viewer tiers follow the same acquisition and ownership contract:
+
+| Contract | DOCX | PPTX | XLSX |
+| --- | --- | --- | --- |
+| Canvas target | `DocxViewer(canvas)` | `PptxViewer(canvas)` | `XlsxSheetViewer(canvas)` |
+| Composite target | `DocxScrollViewer(container)` | `PptxScrollViewer(container)` | `XlsxViewer(container)` |
+| Viewer-owned acquisition | `viewer.load(source)` | `viewer.load(source)` | `viewer.load(source)` |
+| Borrowed engine factory | `fromDocument()` | `fromPresentation()` | `fromWorkbook()` |
+| Borrowed-engine rule | `load()` rejects; caller destroys engine | `load()` rejects; caller destroys engine | `load()` rejects; caller destroys engine |
+
+`load()` and the named engine factories are not two competing sources on one Viewer. They
+select two mutually exclusive ownership modes:
+
+- `new Viewer(target)` followed by `viewer.load(source)` is the convenience path.
+  The Viewer creates, replaces, and destroys its engine.
+- `Viewer.fromDocument()`, `Viewer.fromPresentation()`, or
+  `Viewer.fromWorkbook()` is the reuse path.
+  The caller can share one parsed engine across multiple views; the Viewer may
+  not replace it and never destroys it.
+
+Keeping both paths avoids forcing the common one-view case to manage an engine
+explicitly, while avoiding duplicate parsing, archive caches, workers, and font
+registrations in master/detail and multi-window cases. Public examples should
+lead with `viewer.load()` and present named factories as the advanced reuse path.
 
 The existing public names remain stable. We do not add an `XlsxScrollViewer`
 alias: the container component is a workbook viewer with sheet tabs and a
 scrollable cell grid, not a list of whole sheets.
 
-Every canvas-mounted unit viewer accepts its corresponding already-loaded
-engine (`document`, `presentation`, or `workbook`). Every container-mounted
-viewer accepts the same option. In all six cases the injected engine owns its
+Each Canvas-mounted and container-mounted Viewer exposes its format-specific
+named factory. In all six cases the borrowed engine owns its
 render mode and lifecycle: a conflicting explicit `mode` is rejected, `load()`
-is unavailable, and viewer teardown does not destroy the borrowed engine.
+is unavailable, and Viewer teardown does not destroy the borrowed engine. The
+factories are synchronous because their engines are already loaded; rendering
+and navigation remain asynchronous where they were asynchronous before.
 
 ### XLSX canvas-viewer contract
 
@@ -157,6 +201,29 @@ is unavailable, and viewer teardown does not destroy the borrowed engine.
 owns no sheet-tab/footer chrome and creates no scrollbar. Because a worksheet is
 not a finite page, it additionally exposes format-specific viewport movement.
 That extra state is not forced onto DOCX or PPTX.
+
+`XlsxWorkbook.renderSheet()` is deliberately absent. An OOXML worksheet can
+contain 1,048,576 rows and 16,384 columns, far beyond browser Canvas dimension
+and backing-memory limits. Unlike a DOCX page or PPTX slide, a worksheet is not
+a finite paint unit with one natural Canvas size. The low-level contract
+therefore requires an explicit `ViewportRange` through `renderViewport()`;
+`XlsxSheetViewer` supplies the higher-level "one sheet" experience by owning the
+scroll offset, visible range, resize projection, and redraw scheduling. A future
+full-sheet export API would need explicit bounds plus tiling or pagination and
+must not be a misleading `renderSheet()` alias.
+
+### Symmetry enforcement
+
+`scripts/check-viewer-api-symmetry.mjs` validates the committed public declaration
+baselines for all three formats. It checks engine `load`/mode/count/render/bitmap/
+destroy contracts, Canvas and container constructor targets, Viewer `load`, zoom,
+navigation and destroy methods, named borrowed-engine factories, and the absence
+of the old `document`/`presentation`/`workbook` injection options. It also rejects
+an unbounded `XlsxWorkbook.renderSheet()` and
+requires this section in both language variants. `check:public-api:built` runs it
+in CI after declaration-baseline validation, so an intentional API evolution
+must update the implementation, baseline, symmetry matrix, and documentation
+together.
 
 All mount DOM, styles, DPR reads, and document listeners resolve from
 `canvas.ownerDocument` and its `defaultView`. A parent page can therefore retain
@@ -178,8 +245,6 @@ export interface XlsxScrollToCellOptions {
 }
 
 export interface XlsxSheetViewerOptions extends LoadOptions {
-  /** Borrow one loaded engine; the caller retains its lifecycle. */
-  readonly workbook?: XlsxWorkbook;
   readonly cellScale?: number;
   readonly resizable?: boolean;
   readonly zoomMin?: number;
@@ -199,6 +264,11 @@ export interface XlsxSheetViewerOptions extends LoadOptions {
 }
 
 export class XlsxSheetViewer implements ZoomableViewer {
+  static fromWorkbook(
+    canvas: HTMLCanvasElement,
+    workbook: XlsxWorkbook,
+    options?: XlsxSheetViewerOptions,
+  ): XlsxSheetViewer;
   constructor(canvas: HTMLCanvasElement, options?: XlsxSheetViewerOptions);
   load(source: string | ArrayBuffer): Promise<void>;
   readonly sheetIndex: number;
@@ -238,10 +308,11 @@ export interface XlsxViewerOptions extends XlsxSheetViewerOptions {
 }
 ```
 
-`workbook` follows the same option-injection contract as `document` on the DOCX
-viewers and `presentation` on the PPTX viewers. `load()` is
-unsupported, the engine's render mode is authoritative, and viewer teardown
-does not destroy the caller-owned engine. Callers await `goToSheet(index)` when
+`fromWorkbook()` follows the same named-factory contract as `fromDocument()` on
+the DOCX viewers and `fromPresentation()` on the PPTX viewers. `load()` is
+unsupported on the returned Viewer, the engine's render mode is authoritative,
+and Viewer teardown does not destroy the caller-owned engine. Callers await
+`goToSheet(index)` when
 they need deterministic first-paint completion. Multiple sheet viewers share
 parsing, archive access, worksheet materialization, and immutable content caches
 while retaining independent viewport, selection, zoom, resize, outline, and
@@ -254,8 +325,8 @@ representable. Inputs are finite, clamped to the used scroll extent, and the
 callback receives the resulting clamped value.
 
 The canvas CSS box defines viewport width/height; DPR affects only backing-store
-resolution. `relayout()` re-reads that box. The viewer wraps and restores the
-caller canvas exactly like `DocxViewer`/`PptxViewer`. Wheel/trackpad input pans
+resolution. `relayout()` re-reads that box. The viewer uses the shared
+caller-canvas lifecycle to wrap and restore the canvas. Wheel/trackpad input pans
 the viewport without creating a scrollbar; touch-pinch remains outside this
 release.
 
@@ -547,7 +618,7 @@ listed replacement is complete:
 | --- | --- |
 | `parseDocx()` | `await materializeDocxDocument()` |
 | `parsePptx()` | `await materializePptxPresentation()` |
-| `parseXlsx()` | `await materializeXlsxWorkbookIndex()` or `session.workbookIndex` |
+| `parseXlsx()` | `await materializeXlsxWorkbookIndex()` |
 | `parseXlsxSheet()` | `await materializeXlsxWorksheet()` |
 | `parseXlsxAllSheets()` | `await materializeXlsxWorkbook()` |
 | `extractPptxImage()` | `await session.getImage()` inside `openPptxPresentation()` |

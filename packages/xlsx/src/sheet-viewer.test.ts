@@ -261,14 +261,17 @@ describe('XlsxSheetViewer canvas mount', () => {
     const canvas = makeEl('canvas');
     parent.appendChild(canvas);
 
-    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, { workbook });
+    const viewer = XlsxSheetViewer.fromWorkbook(
+      canvas as unknown as HTMLCanvasElement,
+      workbook,
+    );
     await viewer.goToSheet(1);
 
     expect(viewer.sheetIndex).toBe(1);
     expect(getWorksheet).toHaveBeenCalledWith(1);
     expect(getWorksheet).not.toHaveBeenCalledWith(0);
-    await expect(viewer.load(new ArrayBuffer(0))).rejects.toThrow(
-      'XlsxSheetViewer.load() is unsupported when an engine is injected',
+    await expect((viewer as XlsxSheetViewer).load(new ArrayBuffer(0))).rejects.toThrow(
+      'XlsxSheetViewer.load() is unsupported on a Viewer created by fromWorkbook()',
     );
 
     viewer.destroy();
@@ -276,7 +279,7 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(parent.children).toEqual([canvas]);
   });
 
-  it('validates an injected mode conflict before mounting the caller canvas', () => {
+  it('validates a borrowed mode conflict before mounting the caller canvas', () => {
     installDom();
     const parent = makeContainer();
     const canvas = makeEl('canvas');
@@ -288,10 +291,11 @@ describe('XlsxSheetViewer canvas mount', () => {
       destroy: vi.fn(),
     } as unknown as XlsxWorkbook;
 
-    expect(() => new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+    expect(() => XlsxSheetViewer.fromWorkbook(
+      canvas as unknown as HTMLCanvasElement,
       workbook,
-      mode: 'main',
-    })).toThrow("opts.mode='main' conflicts with the injected engine's mode='worker'");
+      { mode: 'main' } as never,
+    )).toThrow("opts.mode='main' conflicts with the borrowed engine's mode='worker'");
     expect(parent.children).toEqual([canvas]);
   });
 
@@ -307,13 +311,13 @@ describe('XlsxSheetViewer canvas mount', () => {
       isHidden: () => false,
       destroy: vi.fn(),
     } as unknown as XlsxWorkbook;
-    const first = new XlsxSheetViewer(
+    const first = XlsxSheetViewer.fromWorkbook(
       makeEl('canvas') as unknown as HTMLCanvasElement,
-      { workbook },
+      workbook,
     );
-    const second = new XlsxSheetViewer(
+    const second = XlsxSheetViewer.fromWorkbook(
       makeEl('canvas') as unknown as HTMLCanvasElement,
-      { workbook },
+      workbook,
     );
     await Promise.all([first.goToSheet(0), second.goToSheet(0)]);
     const firstWorksheet = (first as unknown as {

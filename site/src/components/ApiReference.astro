@@ -6,6 +6,11 @@ interface Props {
 }
 const { format } = Astro.props;
 const classes = apiReference[format];
+const borrowedEngine = {
+  docx: { className: 'DocxDocument', factory: 'fromDocument()' },
+  pptx: { className: 'PptxPresentation', factory: 'fromPresentation()' },
+  xlsx: { className: 'XlsxWorkbook', factory: 'fromWorkbook()' },
+}[format];
 ---
 <section class="api" data-reveal>
   <p class="api-badge">API reference</p>
@@ -14,6 +19,20 @@ const classes = apiReference[format];
     Every public option and method, straight from the source. Types omitted for brevity are exported
     from the package — your editor will autocomplete the rest.
   </p>
+
+  <div class="api-ownership">
+    <h4>Choose one loading mode</h4>
+    <p>
+      <strong>Normal case:</strong> construct the Viewer, then call <code>viewer.load(source)</code>.
+      The Viewer owns the parsed engine, supports replacement loads, and destroys it during teardown.
+    </p>
+    <p>
+      <strong>Shared-engine case:</strong> load <code>{borrowedEngine.className}</code> once and create
+      each view with <code>{borrowedEngine.factory}</code>. This is mutually exclusive with Viewer loading:
+      <code>load()</code> is unavailable, and the caller must destroy the borrowed engine after every
+      view has been destroyed.
+    </p>
+  </div>
 
   <div class="api-errors">
     <h4>Error handling</h4>
@@ -83,6 +102,11 @@ const classes = apiReference[format];
   }
   .api-title { font-size: 24px; font-weight: 700; margin: 8px 0 8px; }
   .api-desc { color: var(--text-dim); font-size: 16px; max-width: 70ch; margin: 0 0 8px; }
+
+  .api-ownership { margin-top: 30px; padding: 26px 28px 28px; border: 1px solid var(--border); background: var(--bg-elev); }
+  .api-ownership h4 { margin: 0; font-size: 19px; }
+  .api-ownership p { max-width: 92ch; margin: 10px 0 0; color: var(--text-dim); font-size: 14.5px; }
+  .api-ownership code { font-family: var(--mono); font-size: 0.9em; color: var(--text); }
 
   .api-errors { margin-top: 30px; padding: 26px 28px 28px; border: 1px solid var(--border); background: var(--bg-elev); }
   .api-errors h4 { margin: 0; font-size: 19px; }

@@ -99,25 +99,27 @@ describe('PptxViewer.destroy() — canvas reparent return', () => {
     expect(parent.children).toEqual([before, canvas]);
   });
 
-  it('borrows an injected presentation with the same lifecycle contract as the scroll viewer', async () => {
+  it('borrows a presentation through fromPresentation() with the same lifecycle contract as the scroll viewer', async () => {
     const { canvas } = mount();
     const engine = new FakePptxEngine(2, 9144000, 5143500);
-    const viewer = new PptxViewer(canvas as unknown as HTMLCanvasElement, {
-      presentation: engine.asPres(),
-    });
+    const viewer = PptxViewer.fromPresentation(
+      canvas as unknown as HTMLCanvasElement,
+      engine.asPres(),
+    );
     expect(viewer.slideCount).toBe(2);
-    await expect(viewer.load('x.pptx')).rejects.toThrow(/injected/i);
+    await expect((viewer as PptxViewer).load('x.pptx')).rejects.toThrow(/fromPresentation/);
     viewer.destroy();
     expect(engine.destroyed).toBe(false);
   });
 
-  it('rejects an injected mode conflict before reparenting the canvas', () => {
+  it('rejects a borrowed mode conflict before reparenting the canvas', () => {
     const { parent, canvas } = mount();
     const engine = new FakePptxEngine(1, 9144000, 5143500, 'worker');
-    expect(() => new PptxViewer(canvas as unknown as HTMLCanvasElement, {
-      presentation: engine.asPres(),
-      mode: 'main',
-    })).toThrow(/opts\.mode='main'.*mode='worker'/);
+    expect(() => PptxViewer.fromPresentation(
+      canvas as unknown as HTMLCanvasElement,
+      engine.asPres(),
+      { mode: 'main' } as never,
+    )).toThrow(/opts\.mode='main'.*mode='worker'/);
     expect(parent.children).toContain(canvas);
   });
 });
