@@ -727,6 +727,7 @@ export class PptxPresentation {
     private constructor();
 }
 export class PptxScrollViewer implements ZoomableViewer {
+    static fromPresentation(container: HTMLElement, presentation: PptxPresentation, opts?: Omit<PptxScrollViewerOptions, keyof LoadOptions>): Omit<PptxScrollViewer, 'load'>;
     constructor(container: HTMLElement, opts?: PptxScrollViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     get slideCount(): number;
@@ -767,7 +768,6 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
     refitOnResize?: boolean;
     background?: string;
     pageShadow?: string | false;
-    presentation?: PptxPresentation;
     onVisibleSlideChange?: (topIndex: number, total: number) => void;
     onScaleChange?: (scale: number) => void;
     onError?: (err: Error) => void;
@@ -792,6 +792,7 @@ export interface PptxTextRunInfo {
     hyperlink?: HyperlinkTarget;
 }
 export class PptxViewer implements ZoomableViewer {
+    static fromPresentation(canvas: HTMLCanvasElement, presentation: PptxPresentation, opts?: Omit<PptxViewerOptions, keyof LoadOptions>): Omit<PptxViewer, 'load'>;
     constructor(canvas: HTMLCanvasElement, opts?: PptxViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     goToSlide(index: number): Promise<void>;
@@ -819,7 +820,6 @@ export class PptxViewer implements ZoomableViewer {
     private __privatePresence;
 }
 export interface PptxViewerOptions extends RenderOptions, LoadOptions {
-    presentation?: PptxPresentation;
     onSlideChange?: (index: number, total: number) => void;
     onError?: (err: Error) => void;
     zoomMin?: number;

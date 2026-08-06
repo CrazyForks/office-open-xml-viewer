@@ -20,7 +20,7 @@ describe('XLSX multi-window sheet demo', () => {
     expect(demos).toContain('XlsxWorkbook.load(url, { useGoogleFonts: true })');
     expect(demos).toContain("window.open(");
     expect(demos).toContain('const popupDocument = popup.document');
-    expect(demos).toContain('const viewer = new XlsxSheetViewer(canvas, {');
+    expect(demos).toContain('const viewer = XlsxSheetViewer.fromWorkbook(canvas, workbook, {');
     expect(demos).toContain('workbook,');
     expect(demos).toContain('viewer.goToSheet(index)');
     expect(demos).toContain('popup.addEventListener(\'pagehide\'');
@@ -31,7 +31,7 @@ describe('XLSX multi-window sheet demo', () => {
     expect(snippets).toContain("import { XlsxSheetViewer, XlsxWorkbook } from '@silurus/ooxml/xlsx';");
     expect(snippets).toContain("await XlsxWorkbook.load('/sample.xlsx')");
     expect(snippets).toContain("window.open('', '_blank'");
-    expect(snippets).toContain('new XlsxSheetViewer(canvas, { workbook })');
+    expect(snippets).toContain('XlsxSheetViewer.fromWorkbook(canvas, workbook)');
     expect(snippets).toContain('await viewer.goToSheet(sheetIndex)');
     expect(snippets).toContain('viewer.destroy()');
   });

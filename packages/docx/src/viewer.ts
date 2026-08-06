@@ -17,12 +17,12 @@ import {
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import { invalidateDocxRenderTarget } from './paint/canvas-document';
 
+const borrowedDocumentOption = Symbol('DocxViewer.borrowedDocument');
+type InternalDocxViewerOptions = DocxViewerOptions & {
+  [borrowedDocumentOption]?: DocxDocument;
+};
+
 export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
-  /**
-   * Borrow an already-loaded document. Its mode is authoritative, `load()` is
-   * unavailable, and `destroy()` leaves the caller-owned document open.
-   */
-  document?: DocxDocument;
   container?: HTMLElement;
   /**
    * When true, adds a transparent text overlay div over the canvas so the
@@ -77,7 +77,7 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
 export class DocxViewer implements ZoomableViewer {
   private readonly _documentOwner: TerminalResourceOwner<DocxDocument>;
   private get _doc(): DocxDocument | null { return this._documentOwner.current; }
-  private readonly _injected: boolean;
+  private readonly _borrowed: boolean;
   private readonly _hostWindow: Window & typeof globalThis;
   private _currentPage = 0;
   /**
@@ -109,15 +109,33 @@ export class DocxViewer implements ZoomableViewer {
   private readonly _renderDispatcher: StaticCanvasRenderDispatcher;
   private readonly _errorRouter: CanvasViewerErrorRouter;
   private _destroyed = false;
+  /**
+   * Create a Viewer that borrows an already-loaded document.
+   *
+   * The document's render mode is authoritative. The returned Viewer cannot
+   * load another source, and destroying it leaves the caller-owned document
+   * open. Call {@link goToPage} to render the initial page.
+   */
+  static fromDocument(
+    canvas: HTMLCanvasElement,
+    document: DocxDocument,
+    opts: Omit<DocxViewerOptions, keyof LoadOptions> = {},
+  ): Omit<DocxViewer, 'load'> {
+    return new DocxViewer(canvas, {
+      ...opts,
+      [borrowedDocumentOption]: document,
+    } as InternalDocxViewerOptions);
+  }
+
   constructor(canvas: HTMLCanvasElement, opts: DocxViewerOptions = {}) {
     this._canvas = canvas;
     this._opts = opts;
-    const injectedDocument = opts.document;
-    this._injected = injectedDocument !== undefined;
-    this._mode = resolveCanvasViewerMode('DocxViewer', opts.mode, injectedDocument);
+    const borrowedDocument = (opts as InternalDocxViewerOptions)[borrowedDocumentOption];
+    this._borrowed = borrowedDocument !== undefined;
+    this._mode = resolveCanvasViewerMode('DocxViewer', opts.mode, borrowedDocument);
     this._documentOwner = new TerminalResourceOwner(
       'DocxViewer',
-      injectedDocument ?? null,
+      borrowedDocument ?? null,
       false,
     );
     const hostWindow = canvas.ownerDocument?.defaultView ??
@@ -157,10 +175,10 @@ export class DocxViewer implements ZoomableViewer {
    */
   async load(source: string | ArrayBuffer): Promise<void> {
     if (this._destroyed) throw new Error('DocxViewer is destroyed');
-    if (this._injected) {
+    if (this._borrowed) {
       throw new Error(
-        'DocxViewer.load() is unsupported when an engine is injected via opts.document; ' +
-          'the injected engine is already loaded.',
+        'DocxViewer.load() is unsupported on a Viewer created by fromDocument(); ' +
+          'the borrowed document is already loaded.',
       );
     }
     // SC20 atomic swap: retain the previous engine locally and only tear it down

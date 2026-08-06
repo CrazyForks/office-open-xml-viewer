@@ -35,6 +35,10 @@ const ZOOM_SETTLE_MS = 150;
  * {@link DocxScrollViewerOptions.pageShadow}.
  */
 const DEFAULT_PAGE_SHADOW = '0 1px 3px rgba(0,0,0,0.2)';
+const borrowedDocumentOption = Symbol('DocxScrollViewer.borrowedDocument');
+type InternalDocxScrollViewerOptions = DocxScrollViewerOptions & {
+  [borrowedDocumentOption]?: DocxDocument;
+};
 
 /**
  * Options for {@link DocxScrollViewer}. Extends `RenderPageOptions` (per-page
@@ -118,13 +122,6 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    *   here rather than two competing options.
    */
   pageShadow?: string | false;
-  /**
-   * Inject an already-loaded engine to share one parse across panes (design §14).
-   * When set: `load()` is unsupported (throws), the engine's own `mode` wins (an
-   * explicitly conflicting `opts.mode` throws at construction, design §11), and
-   * `destroy()` does NOT destroy this engine (the caller owns its lifecycle).
-   */
-  document?: DocxDocument;
   /** Fires when the top-most visible page changes. `topIndex` from
    *  `computeVisibleRange` (the first page intersecting the viewport top,
    *  EXCLUDING overscan). */
@@ -185,13 +182,13 @@ interface PageSlot {
 export class DocxScrollViewer implements ZoomableViewer {
   private readonly _documentOwner: TerminalResourceOwner<DocxDocument>;
   private get _doc(): DocxDocument | null { return this._documentOwner.current; }
-  private readonly _injected: boolean;
+  private readonly _borrowed: boolean;
   private readonly _opts: DocxScrollViewerOptions;
   private readonly _container: HTMLElement;
   private readonly _wrapper: HTMLDivElement;
   private readonly _scrollHost: HTMLDivElement;
   private readonly _spacer: HTMLDivElement;
-  /** Resolved render mode. When an engine is injected the engine's own `mode`
+  /** Resolved render mode. When an engine is borrowed the engine's own `mode`
    *  is authoritative (design §11 — no silent mis-pathing / no probing); an
    *  explicitly conflicting `opts.mode` is rejected at construction. When self-
    *  loading, `opts.mode` decides and `load()` passes it to `DocxDocument.load`. */
@@ -297,6 +294,24 @@ export class DocxScrollViewer implements ZoomableViewer {
   );
   private _findActive = false;
 
+  /**
+   * Create a Scroll Viewer that borrows an already-loaded document.
+   *
+   * The document's render mode is authoritative. The returned Viewer cannot
+   * load another source, and destroying it leaves the caller-owned document
+   * open. The initial virtual window is laid out during construction.
+   */
+  static fromDocument(
+    container: HTMLElement,
+    document: DocxDocument,
+    opts: Omit<DocxScrollViewerOptions, keyof LoadOptions> = {},
+  ): Omit<DocxScrollViewer, 'load'> {
+    return new DocxScrollViewer(container, {
+      ...opts,
+      [borrowedDocumentOption]: document,
+    } as InternalDocxScrollViewerOptions);
+  }
+
   constructor(container: HTMLElement, opts: DocxScrollViewerOptions = {}) {
     // A <canvas> is an HTMLElement too, so the type system cannot stop a caller
     // used to the pager API (DocxViewer takes a canvas) from passing one — but
@@ -314,11 +329,11 @@ export class DocxScrollViewer implements ZoomableViewer {
     // `??` (not `||`): a caller's explicit `false` must disable the shadow, not
     // fall through to the default.
     this._pageShadow = opts.pageShadow ?? DEFAULT_PAGE_SHADOW;
-    this._injected = !!opts.document;
-    if (this._injected) {
-      const engine = opts.document as DocxDocument;
-      this._documentOwner = new TerminalResourceOwner('DocxScrollViewer', engine, false);
-      this._mode = resolveCanvasViewerMode('DocxScrollViewer', opts.mode, engine);
+    const borrowedDocument = (opts as InternalDocxScrollViewerOptions)[borrowedDocumentOption];
+    this._borrowed = borrowedDocument !== undefined;
+    if (borrowedDocument) {
+      this._documentOwner = new TerminalResourceOwner('DocxScrollViewer', borrowedDocument, false);
+      this._mode = resolveCanvasViewerMode('DocxScrollViewer', opts.mode, borrowedDocument);
     } else {
       this._documentOwner = new TerminalResourceOwner('DocxScrollViewer');
       this._mode = resolveCanvasViewerMode('DocxScrollViewer', opts.mode, undefined);
@@ -381,8 +396,8 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._resizeObserver.observe(this._container);
     }
 
-    if (this._injected) {
-      // An injected engine is already loaded, so lay out + mount the first
+    if (this._borrowed) {
+      // A borrowed engine is already loaded, so lay out + mount the first
       // window immediately. relayout() is idempotent and defers under a
       // zero-width container (the resize path re-runs it once width appears).
       this.relayout();
@@ -391,21 +406,22 @@ export class DocxScrollViewer implements ZoomableViewer {
 
   /**
    * Load a DOCX from URL or ArrayBuffer and render the first window.
-   * UNSUPPORTED when an engine was injected via `opts.document` (throws) — the
-   * caller already owns the parsed engine.
+   * Unsupported on a Viewer created by {@link fromDocument}; the caller already
+   * owns the parsed engine.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
     if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
-    if (this._injected) {
+    if (this._borrowed) {
       throw new Error(
-        'DocxScrollViewer.load() is unsupported when an engine is injected via opts.document; the injected engine is already loaded.',
+        'DocxScrollViewer.load() is unsupported on a Viewer created by fromDocument(); ' +
+          'the borrowed document is already loaded.',
       );
     }
-    // SC20 atomic swap: a self-loaded viewer OWNS its engine (destroy() tears it
-    // down when `!_injected`), so a re-load must not orphan the previous one.
+    // SC20 atomic swap: a self-loaded viewer OWNS its engine, so a re-load must
+    // not orphan the previous one.
     // Retain it locally and free it only after the new engine loads — a FAILED
     // re-load then keeps the current document rendered rather than going blank.
-    // (The injected path returned above can never reach here, so this only ever
+    // (The borrowed path returned above can never reach here, so this only ever
     // frees an engine we created.)
     try {
       const doc = await this._documentOwner.replace(() => DocxDocument.load(source, {
@@ -433,7 +449,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._find.invalidate();
       this._findActive = false;
       // Lay out + mount the first window now that the engine exists (mirrors the
-      // injected-engine path in the constructor). relayout() is idempotent and
+      // borrowed-engine path in the constructor). relayout() is idempotent and
       // defers under a zero-width container — `_onResize` re-runs it once width
       // appears.
       this.relayout();
@@ -497,7 +513,7 @@ export class DocxScrollViewer implements ZoomableViewer {
   /**
    * Recompute per-page heights + the spacer and re-mount the visible window.
    *
-   * The viewer already calls this automatically after `load()`, an injected
+   * The viewer already calls this automatically after `load()`, a borrowed
    * engine, a container resize, and a zoom, so most integrations never need it.
    * It is public as a deliberate escape hatch: if the host mutates the layout in
    * a way the `ResizeObserver` cannot observe (e.g. a CSS change on an ancestor
@@ -1736,7 +1752,7 @@ export class DocxScrollViewer implements ZoomableViewer {
 
   /**
    * Tear down the viewer: remove the DOM subtree and (only for a self-loaded
-   * engine) destroy the engine. An injected engine is left intact — the caller
+   * engine) destroy the engine. A borrowed engine is left intact — the caller
    * owns its lifecycle. Per-slot worker ImageBitmaps are closed on recycle.
    */
   destroy(): void {

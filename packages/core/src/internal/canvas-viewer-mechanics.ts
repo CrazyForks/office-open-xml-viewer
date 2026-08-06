@@ -115,8 +115,8 @@ export function resolveCanvasViewerMode(
 ): CanvasViewerRenderMode {
   if (engine && requestedMode !== undefined && requestedMode !== engine.mode) {
     throw new Error(
-      `${viewerName}: opts.mode='${requestedMode}' conflicts with the injected engine's ` +
-        `mode='${engine.mode}'. Omit opts.mode when injecting an engine — ` +
+      `${viewerName}: opts.mode='${requestedMode}' conflicts with the borrowed engine's ` +
+        `mode='${engine.mode}'. Omit opts.mode when borrowing an engine — ` +
         'the engine owns its render mode.',
     );
   }

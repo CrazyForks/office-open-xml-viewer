@@ -3,6 +3,21 @@ import type { DocxDocument } from './document';
 import type { DocxTextRunInfo } from './renderer';
 import type { RenderPageOptions } from './types';
 import type { WireRenderPageOptions } from './worker-protocol';
+import { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
+
+/** Test-only adapter for mechanics cases that need a preloaded engine. Public
+ * callers use `DocxScrollViewer.fromDocument()` directly. */
+export function makeBorrowedDocxScrollViewer(
+  container: HTMLElement,
+  options: DocxScrollViewerOptions & { document: DocxDocument },
+): DocxScrollViewer {
+  const { document, ...viewerOptions } = options;
+  return (DocxScrollViewer.fromDocument as (
+    target: HTMLElement,
+    engine: DocxDocument,
+    opts: DocxScrollViewerOptions,
+  ) => DocxScrollViewer)(container, document, viewerOptions);
+}
 
 /** A recording fake DOM element. Extends the `FakeEl` pattern from
  *  text-layer.test.ts with the surface DocxScrollViewer touches: scrollTop,

@@ -2,6 +2,21 @@ import { vi } from 'vitest';
 import type { PptxPresentation, RenderSlideOptions, RenderSlideToBitmapOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
+import { PptxScrollViewer, type PptxScrollViewerOptions } from './scroll-viewer';
+
+/** Test-only adapter for mechanics cases that need a preloaded engine. Public
+ * callers use `PptxScrollViewer.fromPresentation()` directly. */
+export function makeBorrowedPptxScrollViewer(
+  container: HTMLElement,
+  options: PptxScrollViewerOptions & { presentation: PptxPresentation },
+): PptxScrollViewer {
+  const { presentation, ...viewerOptions } = options;
+  return (PptxScrollViewer.fromPresentation as (
+    target: HTMLElement,
+    engine: PptxPresentation,
+    opts: PptxScrollViewerOptions,
+  ) => PptxScrollViewer)(container, presentation, viewerOptions);
+}
 
 /** A recording fake DOM element. Extends the `FakeEl` pattern from
  *  text-layer.test.ts with the surface PptxScrollViewer touches: scrollTop,

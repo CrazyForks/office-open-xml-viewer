@@ -53,6 +53,8 @@ import {
 import { CanvasSurface, SheetOverlayHost } from './internal/sheet-surface.js';
 import { withXlsxRenderCommitGuard } from './render-orchestrator.js';
 
+const borrowedWorkbookOption = Symbol('XlsxViewer.borrowedWorkbook');
+
 // Re-exported for the existing xlsx zoom tests (resize-zoom.test.ts imports it
 // from this module) and any consumer that referenced it here before it moved to
 // @silurus/ooxml-core. The single source of truth is core (design §5.2).
@@ -131,14 +133,6 @@ function ensureViewerStyleInjected(ownerDocument: Document): void {
 }
 
 export interface XlsxSheetViewerOptions extends LoadOptions {
-  /**
-   * Borrow an already-loaded workbook, matching `document` / `presentation`
-   * injection on the DOCX/PPTX scroll viewers. The workbook's mode is
-   * authoritative, `load()` is unsupported, and `destroy()` leaves the
-   * caller-owned workbook open. Await `goToSheet()` when first-paint completion
-   * matters.
-   */
-  workbook?: XlsxWorkbook;
   /** Scale factor for cell/header dimensions (default 1). 0.5 = half size. */
   cellScale?: number;
   /**
@@ -249,6 +243,10 @@ export interface XlsxViewerOptions extends XlsxSheetViewerOptions {
    *  own zoom control). */
   showZoomSlider?: boolean;
 }
+
+type InternalXlsxViewerOptions = (XlsxViewerOptions | XlsxSheetViewerOptions) & {
+  [borrowedWorkbookOption]?: XlsxWorkbook;
+};
 
 export interface XlsxViewportOffset {
   /** Horizontal CSS-pixel offset from the logical start edge (column A side). */
@@ -444,7 +442,7 @@ class XlsxViewerEngine implements ZoomableViewer {
   private readonly _mountKind: XlsxViewerMount['kind'];
   /** 'main' renders on this thread; 'worker' paints worker-produced bitmaps. */
   private readonly _mode: 'main' | 'worker';
-  private _injected = false;
+  private _borrowed = false;
   /** Workbook for which viewer-local state has been initialized. A borrowed
    * sheet mount defers this work until the caller's first goToSheet(), so it
    * never materializes an unrelated first sheet as a constructor side effect. */
@@ -578,11 +576,11 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.hostWindow = hostWindow;
     this.opts = opts;
     this._mountKind = mount.kind;
-    const injectedWorkbook = opts.workbook;
-    this._injected = injectedWorkbook !== undefined;
+    const borrowedWorkbook = (opts as InternalXlsxViewerOptions)[borrowedWorkbookOption];
+    this._borrowed = borrowedWorkbook !== undefined;
     this._mode = mount.kind === 'sheet'
       ? mount.mode
-      : resolveCanvasViewerMode('XlsxViewer', opts.mode, injectedWorkbook);
+      : resolveCanvasViewerMode('XlsxViewer', opts.mode, borrowedWorkbook);
     this._hiddenSheetMode = opts.hiddenSheetMode ?? 'show';
     this.viewport = new ViewportState(opts.cellScale ?? 1);
 
@@ -782,10 +780,10 @@ class XlsxViewerEngine implements ZoomableViewer {
       (sheet) => this._collectSheetCells(sheet),
     );
 
-    if (injectedWorkbook) {
-      this.acquisition.install(injectedWorkbook, false);
+    if (borrowedWorkbook) {
+      this.acquisition.install(borrowedWorkbook, false);
       if (this._mountKind === 'composite') {
-        this.activateWorkbook(injectedWorkbook).catch((error) => this._reportRenderError(error));
+        this.activateWorkbook(borrowedWorkbook).catch((error) => this._reportRenderError(error));
       }
     }
 
@@ -823,10 +821,10 @@ class XlsxViewerEngine implements ZoomableViewer {
    */
   async load(source: string | ArrayBuffer): Promise<void> {
     this.assertOpen();
-    if (this._injected) {
+    if (this._borrowed) {
       throw new Error(
         `${this._mountKind === 'sheet' ? 'XlsxSheetViewer' : 'XlsxViewer'}.load() is unsupported ` +
-          'when an engine is injected via opts.workbook; the injected engine is already loaded.',
+          'on a Viewer created by fromWorkbook(); the borrowed workbook is already loaded.',
       );
     }
     // SC20 atomic swap: retain the previous workbook locally and only tear it down
@@ -3589,6 +3587,21 @@ class XlsxViewerEngine implements ZoomableViewer {
 /** Workbook viewer mounted into a container with scrollable grid, sheet tabs,
  * outline gutters, and optional zoom chrome. */
 export class XlsxViewer extends XlsxViewerEngine {
+  /**
+   * Create a workbook Viewer that borrows an already-loaded workbook.
+   * Destroying the Viewer leaves the caller-owned workbook open.
+   */
+  static fromWorkbook(
+    container: HTMLElement,
+    workbook: XlsxWorkbook,
+    opts: Omit<XlsxViewerOptions, keyof LoadOptions> = {},
+  ): Omit<XlsxViewer, 'load'> {
+    return new XlsxViewer(container, {
+      ...opts,
+      [borrowedWorkbookOption]: workbook,
+    } as InternalXlsxViewerOptions);
+  }
+
   constructor(container: HTMLElement, opts: XlsxViewerOptions = {}) {
     super(container, opts, { kind: 'composite' });
   }
@@ -3617,11 +3630,27 @@ export class XlsxSheetViewer implements ZoomableViewer {
   private snapshot: XlsxSheetViewerSnapshot;
   private lastMetrics: OoxmlResourceMetrics | undefined;
 
+  /**
+   * Create a sheet Viewer that borrows an already-loaded workbook.
+   * Destroying the Viewer leaves the caller-owned workbook open.
+   */
+  static fromWorkbook(
+    canvasElement: HTMLCanvasElement,
+    workbook: XlsxWorkbook,
+    options: Omit<XlsxSheetViewerOptions, keyof LoadOptions> = {},
+  ): Omit<XlsxSheetViewer, 'load'> {
+    return new XlsxSheetViewer(canvasElement, {
+      ...options,
+      [borrowedWorkbookOption]: workbook,
+    } as InternalXlsxViewerOptions);
+  }
+
   constructor(
     readonly canvasElement: HTMLCanvasElement,
     options: XlsxSheetViewerOptions = {},
   ) {
-    const mode = resolveCanvasViewerMode('XlsxSheetViewer', options.mode, options.workbook);
+    const borrowedWorkbook = (options as InternalXlsxViewerOptions)[borrowedWorkbookOption];
+    const mode = resolveCanvasViewerMode('XlsxSheetViewer', options.mode, borrowedWorkbook);
     const rect = canvasElement.getBoundingClientRect();
     this.canvasMount = new CallerCanvasMount(canvasElement, {
       wrapperCssText:

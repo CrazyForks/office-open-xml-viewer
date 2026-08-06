@@ -77,19 +77,19 @@ precedence、static bitmap ownership、pure zoom mathが該当する。共有hel
 4. Materializationはcanonicalなbounded unit sourceとdecode/validation coordinatorを、
    明示的なoutput-owned sink経由でconsumeする。別のWASM free-function parser pathではない。
 5. Materialized resultは、内容量に比例するcaller-owned memoryであることを明記する。
-6. Composite Viewerはunit-viewerの内部実装を合成し、rendering、selection、hit-test、
+6. Composite Viewerは各formatのfocused-view内部実装を合成し、rendering、selection、hit-test、
    text layer、worker/bitmap dispatchをコピーしない。
 7. 共通lifecycle/transportは`core`、共有OOXML package/parser policyは
    `ooxml-common`、形式固有の意味は各format packageに置く。
 
-## 現在のBrowser architecture
+## 0.76より前のBrowser architecture
 
 ### 公開surface
 
 | Layer | DOCX | PPTX | XLSX |
 | --- | --- | --- | --- |
 | 所有型rendering engine | `DocxDocument` | `PptxPresentation` | `XlsxWorkbook` |
-| Canvasマウント型unit viewer | `DocxViewer(canvas)` | `PptxViewer(canvas)` | なし |
+| Canvasマウント型focused view | `DocxViewer(canvas)` | `PptxViewer(canvas)` | なし |
 | Containerマウント型composite | `DocxScrollViewer(div)` | `PptxScrollViewer(div)` | `XlsxViewer(div)` |
 | Render unit | page | slide | worksheet viewport |
 
@@ -113,31 +113,92 @@ render scheduling、main/worker bitmap transfer、canvas generation guard、zoom
 overlay、error routingの類似実装をそれぞれが所有している。XLSX Viewerは、
 sheet描画・interactionとcontainer chromeが1つの大きなclassに結合している。
 
-## 改修後のBrowser architecture
+## 現在のBrowser architecture（0.76以降）
 
 ### 公開surface
+
+<!-- viewer-api-symmetry-contract -->
 
 | Layer | DOCX | PPTX | XLSX |
 | --- | --- | --- | --- |
 | 所有型rendering engine | `DocxDocument` | `PptxPresentation` | `XlsxWorkbook` |
-| Canvasマウント型unit viewer | `DocxViewer(canvas)` | `PptxViewer(canvas)` | `XlsxSheetViewer(canvas)` |
+| Canvasマウント型focused view | `DocxViewer(canvas)` | `PptxViewer(canvas)` | `XlsxSheetViewer(canvas)` |
 | Containerマウント型composite | `DocxScrollViewer(div)` | `PptxScrollViewer(div)` | `XlsxViewer(div)` |
-| Unit navigation | `goToPage()` | `goToSlide()` | `goToSheet()` |
-| Unit count | `pageCount` | `slideCount` | `sheetCount` |
+| 主navigation | `goToPage()` | `goToSlide()` | `goToSheet()` |
+| 主count | `pageCount` | `slideCount` | `sheetCount` |
+
+この表はhost integrationとlifecycle contractだけを横に並べたものであり、DOCX page、
+PPTX slide、XLSX sheetを同一のdomain unitとみなすものではない。Viewer境界も1つの
+抽象へ強制しない。各formatは、1 page、1 slide、active sheet viewportという
+自然な関心単位を維持する。
+
+Engine methodの対応関係は次のとおりとする。
+
+| Contract | DOCX | PPTX | XLSX |
+| --- | --- | --- | --- |
+| Packageのparseと保持 | `DocxDocument.load()` | `PptxPresentation.load()` | `XlsxWorkbook.load()` |
+| Canvasへの直接描画 | `renderPage(target, pageIndex, options)` | `renderSlide(target, slideIndex, options)` | `renderViewport(target, sheetIndex, range, options)` |
+| Bitmap描画 | `renderPageToBitmap(pageIndex, options)` | `renderSlideToBitmap(slideIndex, options)` | `renderViewportToBitmap(sheetIndex, range, options)` |
+| Render modeのowner | `DocxDocument.mode` | `PptxPresentation.mode` | `XlsxWorkbook.mode` |
+| Retained resourceの解放 | `destroy()` | `destroy()` | `destroy()` |
+
+2段階のViewerも、同じacquisitionとownership contractに従う。
+
+| Contract | DOCX | PPTX | XLSX |
+| --- | --- | --- | --- |
+| Canvas mount先 | `DocxViewer(canvas)` | `PptxViewer(canvas)` | `XlsxSheetViewer(canvas)` |
+| Compositeのmount先 | `DocxScrollViewer(container)` | `PptxScrollViewer(container)` | `XlsxViewer(container)` |
+| Viewer所有のacquisition | `viewer.load(source)` | `viewer.load(source)` | `viewer.load(source)` |
+| 借用engine factory | `fromDocument()` | `fromPresentation()` | `fromWorkbook()` |
+| 借用時の規約 | `load()`はreject、callerがengineを破棄 | `load()`はreject、callerがengineを破棄 | `load()`はreject、callerがengineを破棄 |
+
+`load()`と名前付きengine factoryは、1つのViewerへ同時に存在する競合sourceではない。次の排他的な
+ownership modeを選択する。
+
+- `new Viewer(target)`の後に`viewer.load(source)`を呼ぶ経路はconvenience pathであり、
+  Viewerがengineの生成、置換、破棄を行う。
+- `Viewer.fromDocument()`、`Viewer.fromPresentation()`、`Viewer.fromWorkbook()`は
+  reuse pathである。
+  callerは1つのparse済みengineを複数Viewで共有でき、Viewerはengineを置換・破棄しない。
+
+両方を維持することで、一般的な1 View用途にengine管理を強制せず、master/detailや
+複数Window用途ではparse、archive cache、worker、font登録の重複を避けられる。公開例は
+`viewer.load()`を基本形とし、名前付きfactoryは高度な再利用経路として説明する。
 
 既存の公開名は維持する。`XlsxScrollViewer` aliasは追加しない。Container componentは
 whole sheetの一覧ではなく、sheet tabとscrollable cell gridを持つWorkbook Viewerだからである。
 
-すべてのCanvasマウント型unit viewerは、対応するload済みengine（`document`、
-`presentation`、`workbook`）を受け取れる。Containerマウント型Viewerも同じoptionを持つ。
-6つすべてで、注入されたengineがrender modeとlifecycleを所有する。明示的に競合する
-`mode`は拒否し、`load()`は利用不可、Viewerの破棄では借用engineを破棄しない。
+各Canvasマウント型ViewerとContainerマウント型Viewerは、format固有の名前付きfactoryを
+持つ。6つすべてで、借用engineがrender modeとlifecycleを所有する。
+明示的に競合する`mode`は拒否し、`load()`は利用不可、Viewerの破棄では借用engineを
+破棄しない。engineはすでにload済みなのでfactoryは同期であり、従来から非同期だった
+描画・navigationだけが引き続き非同期となる。
 
 ### XLSX Canvas Viewerのcontract
 
 `XlsxSheetViewer`は、1つのactive worksheet viewportをCanvasへマウントして表示する。
 sheet tab/footer chromeとscrollbarは所有しない。worksheetは有限pageではないため、
 形式固有のviewport移動を追加で公開する。この状態をDOCX/PPTXへ無理に持ち込まない。
+
+`XlsxWorkbook.renderSheet()`は意図的に用意しない。OOXML worksheetは最大1,048,576行、
+16,384列を持ち、Browser Canvasのdimensionとbacking memoryの上限を大幅に超えうる。
+DOCX pageやPPTX slideと異なり、worksheetには1枚のCanvasへ対応する有限の自然サイズがない。
+したがって低レベルcontractは`renderViewport()`で明示的な`ViewportRange`を必須とする。
+高レベルの「1 sheet表示」は、`XlsxSheetViewer`がscroll offset、visible range、resize
+projection、redraw schedulingを所有することで提供する。将来full-sheet export APIを追加する
+場合は、明示的な範囲とtileまたはpaginationを持つ別contractとし、誤解を招く
+`renderSheet()` aliasにはしない。
+
+### 対称性の自動検査
+
+`scripts/check-viewer-api-symmetry.mjs`は、3形式のcommit済みpublic declaration baselineを
+検証する。Engineの`load`/mode/count/render/bitmap/destroy、Canvas/Container constructorの
+mount先、Viewerの`load`/zoom/navigation/destroy、名前付き借用engine factory、旧
+`document`/`presentation`/`workbook`注入optionが存在しないことを確認する。また、無制限
+worksheetを1枚とみなす`XlsxWorkbook.renderSheet()`を
+拒否し、このsectionが英語版・日本語版の両方に存在することも検査する。
+`check:public-api:built`がdeclaration baseline検証後にCIで実行するため、意図的なAPI変更では
+implementation、baseline、対称性matrix、documentationを同時に更新する必要がある。
 
 mount用DOM、style、DPR参照、document listenerは`canvas.ownerDocument`とその
 `defaultView`を基準に解決する。これにより親画面が1つの`XlsxWorkbook`を保持したまま、
@@ -159,8 +220,6 @@ export interface XlsxScrollToCellOptions {
 }
 
 export interface XlsxSheetViewerOptions extends LoadOptions {
-  /** load済みengineを借用する。lifecycleはcallerが所有する。 */
-  readonly workbook?: XlsxWorkbook;
   readonly cellScale?: number;
   readonly resizable?: boolean;
   readonly zoomMin?: number;
@@ -180,6 +239,11 @@ export interface XlsxSheetViewerOptions extends LoadOptions {
 }
 
 export class XlsxSheetViewer implements ZoomableViewer {
+  static fromWorkbook(
+    canvas: HTMLCanvasElement,
+    workbook: XlsxWorkbook,
+    options?: XlsxSheetViewerOptions,
+  ): XlsxSheetViewer;
   constructor(canvas: HTMLCanvasElement, options?: XlsxSheetViewerOptions);
   load(source: string | ArrayBuffer): Promise<void>;
   readonly sheetIndex: number;
@@ -219,9 +283,10 @@ export interface XlsxViewerOptions extends XlsxSheetViewerOptions {
 }
 ```
 
-`workbook`は、DOCX Viewerの`document`、PPTX Viewerの`presentation`と同じ
-option注入contractに従う。`load()`は利用不可、engine自身のrender modeを正とし、Viewerの破棄では
-caller-owned engineを破棄しない。初回描画の完了点が必要なcallerは`goToSheet(index)`をawaitする。
+`fromWorkbook()`は、DOCX Viewerの`fromDocument()`、PPTX Viewerの
+`fromPresentation()`と同じ名前付きfactory contractに従う。返されたViewerでは`load()`は
+利用不可、engine自身のrender modeを正とし、Viewerの破棄ではcaller-owned engineを破棄しない。
+初回描画の完了点が必要なcallerは`goToSheet(index)`をawaitする。
 複数のsheet viewerはparse、archive access、worksheet materialization、immutable content cacheを
 共有しながら、viewport、selection、zoom、resize、outline、render generationを独立して保持する。
 
@@ -231,8 +296,8 @@ Offsetは現在scaleにおけるlogical CSS pixelとする。`x`はBrowserのRTL
 clampし、callbackにはclamp後の値を渡す。
 
 CanvasのCSS boxをviewport width/heightとし、DPRはbacking-store resolutionだけに影響する。
-`relayout()`でCSS boxを再取得する。DOCX/PPTXと同様にcaller canvasをwrapし、destroy時に
-元へ戻す。Wheel/trackpadはscrollbarを作らずviewportをpanする。touch-pinchは今回の
+`relayout()`でCSS boxを再取得する。共有caller-canvas lifecycleでcanvasをwrapし、
+destroy時に元へ戻す。Wheel/trackpadはscrollbarを作らずviewportをpanする。touch-pinchは今回の
 scope外とする。
 
 `destroy()`はidempotentでinstanceを恒久的にcloseする。Destroy後のasync mutation
@@ -494,7 +559,7 @@ sessionを`finally`でcloseする非同期wrapperへ変更する。
 | --- | --- |
 | `parseDocx()` | `await materializeDocxDocument()` |
 | `parsePptx()` | `await materializePptxPresentation()` |
-| `parseXlsx()` | `await materializeXlsxWorkbookIndex()`または`session.workbookIndex` |
+| `parseXlsx()` | `await materializeXlsxWorkbookIndex()` |
 | `parseXlsxSheet()` | `await materializeXlsxWorksheet()` |
 | `parseXlsxAllSheets()` | `await materializeXlsxWorkbook()` |
 | `extractPptxImage()` | `openPptxPresentation()`内の`await session.getImage()` |

@@ -104,4 +104,27 @@ describe('XlsxViewer.destroy() — subtree + listeners + style', () => {
     await expect(viewer.load(new ArrayBuffer(0))).rejects.toThrow(closed);
     expect(load).not.toHaveBeenCalled();
   });
+
+  it('borrows a workbook through fromWorkbook() and leaves its lifecycle with the caller', async () => {
+    installDom();
+    const destroy = vi.fn();
+    const workbook = {
+      mode: 'main',
+      sheetCount: 1,
+      sheetNames: ['Sheet1'],
+      tabColors: {} as Record<number, string>,
+      isHidden: () => false,
+      getWorksheet: () => new Promise(() => {}),
+      destroy,
+    } as unknown as XlsxWorkbook;
+    const viewer = XlsxViewer.fromWorkbook(
+      makeContainer() as unknown as HTMLElement,
+      workbook,
+    );
+
+    expect(viewer.sheetCount).toBe(1);
+    await expect((viewer as XlsxViewer).load(new ArrayBuffer(0))).rejects.toThrow(/fromWorkbook/);
+    viewer.destroy();
+    expect(destroy).not.toHaveBeenCalled();
+  });
 });

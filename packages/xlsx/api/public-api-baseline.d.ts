@@ -1227,6 +1227,7 @@ export interface XlsxScrollToCellOptions {
 }
 export class XlsxSheetViewer implements ZoomableViewer {
     readonly canvasElement: HTMLCanvasElement;
+    static fromWorkbook(canvasElement: HTMLCanvasElement, workbook: XlsxWorkbook, options?: Omit<XlsxSheetViewerOptions, keyof LoadOptions__emitterCollision1>): Omit<XlsxSheetViewer, 'load'>;
     constructor(canvasElement: HTMLCanvasElement, options?: XlsxSheetViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     get sheetIndex(): number;
@@ -1261,7 +1262,6 @@ export class XlsxSheetViewer implements ZoomableViewer {
     private __privatePresence;
 }
 export interface XlsxSheetViewerOptions extends LoadOptions__emitterCollision1 {
-    workbook?: XlsxWorkbook;
     cellScale?: number;
     resizable?: boolean;
     zoomMin?: number;
@@ -1291,6 +1291,7 @@ export interface XlsxTextRunInfo {
     col: number;
 }
 export class XlsxViewer extends XlsxViewerEngine {
+    static fromWorkbook(container: HTMLElement, workbook: XlsxWorkbook, opts?: Omit<XlsxViewerOptions, keyof LoadOptions__emitterCollision1>): Omit<XlsxViewer, 'load'>;
     constructor(container: HTMLElement, opts?: XlsxViewerOptions);
 }
 class XlsxViewerEngine implements ZoomableViewer {

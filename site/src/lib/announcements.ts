@@ -24,6 +24,123 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v076-migration-guide',
+    date: '2026-08-06',
+    label: 'Upcoming release',
+    version: 'v0.76',
+    title: 'Migrating to v0.76',
+    summary: 'v0.76 makes shared-engine Viewer construction explicit, adds the canvas-mounted XLSX sheet Viewer, and replaces the synchronous Node parser compatibility APIs with one owned asynchronous pipeline.',
+    audience: 'Applications that share one parsed document across multiple Viewers, use the Node parser helpers, or want to render individual XLSX sheets into caller-owned canvases.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        paragraphs: [
+          'Ordinary browser Viewer code that constructs a Viewer and awaits load(source) does not change. The migration applies to shared-engine construction and the Node parser helpers.',
+        ],
+        bullets: [
+          'Shared browser engine: replace the document, presentation or workbook constructor option with the matching named factory.',
+          'Node parser helpers: replace synchronous parse and extraction exports with an asynchronous materializer or owned session.',
+          'XLSX unit rendering: use XlsxSheetViewer for a caller-owned canvas without workbook tabs or footer controls.',
+          'Archive policy: maxArchiveEntries is now available in Browser and Node resourceLimits.',
+        ],
+      },
+      {
+        title: 'Use a named factory for a shared engine',
+        paragraphs: [
+          'The document, presentation and workbook Viewer options are removed. Load the engine once, then use fromDocument(), fromPresentation() or fromWorkbook(). The factory is synchronous because the engine is already loaded; rendering and navigation remain asynchronous.',
+          'Load-only settings such as mode, wasmUrl, resourceLimits, password and useGoogleFonts belong on the engine load call. A Viewer created by a factory cannot load another source.',
+          'This cleanup obligation is not new: the removed constructor-option injection also borrowed its engine, so viewer.destroy() intentionally left that engine open. Destroy the borrowed Viewers before destroying their caller-owned engine once.',
+        ],
+        examples: [
+          {
+            title: 'Before: constructor-option injection',
+            code: `const document = await DocxDocument.load(file);
+
+const viewer = new DocxViewer(canvas, {
+  document,
+});`,
+          },
+          {
+            title: 'After: explicit borrowed-engine factory',
+            code: `const document = await DocxDocument.load(file, {
+  mode: 'worker',
+});
+
+const viewer = DocxViewer.fromDocument(canvas, document);
+await viewer.goToPage(0);
+
+viewer.destroy();
+document.destroy();`,
+          },
+        ],
+        bullets: [
+          'DOCX: DocxViewer.fromDocument() and DocxScrollViewer.fromDocument().',
+          'PPTX: PptxViewer.fromPresentation() and PptxScrollViewer.fromPresentation().',
+          'XLSX: XlsxViewer.fromWorkbook() and XlsxSheetViewer.fromWorkbook().',
+        ],
+      },
+      {
+        title: 'Replace synchronous Node parser helpers',
+        paragraphs: [
+          'The old synchronous exports could not provide the same cancellation, limits, metrics, archive reuse and deterministic cleanup as the asynchronous parser pipeline. v0.76 removes that compatibility path instead of maintaining two subtly different implementations.',
+          'Use a materializer when the application needs a complete caller-owned model. Use an owned session for bounded sequential work and close it in finally. There is intentionally no synchronous wrapper around the new APIs.',
+          'In v0.75, parseXlsx() returned ParsedWorkbook: workbook metadata and sheet list, styles, and shared strings. It did not include worksheet cell rows; those required parseXlsxSheet() or parseXlsxAllSheets(). The v0.76 names make those three materialization scopes explicit.',
+          'session.workbookIndex is the already-parsed, read-only ParsedWorkbook property on a session returned by openXlsxWorkbook(); it is useful when the same session will also stream worksheetRows(). It is not a second direct replacement. If only the old parseXlsx() result is needed, use materializeXlsxWorkbookIndex().',
+        ],
+        bullets: [
+          'parseDocx() → await materializeDocxDocument().',
+          'parsePptx() → await materializePptxPresentation().',
+          'parseXlsx() → await materializeXlsxWorkbookIndex() for metadata/index only.',
+          'parseXlsxSheet() → await materializeXlsxWorksheet() for one caller-owned worksheet.',
+          'parseXlsxAllSheets() → await materializeXlsxWorkbook() for the index and every worksheet; this has the highest time and retained-memory cost.',
+          'PPTX image and media extraction → await session.getImage() or session.getMedia() on openPptxPresentation().',
+        ],
+        examples: [
+          {
+            title: 'Owned session',
+            code: `const presentation = await openPptxPresentation(bytes);
+
+try {
+  for await (const slide of presentation.slides()) {
+    consume(slide);
+  }
+} finally {
+  await presentation.close();
+}`,
+          },
+        ],
+      },
+      {
+        title: 'Render one XLSX sheet into a canvas',
+        paragraphs: [
+          'XlsxSheetViewer mounts one active worksheet viewport into a caller-owned canvas and includes sheet navigation, logical viewport, selection, search and zoom APIs without workbook tabs, footer controls or a native scrollbar.',
+          'This is an XLSX-specific Viewer boundary. A worksheet is not treated as equivalent to a DOCX page or PPTX slide; each format keeps the Viewer split that matches its own document model.',
+          'fromWorkbook() does not materialize an arbitrary first worksheet. The first goToSheet(index) materializes only the requested sheet, which keeps parse-once multi-window integrations efficient. The full XlsxViewer still starts its initial sheet display immediately.',
+        ],
+        examples: [
+          {
+            title: 'Borrow one workbook across sheet Viewers',
+            code: `const workbook = await XlsxWorkbook.load(file);
+const sheet = XlsxSheetViewer.fromWorkbook(canvas, workbook);
+
+await sheet.goToSheet(2);
+await sheet.setViewportOffset({ x: 120, y: 80 });
+
+sheet.destroy();
+workbook.destroy();`,
+          },
+        ],
+      },
+      {
+        title: 'Bound the number of archive entries',
+        paragraphs: [
+          'Browser and Node load or session options now accept resourceLimits.maxArchiveEntries. Omission uses the calibrated default, null disables that configurable limit, and the internal hard ceiling remains enforced.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v075-resource-governance',
     date: '2026-08-02',
     label: 'Upcoming release',
