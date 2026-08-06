@@ -1,8 +1,60 @@
 # Changelog
 
 All notable changes to @silurus/ooxml are documented here. The project follows
-semantic versioning; minor releases add spec-compliant features or behavior
-changes that remain compatible with existing API surfaces.
+semantic versioning. While the major version is zero, minor releases may contain
+explicitly documented breaking changes; patch releases remain compatible with
+the corresponding minor release.
+
+## 0.76.0 — 2026-08-06
+
+Breaking minor release. Unifies Browser Viewer ownership, replaces the legacy
+synchronous Node parser helpers with one bounded asynchronous pipeline, and adds
+an independently mountable XLSX sheet surface without changing the ordinary
+Browser `new Viewer(target)` plus `await viewer.load(source)` flow. See the
+[0.75 to 0.76 migration guide](docs/migration-0.76.md).
+
+- **browser Viewer architecture:** add `XlsxSheetViewer`, a caller-canvas active
+  worksheet viewport with selection, search, zoom, logical scrolling, and
+  independent sheet navigation. The existing `XlsxViewer` retains its complete
+  workbook UI and now composes the same acquisition, geometry, viewport,
+  selection, render-dispatch, and surface implementation. DOCX and PPTX single
+  and scroll Viewers likewise share the same Canvas lifecycle and static render
+  dispatch mechanics without merging their format-specific layout semantics.
+  (#1155, #1159)
+- **explicit engine reuse:** replace Viewer constructor-option injection with
+  synchronous named factories: `fromDocument()`, `fromPresentation()`, and
+  `fromWorkbook()`. The normal `viewer.load(source)` path remains the simple,
+  Viewer-owned default; factories provide an explicit caller-owned path for
+  master/detail, multi-pane, and multi-window rendering. Factory return types
+  omit `load()`, conflicting load options are rejected, and borrowed engines are
+  never destroyed by their Viewers. A declaration-level symmetry check guards
+  these ownership and naming contracts across DOCX, PPTX, and XLSX. (#1160)
+- **node parser API:** remove the synchronous `parseDocx()`, `parsePptx()`,
+  `parseXlsx()`, `parseXlsxSheet()`, `parseXlsxAllSheets()`, and standalone PPTX
+  media extraction compatibility paths. New `materialize*()` helpers preserve
+  convenient caller-owned results, while `openDocxDocument()`,
+  `openPptxPresentation()`, and `openXlsxWorkbook()` provide bounded sequential
+  sessions with cancellation, metrics, archive reuse, deterministic cleanup,
+  and runtime recovery through the same canonical acquisition pipeline used by
+  Browser rendering. (#1134, #1155)
+- **resource governance:** add the shared `resourceLimits.maxArchiveEntries`
+  admission policy across Browser main mode, workers, and Node sessions. The
+  calibrated default is 4,096 entries, `null` disables only the configurable
+  limit, and the non-configurable 20,000-entry structural ceiling remains in
+  force. Violations use the existing typed resource-limit error and metrics
+  vocabulary. (#1133, #1155)
+- **xlsx fidelity and interaction:** localize the built-in short-date format,
+  reuse date formatters and streamed worksheet metrics, center wrapped values
+  that remain one rendered line, and mirror text overflow, footer controls, and
+  sheet-tab ordering/alignment for RTL workbooks. The public site demonstrates
+  one parsed workbook rendered as independently scrollable sheets, including
+  same-origin popup windows. (#1156, #1157, #1158, #1159)
+- **tooling and documentation:** build the libraries with TypeScript 7 while
+  isolating the temporary TypeScript 6 Compiler API dependency used by
+  declaration tooling. Publish English and Japanese architecture baselines, a
+  complete migration guide and site announcement, JavaScript Office Viewer SEO
+  metadata, sitemap and robots endpoints, refreshed public API references, and
+  updated README screenshots. (#1154, #1155, #1160)
 
 ## 0.75.5 — 2026-08-05
 

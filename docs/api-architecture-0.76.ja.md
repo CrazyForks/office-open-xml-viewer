@@ -2,8 +2,8 @@
 
 English: [`api-architecture-0.76.md`](api-architecture-0.76.md)
 
-ステータス: 次期マイナーリリースに向けた設計案。本書に記載する
-移行途中の公開APIをリリースすることは意図しない。
+ステータス: 0.76.0で実装済み。本書は0.76以降の公開API、ownership、
+責務境界を維持するためのarchitecture baselineとする。
 
 関連Issue: [#1133](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1133)、
 [#1134](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1134)。
