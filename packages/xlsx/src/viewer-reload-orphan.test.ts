@@ -80,4 +80,32 @@ describe('XlsxViewer.load() — no orphaned workbook on re-load (SC20)', () => {
     v.destroy();
     expect(a.destroy).toHaveBeenCalledTimes(1);
   });
+
+  it('maps an in-flight loader rejection after destroy to the terminal viewer error', async () => {
+    const { v } = build();
+    let rejectLoad: ((reason: Error) => void) | undefined;
+    vi.spyOn(XlsxWorkbook, 'load').mockImplementation(() =>
+      new Promise<XlsxWorkbook>((_resolve, reject) => { rejectLoad = reject; }));
+
+    const pending = v.load('pending.xlsx');
+    v.destroy();
+    rejectLoad?.(new Error('late parser failure'));
+
+    await expect(pending).rejects.toThrow('XlsxViewer is destroyed');
+  });
+
+  it('disposes an in-flight workbook that resolves after destroy and reports terminal close', async () => {
+    const { v } = build();
+    const late = fakeWorkbook();
+    let resolveLoad: ((workbook: XlsxWorkbook) => void) | undefined;
+    vi.spyOn(XlsxWorkbook, 'load').mockImplementation(() =>
+      new Promise<XlsxWorkbook>((resolve) => { resolveLoad = resolve; }));
+
+    const pending = v.load('pending.xlsx');
+    v.destroy();
+    resolveLoad?.(late.wb);
+
+    await expect(pending).rejects.toThrow('XlsxViewer is destroyed');
+    expect(late.destroy).toHaveBeenCalledOnce();
+  });
 });

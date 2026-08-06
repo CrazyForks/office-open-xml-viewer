@@ -31,6 +31,36 @@ describe('XLSX viewer composition roles', () => {
     expect(second.destroy).toHaveBeenCalledOnce();
   });
 
+  it('SheetAcquisition is terminally closed and disposes a candidate that resolves late', async () => {
+    const acquisition = new SheetAcquisition();
+    let resolveLate: ((value: XlsxWorkbook) => void) | undefined;
+    const pending = new Promise<XlsxWorkbook>((resolve) => { resolveLate = resolve; });
+    const replacement = acquisition.replace(() => pending);
+
+    acquisition.destroy();
+    const late = workbook();
+    resolveLate?.(late.value);
+
+    await expect(replacement).rejects.toThrow('SheetAcquisition is closed');
+    expect(late.destroy).toHaveBeenCalledOnce();
+    await expect(acquisition.replace(() => Promise.resolve(workbook().value))).rejects.toThrow(
+      'SheetAcquisition is closed',
+    );
+    expect(() => acquisition.install(workbook().value)).toThrow('SheetAcquisition is closed');
+  });
+
+  it('SheetAcquisition reports terminal close when an in-flight loader rejects late', async () => {
+    const acquisition = new SheetAcquisition();
+    let rejectLate: ((reason: Error) => void) | undefined;
+    const pending = new Promise<XlsxWorkbook>((_resolve, reject) => { rejectLate = reject; });
+    const replacement = acquisition.replace(() => pending);
+
+    acquisition.destroy();
+    rejectLate?.(new Error('late parser failure'));
+
+    await expect(replacement).rejects.toThrow('SheetAcquisition is closed');
+  });
+
   it('ViewportState clamps logical offsets without a native scroll element', () => {
     const viewport = new ViewportState(1);
     viewport.setExtent(1000, 800);

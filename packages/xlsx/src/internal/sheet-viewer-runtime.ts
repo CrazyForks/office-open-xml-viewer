@@ -1,22 +1,30 @@
 import type { XlsxWorkbook } from '../workbook.js';
+import { StaticCanvasRenderDispatcher } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 
 /** Generation-safe workbook ownership for one viewer instance. */
 export class SheetAcquisition {
   private generation = 0;
   private currentWorkbook: XlsxWorkbook | null = null;
+  private closed = false;
 
   get current(): XlsxWorkbook | null {
     return this.currentWorkbook;
   }
 
   async replace(load: () => Promise<XlsxWorkbook>): Promise<XlsxWorkbook | null> {
+    this.assertOpen();
     const generation = ++this.generation;
     let candidate: XlsxWorkbook;
     try {
       candidate = await load();
     } catch (error) {
+      if (this.closed) throw this.closedError();
       if (generation !== this.generation) return null;
       throw error;
+    }
+    if (this.closed) {
+      candidate.destroy();
+      throw this.closedError();
     }
     if (generation !== this.generation) {
       candidate.destroy();
@@ -28,15 +36,26 @@ export class SheetAcquisition {
 
   /** Commit an already acquired workbook, closing the previously owned one. */
   install(candidate: XlsxWorkbook): void {
+    this.assertOpen();
     const previous = this.currentWorkbook;
     this.currentWorkbook = candidate;
     previous?.destroy();
   }
 
   destroy(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.generation++;
     this.currentWorkbook?.destroy();
     this.currentWorkbook = null;
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw this.closedError();
+  }
+
+  private closedError(): Error {
+    return new Error('SheetAcquisition is closed');
   }
 }
 
@@ -101,31 +120,33 @@ export class ViewportState {
   }
 }
 
-/** Coalescing and stale-result generation mechanics for one sheet surface. */
+/** XLSX render scheduling around core-owned static bitmap lifecycle mechanics. */
 export class SheetRenderDispatcher {
   private animationFrame: number | null = null;
+  private readonly staticDispatcher: StaticCanvasRenderDispatcher | null;
   private generation = 0;
-  private readonly bitmapContext: ImageBitmapRenderingContext | null;
+  private destroyed = false;
 
   constructor(
-    private readonly canvas?: HTMLCanvasElement,
+    canvas?: HTMLCanvasElement,
     workerBitmapMode = false,
   ) {
-    this.bitmapContext = workerBitmapMode && canvas
-      ? canvas.getContext('bitmaprenderer')
+    this.staticDispatcher = canvas
+      ? new StaticCanvasRenderDispatcher(canvas, workerBitmapMode)
       : null;
   }
 
   begin(): number {
+    if (this.staticDispatcher) return this.staticDispatcher.begin();
     return ++this.generation;
   }
 
   isCurrent(generation: number): boolean {
-    return generation === this.generation;
+    if (this.staticDispatcher) return this.staticDispatcher.isCurrent(generation);
+    return !this.destroyed && generation === this.generation;
   }
 
-  /** Own the full lifecycle of an off-thread frame: stale frames are closed,
-   * current frames resize the backing store and atomically replace the bitmap. */
+  /** Delegate stale disposal and atomic bitmap replacement to the core owner. */
   commitBitmap(
     generation: number,
     bitmap: ImageBitmap,
@@ -136,23 +157,14 @@ export class SheetRenderDispatcher {
       bitmap.close();
       return false;
     }
-    if (!this.canvas || !this.bitmapContext) {
+    if (!this.staticDispatcher) {
       bitmap.close();
       throw new Error('SheetRenderDispatcher is not configured for worker bitmap rendering');
     }
-    if (this.canvas.width !== bitmap.width) this.canvas.width = bitmap.width;
-    if (this.canvas.height !== bitmap.height) this.canvas.height = bitmap.height;
-    const width = `${cssWidth}px`;
-    const height = `${cssHeight}px`;
-    if (this.canvas.style.width !== width) this.canvas.style.width = width;
-    if (this.canvas.style.height !== height) this.canvas.style.height = height;
-    try {
-      this.bitmapContext.transferFromImageBitmap(bitmap);
-    } catch (error) {
-      bitmap.close();
-      throw error;
-    }
-    return true;
+    return this.staticDispatcher.commitBitmap(generation, bitmap, {
+      cssWidth,
+      cssHeight,
+    });
   }
 
   schedule(render: () => void): void {
@@ -168,10 +180,13 @@ export class SheetRenderDispatcher {
   }
 
   destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
     if (this.animationFrame !== null && typeof cancelAnimationFrame === 'function') {
       cancelAnimationFrame(this.animationFrame);
       this.animationFrame = null;
     }
+    this.staticDispatcher?.destroy();
     this.generation++;
   }
 }

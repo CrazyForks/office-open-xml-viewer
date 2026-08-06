@@ -3,7 +3,7 @@ import type { Hyperlink, ViewportRange, Worksheet, XlsxComment } from './types.j
 import type { FindHighlightColors, HyperlinkTarget, LoadOptions, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale, anchoredZoomOffset, openExternalHyperlink, nextZoomStep, prevZoomStep, fitScale } from '@silurus/ooxml-core';
 import { CallerCanvasMount } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
-import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
+import { HEADER_W, HEADER_H, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
 import { XlsxFindController, type FindCell, type XlsxMatchLocation } from './find.js';
@@ -741,6 +741,7 @@ class XlsxViewerEngine implements ZoomableViewer {
    *   RESOLVES, matching every subsequent navigation call.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    this.assertOpen();
     // SC20 atomic swap: retain the previous workbook locally and only tear it down
     // AFTER the new one loads successfully. A re-load thus never orphans the old
     // workbook's worker + pinned WASM allocation (the leak this guards), yet a
@@ -768,6 +769,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       this.opts.onReady?.(wb.sheetNames);
       await this.showSheet(this._initialSheet());
     } catch (err) {
+      if (this._destroyed) throw this.destroyedError();
       const e = err instanceof Error ? err : new Error(String(err));
       if (this.opts.onError) {
         this.opts.onError(e);
@@ -1497,6 +1499,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
   /** Returns the cell at canvas-client coordinates, or null if outside the cell grid. */
   getCellAt(clientX: number, clientY: number): CellAddress | null {
+    if (this._destroyed) return null;
     const ws = this.currentWorksheet;
     if (!ws) return null;
     const cs = this.viewport.scale;
@@ -1514,62 +1517,10 @@ class XlsxViewerEngine implements ZoomableViewer {
     const innerX = lx - HEADER_W;
     const innerY = ly - HEADER_H;
 
-    const freezeRows = ws.freezeRows ?? 0;
-    const freezeCols = ws.freezeCols ?? 0;
-
-    // Compute frozen pixel dimensions (unscaled)
-    let frozenH = 0;
-    const frozenRowH: number[] = [];
-    for (let r = 1; r <= freezeRows; r++) {
-      const h = rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
-      frozenRowH.push(h);
-      frozenH += h;
-    }
-    let frozenW = 0;
-    const frozenColW: number[] = [];
-    for (let c = 1; c <= freezeCols; c++) {
-      const w = colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
-      frozenColW.push(w);
-      frozenW += w;
-    }
-
-    // Find row
-    let row: number;
-    if (innerY < frozenH) {
-      row = -1;
-      let acc = 0;
-      for (let r = 0; r < freezeRows; r++) {
-        acc += frozenRowH[r];
-        if (innerY < acc) { row = r + 1; break; }
-      }
-      if (row === -1) return null;
-    } else {
-      const contentY = innerY - frozenH + this.viewportTop / cs;
-      const axes = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws));
-      const r = axes.row.scrollableIndexAt(contentY, freezeRows + 1);
-      if (r === null) return null;
-      row = r;
-    }
-
-    // Find col
-    let col: number;
-    if (innerX < frozenW) {
-      col = -1;
-      let acc = 0;
-      for (let c = 0; c < freezeCols; c++) {
-        acc += frozenColW[c];
-        if (innerX < acc) { col = c + 1; break; }
-      }
-      if (col === -1) return null;
-    } else {
-      const contentX = innerX - frozenW + this.effectiveScrollLeft / cs;
-      const axes = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws));
-      const c = axes.col.scrollableIndexAt(contentX, freezeCols + 1);
-      if (c === null) return null;
-      col = c;
-    }
-
-    return { row, col };
+    return GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).cellAt(innerX, innerY, {
+      scrollX: this.effectiveScrollLeft / cs,
+      scrollY: this.viewportTop / cs,
+    });
   }
 
   /** Returns the CSS-pixel rect of a cell within canvasArea, or null if not
@@ -1582,70 +1533,13 @@ class XlsxViewerEngine implements ZoomableViewer {
     const ws = this.currentWorksheet;
     if (!ws) return null;
     const cs = this.viewport.scale;
-    const mdw = getMdwForWorksheet(ws);
-    const sp = (px: number) => Math.round(px * cs);
-    const colW = (c: number) => sp(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, mdw));
-    const rowH = (r: number) => sp(rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight));
-
-    const freezeRows = ws.freezeRows ?? 0;
-    const freezeCols = ws.freezeCols ?? 0;
-
-    // Compute x. The renderer draws the scrollable area starting at
-    // `scrollAreaX = sp(HEADER_W) + Σ sp(frozenWidth)` and offsets each
-    // cell by `-(offsetX * cs)` where offsetX is the *logical* partial
-    // visibility of the leftmost visible column.
-    let x: number;
-    if (col <= freezeCols) {
-      let acc = sp(HEADER_W);
-      for (let c = 1; c < col; c++) acc += colW(c);
-      x = acc;
-    } else {
-      let frozenW = 0;
-      for (let c = 1; c <= freezeCols; c++) frozenW += colW(c);
-      const scrollAreaX = sp(HEADER_W) + frozenW;
-
-      // Mirror renderCurrentSheet's startCol / offsetX search (binary search).
-      const logicalScrollX = this.effectiveScrollLeft / cs;
-      const colAxis = GridGeometry.forWorksheet(ws, mdw).col;
-      const { index: startCol, partial: offsetX } =
-        colAxis.indexAt(logicalScrollX + colAxis.offsetOf(freezeCols + 1));
-
-      let acc = scrollAreaX - offsetX * cs;
-      if (col >= startCol) {
-        for (let c = startCol; c < col; c++) acc += colW(c);
-      } else {
-        // Cell scrolled off to the left of startCol — subtract instead.
-        for (let c = col; c < startCol; c++) acc -= colW(c);
-      }
-      x = acc;
-    }
-
-    // Compute y, same logic as x.
-    let y: number;
-    if (row <= freezeRows) {
-      let acc = sp(HEADER_H);
-      for (let r = 1; r < row; r++) acc += rowH(r);
-      y = acc;
-    } else {
-      let frozenH = 0;
-      for (let r = 1; r <= freezeRows; r++) frozenH += rowH(r);
-      const scrollAreaY = sp(HEADER_H) + frozenH;
-
-      const logicalScrollY = this.viewportTop / cs;
-      const rowAxis = GridGeometry.forWorksheet(ws, mdw).row;
-      const { index: startRow, partial: offsetY } =
-        rowAxis.indexAt(logicalScrollY + rowAxis.offsetOf(freezeRows + 1));
-
-      let acc = scrollAreaY - offsetY * cs;
-      if (row >= startRow) {
-        for (let r = startRow; r < row; r++) acc += rowH(r);
-      } else {
-        for (let r = row; r < startRow; r++) acc -= rowH(r);
-      }
-      y = acc;
-    }
-
-    return { x, y, w: colW(col), h: rowH(row) };
+    return GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).cellRect(row, col, {
+      scale: cs,
+      scrollX: this.effectiveScrollLeft / cs,
+      scrollY: this.viewportTop / cs,
+      headerWidth: HEADER_W,
+      headerHeight: HEADER_H,
+    });
   }
 
   /** Returns the current selection, including mode. */
@@ -1692,53 +1586,20 @@ class XlsxViewerEngine implements ZoomableViewer {
     if (!inRowHeader && !inColHeader) return null;
     if (inRowHeader && inColHeader) return { kind: 'corner' };
 
-    const freezeRows = ws.freezeRows ?? 0;
-    const freezeCols = ws.freezeCols ?? 0;
+    const geometry = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws));
 
     if (inRowHeader) {
       // Determine which row was clicked
       const innerY = ly - HEADER_H;
       if (innerY < 0) return { kind: 'corner' };
-      let frozenH = 0;
-      const frozenRowH: number[] = [];
-      for (let r = 1; r <= freezeRows; r++) {
-        const h = rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
-        frozenRowH.push(h); frozenH += h;
-      }
-      if (innerY < frozenH) {
-        let acc = 0;
-        for (let r = 0; r < freezeRows; r++) {
-          acc += frozenRowH[r];
-          if (innerY < acc) return { kind: 'row', row: r + 1 };
-        }
-        return null;
-      }
-      const contentY = innerY - frozenH + this.viewportTop / cs;
-      const axes = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws));
-      const r = axes.row.scrollableIndexAt(contentY, freezeRows + 1);
+      const r = geometry.rowAt(innerY, this.viewportTop / cs);
       return r === null ? null : { kind: 'row', row: r };
     }
 
     // inColHeader
     const innerX = lx - HEADER_W;
     if (innerX < 0) return { kind: 'corner' };
-    let frozenW = 0;
-    const frozenColW: number[] = [];
-    for (let c = 1; c <= freezeCols; c++) {
-      const w = colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
-      frozenColW.push(w); frozenW += w;
-    }
-    if (innerX < frozenW) {
-      let acc = 0;
-      for (let c = 0; c < freezeCols; c++) {
-        acc += frozenColW[c];
-        if (innerX < acc) return { kind: 'col', col: c + 1 };
-      }
-      return null;
-    }
-    const contentX = innerX - frozenW + this.effectiveScrollLeft / cs;
-    const axes = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws));
-    const c = axes.col.scrollableIndexAt(contentX, freezeCols + 1);
+    const c = geometry.colAt(innerX, this.effectiveScrollLeft / cs);
     return c === null ? null : { kind: 'col', col: c };
   }
 
@@ -1950,10 +1811,9 @@ class XlsxViewerEngine implements ZoomableViewer {
     const headerW = sp(HEADER_W);
     const headerH = sp(HEADER_H);
 
-    let frozenH = 0;
-    if (ws) for (let r = 1; r <= freezeRows; r++) frozenH += sp(rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight));
-    let frozenW = 0;
-    if (ws) for (let c = 1; c <= freezeCols; c++) frozenW += sp(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws)));
+    const frozen = ws
+      ? GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).roundedFrozenExtent(cs)
+      : { width: 0, height: 0 };
 
     let x: number, y: number, w: number, h: number;
     let selR1 = 1, selC1 = 1;
@@ -2003,8 +1863,8 @@ class XlsxViewerEngine implements ZoomableViewer {
     // Clamp scrollable-region selections at the frozen pane boundary.
     // Frozen cells legitimately live inside the frozen area; scrollable cells
     // that have scrolled behind the frozen area must be clipped there instead.
-    const frozenBoundX = headerW + frozenW;
-    const frozenBoundY = headerH + frozenH;
+    const frozenBoundX = headerW + frozen.width;
+    const frozenBoundY = headerH + frozen.height;
     if (selC1 > freezeCols && x < frozenBoundX) { w -= frozenBoundX - x; x = frozenBoundX; }
     if (selR1 > freezeRows && y < frozenBoundY) { h -= frozenBoundY - y; y = frozenBoundY; }
 
@@ -2126,14 +1986,9 @@ class XlsxViewerEngine implements ZoomableViewer {
     const headerH = sp(HEADER_H);
     const freezeRows = ws.freezeRows ?? 0;
     const freezeCols = ws.freezeCols ?? 0;
-    let frozenW = 0;
-    for (let c = 1; c <= freezeCols; c++)
-      frozenW += sp(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws)));
-    let frozenH = 0;
-    for (let r = 1; r <= freezeRows; r++)
-      frozenH += sp(rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight));
-    const frozenBoundX = headerW + frozenW;
-    const frozenBoundY = headerH + frozenH;
+    const frozen = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).roundedFrozenExtent(cs);
+    const frozenBoundX = headerW + frozen.width;
+    const frozenBoundY = headerH + frozen.height;
 
     // A match accent: same single-color → border + translucent fill derivation
     // the selection overlay uses. The active match uses a warm accent so it is
@@ -2242,64 +2097,22 @@ class XlsxViewerEngine implements ZoomableViewer {
     const ws = this.currentWorksheet;
     if (!ws) return;
     const cs = this.viewport.scale;
-    const mdw = getMdwForWorksheet(ws);
-    const axes = GridGeometry.forWorksheet(ws, mdw);
-    const freezeRows = ws.freezeRows ?? 0;
-    const freezeCols = ws.freezeCols ?? 0;
-
-    // Vertical: only scroll for a scrollable-region row.
-    if (row > freezeRows) {
-      const headerH = Math.round(HEADER_H * cs);
-      let frozenH = 0;
-      for (let r = 1; r <= freezeRows; r++) frozenH += Math.round(rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight) * cs);
-      const viewTop = headerH + frozenH; // top of the scrollable region (canvasArea px)
-      const viewH = this.canvasArea.clientHeight;
-      // Cell offset from the first scrollable row, in logical px, → scaled px.
-      const cellTopLogical = axes.row.offsetOf(row) - axes.row.offsetOf(freezeRows + 1);
-      const cellHLogical = rowHeightToPx(ws.rowHeights[row] ?? ws.defaultRowHeight);
-      const cellTop = viewTop + (cellTopLogical * cs - this.viewportTop);
-      const cellBot = cellTop + cellHLogical * cs;
-      if (align === 'start') {
-        this.viewportTop = cellTopLogical * cs;
-      } else if (align === 'center') {
-        this.viewportTop = cellTopLogical * cs - (viewH - viewTop - cellHLogical * cs) / 2;
-      } else if (align === 'end') {
-        this.viewportTop = cellTopLogical * cs - (viewH - viewTop - cellHLogical * cs);
-      } else if (cellTop < viewTop) {
-        this.viewportTop = cellTopLogical * cs;
-      } else if (cellBot > viewH) {
-        this.viewportTop = cellTopLogical * cs - (viewH - viewTop - cellHLogical * cs);
-      }
-    }
-
-    // Horizontal: only scroll for a scrollable-region column. Work in the
-    // start-anchored logical space, then re-derive the native scrollLeft (RTL
-    // safe) via the existing anchor path.
-    if (col > freezeCols) {
-      const headerW = Math.round(HEADER_W * cs);
-      let frozenW = 0;
-      for (let c = 1; c <= freezeCols; c++) frozenW += Math.round(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, mdw) * cs);
-      const viewLeft = headerW + frozenW;
-      const viewW = this.canvasArea.clientWidth;
-      const cellLeftLogical = axes.col.offsetOf(col) - axes.col.offsetOf(freezeCols + 1);
-      const cellWLogical = colWidthToPx(ws.colWidths[col] ?? ws.defaultColWidth, mdw);
-      const cellLeft = viewLeft + (cellLeftLogical * cs - this.effectiveScrollLeft);
-      const cellRight = cellLeft + cellWLogical * cs;
-      let wantEff = this.effectiveScrollLeft;
-      if (align === 'start') {
-        wantEff = cellLeftLogical * cs;
-      } else if (align === 'center') {
-        wantEff = cellLeftLogical * cs - (viewW - viewLeft - cellWLogical * cs) / 2;
-      } else if (align === 'end') {
-        wantEff = cellLeftLogical * cs - (viewW - viewLeft - cellWLogical * cs);
-      } else if (cellLeft < viewLeft) {
-        wantEff = cellLeftLogical * cs;
-      } else if (cellRight > viewW) {
-        wantEff = cellLeftLogical * cs - (viewW - viewLeft - cellWLogical * cs);
-      }
-      wantEff = Math.max(0, wantEff);
-      this.setViewportLeft(wantEff);
-    }
+    const offset = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).scrollOffsetForCell(
+      row,
+      col,
+      {
+        scale: cs,
+        viewportWidth: this.canvasArea.clientWidth,
+        viewportHeight: this.canvasArea.clientHeight,
+        currentX: this.effectiveScrollLeft,
+        currentY: this.viewportTop,
+        headerWidth: HEADER_W,
+        headerHeight: HEADER_H,
+        align,
+      },
+    );
+    this.viewportTop = offset.y;
+    this.setViewportLeft(offset.x);
   }
 
   // ─── List data-validation dropdown panel (display-only) ───────────────────
@@ -3316,7 +3129,6 @@ class XlsxViewerEngine implements ZoomableViewer {
    *  {@link updateSpacerSize} at cs=1 (same used-range detection) so the fit
    *  targets exactly the region the spacer/scroll extent covers. */
   private _naturalContentExtent(ws: Worksheet): { width: number; height: number } {
-    const mdw = getMdwForWorksheet(ws);
     let maxRow = Math.max(50, ws.freezeRows ?? 0);
     let maxCol = Math.max(26, ws.freezeCols ?? 0);
     for (const row of ws.rows) {
@@ -3325,24 +3137,16 @@ class XlsxViewerEngine implements ZoomableViewer {
         if (cell.col > maxCol) maxCol = cell.col;
       }
     }
-    let width = HEADER_W;
-    for (let c = 1; c <= maxCol; c++) {
-      width += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, mdw);
-    }
-    let height = HEADER_H;
-    for (let r = 1; r <= maxRow; r++) {
-      height += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
-    }
-    return { width, height };
+    return GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).logicalContentExtent(
+      maxRow,
+      maxCol,
+      HEADER_W,
+      HEADER_H,
+    );
   }
 
   private updateSpacerSize(ws: Worksheet): void {
     const cs = this.viewport.scale;
-    const mdw = getMdwForWorksheet(ws);
-    // Match getCellRect / the renderer: round each cell's scaled width
-    // independently so the scrollbar's max scroll lines up with the
-    // canvas's furthest-right / furthest-down drawn cell edge.
-    const sp = (px: number) => Math.round(px * cs);
     const freezeRows = ws.freezeRows ?? 0;
     const freezeCols = ws.freezeCols ?? 0;
 
@@ -3358,15 +3162,16 @@ class XlsxViewerEngine implements ZoomableViewer {
     maxRow += 30;
     maxCol += 10;
 
-    // Spacer = sp(header) + Σ sp(width) for every visible col, same for rows.
-    let totalW = sp(HEADER_W);
-    for (let c = 1; c <= maxCol; c++) {
-      totalW += sp(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, mdw));
-    }
-    let totalH = sp(HEADER_H);
-    for (let r = 1; r <= maxRow; r++) {
-      totalH += sp(rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight));
-    }
+    // Spacer = rounded header + cumulative per-band-rounded geometry.
+    const extent = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).roundedContentExtent(
+      maxRow,
+      maxCol,
+      cs,
+      HEADER_W,
+      HEADER_H,
+    );
+    const totalW = extent.width;
+    const totalH = extent.height;
 
     this.spacer.style.width = `${totalW}px`;
     this.spacer.style.height = `${totalH}px`;
@@ -3434,16 +3239,6 @@ class XlsxViewerEngine implements ZoomableViewer {
     const freezeRows = ws.freezeRows ?? 0;
     const freezeCols = ws.freezeCols ?? 0;
 
-    // Compute frozen area in logical (unscaled) pixels
-    let frozenW = 0;
-    for (let c = 1; c <= freezeCols; c++) {
-      frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
-    }
-    let frozenH = 0;
-    for (let r = 1; r <= freezeRows; r++) {
-      frozenH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
-    }
-
     // DOM scrollLeft/scrollTop are in scaled (physical) CSS pixels.
     // Convert to logical pixels for cell-finding by dividing by cs. For RTL
     // sheets effectiveScrollLeft inverts the native scrollLeft so that 0 = col A
@@ -3451,36 +3246,18 @@ class XlsxViewerEngine implements ZoomableViewer {
     const logicalScrollX = this.effectiveScrollLeft / cs;
     const logicalScrollY = this.viewportTop / cs;
 
-    // Find startCol / startRow in logical pixel space (binary search over the
-    // per-sheet cumulative-offset axes instead of an O(n) walk from cell 1).
-    const axes = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws));
-    const { index: startCol, partial: offsetX } =
-      axes.col.indexAt(logicalScrollX + axes.col.offsetOf(freezeCols + 1));
-    const { index: startRow, partial: offsetY } =
-      axes.row.indexAt(logicalScrollY + axes.row.offsetOf(freezeRows + 1));
-
-    // Effective scrollable area in logical pixels (canvas / cs - headers - frozen)
-    const cellW = w / cs - HEADER_W - frozenW;
-    const cellH = h / cs - HEADER_H - frozenH;
-
-    // Compute exact number of visible columns by walking actual widths (+ 2 buffer)
-    let cols = 0;
-    { let xAcc = -offsetX; let c = startCol;
-      while (xAcc < cellW + offsetX && c <= 16384) {
-        xAcc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws)); cols++; c++;
-      }
-      cols += 2;
-    }
-    // Compute exact number of visible rows by walking actual heights (+ 2 buffer)
-    let rows = 0;
-    { let yAcc = -offsetY; let r = startRow;
-      while (yAcc < cellH + offsetY && r <= 1048576) {
-        yAcc += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight); rows++; r++;
-      }
-      rows += 2;
-    }
-
-    const viewport: ViewportRange = { row: startRow, col: startCol, rows, cols };
+    const visible = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).visibleRange({
+      width: w,
+      height: h,
+      scale: cs,
+      scrollX: logicalScrollX,
+      scrollY: logicalScrollY,
+      headerWidth: HEADER_W,
+      headerHeight: HEADER_H,
+      buffer: 2,
+    });
+    const viewport: ViewportRange = visible.range;
+    const { offsetX, offsetY } = visible;
 
     const { selectedRowRange, selectedColRange } = this.computeHeaderHighlight();
 
@@ -3584,6 +3361,16 @@ class XlsxViewerEngine implements ZoomableViewer {
     // detaches every listener bound to elements within it (scrollHost pointer/
     // wheel handlers, tab clicks, zoom slider) without per-element cleanup.
     this.wrapper.remove();
+  }
+
+  private assertOpen(): void {
+    if (this._destroyed) throw this.destroyedError();
+  }
+
+  private destroyedError(): Error {
+    return new Error(this._mountKind === 'sheet'
+      ? 'XlsxSheetViewer is destroyed'
+      : 'XlsxViewer is destroyed');
   }
 }
 

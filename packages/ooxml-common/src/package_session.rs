@@ -760,6 +760,40 @@ impl PackageSessionHandle {
         })
     }
 
+    /// Run one self-contained package read in its own accounting operation.
+    ///
+    /// Format cursors may retain a different operation across an acknowledged
+    /// unit boundary. This helper deliberately does not borrow that cursor's
+    /// operation: the package session owns both lifecycles and applies the same
+    /// shared governor to them. Success commits only this operation; failure
+    /// cancels only this operation while preserving a package-wide resource
+    /// failure as the primary error.
+    pub fn run_operation<T>(
+        &self,
+        name: impl Into<String>,
+        run: impl FnOnce(&PackageOperation) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut operation = self.begin_operation(name)?;
+        let result = run(&operation);
+        if let Err(resource_error) = self.assert_healthy() {
+            let _ = operation.cancel();
+            return Err(resource_error);
+        }
+        match result {
+            Ok(value) => match operation.finish() {
+                Ok(()) => Ok(value),
+                Err(error) => {
+                    let _ = operation.cancel();
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = operation.cancel();
+                Err(error)
+            }
+        }
+    }
+
     /// Verify that the package is still open and has not encountered a
     /// package-wide resource failure.
     pub fn assert_healthy(&self) -> Result<(), String> {

@@ -1287,6 +1287,22 @@ function decoYForBaseline(baseline: CanvasTextBaseline, textY: number, rSizePx: 
   return { underline: textY + rSizePx + 1, strike: textY + Math.round(rSizePx * 0.5) };
 }
 
+/** Resolve the vertical anchor for content that lays out as exactly one line.
+ *  ECMA-376 Part 1 §18.8.1 makes wrapText a line-wrapping switch, while
+ *  §18.18.88 defines vertical alignment over the cell height. A wrap-enabled
+ *  value that still fits on one line therefore uses the same top/middle/bottom
+ *  anchor as an unwrapped value; only a genuinely multi-line result owns a
+ *  line-box block. */
+function singleLineVerticalAnchor(geom: RichCellGeom): {
+  baseline: CanvasTextBaseline;
+  textY: number;
+} {
+  const { alignV, cy, cellH, paddingY } = geom;
+  if (alignV === 'top') return { baseline: 'top', textY: cy + paddingY };
+  if (alignV === 'center') return { baseline: 'middle', textY: cy + cellH / 2 };
+  return { baseline: 'bottom', textY: cy + cellH - paddingY };
+}
+
 /** The draw font for a run/segment: super/subscript renders at ~65% size
  *  (ECMA-376 §18.4.14 vertAlign / ST_VerticalAlignRun §22.9.2.17); everything
  *  else keeps its declared size. The *base* size still governs line height and
@@ -1371,6 +1387,26 @@ export function drawResolvedRichLine(
  * Used by the non-wrap rich paths; the wrap path drives `drawResolvedRichLine`
  * directly from its laid-out segments.
  */
+function drawRichSegments(
+  ctx: CanvasRenderingContext2D,
+  segs: RichSeg[],
+  geom: RichCellGeom,
+  cs: number,
+  dpr: number,
+  opts: { fontColor?: string | null; readingOrder?: number },
+  textY: number,
+  baseline: CanvasTextBaseline,
+): void {
+  const { alignH, cx, cellW, leftPad, paddingX } = geom;
+  const totalWidth = segs.reduce((a, s) => a + s.width, 0);
+  let startX: number;
+  if (alignH === 'right') startX = cx + cellW - paddingX - totalWidth;
+  else if (alignH === 'center') startX = cx + cellW / 2 - totalWidth / 2;
+  else startX = cx + leftPad;
+  const { needBidi, baseRtl } = resolveCellBidi(opts.readingOrder, segs.map((s) => s.text).join(''));
+  drawResolvedRichLine(ctx, segs, startX, textY, baseline, cs, dpr, { fontColor: opts.fontColor, needBidi, baseRtl });
+}
+
 function drawRichLine(
   ctx: CanvasRenderingContext2D,
   lineRuns: Run[],
@@ -1382,19 +1418,12 @@ function drawRichLine(
   textY: number,
   baseline: CanvasTextBaseline,
 ): void {
-  const { alignH, cx, cellW, leftPad, paddingX } = geom;
   const segs: RichSeg[] = lineRuns.map((r) => {
     const font = applyRunFont(baseFont, r);
     ctx.font = buildFont(vertAlignDrawFont(font), cs);
     return { text: r.text, font, width: ctx.measureText(r.text).width };
   });
-  const totalWidth = segs.reduce((a, s) => a + s.width, 0);
-  let startX: number;
-  if (alignH === 'right') startX = cx + cellW - paddingX - totalWidth;
-  else if (alignH === 'center') startX = cx + cellW / 2 - totalWidth / 2;
-  else startX = cx + leftPad;
-  const { needBidi, baseRtl } = resolveCellBidi(opts.readingOrder, segs.map((s) => s.text).join(''));
-  drawResolvedRichLine(ctx, segs, startX, textY, baseline, cs, dpr, { fontColor: opts.fontColor, needBidi, baseRtl });
+  drawRichSegments(ctx, segs, geom, cs, dpr, opts, textY, baseline);
 }
 
 /**
@@ -1414,12 +1443,7 @@ function drawSingleLineRichText(
   dpr: number,
   opts: { fontColor?: string | null; readingOrder?: number } = {},
 ): void {
-  const { alignV, cy, cellH, paddingY } = geom;
-  let textY: number;
-  let baseline: CanvasTextBaseline;
-  if (alignV === 'top') { baseline = 'top'; textY = cy + paddingY; }
-  else if (alignV === 'center') { baseline = 'middle'; textY = cy + cellH / 2; }
-  else { baseline = 'bottom'; textY = cy + cellH - paddingY; }
+  const { baseline, textY } = singleLineVerticalAnchor(geom);
   drawRichLine(ctx, runs, baseFont, geom, cs, dpr, opts, textY, baseline);
 }
 
@@ -1516,6 +1540,40 @@ export function drawNonWrapRichText(
   }
 }
 
+/** Lay out and draw a plain wrap-enabled cell value. A value that does not
+ *  actually wrap remains a single line and uses the ordinary cell-height
+ *  anchor; only two or more produced lines use the design line-box block. This
+ *  helper is shared by visible cells and off-screen merged anchors so scrolling
+ *  cannot select a different vertical-placement algorithm. */
+export function drawWrappedPlainText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  textX: number,
+  font: CellFont,
+  geom: RichCellGeom,
+  cs: number,
+): void {
+  const { alignV, cy, cellH, leftPad, paddingX, paddingY } = geom;
+  const lines = wrapTextLines(ctx, text, geom.cellW - leftPad - paddingX);
+  if (lines.length === 1) {
+    const { baseline, textY } = singleLineVerticalAnchor(geom);
+    ctx.textBaseline = baseline;
+    ctx.fillText(lines[0], textX, textY);
+    return;
+  }
+
+  const lineH = vMetricPx(font.size, cs, 1.2, font.name ?? undefined);
+  const totalTextH = lines.length * lineH;
+  let startY: number;
+  if (alignV === 'top') startY = cy + paddingY;
+  else if (alignV === 'center') startY = cy + (cellH - totalTextH) / 2;
+  else startY = cy + cellH - totalTextH - paddingY;
+  ctx.textBaseline = 'top';
+  for (let li = 0; li < lines.length; li++) {
+    ctx.fillText(lines[li], textX, startY + li * lineH);
+  }
+}
+
 /**
  * Lay out and draw WRAP-mode rich text (mixed-font runs, §18.8.1 wrapText on).
  * `layoutRichTextLines` soft-wraps at word / CJK boundaries (and hard breaks),
@@ -1544,6 +1602,13 @@ export function drawWrappedRichText(
 ): void {
   const { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY } = geom;
   const rLines = layoutRichTextLines(ctx, runs, baseFont, cs, cellW - leftPad - paddingX);
+  // layoutRichTextLines preserves leading, trailing, and consecutive hard-break
+  // regions, so exactly one produced line also proves there was no hard break.
+  if (rLines.length === 1) {
+    const { baseline, textY } = singleLineVerticalAnchor(geom);
+    drawRichSegments(ctx, rLines[0].segments, geom, cs, dpr, opts, textY, baseline);
+    return;
+  }
   const totalH = rLines.reduce((s, l) => s + vMetricPx(l.maxFontSize, cs, 1.2, l.maxFontFamily ?? undefined), 0);
   let yy: number;
   if (alignV === 'top') yy = cy + paddingY;
@@ -2134,17 +2199,14 @@ function renderQuadrant(
         cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder },
       );
     } else if (xf.wrapText) {
-      const lines = wrapTextLines(ctx, text, cW - leftPad - paddingX);
-      const lineH = vMetricPx(font.size, cs, 1.2, font.name ?? undefined);
-      const totalTextH = lines.length * lineH;
-      let startY: number;
-      if (alignV === 'top') startY = aCy + paddingY;
-      else if (alignV === 'center') startY = aCy + (cH - totalTextH) / 2;
-      else startY = aCy + cH - totalTextH - paddingY;
-      ctx.textBaseline = 'top';
-      for (let li = 0; li < lines.length; li++) {
-        ctx.fillText(lines[li], textX, startY + li * lineH);
-      }
+      drawWrappedPlainText(
+        ctx,
+        text,
+        textX,
+        fontForDraw,
+        { alignH, alignV, cx: aCx, cy: aCy, cellW: cW, cellH: cH, leftPad, paddingX, paddingY },
+        cs,
+      );
     } else if (hasRichText) {
       // Non-wrap rich text — same helper as the in-viewport path so an
       // off-screen-anchored merge renders identical per-run text (single line, or
@@ -2155,10 +2217,10 @@ function renderQuadrant(
         cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder },
       );
     } else {
-      let textY: number;
-      if (alignV === 'top') { ctx.textBaseline = 'top'; textY = aCy + paddingY; }
-      else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = aCy + cH / 2; }
-      else { ctx.textBaseline = 'bottom'; textY = aCy + cH - paddingY; }
+      const { baseline, textY } = singleLineVerticalAnchor({
+        alignH, alignV, cx: aCx, cy: aCy, cellW: cW, cellH: cH, leftPad, paddingX, paddingY,
+      });
+      ctx.textBaseline = baseline;
       ctx.fillText(text, textX, textY);
     }
     ctx.restore();
@@ -2752,16 +2814,14 @@ function renderQuadrant(
           cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder },
         );
       } else if (xf.wrapText) {
-        const lines = wrapTextLines(ctx, text, cellW - leftPad - paddingX);
-        const lineH = vMetricPx(font.size, cs, 1.2, font.name ?? undefined);
-        const totalTextH = lines.length * lineH;
-        let startY: number;
-        if (alignV === 'top') { startY = cy + paddingY; ctx.textBaseline = 'top'; }
-        else if (alignV === 'center') { startY = cy + (cellH - totalTextH) / 2; ctx.textBaseline = 'top'; }
-        else { startY = cy + cellH - totalTextH - paddingY; ctx.textBaseline = 'top'; }
-        for (let li = 0; li < lines.length; li++) {
-          ctx.fillText(lines[li], textX, startY + li * lineH);
-        }
+        drawWrappedPlainText(
+          ctx,
+          text,
+          textX,
+          fontForDraw,
+          { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY },
+          cs,
+        );
       } else if (hasRichText) {
         // Non-wrap rich text: per-run fonts, honoring hard breaks (Alt+Enter LF;
         // ECMA-376 §18.8.1 — Excel renders breaks even with wrapText off). The
@@ -2845,10 +2905,10 @@ function renderQuadrant(
             ctx.fillText(lines[li], textX, startY + li * lineH + vaYShift);
           }
         } else {
-          let textY: number;
-          if (alignV === 'top') { ctx.textBaseline = 'top'; textY = cy + paddingY; }
-          else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = cy + cellH / 2; }
-          else { ctx.textBaseline = 'bottom'; textY = cy + cellH - paddingY; }
+          const { baseline, textY } = singleLineVerticalAnchor({
+            alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY,
+          });
+          ctx.textBaseline = baseline;
           ctx.fillText(drawText, textX, textY + vaYShift);
         }
       }
