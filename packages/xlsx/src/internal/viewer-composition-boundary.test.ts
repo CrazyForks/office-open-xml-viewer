@@ -22,7 +22,7 @@ describe('XLSX viewer composition boundary', () => {
     ]) {
       expect(viewer.match(new RegExp(`new ${role}\\(`, 'g')), role).toHaveLength(1);
     }
-    expect(viewer).toContain('GridGeometry.forWorksheet');
+    expect(viewer).toContain('getGridGeometryForWorksheet');
   });
 
   it('keeps geometry pure and delegates static bitmap ownership to core', () => {

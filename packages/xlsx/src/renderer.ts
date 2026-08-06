@@ -20,6 +20,18 @@ import {
   setCoordinateIndexValue,
   type CoordinateIndexIdentity,
 } from './renderer-coordinate-index.js';
+import { GridGeometry } from './internal/grid-geometry.js';
+import type { GridAxisGeometry } from './internal/grid-axis-geometry.js';
+import { usesNativeOneCellExtent } from './internal/cell-anchor-geometry.js';
+import {
+  MDW_FALLBACK,
+  colWidthToPx,
+  pxToColWidth,
+  rowHeightToPx,
+  pxToRowHeight,
+} from './internal/grid-metrics.js';
+
+export { colWidthToPx, pxToColWidth, rowHeightToPx, pxToRowHeight };
 
 /** Cache key for a decoded image in the shared `loadedImages` map. A plain
  *  picture is keyed by its zip `imagePath`; a picture carrying a `<a:duotone>`
@@ -114,8 +126,6 @@ const DEFAULT_FONT_SIZE = 11;
 // rendered width among the digits 0-9 in the workbook's Normal-style font,
 // so the spec-correct value depends on which font and point size that style
 // resolves to (e.g. Meiryo UI 10 pt yields MDW ≈ 6 px).
-const MDW_FALLBACK = 8;
-
 export const HEADER_W = 50;
 export const HEADER_H = 22;
 
@@ -159,50 +169,16 @@ export function sheetAnchoredRectX(
 // Thin line drawn between frozen and scrollable areas
 const FREEZE_LINE_COLOR = '#7a7a7a';
 
-/** Cache of Max Digit Width per "family:sizePt" key. The Canvas2D
- *  `measureText` call is cheap but not free; column-width conversion is
- *  invoked many times per render so we memoize. */
-const mdwCache = new Map<string, number>();
-
-/** Excel's empirical MDW overrides for fonts that the host might not have
- *  installed (e.g. Meiryo UI on macOS, where Canvas2D falls back to a
- *  narrower sans-serif and undermeasures the digits — verified against
- *  private/sample-10's column widths in Excel: 21.125 chars = 169 px,
- *  which requires MDW=8). Without these the rendered column widths drift
- *  smaller than Excel's, which then offsets every drawing anchor inside
- *  the sheet (sample-10's H7 sun ended up one cell to the right of where
- *  Excel renders it).
- *
- *  Only listed when the Canvas2D fallback measurement diverges from
- *  Excel's actual MDW; other fonts (e.g. Yu Gothic 12 pt where Canvas
- *  happens to land on 8) continue to use the measurement. */
-const MDW_TABLE: Record<string, Record<number, number>> = {
-  'meiryo ui':       { 10: 8, 11: 8 },
-  'meiryo':          { 10: 8, 11: 8 },
-};
-
 /** Measure the Max Digit Width (ECMA-376 §18.3.1.13) for an arbitrary font
  *  using Canvas2D. The maximum of `measureText('0'..'9').width` is taken,
  *  rounded to the nearest pixel to match Excel's storage of integer pixel
  *  widths in `<col>` width values.
  *
- *  When the requested font isn't installed on the host (e.g. Meiryo UI on
- *  macOS), Canvas2D silently falls back to a narrower sans-serif face and
- *  the digit width comes back ~1 px too small. That offset cascades into
- *  the column widths, shifting every drawing anchor inside the sheet
- *  relative to where Excel placed it (private/sample-10 H7 sun ended up
- *  one cell to the right of where Excel renders it). So we consult a small
- *  lookup table of Excel's documented MDW values first and only fall back
- *  to measurement for unknown faces. */
+ *  The value is deliberately measured from the current realm on each call.
+ *  Font registration is lifecycle-managed and may change between workbooks;
+ *  caching by family/size alone would retain fallback metrics after the real
+ *  face loads or is released. */
 export function computeMdw(family: string, sizePt: number): number {
-  const key = `${family}:${sizePt}`;
-  const cached = mdwCache.get(key);
-  if (cached !== undefined) return cached;
-  const tableHit = MDW_TABLE[family.toLowerCase()]?.[Math.round(sizePt)];
-  if (tableHit !== undefined) {
-    mdwCache.set(key, tableHit);
-    return tableHit;
-  }
   const sizePx = sizePt * PT_TO_PX;
   // Off-DOM canvas: avoids touching the document tree from background calls.
   const canvas = (typeof OffscreenCanvas !== 'undefined')
@@ -219,7 +195,6 @@ export function computeMdw(family: string, sizePt: number): number {
     if (w > mdw) mdw = w;
   }
   const out = Math.round(mdw) || MDW_FALLBACK;
-  mdwCache.set(key, out);
   return out;
 }
 
@@ -231,6 +206,12 @@ export function getMdwForWorksheet(ws: { defaultFontFamily?: string; defaultFont
   return computeMdw(ws.defaultFontFamily, ws.defaultFontSize);
 }
 
+/** Worksheet-lifetime geometry snapshot. Font loading completes before a
+ * worksheet reaches paint; explicit model mutations invalidate this snapshot. */
+export function getGridGeometryForWorksheet(ws: Worksheet): GridGeometry {
+  return GridGeometry.forWorksheetMeasured(ws, () => getMdwForWorksheet(ws));
+}
+
 /** Convert a stored column-width value (ECMA-376 §18.3.1.13 `<col width>`, in
  *  "number of characters" = max digit widths) to CSS pixels.
  *
@@ -240,52 +221,6 @@ export function getMdwForWorksheet(ws: { defaultFontFamily?: string; defaultFont
  *  truncated *before* it is folded into the numerator (§18.3.1.13), then the
  *  whole expression is truncated to an integer pixel. Excel stores integer
  *  pixel column widths, so this yields exactly the width Excel renders. */
-export function colWidthToPx(w: number, mdw: number = MDW_FALLBACK): number {
-  return Math.trunc(((256 * w + Math.trunc(128 / mdw)) / 256) * mdw);
-}
-
-/** Analytic inverse of {@link colWidthToPx}: the internal column-width value (in
- *  "max digit widths") that renders back to *exactly* `px` logical pixels, so a
- *  column dragged to N px paints at N px with no drift (WYSIWYG). Used only by
- *  the drag-to-resize handles (issue #567) to write the dragged size into the
- *  in-memory worksheet model.
- *
- *  This is deliberately NOT the ECMA-376 §18.3.1.13 file px→character formula
- *  `Truncate((px - 5) / MDW * 100 + 0.5) / 100`, for two reasons:
- *   (a) this viewer never serializes the workbook, so the model's width unit is
- *       purely internal — the only contract it must honor is the exact round-trip
- *       with {@link colWidthToPx}, which `px / MDW` satisfies (the constant
- *       `Truncate(128/MDW)/256 * MDW` added by the forward formula stays in
- *       `[0, 1)`, so `trunc(px + c) === px` for integer `px`); and
- *   (b) the spec formula degenerates below its hard-coded 5 px cell padding —
- *       for small dragged columns `(px - 5)` goes to zero or negative, producing
- *       0 / negative character widths that would make drags snap or collapse.
- *
- *  If a file-export path is ever added, do NOT reuse this for serialization:
- *  switch to the spec px→character formula above AND record `customWidth="1"`
- *  provenance (§18.3.1.13) at the serialization boundary. */
-export function pxToColWidth(px: number, mdw: number = MDW_FALLBACK): number {
-  return px / mdw;
-}
-
-/** Convert a row height value from the parser into CSS pixels.
- *
- * ECMA-376 §18.3.1.73 (`<row ht>`) and §18.3.1.81 (`sheetFormatPr@defaultRowHeight`)
- * both specify the value in points. Convert pt → CSS px at 96 DPI (×4/3)
- * to match what Excel actually displays. The parser keeps both per-row
- * heights and the intrinsic default in points so this single conversion
- * applies to either source. */
-export function rowHeightToPx(h: number): number {
-  return Math.round(h * PT_TO_PX);
-}
-
-/** Inverse of {@link rowHeightToPx}: the row height in points that renders back
- *  to exactly `px` logical pixels (`round(px/PT_TO_PX * PT_TO_PX) === px`). Used
- *  by the drag-to-resize handles (issue #567). */
-export function pxToRowHeight(px: number): number {
-  return px / PT_TO_PX;
-}
-
 /**
  * Fill a data-bar rectangle. Excel 2010+ dataBars default to a horizontal
  * gradient (`x14:dataBar@gradient="1"`): solid color on the left, fading
@@ -1652,6 +1587,8 @@ interface RenderContext {
   cfContext: CfContext;
   colWidths: number[];
   rowHeights: number[];
+  colAxis: GridAxisGeometry;
+  rowAxis: GridAxisGeometry;
   frozenColWidths: number[];
   frozenRowHeights: number[];
   frozenW: number;
@@ -2001,6 +1938,7 @@ function renderQuadrant(
   rc: RenderContext,
   startRow: number, startCol: number,
   colWidths: number[], rowHeights: number[],
+  colIndices: readonly number[], rowIndices: readonly number[],
   pixOffsetX: number, pixOffsetY: number,
   originX: number, originY: number,
   clipX: number, clipY: number, clipW: number, clipH: number,
@@ -2010,6 +1948,8 @@ function renderQuadrant(
   const { styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext, cs, dpr } = rc;
   const numCols = colWidths.length;
   const numRows = rowHeights.length;
+  const visibleRows = new Set(rowIndices);
+  const visibleCols = new Set(colIndices);
 
   // RTL grid mirror (ECMA-376 §18.3.1.87). Maps a left-anchored cell rect
   // [x, x+w] to its mirror [canvasW - x - w, canvasW - x] within the
@@ -2079,37 +2019,20 @@ function renderQuadrant(
   for (const mc of rc.worksheet.mergeCells ?? []) {
     const aRow = mc.top, aCol = mc.left;
     // If anchor is within the main loop range, skip — handled normally below.
-    if (aRow >= startRow && aRow < startRow + numRows &&
-        aCol >= startCol && aCol < startCol + numCols) continue;
+    if (visibleRows.has(aRow) && visibleCols.has(aCol)) continue;
     // Skip if merge span has no overlap with this viewport.
-    if (mc.bottom < startRow || mc.top >= startRow + numRows) continue;
-    if (mc.right  < startCol || mc.left >= startCol + numCols) continue;
+    if (!rowIndices.some((row) => row >= mc.top && row <= mc.bottom)) continue;
+    if (!colIndices.some((col) => col >= mc.left && col <= mc.right)) continue;
 
     const info = rc.mergeAnchorMap.get(`${aRow}:${aCol}`);
     if (!info) continue;
 
-    // Canvas X of anchor col (may be negative = off-screen to the left).
-    let aCx: number;
-    if (aCol >= startCol) {
-      aCx = originX + colXs[aCol - startCol];
-    } else {
-      let dx = 0;
-      for (let c = aCol; c < startCol; c++) {
-        dx += Math.round(colWidthToPx(rc.worksheet.colWidths[c] ?? rc.worksheet.defaultColWidth, rc.mdw) * cs);
-      }
-      aCx = originX - pixOffsetX - dx;
-    }
-    // Canvas Y of anchor row (may be negative = off-screen above).
-    let aCy: number;
-    if (aRow >= startRow) {
-      aCy = originY + rowYs[aRow - startRow];
-    } else {
-      let dy = 0;
-      for (let r = aRow; r < startRow; r++) {
-        dy += Math.round(rowHeightToPx(rc.worksheet.rowHeights[r] ?? rc.worksheet.defaultRowHeight) * cs);
-      }
-      aCy = originY - pixOffsetY - dy;
-    }
+    // Sparse cumulative axes keep far off-screen anchors O(log custom bands)
+    // instead of walking every intervening row/column.
+    let aCx = originX - pixOffsetX
+      + rc.colAxis.offsetOf(aCol) - rc.colAxis.offsetOf(startCol);
+    let aCy = originY - pixOffsetY
+      + rc.rowAxis.offsetOf(aRow) - rc.rowAxis.offsetOf(startRow);
 
     const cW = info.totalW, cH = info.totalH;
     aCx = mirrorX(aCx, cW);
@@ -2227,7 +2150,7 @@ function renderQuadrant(
   }
 
   for (let ri = 0; ri < numRows; ri++) {
-    const rowIndex = startRow + ri;
+    const rowIndex = rowIndices[ri];
     const cy = originY + rowYs[ri];
     const ch = rowHeights[ri];
     if (cy + ch <= clipY || cy >= clipY + clipH) continue;
@@ -2257,7 +2180,7 @@ function renderQuadrant(
       let isCC = false;
       let hasValue = false;
       if (ci < numCols) {
-        const ckey = `${rowIndex}:${startCol + ci}`;
+        const ckey = `${rowIndex}:${colIndices[ci]}`;
         if (!mergeSkipSet.has(ckey) && !mergeAnchorMap.has(ckey)) {
           const c = cellMap.get(ckey);
           const cXf = resolveXf(styles, c?.styleIndex ?? 0).xf;
@@ -2277,7 +2200,7 @@ function renderQuadrant(
     }
 
     for (let ci = 0; ci < numCols; ci++) {
-      const colIndex = startCol + ci;
+      const colIndex = colIndices[ci];
       const ltrCx = originX + colXs[ci];
       const cw = colWidths[ci];
       // Cull against the (un-mirrored) clip band — visibility is preserved
@@ -2587,7 +2510,7 @@ function renderQuadrant(
       let centerContinuousLastCi = ci;
       if (alignH === 'centerContinuous' && !mergeInfo) {
         for (let oci = ci + 1; oci < numCols; oci++) {
-          const adjKey = `${rowIndex}:${startCol + oci}`;
+          const adjKey = `${rowIndex}:${colIndices[oci]}`;
           if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
           const adjCell = cellMap.get(adjKey);
           if (adjCell && adjCell.value.type !== 'empty') break;
@@ -2635,7 +2558,7 @@ function renderQuadrant(
             let budget = extendRight;
             const startOci = isCenterCont ? centerContinuousLastCi + 1 : ci + 1;
             for (let oci = startOci; oci < numCols && budget > 0; oci++) {
-              const adjKey = `${rowIndex}:${startCol + oci}`;
+              const adjKey = `${rowIndex}:${colIndices[oci]}`;
               if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
               const adjCell = cellMap.get(adjKey);
               if (adjCell && adjCell.value.type !== 'empty') break;
@@ -2646,7 +2569,7 @@ function renderQuadrant(
           if (extendLeft > 0) {
             let budget = extendLeft;
             for (let oci = ci - 1; oci >= 0 && budget > 0; oci--) {
-              const adjKey = `${rowIndex}:${startCol + oci}`;
+              const adjKey = `${rowIndex}:${colIndices[oci]}`;
               if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
               const adjCell = cellMap.get(adjKey);
               if (adjCell && adjCell.value.type !== 'empty') break;
@@ -3089,9 +3012,9 @@ export function renderViewport(
   const dpr = opts.dpr ?? 1;
   const cs = opts.cellScale ?? 1;
   // Resolve MDW once per render — workbook-wide value derived from the
-  // Normal-style font (ECMA-376 §18.3.1.13). Cached internally per
-  // (family, sizePt) so repeated renders are O(1).
-  const mdw = getMdwForWorksheet(worksheet);
+  // Normal-style font (ECMA-376 §18.3.1.13).
+  const geometry = getGridGeometryForWorksheet(worksheet);
+  const mdw = geometry.maximumDigitWidth;
   const canvasW = ctx.canvas.width / dpr;
   const canvasH = ctx.canvas.height / dpr;
 
@@ -3107,30 +3030,44 @@ export function renderViewport(
   const { row: startRow, col: startCol, rows: numRows, cols: numCols } = viewport;
   const scrollOffsetX = (opts.scrollOffsetX ?? 0) * cs;
   const scrollOffsetY = (opts.scrollOffsetY ?? 0) * cs;
-  const freezeRows = opts.freezeRows ?? 0;
-  const freezeCols = opts.freezeCols ?? 0;
+  const { col: colAxis, row: rowAxis } = geometry.axesAtScale(cs);
+  // A freeze count may legally cover the entire worksheet. Only materialize
+  // bands that can reach this canvas; the last one may extend past the edge and
+  // naturally reduces the scrollable quadrant to zero.
+  const frozenColBands = colAxis.bandsToCover(
+    1,
+    opts.freezeCols ?? 0,
+    Math.max(0, canvasW - hw),
+  );
+  const frozenRowBands = rowAxis.bandsToCover(
+    1,
+    opts.freezeRows ?? 0,
+    Math.max(0, canvasH - hh),
+  );
+  const freezeRows = frozenRowBands.at(-1)?.index ?? 0;
+  const freezeCols = frozenColBands.at(-1)?.index ?? 0;
 
   // ── Compute frozen area pixel sizes (scaled) ─────────────────
-  const frozenColWidths: number[] = [];
-  for (let c = 1; c <= freezeCols; c++) {
-    frozenColWidths.push(sp(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth, mdw)));
-  }
-  const frozenRowHeights: number[] = [];
-  for (let r = 1; r <= freezeRows; r++) {
-    frozenRowHeights.push(sp(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight)));
-  }
+  const frozenColIndices = frozenColBands.map(({ index }) => index);
+  const frozenRowIndices = frozenRowBands.map(({ index }) => index);
+  const frozenColWidths = frozenColBands.map(({ size }) => size);
+  const frozenRowHeights = frozenRowBands.map(({ size }) => size);
   const frozenW = frozenColWidths.reduce((s, w) => s + w, 0);
   const frozenH = frozenRowHeights.reduce((s, h) => s + h, 0);
 
   // ── Scrollable col/row pixel widths (scaled) ─────────────────
-  const scrollColWidths: number[] = [];
-  for (let c = startCol; c < startCol + numCols; c++) {
-    scrollColWidths.push(sp(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth, mdw)));
-  }
-  const scrollRowHeights: number[] = [];
-  for (let r = startRow; r < startRow + numRows; r++) {
-    scrollRowHeights.push(sp(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight)));
-  }
+  const scrollColBands = colAxis.bandsToCover(
+    startCol,
+    Math.min(16_384, startCol + numCols - 1),
+  );
+  const scrollRowBands = rowAxis.bandsToCover(
+    startRow,
+    Math.min(1_048_576, startRow + numRows - 1),
+  );
+  const scrollColIndices = scrollColBands.map(({ index }) => index);
+  const scrollRowIndices = scrollRowBands.map(({ index }) => index);
+  const scrollColWidths = scrollColBands.map(({ size }) => size);
+  const scrollRowHeights = scrollRowBands.map(({ size }) => size);
 
   // ── Viewport-independent lookups (memoized per Worksheet) ────
   const {
@@ -3145,14 +3082,8 @@ export function renderViewport(
     'index-merge-anchor-coordinates',
   );
   for (const mc of worksheet.mergeCells ?? []) {
-    let totalW = 0;
-    for (let c = mc.left; c <= mc.right; c++) {
-      totalW += sp(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth, mdw));
-    }
-    let totalH = 0;
-    for (let r = mc.top; r <= mc.bottom; r++) {
-      totalH += sp(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight));
-    }
+    const totalW = colAxis.offsetOf(mc.right + 1) - colAxis.offsetOf(mc.left);
+    const totalH = rowAxis.offsetOf(mc.bottom + 1) - rowAxis.offsetOf(mc.top);
     setCoordinateIndexValue(
       mergeAnchorMap,
       `${mc.top}:${mc.left}`,
@@ -3165,6 +3096,8 @@ export function renderViewport(
     worksheet, styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext,
     colWidths: scrollColWidths,
     rowHeights: scrollRowHeights,
+    colAxis,
+    rowAxis,
     frozenColWidths, frozenRowHeights,
     frozenW, frozenH,
     startRow, startCol,
@@ -3193,6 +3126,7 @@ export function renderViewport(
   if (freezeRows > 0 && freezeCols > 0) {
     renderQuadrant(ctx, rc,
       1, 1, frozenColWidths, frozenRowHeights,
+      frozenColIndices, frozenRowIndices,
       0, 0,
       cellAreaX, cellAreaY,
       cellAreaX, cellAreaY, frozenW, frozenH,
@@ -3203,6 +3137,7 @@ export function renderViewport(
   if (freezeRows > 0) {
     renderQuadrant(ctx, rc,
       1, startCol, scrollColWidths, frozenRowHeights,
+      scrollColIndices, frozenRowIndices,
       scrollOffsetX, 0,
       scrollAreaX, cellAreaY,
       scrollAreaX, cellAreaY, scrollAreaW, frozenH,
@@ -3213,6 +3148,7 @@ export function renderViewport(
   if (freezeCols > 0) {
     renderQuadrant(ctx, rc,
       startRow, 1, frozenColWidths, scrollRowHeights,
+      frozenColIndices, scrollRowIndices,
       0, scrollOffsetY,
       cellAreaX, scrollAreaY,
       cellAreaX, scrollAreaY, frozenW, scrollAreaH,
@@ -3222,6 +3158,7 @@ export function renderViewport(
   // ── Q4: scrollable rows × scrollable cols (main area) ───────
   renderQuadrant(ctx, rc,
     startRow, startCol, scrollColWidths, scrollRowHeights,
+    scrollColIndices, scrollRowIndices,
     scrollOffsetX, scrollOffsetY,
     scrollAreaX, scrollAreaY,
     scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
@@ -3230,7 +3167,7 @@ export function renderViewport(
   // ── Anchored images (clipped to scrollable area) ─────────────
   if (worksheet.images && worksheet.images.length > 0 && opts.loadedImages) {
     renderImages(
-      ctx, worksheet, opts.loadedImages, cs,
+      ctx, worksheet, colAxis, rowAxis, opts.loadedImages, cs,
       startRow, startCol,
       scrollOffsetX, scrollOffsetY,
       scrollAreaX, scrollAreaY,
@@ -3242,7 +3179,7 @@ export function renderViewport(
   // ── Anchored shape groups (custom geometry, incl. embedded images) ────
   if (worksheet.shapeGroups && worksheet.shapeGroups.length > 0) {
     renderShapeGroups(
-      ctx, worksheet, cs,
+      ctx, worksheet, colAxis, rowAxis, cs,
       startRow, startCol,
       scrollOffsetX, scrollOffsetY,
       scrollAreaX, scrollAreaY,
@@ -3255,7 +3192,7 @@ export function renderViewport(
   // ── Anchored charts (clipped to scrollable area) ──────────────
   if (worksheet.charts && worksheet.charts.length > 0) {
     renderCharts(
-      ctx, worksheet, cs,
+      ctx, worksheet, colAxis, rowAxis, cs,
       startRow, startCol,
       scrollOffsetX, scrollOffsetY,
       scrollAreaX, scrollAreaY,
@@ -3267,7 +3204,7 @@ export function renderViewport(
   // ── Anchored slicers (Office 2010+ pivot/table filter buttons) ──
   if (worksheet.slicers && worksheet.slicers.length > 0) {
     renderSlicers(
-      ctx, worksheet, cs,
+      ctx, worksheet, colAxis, rowAxis, cs,
       startRow, startCol,
       scrollOffsetX, scrollOffsetY,
       scrollAreaX, scrollAreaY,
@@ -3280,8 +3217,10 @@ export function renderViewport(
   renderHeaders(ctx, canvasW, canvasH,
     startRow, startCol, numRows, numCols,
     scrollColWidths, scrollRowHeights,
+    scrollColIndices, scrollRowIndices,
     scrollOffsetX, scrollOffsetY,
     frozenColWidths, frozenRowHeights,
+    frozenColIndices, frozenRowIndices,
     frozenW, frozenH,
     hw, hh, cs, dpr,
     opts.selectedRowRange ?? null,
@@ -3340,8 +3279,10 @@ function renderHeaders(
   startRow: number, startCol: number,
   numRows: number, numCols: number,
   scrollColWidths: number[], scrollRowHeights: number[],
+  scrollColIndices: readonly number[], scrollRowIndices: readonly number[],
   scrollOffsetX: number, scrollOffsetY: number,
   frozenColWidths: number[], frozenRowHeights: number[],
+  frozenColIndices: readonly number[], frozenRowIndices: readonly number[],
   frozenW: number, frozenH: number,
   hw: number, hh: number, cs: number, dpr: number,
   selectedRowRange: { start: number; end: number; strong: boolean } | null,
@@ -3476,7 +3417,7 @@ function renderHeaders(
     ctx.clip();
     let cx = hw;
     for (let ci = 0; ci < frozenColWidths.length; ci++) {
-      drawColHeader(ci + 1, cx, frozenColWidths[ci]);
+      drawColHeader(frozenColIndices[ci], cx, frozenColWidths[ci]);
       cx += frozenColWidths[ci];
     }
     ctx.restore();
@@ -3491,7 +3432,7 @@ function renderHeaders(
   for (let ci = 0; ci < scrollColWidths.length; ci++) {
     const cw = scrollColWidths[ci];
     if (cx + cw > scrollAreaX && cx < canvasW) {
-      drawColHeader(startCol + ci, cx, cw);
+      drawColHeader(scrollColIndices[ci], cx, cw);
     }
     cx += cw;
   }
@@ -3505,7 +3446,7 @@ function renderHeaders(
     ctx.clip();
     let cy = hh;
     for (let ri = 0; ri < frozenRowHeights.length; ri++) {
-      drawRowHeader(ri + 1, cy, frozenRowHeights[ri]);
+      drawRowHeader(frozenRowIndices[ri], cy, frozenRowHeights[ri]);
       cy += frozenRowHeights[ri];
     }
     ctx.restore();
@@ -3520,7 +3461,7 @@ function renderHeaders(
   for (let ri = 0; ri < scrollRowHeights.length; ri++) {
     const ch = scrollRowHeights[ri];
     if (cy + ch > scrollAreaY && cy < canvasH) {
-      drawRowHeader(startRow + ri, cy, ch);
+      drawRowHeader(scrollRowIndices[ri], cy, ch);
     }
     cy += ch;
   }
@@ -3534,35 +3475,26 @@ function renderHeaders(
 
 /** Sum scaled column widths for cols 1..n-1 (sheet-space X of col n in scaled px). */
 function sheetXForCol(
-  ws: Worksheet,
+  axis: GridAxisGeometry,
   col1: number, // 1-indexed column number
-  cs: number,
 ): number {
-  const mdw = getMdwForWorksheet(ws);
-  let x = 0;
-  for (let c = 1; c < col1; c++) {
-    x += Math.round(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, mdw) * cs);
-  }
-  return x;
+  return axis.offsetOf(col1);
 }
 
 /** Sum scaled row heights for rows 1..n-1 (sheet-space Y of row n in scaled px). */
 function sheetYForRow(
-  ws: Worksheet,
+  axis: GridAxisGeometry,
   row1: number, // 1-indexed row number
-  cs: number,
 ): number {
-  let y = 0;
-  for (let r = 1; r < row1; r++) {
-    y += Math.round(rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight) * cs);
-  }
-  return y;
+  return axis.offsetOf(row1);
 }
 
 
 function renderImages(
   ctx: CanvasRenderingContext2D,
   ws: Worksheet,
+  colAxis: GridAxisGeometry,
+  rowAxis: GridAxisGeometry,
   loadedImages: Map<string, CanvasImageSource | null>,
   cs: number,
   startRow: number,
@@ -3579,8 +3511,8 @@ function renderImages(
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
 
   // Sheet-space origin of the current scroll viewport's first visible cell
-  const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
-  const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+  const scrollOriginSheetX = sheetXForCol(colAxis, startCol);
+  const scrollOriginSheetY = sheetYForRow(rowAxis, startRow);
 
   ctx.save();
   ctx.beginPath();
@@ -3599,8 +3531,8 @@ function renderImages(
     const fromRow1 = anchor.fromRow + 1;
 
     // Image sheet-space top-left (always derived from the `from` anchor)
-    const imgSheetX1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
-    const imgSheetY1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
+    const imgSheetX1 = sheetXForCol(colAxis, fromCol1) + (anchor.fromColOff * cs) / EMU_PER_PX;
+    const imgSheetY1 = sheetYForRow(rowAxis, fromRow1) + (anchor.fromRowOff * cs) / EMU_PER_PX;
 
     // ECMA-376 §20.5.2.33 + "Move but don't size with cells": when the
     // anchor was saved with editAs="oneCell" Excel preserves the picture's
@@ -3613,14 +3545,14 @@ function renderImages(
     // editAs="twoCell" (default, image resizes with cells) and absolute
     // anchors, or when the parser couldn't capture the native ext.
     let imgW: number, imgH: number;
-    if (anchor.editAs === 'oneCell' && anchor.nativeExtCx > 0 && anchor.nativeExtCy > 0) {
+    if (usesNativeOneCellExtent(anchor)) {
       imgW = (anchor.nativeExtCx * cs) / EMU_PER_PX;
       imgH = (anchor.nativeExtCy * cs) / EMU_PER_PX;
     } else {
       const toCol1 = anchor.toCol + 1;
       const toRow1 = anchor.toRow + 1;
-      const imgSheetX2 = sheetXForCol(ws, toCol1, cs) + (anchor.toColOff * cs) / EMU_PER_PX;
-      const imgSheetY2 = sheetYForRow(ws, toRow1, cs) + (anchor.toRowOff * cs) / EMU_PER_PX;
+      const imgSheetX2 = sheetXForCol(colAxis, toCol1) + (anchor.toColOff * cs) / EMU_PER_PX;
+      const imgSheetY2 = sheetYForRow(rowAxis, toRow1) + (anchor.toRowOff * cs) / EMU_PER_PX;
       imgW = imgSheetX2 - imgSheetX1;
       imgH = imgSheetY2 - imgSheetY1;
     }
@@ -3654,6 +3586,8 @@ function renderImages(
 function renderShapeGroups(
   ctx: CanvasRenderingContext2D,
   ws: Worksheet,
+  colAxis: GridAxisGeometry,
+  rowAxis: GridAxisGeometry,
   cs: number,
   startRow: number,
   startCol: number,
@@ -3671,8 +3605,8 @@ function renderShapeGroups(
   const anchors = ws.shapeGroups;
   if (!anchors || anchors.length === 0) return;
 
-  const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
-  const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+  const scrollOriginSheetX = sheetXForCol(colAxis, startCol);
+  const scrollOriginSheetY = sheetYForRow(rowAxis, startRow);
 
   ctx.save();
   ctx.beginPath();
@@ -3684,21 +3618,21 @@ function renderShapeGroups(
     const fromCol1 = anchor.fromCol + 1;
     const fromRow1 = anchor.fromRow + 1;
 
-    const x1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
-    const y1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
+    const x1 = sheetXForCol(colAxis, fromCol1) + (anchor.fromColOff * cs) / EMU_PER_PX;
+    const y1 = sheetYForRow(rowAxis, fromRow1) + (anchor.fromRowOff * cs) / EMU_PER_PX;
 
     // editAs="oneCell" preserves the group's saved grpSpPr/xfrm/ext EMU
     // size regardless of cell resizing (ECMA-376 §20.5.2.33). See
     // renderImages for the same handling on stand-alone <xdr:pic>.
     let w: number, h: number;
-    if (anchor.editAs === 'oneCell' && anchor.nativeExtCx > 0 && anchor.nativeExtCy > 0) {
+    if (usesNativeOneCellExtent(anchor)) {
       w = (anchor.nativeExtCx * cs) / EMU_PER_PX;
       h = (anchor.nativeExtCy * cs) / EMU_PER_PX;
     } else {
       const toCol1 = anchor.toCol + 1;
       const toRow1 = anchor.toRow + 1;
-      const x2 = sheetXForCol(ws, toCol1, cs) + (anchor.toColOff * cs) / EMU_PER_PX;
-      const y2 = sheetYForRow(ws, toRow1, cs) + (anchor.toRowOff * cs) / EMU_PER_PX;
+      const x2 = sheetXForCol(colAxis, toCol1) + (anchor.toColOff * cs) / EMU_PER_PX;
+      const y2 = sheetYForRow(rowAxis, toRow1) + (anchor.toRowOff * cs) / EMU_PER_PX;
       w = x2 - x1;
       h = y2 - y1;
     }
@@ -4606,6 +4540,8 @@ function pickStrongerEdge(
 function renderCharts(
   ctx: CanvasRenderingContext2D,
   ws: Worksheet,
+  colAxis: GridAxisGeometry,
+  rowAxis: GridAxisGeometry,
   cs: number,
   startRow: number,
   startCol: number,
@@ -4620,8 +4556,8 @@ function renderCharts(
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
 
-  const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
-  const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+  const scrollOriginSheetX = sheetXForCol(colAxis, startCol);
+  const scrollOriginSheetY = sheetYForRow(rowAxis, startRow);
   const clipX = sheetAnchoredRectX(scrollAreaX, scrollAreaW, canvasW, rtl);
 
   for (const anchor of ws.charts) {
@@ -4630,10 +4566,10 @@ function renderCharts(
     const toCol1   = anchor.toCol   + 1;
     const toRow1   = anchor.toRow   + 1;
 
-    const shX1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
-    const shY1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
-    const shX2 = sheetXForCol(ws, toCol1,   cs) + (anchor.toColOff   * cs) / EMU_PER_PX;
-    const shY2 = sheetYForRow(ws, toRow1,   cs) + (anchor.toRowOff   * cs) / EMU_PER_PX;
+    const shX1 = sheetXForCol(colAxis, fromCol1) + (anchor.fromColOff * cs) / EMU_PER_PX;
+    const shY1 = sheetYForRow(rowAxis, fromRow1) + (anchor.fromRowOff * cs) / EMU_PER_PX;
+    const shX2 = sheetXForCol(colAxis, toCol1) + (anchor.toColOff * cs) / EMU_PER_PX;
+    const shY2 = sheetYForRow(rowAxis, toRow1) + (anchor.toRowOff * cs) / EMU_PER_PX;
 
     const cw = shX2 - shX1;
     const ch = shY2 - shY1;
@@ -4688,6 +4624,8 @@ const SLICER_ITEM_OFF_BD  = '#C6C6C6';
 function renderSlicers(
   ctx: CanvasRenderingContext2D,
   ws: Worksheet,
+  colAxis: GridAxisGeometry,
+  rowAxis: GridAxisGeometry,
   cs: number,
   startRow: number,
   startCol: number,
@@ -4704,8 +4642,8 @@ function renderSlicers(
   const slicers = ws.slicers;
   if (!slicers) return;
 
-  const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
-  const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+  const scrollOriginSheetX = sheetXForCol(colAxis, startCol);
+  const scrollOriginSheetY = sheetYForRow(rowAxis, startRow);
   const clipX = sheetAnchoredRectX(scrollAreaX, scrollAreaW, canvasW, rtl);
 
   for (const anchor of slicers) {
@@ -4714,10 +4652,10 @@ function renderSlicers(
     const toCol1   = anchor.toCol   + 1;
     const toRow1   = anchor.toRow   + 1;
 
-    const shX1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
-    const shY1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
-    const shX2 = sheetXForCol(ws, toCol1,   cs) + (anchor.toColOff   * cs) / EMU_PER_PX;
-    const shY2 = sheetYForRow(ws, toRow1,   cs) + (anchor.toRowOff   * cs) / EMU_PER_PX;
+    const shX1 = sheetXForCol(colAxis, fromCol1) + (anchor.fromColOff * cs) / EMU_PER_PX;
+    const shY1 = sheetYForRow(rowAxis, fromRow1) + (anchor.fromRowOff * cs) / EMU_PER_PX;
+    const shX2 = sheetXForCol(colAxis, toCol1) + (anchor.toColOff * cs) / EMU_PER_PX;
+    const shY2 = sheetYForRow(rowAxis, toRow1) + (anchor.toRowOff * cs) / EMU_PER_PX;
 
     const w = shX2 - shX1;
     const h = shY2 - shY1;

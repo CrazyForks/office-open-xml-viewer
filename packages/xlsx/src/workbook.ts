@@ -54,6 +54,7 @@ import type {
   RenderWorkerResponse,
   WireRenderViewportOptions,
 } from './worker-protocol.js';
+import { extractViewerLayoutMetrics } from './worker-protocol.js';
 import {
   isXlsxWorksheetPullResponse,
   XlsxWorksheetPullClient,
@@ -117,7 +118,9 @@ export class XlsxWorkbook {
   private archiveOperationTail: Promise<void> = Promise.resolve();
   private worksheetPullClient: XlsxWorksheetPullClient | null = null;
   private workerTimeoutMs: number | undefined;
-  private retainedSheetUsage: WorksheetCacheUsage = { rows: 0, cells: 0 };
+  private retainedSheetUsage: WorksheetCacheUsage = {
+    rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0,
+  };
   /** First fatal model/package violation. Compatibility materialization happens
    * on main, so this latch is the document-level poison boundary for every
    * later public operation on the same workbook instance. */
@@ -227,7 +230,7 @@ export class XlsxWorkbook {
     preserveCallerBuffer = false,
   ): Promise<void> {
     this.resourceFailure = null;
-    this.retainedSheetUsage = { rows: 0, cells: 0 };
+    this.retainedSheetUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 };
     this.sheetCache.clear();
     await this.worksheetPullClient?.cancelAll('closed');
     this.worksheetPullClient = null;
@@ -291,7 +294,11 @@ export class XlsxWorkbook {
     if (workbookError) {
       console.warn(`[ooxml] xlsx opened with a degraded part: ${workbookError}`);
     }
-    if (this._mode === 'main' && opts.useGoogleFonts) {
+    if (opts.useGoogleFonts) {
+      // The composite viewer computes hit/scroll/overlay geometry on the main
+      // realm even when paint runs in a worker. Register the same fallback
+      // faces in both realms before any worksheet geometry snapshot is made so
+      // ECMA-376 MDW is identical across paint and interaction.
       this.googleFontFaces = await preloadGoogleFonts(
         xlsxFontPreloadNames(this.parsedWorkbook),
         XLSX_GOOGLE_FONTS,
@@ -417,7 +424,9 @@ export class XlsxWorkbook {
           part,
           unit.usage,
         );
-        const retainedUsage = this.retainedSheetUsage ?? { rows: 0, cells: 0 };
+        const retainedUsage = this.retainedSheetUsage ?? {
+          rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0,
+        };
         const nextCache = addWorksheetCacheUsage(retainedUsage, measured);
         assertWorksheetCacheUsage(
           nextCache,
@@ -662,14 +671,22 @@ export class XlsxWorkbook {
     opts: WireRenderViewportOptions & { width: number; height: number },
   ): Promise<ImageBitmap> {
     this.assertResourceHealthy();
-    const wireOpts = { ...opts, dpr: opts.dpr ?? defaultDpr() };
+    const extracted = extractViewerLayoutMetrics(opts);
+    const wireOpts = { ...extracted.opts, dpr: opts.dpr ?? defaultDpr() };
     if (this._mode === 'worker') {
       if (!Number.isInteger(sheetIndex) || sheetIndex < 0 || sheetIndex >= this.sheetCount) {
         throw new Error(`Sheet index ${sheetIndex} out of range (count: ${this.sheetCount})`);
       }
       const res = await this.withWorksheetArchiveOperation(sheetIndex, () =>
         this.bridge.request(
-          (id) => ({ type: 'renderViewport', id, sheetIndex, viewport, opts: wireOpts }) satisfies RenderWorkerRequest,
+          (id) => ({
+            type: 'renderViewport',
+            id,
+            sheetIndex,
+            viewport,
+            opts: wireOpts,
+            layoutMetrics: extracted.layoutMetrics,
+          }) satisfies RenderWorkerRequest,
         ));
       return (res as Extract<RenderWorkerResponse, { type: 'viewportRendered' }>).bitmap;
     }

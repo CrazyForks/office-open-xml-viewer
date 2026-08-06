@@ -50,9 +50,13 @@
       if (!resp.ok) throw new Error(`fetch failed: ${resp.status}`);
       const buf = await resp.arrayBuffer();
       await viewer.load(buf);
+      document.body.dataset.slideCount = String(viewer.slideCount);
       if (slideIdx !== 0) {
         await viewer.goToSlide(slideIdx);
       }
+      window.renderPptxVrtSlide = async (slideIndex) => {
+        await viewer.goToSlide(slideIndex);
+      };
       document.body.dataset.status = 'ready';
     } catch (err) {
       document.body.dataset.status = 'error';

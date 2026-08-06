@@ -104,6 +104,63 @@ describe('XLSX viewer composition roles', () => {
     expect(dispatcher.isCurrent(generation)).toBe(false);
   });
 
+  it('keeps at most one active render and one latest pending render', async () => {
+    const dispatcher = new SheetRenderDispatcher();
+    let finishFirst: () => void = () => undefined;
+    const first = new Promise<void>((resolve) => { finishFirst = resolve; });
+    const calls: string[] = [];
+
+    dispatcher.schedule(() => {
+      calls.push('first');
+      return first;
+    });
+    dispatcher.schedule(() => { calls.push('stale'); });
+    dispatcher.schedule(() => { calls.push('latest'); });
+    expect(calls).toEqual(['first']);
+
+    finishFirst();
+    await first;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toEqual(['first', 'latest']);
+    dispatcher.destroy();
+  });
+
+  it('invalidates an active worker bitmap as soon as a newer viewport is queued', async () => {
+    const transfer = vi.fn();
+    const canvas = {
+      width: 0,
+      height: 0,
+      style: { width: '', height: '' },
+      getContext: vi.fn(() => ({ transferFromImageBitmap: transfer })),
+    } as unknown as HTMLCanvasElement;
+    const dispatcher = new SheetRenderDispatcher(canvas, true);
+    let finishActive: () => void = () => undefined;
+    const active = new Promise<void>((resolve) => { finishActive = resolve; });
+    let activeGeneration = 0;
+    dispatcher.schedule(() => {
+      activeGeneration = dispatcher.begin();
+      return active;
+    });
+
+    dispatcher.schedule(() => undefined);
+    const close = vi.fn();
+    expect(dispatcher.commitBitmap(
+      activeGeneration,
+      { close, width: 1, height: 1 } as unknown as ImageBitmap,
+      1,
+      1,
+    )).toBe(false);
+    expect(close).toHaveBeenCalledOnce();
+    expect(transfer).not.toHaveBeenCalled();
+
+    finishActive();
+    await active;
+    await Promise.resolve();
+    await Promise.resolve();
+    dispatcher.destroy();
+  });
+
   it('SheetRenderDispatcher owns stale ImageBitmap disposal', () => {
     const close = vi.fn();
     const dispatcher = new SheetRenderDispatcher();

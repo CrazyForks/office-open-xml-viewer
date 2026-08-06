@@ -81,14 +81,14 @@ interface ViewerPriv {
   renderCurrentSheet(): Promise<void>;
 }
 
-/** Worker-mode viewer over the outline worksheet, with a fake workbook whose
- *  renderViewportToBitmap records every request (never resolves — only the
- *  synchronously-sent request matters here). */
+/** Worker-mode viewer over the outline worksheet, with a controllable first
+ *  bitmap so the latest-only render queue can be advanced deterministically. */
 function buildWorker() {
   installDom();
   const container = makeContainer();
   const v = new XlsxViewer(container as unknown as HTMLElement, { mode: 'worker' });
-  const renderViewportToBitmap = vi.fn(() => new Promise<never>(() => undefined));
+  const renderGate = deferred<ImageBitmap>();
+  const renderViewportToBitmap = vi.fn(() => renderGate.promise);
   const fakeWb = {
     renderViewportToBitmap,
     sheetNames: ['Outline'],
@@ -102,7 +102,17 @@ function buildWorker() {
   priv.canvasArea.clientWidth = 800;
   priv.canvasArea.clientHeight = 600;
   priv.buildOutline(priv.currentWorksheet);
-  return { v, priv, renderViewportToBitmap };
+  return { v, priv, renderViewportToBitmap, completeRender: renderGate.resolve };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolvePromise: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((resolve) => { resolvePromise = resolve; });
+  return { promise, resolve: resolvePromise };
+}
+
+async function settleRenders(): Promise<void> {
+  for (let index = 0; index < 8; index++) await Promise.resolve();
 }
 
 /** The `sizeOverrides` of the most recent render request, if any. */
@@ -133,14 +143,16 @@ describe('worker-mode outline collapse/expand reaches the grid bitmap', () => {
     expect(workerSheet.rowHeights[4]).toBeUndefined(); // was 0 (hidden) pre-override
   });
 
-  it('re-collapsing sends rows back as 0-height overrides', () => {
-    const { priv, renderViewportToBitmap } = buildWorker();
+  it('re-collapsing sends rows back as 0-height overrides', async () => {
+    const { priv, renderViewportToBitmap, completeRender } = buildWorker();
     const expand = priv.rowOutline?.groups.find((g) => g.level === 3);
     priv.applyGroupToggle(expand as OutlineLayout['groups'][number], 'row');
     // The layout was rebuilt after the expand — fetch the group's new object.
     const collapse = priv.rowOutline?.groups.find((g) => g.level === 3);
     expect(collapse?.collapsed).toBe(false);
     priv.applyGroupToggle(collapse as OutlineLayout['groups'][number], 'row');
+    completeRender({ close: vi.fn() } as unknown as ImageBitmap);
+    await settleRenders();
 
     const o = lastOverrides(renderViewportToBitmap);
     expect(o?.rows).toMatchObject({ 4: 0, 5: 0, 6: 0, 7: 0 });

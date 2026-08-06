@@ -106,17 +106,14 @@ function getMedia(path: string): Promise<Blob> {
   const mimeType = findPreflightMimeType(requirePreflight(), path);
   return rawParts.get(path, mimeType, () => slidePull.run(() => {
     const bytes = executeArchive((archive) => archive.extract_media(path));
-    return new Blob(
-      [new Uint8Array(bytes).slice().buffer],
-      { type: mimeType },
-    );
+    return new Blob([bytes as BlobPart], { type: mimeType });
   }));
 }
 
 function getImage(path: string, mimeType: string): Promise<Blob> {
   return rawParts.get(path, mimeType, () => slidePull.run(() => {
     const bytes = executeArchive((archive) => archive.extract_image(path));
-    return new Blob([new Uint8Array(bytes).slice().buffer], { type: mimeType });
+    return new Blob([bytes as BlobPart], { type: mimeType });
   }));
 }
 

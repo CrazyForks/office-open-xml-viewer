@@ -109,8 +109,15 @@ export async function acquireDocxNodeDocument<TResult>(
     throwIfAborted(options.signal);
     const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(resourceOptions.policy);
     const Archive = (docxWasm as unknown as { DocxArchive: DocxArchiveConstructor }).DocxArchive;
-    handle = await formatRuntime(module).open(() =>
-      new Archive(bytes, maxEntry, maxTotal, maxEntries));
+    handle = await formatRuntime(module).open(
+      () => new Archive(bytes, maxEntry, maxTotal, maxEntries),
+      {
+        signal: options.signal,
+        abortError: createAbortError,
+        disposeOnAbort: (archive) => archive.free(),
+      },
+    );
+    throwIfAborted(options.signal);
     const archive = handle.proxy;
     metrics.checkpoint('container ready');
     pull = new DocumentPullWorker(() => archive);
@@ -160,7 +167,11 @@ function decodeUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined 
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
+  throw createAbortError();
+}
+
+function createAbortError(): Error {
   const error = new Error('DOCX document session was aborted');
   error.name = 'AbortError';
-  throw error;
+  return error;
 }

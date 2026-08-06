@@ -8,6 +8,7 @@ import type {
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import type { NormalizedOoxmlResourcePolicy } from '@silurus/ooxml-core/worker';
 import type { PullSessionIdentity } from '@silurus/ooxml-core/worker';
+import { GridGeometry } from './internal/grid-geometry.js';
 
 /**
  * View-only per-band size overrides for one sheet, carried with every worker
@@ -37,20 +38,36 @@ export interface WireSizeOverrides {
  */
 export function applySizeOverrides(ws: Worksheet, overrides: WireSizeOverrides | undefined): void {
   if (!overrides) return;
+  let changed = false;
   if (overrides.rows) {
     for (const [k, v] of Object.entries(overrides.rows)) {
       const idx = Number(k);
-      if (v === null) delete ws.rowHeights[idx];
-      else ws.rowHeights[idx] = v;
+      if (v === null) {
+        if (Object.hasOwn(ws.rowHeights, idx)) {
+          delete ws.rowHeights[idx];
+          changed = true;
+        }
+      } else if (ws.rowHeights[idx] !== v) {
+        ws.rowHeights[idx] = v;
+        changed = true;
+      }
     }
   }
   if (overrides.cols) {
     for (const [k, v] of Object.entries(overrides.cols)) {
       const idx = Number(k);
-      if (v === null) delete ws.colWidths[idx];
-      else ws.colWidths[idx] = v;
+      if (v === null) {
+        if (Object.hasOwn(ws.colWidths, idx)) {
+          delete ws.colWidths[idx];
+          changed = true;
+        }
+      } else if (ws.colWidths[idx] !== v) {
+        ws.colWidths[idx] = v;
+        changed = true;
+      }
     }
   }
+  if (changed) GridGeometry.invalidate(ws);
 }
 
 /** Serializable subset of RenderViewportOptions: drop the callback, the image
@@ -62,7 +79,45 @@ export function applySizeOverrides(ws: Worksheet, overrides: WireSizeOverrides |
 export type WireRenderViewportOptions = Omit<
   RenderViewportOptions,
   'onTextRun' | 'loadedImages' | 'fetchImage'
-> & { sizeOverrides?: WireSizeOverrides };
+> & {
+  sizeOverrides?: WireSizeOverrides;
+};
+
+const viewerLayoutMetrics = Symbol('xlsx-viewer-layout-metrics');
+
+type ViewerRenderViewportOptions = WireRenderViewportOptions & {
+  [viewerLayoutMetrics]?: Readonly<{ maximumDigitWidth: number }>;
+};
+
+/** @internal Attach the Window-owned layout metric used by the composite
+ * viewer. It is a symbol property, so it cannot become a user-facing OOXML
+ * rendering knob or accidentally cross structured-clone. Workbook transport
+ * extracts it into the internal worker request envelope. */
+export function withViewerLayoutMetrics<T extends WireRenderViewportOptions>(
+  opts: T,
+  maximumDigitWidth: number,
+): T {
+  if (!Number.isFinite(maximumDigitWidth) || maximumDigitWidth <= 0) {
+    throw new Error('XLSX maximum digit width must be a finite positive number');
+  }
+  return {
+    ...opts,
+    [viewerLayoutMetrics]: { maximumDigitWidth },
+  } as T & ViewerRenderViewportOptions;
+}
+
+/** @internal Remove the non-cloneable symbol property and return the internal
+ * request-envelope metric separately. */
+export function extractViewerLayoutMetrics(opts: WireRenderViewportOptions): {
+  readonly opts: WireRenderViewportOptions;
+  readonly layoutMetrics?: Readonly<{ maximumDigitWidth: number }>;
+} {
+  const internal = opts as ViewerRenderViewportOptions;
+  const layoutMetrics = internal[viewerLayoutMetrics];
+  const wire = { ...opts } as ViewerRenderViewportOptions;
+  delete wire[viewerLayoutMetrics];
+  return layoutMetrics ? { opts: wire, layoutMetrics } : { opts: wire };
+}
 
 // The base `parse` arm from types.ts is intentionally NOT reused: the render
 // worker's `parse` carries an extra `useGoogleFonts` flag, and two `parse`
@@ -72,7 +127,17 @@ export type RenderWorkerRequest =
   | { type: 'init'; wasmUrl: string }
   | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; useGoogleFonts?: boolean }
   | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } & PullSessionIdentity<number>)
-  | { type: 'renderViewport'; id: number; sheetIndex: number; viewport: ViewportRange; opts: WireRenderViewportOptions }
+  | {
+      type: 'renderViewport';
+      id: number;
+      sheetIndex: number;
+      viewport: ViewportRange;
+      opts: WireRenderViewportOptions;
+      /** Internal Window→Worker geometry authority. Not part of the public
+       * render options because it exists only to align viewer interaction and
+       * worker paint across font realms. */
+      layoutMetrics?: Readonly<{ maximumDigitWidth: number }>;
+    }
   // Worker render mode decodes images in-worker via a getImage closure; this arm
   // exists only for protocol parity with worker.ts (so a stray extractImage
   // never hangs). The render worker reads bytes straight from its retained

@@ -7,7 +7,9 @@ use wasm_bindgen::prelude::*;
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::json_measurement::measure_json;
 use ooxml_common::ns::{attr_ns, is_r_ns, is_x_ns, relationships};
-use ooxml_common::package_session::{PackageLimitReporter, PackageOperation, PackageSessionHandle};
+use ooxml_common::package_session::{
+    PackageLimitReporter, PackageOperation, PackageSessionHandle, RetainedPackageOperation,
+};
 use ooxml_common::resource::{
     HardResourceLimitKind, ResourceUsage, HARD_MAX_XLSX_WORKSHEET_CELLS,
     HARD_MAX_XLSX_WORKSHEET_CELL_CONTENT_UTF8_BYTES, HARD_MAX_XLSX_WORKSHEET_JSON_BYTES,
@@ -59,7 +61,7 @@ use table::*;
 /// compatibility operation with the same bounded reader semantics.
 pub(crate) struct XlsxZip {
     session: PackageSessionHandle,
-    operation: Option<PackageOperation>,
+    operation: RetainedPackageOperation,
 }
 
 impl XlsxZip {
@@ -69,11 +71,7 @@ impl XlsxZip {
     }
 
     fn begin_operation(&mut self, name: &str) -> Result<(), String> {
-        if self.operation.is_some() {
-            return Err("xlsx package operation is already active".to_string());
-        }
-        self.operation = Some(self.session.begin_operation(name)?);
-        Ok(())
+        self.operation.begin(&self.session, name)
     }
 
     fn usage(&self) -> ResourceUsage {
@@ -81,34 +79,25 @@ impl XlsxZip {
     }
 
     fn operation(&mut self) -> Result<&PackageOperation, String> {
-        if self.operation.is_none() {
-            self.operation = Some(self.session.begin_operation("xlsx-parser-compat")?);
-        }
-        Ok(self
-            .operation
-            .as_ref()
-            .expect("operation initialized above"))
+        #[cfg(test)]
+        let compatibility_name = Some("xlsx-parser-compat");
+        #[cfg(not(test))]
+        let compatibility_name = None;
+        self.operation.operation(&self.session, compatibility_name)
     }
 
     /// Return the explicitly-started operation used by persistent production
     /// cursors. Unlike `operation`, this never creates a compatibility scope.
     fn active_operation(&self) -> Result<&PackageOperation, String> {
-        self.operation
-            .as_ref()
-            .ok_or_else(|| "xlsx package operation is not active".to_string())
+        self.operation.active()
     }
 
     fn finish_operation(&mut self) -> Result<(), String> {
-        let Some(mut operation) = self.operation.take() else {
-            return Ok(());
-        };
-        operation.finish()
+        self.operation.finish()
     }
 
     fn cancel_operation(&mut self) {
-        if let Some(mut operation) = self.operation.take() {
-            let _ = operation.cancel();
-        }
+        self.operation.cancel();
     }
 
     fn run_operation<T>(
@@ -118,23 +107,7 @@ impl XlsxZip {
     ) -> Result<T, String> {
         self.begin_operation(name)?;
         let result = run(self);
-        if let Err(resource_error) = self.assert_healthy() {
-            self.cancel_operation();
-            return Err(resource_error);
-        }
-        match result {
-            Ok(value) => match self.finish_operation() {
-                Ok(()) => Ok(value),
-                Err(error) => {
-                    self.cancel_operation();
-                    Err(error)
-                }
-            },
-            Err(error) => {
-                self.cancel_operation();
-                Err(error)
-            }
-        }
+        self.operation.settle(&self.session, result)
     }
 
     fn assert_healthy(&self) -> Result<(), String> {
@@ -175,23 +148,7 @@ pub(crate) fn read_zip_bytes(archive: &mut XlsxZip, path: &str) -> Result<Vec<u8
 }
 
 fn settle_xlsx_operation<T>(archive: &mut XlsxZip, result: Result<T, String>) -> Result<T, String> {
-    if let Err(resource_error) = archive.assert_healthy() {
-        archive.cancel_operation();
-        return Err(resource_error);
-    }
-    match result {
-        Ok(value) => match archive.finish_operation() {
-            Ok(()) => Ok(value),
-            Err(error) => {
-                archive.cancel_operation();
-                Err(error)
-            }
-        },
-        Err(error) => {
-            archive.cancel_operation();
-            Err(error)
-        }
-    }
+    archive.operation.settle(&archive.session, result)
 }
 
 /// Part-name tag for a whole-container degradation (#774). Already parenthesized
@@ -317,7 +274,7 @@ fn open_zip_with_policy(
     )
     .map(|session| XlsxZip {
         session,
-        operation: None,
+        operation: RetainedPackageOperation::new("xlsx"),
     })
     .map_err(ooxml_common::zip::tag_container_error)
 }
@@ -1489,9 +1446,9 @@ fn parse_projected_worksheet(
     // WASM stack. See `ooxml_common::depth::parse_guarded`.
     let doc = parse_guarded(&streamed.shell_xml).map_err(|e| e.to_string())?;
 
-    let rows = streamed.rows;
+    let mut rows = streamed.rows;
     let mut col_widths: BTreeMap<u32, f64> = BTreeMap::new();
-    let row_heights = streamed.row_heights;
+    let mut row_heights = streamed.row_heights;
     // Outline (grouping) metadata — ECMA-376 §18.3.1.13 (col) / §18.3.1.73
     // (row) / §18.3.1.61 (outlinePr). Only non-default entries are recorded so
     // an outline-free sheet keeps empty maps / a `None` outlinePr (byte-stable
@@ -1510,6 +1467,7 @@ fn parse_projected_worksheet(
     // both this default and per-row `<row ht="…">` values share the
     // same units across the parser/renderer boundary.
     let mut default_row_height = 15.0;
+    let mut rows_hidden_by_default = false;
     let mut conditional_formats: Vec<ConditionalFormat> = Vec::new();
     let mut show_zeros = true;
     let mut show_gridlines = true;
@@ -1645,7 +1603,8 @@ fn parse_projected_worksheet(
             "sheetFormatPr" if is_x_ns(node.tag_name().namespace()) => {
                 if let Some(v) = node
                     .attribute("defaultColWidth")
-                    .and_then(|s| s.parse().ok())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .filter(|value| value.is_finite() && *value >= 0.0)
                 {
                     default_col_width = v;
                 }
@@ -1658,9 +1617,15 @@ fn parse_projected_worksheet(
                 if let Some(v) = node
                     .attribute("defaultRowHeight")
                     .and_then(|s| s.parse::<f64>().ok())
+                    .filter(|value| value.is_finite() && *value >= 0.0)
                 {
                     default_row_height = v;
                 }
+                // ECMA-376 §18.3.1.81: zeroHeight makes unspecified rows hidden
+                // by default. Keep this fact separate from defaultRowHeight:
+                // explicit, non-hidden rows still use the authored default
+                // height even when they omit @ht.
+                rows_hidden_by_default = attr_bool(&node, "zeroHeight").unwrap_or(false);
             }
             "col" if is_x_ns(node.tag_name().namespace()) => {
                 let custom = attr_bool(&node, "customWidth").unwrap_or(false);
@@ -1696,7 +1661,8 @@ fn parse_projected_worksheet(
                     0.0
                 } else {
                     node.attribute("width")
-                        .and_then(|s| s.parse().ok())
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .filter(|value| value.is_finite() && *value >= 0.0)
                         .unwrap_or(default_col_width)
                 };
                 for c in min..=max {
@@ -1792,12 +1758,12 @@ fn parse_projected_worksheet(
                     freeze_rows = node
                         .attribute("ySplit")
                         .and_then(|s| s.parse::<f64>().ok())
-                        .map(|v| v as u32)
+                        .map(|v| (v as u32).min(1_048_576))
                         .unwrap_or(0);
                     freeze_cols = node
                         .attribute("xSplit")
                         .and_then(|s| s.parse::<f64>().ok())
-                        .map(|v| v as u32)
+                        .map(|v| (v as u32).min(16_384))
                         .unwrap_or(0);
                 }
             }
@@ -2090,6 +2056,20 @@ fn parse_projected_worksheet(
     }
 
     conditional_formats.extend(x14_icon_formats);
+
+    if rows_hidden_by_default {
+        let visible_default_height = default_row_height;
+        for row in &mut rows {
+            if !row.hidden && row.height.is_none() {
+                row.height = Some(visible_default_height);
+                row_heights.insert(row.index, visible_default_height);
+            }
+        }
+        // Unspecified rows remain hidden. The sparse grid axis represents the
+        // hidden default as zero while the explicit rows above are positive
+        // custom bands, so it can jump over arbitrarily large hidden spans.
+        default_row_height = 0.0;
+    }
 
     let data_validations = parse_data_validations(doc.root_element());
 
@@ -3588,8 +3568,7 @@ impl XlsxArchive {
             .archive
             .as_ref()
             .ok()
-            .and_then(|zip| zip.operation.as_ref())
-            .and_then(PackageOperation::usage)
+            .and_then(|zip| zip.operation.usage())
             .or(self.last_cursor_usage)
             .ok_or_else(|| JsValue::from_str("worksheet cursor usage is unavailable"))?;
         serde_json::to_vec(&usage)
@@ -3613,7 +3592,7 @@ impl XlsxArchive {
             return Ok(());
         }
         let zip = self.archive.as_mut().expect("container open checked above");
-        self.last_cursor_usage = zip.operation.as_ref().and_then(PackageOperation::usage);
+        self.last_cursor_usage = zip.operation.usage();
         let result = zip.finish_operation();
         if let Err(resource_error) = zip.assert_healthy() {
             zip.cancel_operation();
@@ -3637,11 +3616,7 @@ impl XlsxArchive {
         self.terminal_awaiting_ack = false;
         self.last_cursor_pull_terminal = false;
         if let Ok(zip) = self.archive.as_mut() {
-            self.last_cursor_usage = zip
-                .operation
-                .as_ref()
-                .and_then(PackageOperation::usage)
-                .or(self.last_cursor_usage);
+            self.last_cursor_usage = zip.operation.usage().or(self.last_cursor_usage);
             zip.cancel_operation();
         }
     }
@@ -3655,11 +3630,7 @@ impl XlsxArchive {
                 cursor.close();
             }
             if let Ok(zip) = self.archive.as_mut() {
-                self.last_cursor_usage = zip
-                    .operation
-                    .as_ref()
-                    .and_then(PackageOperation::usage)
-                    .or(self.last_cursor_usage);
+                self.last_cursor_usage = zip.operation.usage().or(self.last_cursor_usage);
                 zip.cancel_operation();
             }
             self.last_cursor_pull_terminal = false;
@@ -3874,6 +3845,52 @@ mod sheet_view_tests {
         );
         let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
         assert_eq!(ws.col_widths.get(&2).copied(), Some(10.0));
+    }
+
+    /// ECMA-376 §18.3.1.81 `zeroHeight` hides rows by default, including rows
+    /// not materialized in `<sheetData>`. The renderer represents that rule as
+    /// a zero default axis size and skips the sparse ordinal run.
+    #[test]
+    fn sheet_format_zero_height_sets_zero_default_row_height() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetFormatPr defaultRowHeight="22" zeroHeight="1"/><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        assert_eq!(ws.default_row_height, 0.0);
+    }
+
+    #[test]
+    fn sheet_format_zero_height_preserves_explicit_visible_rows() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}">
+                 <sheetFormatPr defaultRowHeight="22" zeroHeight="1"/>
+                 <sheetData><row r="3" hidden="0"><c r="A3"/></row></sheetData>
+               </worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        assert_eq!(ws.default_row_height, 0.0, "unspecified rows are hidden");
+        assert_eq!(ws.row_heights.get(&3).copied(), Some(22.0));
+        assert_eq!(ws.rows[0].height, Some(22.0));
+        assert!(!ws.rows[0].hidden);
+    }
+
+    /// Malformed non-finite/negative dimensions never cross the parser/model
+    /// boundary. Keep the schema defaults rather than poisoning cumulative
+    /// geometry with NaN or a negative band size.
+    #[test]
+    fn malformed_sheet_and_row_dimensions_fall_back_safely() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}">
+                 <sheetFormatPr defaultColWidth="NaN" defaultRowHeight="-2"/>
+                 <cols><col customWidth="1" min="1" max="1" width="NaN"/></cols>
+                 <sheetData><row r="1" ht="-4"/><row r="2" ht="NaN"/></sheetData>
+               </worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        assert_eq!(ws.default_col_width, 8.43);
+        assert_eq!(ws.default_row_height, 15.0);
+        assert_eq!(ws.col_widths.get(&1).copied(), Some(8.43));
+        assert!(ws.row_heights.is_empty());
     }
 
     /// The serialized worksheet JSON is deterministic: `colWidths` keys come out
@@ -5575,7 +5592,7 @@ mod rb7_partial_degradation_tests {
             let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
             if value["kind"] == "finished" {
                 assert!(archive.terminal_awaiting_ack);
-                assert!(archive.archive.as_ref().unwrap().operation.is_some());
+                assert!(archive.archive.as_ref().unwrap().operation.is_active());
                 assert_eq!(value["worksheet"]["rows"], serde_json::json!([]));
                 let usage: serde_json::Value =
                     serde_json::from_slice(&archive.sheet_cursor_resource_usage().unwrap())
@@ -5587,7 +5604,7 @@ mod rb7_partial_degradation_tests {
         archive.acknowledge_sheet_cursor_terminal().unwrap();
         assert!(!archive.terminal_awaiting_ack);
         assert!(archive.active_worksheet.is_none());
-        assert!(archive.archive.as_ref().unwrap().operation.is_none());
+        assert!(!archive.archive.as_ref().unwrap().operation.is_active());
         assert!(archive.sheet_cursor_resource_usage().is_ok());
         archive.close_sheet_cursor();
     }
@@ -5606,7 +5623,7 @@ mod rb7_partial_degradation_tests {
         archive.cancel_sheet_cursor();
         assert!(!archive.terminal_awaiting_ack);
         assert!(archive.active_worksheet.is_none());
-        assert!(archive.archive.as_ref().unwrap().operation.is_none());
+        assert!(!archive.archive.as_ref().unwrap().operation.is_active());
         assert_eq!(archive.sheet_cursor_resource_usage().unwrap(), usage);
     }
 
@@ -5622,9 +5639,9 @@ mod rb7_partial_degradation_tests {
             .as_str()
             .unwrap()
             .starts_with("xl/worksheets/missing.xml: "));
-        assert!(archive.archive.as_ref().unwrap().operation.is_some());
+        assert!(archive.archive.as_ref().unwrap().operation.is_active());
         archive.acknowledge_sheet_cursor_terminal().unwrap();
-        assert!(archive.archive.as_ref().unwrap().operation.is_none());
+        assert!(!archive.archive.as_ref().unwrap().operation.is_active());
     }
 
     #[test]
@@ -5658,7 +5675,7 @@ mod rb7_partial_degradation_tests {
         assert!(!archive.sheet_cursor_pull_finished());
         assert!(!archive.terminal_awaiting_ack);
         assert!(archive.active_worksheet.is_none());
-        assert!(archive.archive.as_ref().unwrap().operation.is_none());
+        assert!(!archive.archive.as_ref().unwrap().operation.is_active());
         assert!(archive.acknowledge_sheet_cursor_terminal_inner().is_err());
         archive.cancel_sheet_cursor();
         archive.close_sheet_cursor();
@@ -5688,7 +5705,7 @@ mod rb7_partial_degradation_tests {
         assert!(!archive.sheet_cursor_pull_finished());
         assert!(!archive.terminal_awaiting_ack);
         assert!(archive.active_worksheet.is_none());
-        assert!(archive.archive.as_ref().unwrap().operation.is_none());
+        assert!(!archive.archive.as_ref().unwrap().operation.is_active());
         assert!(archive.acknowledge_sheet_cursor_terminal_inner().is_err());
     }
 

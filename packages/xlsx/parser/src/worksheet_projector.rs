@@ -478,7 +478,9 @@ fn parse_row_node(
     let height = if hidden {
         Some(0.0)
     } else {
-        node.attribute("ht").and_then(|s| s.parse().ok())
+        node.attribute("ht")
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
     };
     let outline_level = node
         .attribute("outlineLevel")

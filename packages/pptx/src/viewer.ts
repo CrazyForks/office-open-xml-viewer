@@ -29,6 +29,7 @@ import {
   CanvasOverlayHost,
   CanvasViewerErrorRouter,
   StaticCanvasRenderDispatcher,
+  TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 
 /** How {@link PptxViewer} presents hidden slides (`<p:sld show="0">`). */
@@ -150,7 +151,8 @@ export class PptxViewer implements ZoomableViewer {
   private _find: PptxFindController;
   /** Private 2d context for measuring highlight text (own 1×1 canvas). */
   private _measureCtx: CanvasRenderingContext2D | null = null;
-  private engine: PptxPresentation | null = null;
+  private readonly presentationOwner = new TerminalResourceOwner<PptxPresentation>('PptxViewer');
+  private get engine(): PptxPresentation | null { return this.presentationOwner.current; }
   private readonly opts: PptxViewerOptions;
   private currentSlide = 0;
   private _hiddenMode: HiddenSlideMode;
@@ -158,22 +160,7 @@ export class PptxViewer implements ZoomableViewer {
   private readonly _mode: 'main' | 'worker';
   private readonly renderDispatcher: StaticCanvasRenderDispatcher;
   private readonly errorRouter: CanvasViewerErrorRouter;
-  /**
-   * Concurrent-load latch (generation token). Every {@link load} increments this
-   * and captures the value; after its engine finishes loading it re-checks the
-   * live value and BAILS (destroying its own just-loaded engine) if a newer
-   * `load()` has since started. Without it, two overlapping `load(A)`/`load(B)`
-   * calls race the WASM parse / worker init, and whichever RESOLVES last wins the
-   * swap — even the stale `load(A)` resolving after `load(B)`; the loser's freshly
-   * created engine (never installed, or installed then overwritten) then leaks its
-   * worker + pinned WASM allocation. The latch composes with SC20: the check runs
-   * AFTER the new engine loads but BEFORE the field assignment and
-   * `previous?.destroy()`, so a superseded load never touches `this.engine` nor
-   * frees the current (newer) engine. {@link destroy} also bumps it so a load in
-   * flight at teardown is treated as superseded and its engine cleaned up.
-   */
-  private _loadGen = 0;
-
+  private destroyed = false;
   constructor(canvas: HTMLCanvasElement, opts: PptxViewerOptions = {}) {
     this.opts = opts;
     this.canvas = canvas;
@@ -214,16 +201,15 @@ export class PptxViewer implements ZoomableViewer {
    *   RESOLVES, matching every subsequent navigation call.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    if (this.destroyed) throw new Error('PptxViewer is destroyed');
     // SC20 atomic swap: retain the previous engine locally and only tear it down
     // AFTER the new one loads successfully. A re-load thus never orphans the old
     // engine's worker + pinned WASM allocation (the leak this guards), yet a
     // FAILED re-load keeps the current engine + its rendered slide intact rather
     // than dropping to an empty viewer. The 2× memory window is bounded to the
     // load itself (the old engine is freed the moment the new model arrives).
-    const gen = ++this._loadGen;
-    const previous = this.engine;
     try {
-      const engine = await PptxPresentation.load(source, {
+      const engine = await this.presentationOwner.replace(() => PptxPresentation.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
         resourceLimits: this.opts.resourceLimits,
@@ -233,30 +219,22 @@ export class PptxViewer implements ZoomableViewer {
         wasmUrl: this.opts.wasmUrl,
         math: this.opts.math,
         mode: this._mode,
+      }), () => {
+        this.renderDispatcher.begin();
+        this._find.invalidate();
+        this.handle?.destroy();
+        this.handle = null;
       });
-      if (gen !== this._loadGen) {
-        // A newer load() (or destroy()) started while this one was in flight — we
-        // lost the concurrent-load race. Destroy the engine we just loaded (it was
-        // never installed) and leave the winning load's engine + SC20 swap
-        // untouched: do NOT touch `this.engine`/`this.handle` and do NOT destroy
-        // `previous` (irrelevant to the winner; possibly already stale).
-        engine.destroy();
-        return;
-      }
+      if (!engine) return;
+      if (this.destroyed) throw new Error('PptxViewer is destroyed');
       // Discard the stale slide's media handle before swapping engines so its RAF
       // loop / object URLs don't outlive the replaced presentation.
-      this.handle?.destroy();
-      this.handle = null;
-      this.engine = engine;
-      previous?.destroy();
       this.currentSlide = this._initialSlide();
       // A new presentation invalidates any prior find state.
       this._find.invalidate();
       await this.renderCurrentSlide();
     } catch (err) {
-      // Superseded loads own no error reporting — the winning load (or destroy())
-      // is the outcome the caller awaits; swallow this stale rejection.
-      if (gen !== this._loadGen) return;
+      if (this.destroyed) throw new Error('PptxViewer is destroyed');
       const e = err instanceof Error ? err : new Error(String(err));
       if (this.opts.onError) {
         this.opts.onError(e);
@@ -475,7 +453,9 @@ export class PptxViewer implements ZoomableViewer {
           dpr,
           dim,
           onTextRun,
-          onError: (error) => this._reportRenderError(error),
+          onError: (error) => {
+            if (this.renderDispatcher.isCurrent(generation)) this._reportRenderError(error);
+          },
         });
         if (!this.renderDispatcher.isCurrent(generation)) {
           handle.destroy();
@@ -692,6 +672,8 @@ export class PptxViewer implements ZoomableViewer {
    * is simply removed from the internal wrapper. Safe to call more than once.
    */
   destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
     // First line: block any render rejection racing in from surfacing on a dead
     // viewer (checked at the top of _reportRenderError). Bump the load generation
     // too so a load() still in flight is treated as superseded and its engine is
@@ -699,10 +681,9 @@ export class PptxViewer implements ZoomableViewer {
     this.errorRouter.close();
     this.renderDispatcher.destroy();
     invalidatePptxRenderTarget(this.canvas);
-    this._loadGen++;
     this.handle?.destroy();
     this.handle = null;
-    this.engine?.destroy();
+    this.presentationOwner.close();
     // IX2 — drop the find state (matches + cached runs) so a stale
     // findNext()/findPrev() after teardown returns null instead of a match
     // pointing into a dead viewer.

@@ -99,6 +99,106 @@ export interface BitmapCommitSize {
   readonly cssHeight?: number;
 }
 
+export interface DestroyableResource {
+  destroy(): void;
+}
+
+/**
+ * Terminal, generation-safe ownership for a replaceable viewer resource.
+ *
+ * Page, slide, and sheet viewers share the same lifecycle invariant: a newer
+ * acquisition supersedes an older one, a losing candidate is destroyed, and
+ * close is permanent. Format-specific rendering remains outside this class.
+ */
+export class TerminalResourceOwner<T extends DestroyableResource> {
+  private generation = 0;
+  private resource: T | null;
+  private ownsResource: boolean;
+  private closed = false;
+
+  constructor(
+    private readonly ownerName: string,
+    initial: T | null = null,
+    ownsInitial = false,
+  ) {
+    this.resource = initial;
+    this.ownsResource = initial !== null && ownsInitial;
+  }
+
+  get current(): T | null {
+    return this.resource;
+  }
+
+  async replace(
+    load: () => Promise<T>,
+    beforeCommit?: (previous: T | null) => void,
+  ): Promise<T | null> {
+    this.assertOpen();
+    const generation = ++this.generation;
+    let candidate: T;
+    try {
+      candidate = await load();
+    } catch (error) {
+      if (this.closed) throw this.closedError();
+      if (generation !== this.generation) return null;
+      throw error;
+    }
+    if (this.closed) {
+      this.dispose(candidate);
+      throw this.closedError();
+    }
+    if (generation !== this.generation) {
+      this.dispose(candidate);
+      return null;
+    }
+    try {
+      beforeCommit?.(this.resource);
+    } catch (error) {
+      this.dispose(candidate);
+      throw error;
+    }
+    this.install(candidate, true);
+    return candidate;
+  }
+
+  install(candidate: T, owned = true): void {
+    this.assertOpen();
+    // A direct installation is itself a replacement generation. Any loader
+    // already in flight must lose when it resolves; otherwise it can overwrite
+    // this explicitly installed resource and destroy it as the previous owner.
+    this.generation++;
+    const previous = this.resource;
+    const ownedPrevious = this.ownsResource;
+    this.resource = candidate;
+    this.ownsResource = owned;
+    if (ownedPrevious && previous) this.dispose(previous);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.generation++;
+    const previous = this.resource;
+    const ownedPrevious = this.ownsResource;
+    this.resource = null;
+    this.ownsResource = false;
+    if (ownedPrevious && previous) this.dispose(previous);
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw this.closedError();
+  }
+
+  private closedError(): Error {
+    return new Error(`${this.ownerName} is closed`);
+  }
+
+  /** Cleanup cannot change the already-committed ownership transition. */
+  private dispose(resource: T): void {
+    try { resource.destroy(); } catch {}
+  }
+}
+
 /**
  * Generation gate for a single static canvas. Format renderers still perform
  * their own drawing; this object prevents stale completion side effects and

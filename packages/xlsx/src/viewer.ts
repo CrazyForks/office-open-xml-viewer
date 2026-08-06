@@ -3,7 +3,14 @@ import type { Hyperlink, ViewportRange, Worksheet, XlsxComment } from './types.j
 import type { FindHighlightColors, HyperlinkTarget, LoadOptions, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale, anchoredZoomOffset, openExternalHyperlink, nextZoomStep, prevZoomStep, fitScale } from '@silurus/ooxml-core';
 import { CallerCanvasMount } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
-import { HEADER_W, HEADER_H, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
+import {
+  HEADER_W,
+  HEADER_H,
+  pxToColWidth,
+  pxToRowHeight,
+  getGridGeometryForWorksheet,
+  rtlMirrorX,
+} from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
 import { XlsxFindController, type FindCell, type XlsxMatchLocation } from './find.js';
@@ -12,7 +19,7 @@ import {
   computeValidationPanelPosition,
   type ResolvedList,
 } from './validation-list.js';
-import type { WireSizeOverrides } from './worker-protocol.js';
+import { withViewerLayoutMetrics, type WireSizeOverrides } from './worker-protocol.js';
 import {
   buildOutlineLayout,
   toggleGroupHidden,
@@ -505,9 +512,10 @@ class XlsxViewerEngine implements ZoomableViewer {
    *  target (`pointer-events:auto`). Read-only: hovering an item highlights it
    *  but selecting does NOT change the cell. */
   private validationPanel: HTMLDivElement;
-  /** `"row:col"` of the cell whose panel is currently open, or null. Lets a
-   *  re-click on the same arrow toggle the panel closed. */
+  /** `"row:col"` of the cell whose panel is pending or open, or null. Claiming
+   *  the key before async range resolution lets a re-click cancel the request. */
   private validationPanelKey: string | null = null;
+  private validationRequestGeneration = 0;
   /** Screen rect (canvasArea CSS px) of the dropdown arrow button last drawn by
    *  {@link maybeDrawValidationDropdown}, so pointerdown can hit-test it. Null
    *  when no arrow is currently visible. */
@@ -759,8 +767,17 @@ class XlsxViewerEngine implements ZoomableViewer {
           wasmUrl: this.opts.wasmUrl,
           math: this.opts.math,
           mode: this._mode,
-        }));
+        }), () => {
+          // Claim every async-operation generation before closing the old
+          // workbook. Rejections caused by its worker termination are stale
+          // completion, not errors belonging to the new workbook.
+          this.sheetRequestGeneration++;
+          this.renderDispatcher.begin();
+          this._find.invalidate();
+          this.hideValidationPanel();
+        });
       if (!wb) return;
+      if (this._destroyed) throw this.destroyedError();
       // A new workbook invalidates any prior find state and every accumulated
       // view-only size override (sheet indices now name different sheets).
       this._find.invalidate();
@@ -800,7 +817,13 @@ class XlsxViewerEngine implements ZoomableViewer {
   async showSheet(index: number): Promise<void> {
     const generation = ++this.sheetRequestGeneration;
     const workbook = this.workbook;
-    const worksheet = await workbook.getWorksheet(index);
+    let worksheet: Worksheet;
+    try {
+      worksheet = await workbook.getWorksheet(index);
+    } catch (error) {
+      if (!this.isCurrentSheetRequest(generation, workbook)) return;
+      throw error;
+    }
     if (!this.isCurrentSheetRequest(generation, workbook)) return;
 
     this.currentSheet = index;
@@ -1509,17 +1532,20 @@ class XlsxViewerEngine implements ZoomableViewer {
     // assumes (header on the left). screenX is an involution, so applying it to
     // a screen point recovers the logical point; w = 0 for a point. Done in
     // scaled CSS px (canvasArea space) before converting to logical px.
-    const lx = this.screenX(clientX - rect.left, 0) / cs;
-    const ly = (clientY - rect.top) / cs;
+    const lx = this.screenX(clientX - rect.left, 0);
+    const ly = clientY - rect.top;
 
-    if (lx < HEADER_W || ly < HEADER_H) return null;
+    const scaledHeaderW = Math.round(HEADER_W * cs);
+    const scaledHeaderH = Math.round(HEADER_H * cs);
+    if (lx < scaledHeaderW || ly < scaledHeaderH) return null;
 
-    const innerX = lx - HEADER_W;
-    const innerY = ly - HEADER_H;
+    const innerX = lx - scaledHeaderW;
+    const innerY = ly - scaledHeaderH;
 
-    return GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).cellAt(innerX, innerY, {
-      scrollX: this.effectiveScrollLeft / cs,
-      scrollY: this.viewportTop / cs,
+    return getGridGeometryForWorksheet(ws).cellAt(innerX, innerY, {
+      scrollX: this.effectiveScrollLeft,
+      scrollY: this.viewportTop,
+      scale: cs,
     });
   }
 
@@ -1533,10 +1559,10 @@ class XlsxViewerEngine implements ZoomableViewer {
     const ws = this.currentWorksheet;
     if (!ws) return null;
     const cs = this.viewport.scale;
-    return GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).cellRect(row, col, {
+    return getGridGeometryForWorksheet(ws).cellRect(row, col, {
       scale: cs,
-      scrollX: this.effectiveScrollLeft / cs,
-      scrollY: this.viewportTop / cs,
+      scrollX: this.effectiveScrollLeft,
+      scrollY: this.viewportTop,
       headerWidth: HEADER_W,
       headerHeight: HEADER_H,
     });
@@ -1578,28 +1604,30 @@ class XlsxViewerEngine implements ZoomableViewer {
     const rect = this.canvasArea.getBoundingClientRect();
     // Same RTL un-mirror as getCellAt: map the screen x back to the logical-LTR
     // layout (row header on the left) before the header math below.
-    const lx = this.screenX(clientX - rect.left, 0) / cs;
-    const ly = (clientY - rect.top) / cs;
+    const lx = this.screenX(clientX - rect.left, 0);
+    const ly = clientY - rect.top;
 
-    const inRowHeader = lx < HEADER_W;
-    const inColHeader = ly < HEADER_H;
+    const headerW = Math.round(HEADER_W * cs);
+    const headerH = Math.round(HEADER_H * cs);
+    const inRowHeader = lx < headerW;
+    const inColHeader = ly < headerH;
     if (!inRowHeader && !inColHeader) return null;
     if (inRowHeader && inColHeader) return { kind: 'corner' };
 
-    const geometry = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws));
+    const geometry = getGridGeometryForWorksheet(ws);
 
     if (inRowHeader) {
       // Determine which row was clicked
-      const innerY = ly - HEADER_H;
+      const innerY = ly - headerH;
       if (innerY < 0) return { kind: 'corner' };
-      const r = geometry.rowAt(innerY, this.viewportTop / cs);
+      const r = geometry.rowAt(innerY, this.viewportTop, cs);
       return r === null ? null : { kind: 'row', row: r };
     }
 
     // inColHeader
-    const innerX = lx - HEADER_W;
+    const innerX = lx - headerW;
     if (innerX < 0) return { kind: 'corner' };
-    const c = geometry.colAt(innerX, this.effectiveScrollLeft / cs);
+    const c = geometry.colAt(innerX, this.effectiveScrollLeft, cs);
     return c === null ? null : { kind: 'col', col: c };
   }
 
@@ -1627,7 +1655,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const ptY = clientY - rect.top;
     const headerW = Math.round(HEADER_W * cs);
     const headerH = Math.round(HEADER_H * cs);
-    const mdw = getMdwForWorksheet(ws);
+    const mdw = getGridGeometryForWorksheet(ws).maximumDigitWidth;
 
     // Column borders live in the column-header strip, right of the corner.
     if (ptY <= headerH && ptX > headerW) {
@@ -1812,7 +1840,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const headerH = sp(HEADER_H);
 
     const frozen = ws
-      ? GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).roundedFrozenExtent(cs)
+      ? getGridGeometryForWorksheet(ws).roundedFrozenExtent(cs)
       : { width: 0, height: 0 };
 
     let x: number, y: number, w: number, h: number;
@@ -1986,7 +2014,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const headerH = sp(HEADER_H);
     const freezeRows = ws.freezeRows ?? 0;
     const freezeCols = ws.freezeCols ?? 0;
-    const frozen = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).roundedFrozenExtent(cs);
+    const frozen = getGridGeometryForWorksheet(ws).roundedFrozenExtent(cs);
     const frozenBoundX = headerW + frozen.width;
     const frozenBoundY = headerH + frozen.height;
 
@@ -2097,7 +2125,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const ws = this.currentWorksheet;
     if (!ws) return;
     const cs = this.viewport.scale;
-    const offset = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).scrollOffsetForCell(
+    const offset = getGridGeometryForWorksheet(ws).scrollOffsetForCell(
       row,
       col,
       {
@@ -2125,12 +2153,14 @@ class XlsxViewerEngine implements ZoomableViewer {
     const active = this.activeCell;
     if (!ws || !active) return;
     const key = `${active.row}:${active.col}`;
-    if (this.validationPanelKey === key && this.validationPanel.style.display !== 'none') {
+    if (this.validationPanelKey === key) {
       this.hideValidationPanel();
       return;
     }
     const dv = findListValidationAt(ws.dataValidations, active.row, active.col);
     if (!dv) return;
+    this.hideValidationPanel();
+    this.validationPanelKey = key;
     void this.openValidationPanel(active, dv.formula1);
   }
 
@@ -2138,22 +2168,40 @@ class XlsxViewerEngine implements ZoomableViewer {
    *  and render them in the panel anchored below the active cell. Async because
    *  cross-sheet range references may need a lazily-parsed worksheet. */
   private async openValidationPanel(cell: CellAddress, formula1: string | undefined): Promise<void> {
+    const generation = ++this.validationRequestGeneration;
+    const workbook = this.wb;
+    const sheet = this.currentSheet;
+    if (!workbook || this._destroyed) return;
     let resolved: ResolvedList;
     try {
-      resolved = await this.workbook.resolveValidationList(this.currentSheet, formula1);
+      resolved = await workbook.resolveValidationList(sheet, formula1);
     } catch {
+      if (!this.isCurrentValidationRequest(generation, workbook, sheet, cell)) return;
       // A resolution failure (e.g. a missing sheet) must not break the viewer;
       // fall back to disclosing the raw formula.
       resolved = { kind: 'formula', formula: formula1 ?? '' };
     }
-    // The selection may have moved while awaiting — bail if so.
-    const active = this.activeCell;
-    if (!active || active.row !== cell.row || active.col !== cell.col) return;
+    if (!this.isCurrentValidationRequest(generation, workbook, sheet, cell)) return;
 
-    this.validationPanelKey = `${cell.row}:${cell.col}`;
     this.renderValidationPanel(resolved);
     this.positionValidationPanel();
     this.installValidationOutsideHandler();
+  }
+
+  private isCurrentValidationRequest(
+    generation: number,
+    workbook: XlsxWorkbook,
+    sheet: number,
+    cell: CellAddress,
+  ): boolean {
+    const active = this.activeCell;
+    return !this._destroyed
+      && generation === this.validationRequestGeneration
+      && this.wb === workbook
+      && this.currentSheet === sheet
+      && this.validationPanelKey === `${cell.row}:${cell.col}`
+      && active?.row === cell.row
+      && active?.col === cell.col;
   }
 
   /** Build the panel's children. Uses textContent throughout (no HTML injection
@@ -2235,6 +2283,7 @@ class XlsxViewerEngine implements ZoomableViewer {
   /** Hide the panel and detach its outside-click listener. Called on re-click,
    *  outside click, Esc, scroll, selection change, sheet switch and destroy. */
   private hideValidationPanel(): void {
+    this.validationRequestGeneration++;
     this.overlayHost.hideValidation();
     this.validationPanelKey = null;
     if (this.validationOutsideHandler) {
@@ -3137,7 +3186,7 @@ class XlsxViewerEngine implements ZoomableViewer {
         if (cell.col > maxCol) maxCol = cell.col;
       }
     }
-    return GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).logicalContentExtent(
+    return getGridGeometryForWorksheet(ws).logicalContentExtent(
       maxRow,
       maxCol,
       HEADER_W,
@@ -3163,7 +3212,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     maxCol += 10;
 
     // Spacer = rounded header + cumulative per-band-rounded geometry.
-    const extent = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).roundedContentExtent(
+    const extent = getGridGeometryForWorksheet(ws).roundedContentExtent(
       maxRow,
       maxCol,
       cs,
@@ -3194,9 +3243,8 @@ class XlsxViewerEngine implements ZoomableViewer {
    * old semantics there.
    */
   private scheduleRender(): void {
-    this.renderDispatcher.schedule(() => {
-      this.renderCurrentSheet().catch((error) => this._reportRenderError(error));
-    });
+    this.renderDispatcher.schedule(() =>
+      this.renderCurrentSheet().catch((error) => this._reportRenderError(error)));
   }
 
   private async renderCurrentSheet(): Promise<void> {
@@ -3205,10 +3253,11 @@ class XlsxViewerEngine implements ZoomableViewer {
     // unguarded throw would surface as an unhandled promise rejection. Catch here
     // and route to `onError` (or `console.error` — never silent), matching
     // DocxViewer._render and the scroll viewers.
+    const generation = this.renderDispatcher.begin();
     try {
-      await this._renderCurrentSheet();
+      await this._renderCurrentSheet(generation);
     } catch (err) {
-      this._reportRenderError(err);
+      if (this.renderDispatcher.isCurrent(generation)) this._reportRenderError(err);
     }
   }
 
@@ -3222,7 +3271,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     else console.error('[ooxml] XlsxViewer render failed:', e);
   }
 
-  private async _renderCurrentSheet(): Promise<void> {
+  private async _renderCurrentSheet(seq: number): Promise<void> {
     if (!this.currentWorksheet) return;
     const ws = this.currentWorksheet;
     const w = this.canvasArea.clientWidth;
@@ -3231,8 +3280,6 @@ class XlsxViewerEngine implements ZoomableViewer {
 
     // Claim a render generation up front so a later render started while this one
     // awaits the worker can mark this frame stale (worker mode only; see below).
-    const seq = this.renderDispatcher.begin();
-
     const cs = this.viewport.scale;
     const dpr = this.surface.dpr;
 
@@ -3243,15 +3290,12 @@ class XlsxViewerEngine implements ZoomableViewer {
     // Convert to logical pixels for cell-finding by dividing by cs. For RTL
     // sheets effectiveScrollLeft inverts the native scrollLeft so that 0 = col A
     // at the (mirrored) right edge — see the getter for the rationale.
-    const logicalScrollX = this.effectiveScrollLeft / cs;
-    const logicalScrollY = this.viewportTop / cs;
-
-    const visible = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws)).visibleRange({
+    const visible = getGridGeometryForWorksheet(ws).visibleRange({
       width: w,
       height: h,
       scale: cs,
-      scrollX: logicalScrollX,
-      scrollY: logicalScrollY,
+      scrollX: this.effectiveScrollLeft,
+      scrollY: this.viewportTop,
       headerWidth: HEADER_W,
       headerHeight: HEADER_H,
       buffer: 2,
@@ -3281,10 +3325,14 @@ class XlsxViewerEngine implements ZoomableViewer {
       // expand, drag resize) so the worker re-lays the mutated bands — its
       // local sheet cache never sees main-thread model writes on its own.
       const sizeOverrides = this.wireSizeOverrides();
+      const workerOpts = withViewerLayoutMetrics(
+        sizeOverrides ? { ...renderOpts, sizeOverrides } : renderOpts,
+        getGridGeometryForWorksheet(ws).maximumDigitWidth,
+      );
       const bmp = await this.workbook.renderViewportToBitmap(
         this.currentSheet,
         viewport,
-        sizeOverrides ? { ...renderOpts, sizeOverrides } : renderOpts,
+        workerOpts,
       );
       if (!this.renderDispatcher.commitBitmap(seq, bmp, w, h)) return;
     } else {

@@ -86,8 +86,15 @@ export async function acquirePptxNodeSession(
     throwIfAborted(options.signal);
     const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(resourceOptions.policy);
     const Archive = (pptxWasm as unknown as { PptxArchive: PptxArchiveConstructor }).PptxArchive;
-    handle = await formatRuntime(module).open(() =>
-      new Archive(bytes, maxEntry, maxTotal, maxEntries));
+    handle = await formatRuntime(module).open(
+      () => new Archive(bytes, maxEntry, maxTotal, maxEntries),
+      {
+        signal: options.signal,
+        abortError: createAbortError,
+        disposeOnAbort: (archive) => archive.free(),
+      },
+    );
+    throwIfAborted(options.signal);
     const archive = handle.proxy;
     const bootstrap = normalizePresentationBootstrap(JSON.parse(
       new TextDecoder().decode(archive.presentation_bootstrap()),
@@ -109,7 +116,11 @@ export async function acquirePptxNodeSession(
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
+  throw createAbortError();
+}
+
+function createAbortError(): Error {
   const error = new Error('PPTX presentation session was aborted');
   error.name = 'AbortError';
-  throw error;
+  return error;
 }

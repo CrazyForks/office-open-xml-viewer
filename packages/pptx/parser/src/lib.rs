@@ -5,7 +5,9 @@ use ooxml_common::json_measurement::measure_json;
 use ooxml_common::ns::is_r_ns;
 #[cfg(test)]
 use ooxml_common::package_session::PackageLimitReporter;
-use ooxml_common::package_session::{PackageOperation, PackageSessionHandle};
+use ooxml_common::package_session::{
+    PackageOperation, PackageSessionHandle, RetainedPackageOperation,
+};
 use ooxml_common::pull::insufficient_credit_error;
 use ooxml_common::rels::relationship_part_path;
 use ooxml_common::resource::{
@@ -843,7 +845,7 @@ impl PptxArchive {
             return Err(error);
         }
         let zip = self.archive.as_mut().map_err(|error| error.clone())?;
-        self.last_slide_usage = zip.operation.as_ref().and_then(PackageOperation::usage);
+        self.last_slide_usage = zip.operation.usage();
         if let Err(error) = zip.finish_operation() {
             self.cancel_slide();
             return Err(error);
@@ -865,7 +867,7 @@ impl PptxArchive {
             }
         }
         if let Ok(zip) = self.archive.as_mut() {
-            self.last_slide_usage = zip.operation.as_ref().and_then(PackageOperation::usage);
+            self.last_slide_usage = zip.operation.usage();
             zip.cancel_operation();
         }
     }
@@ -880,8 +882,7 @@ impl PptxArchive {
             .archive
             .as_ref()
             .ok()
-            .and_then(|zip| zip.operation.as_ref())
-            .and_then(PackageOperation::usage)
+            .and_then(|zip| zip.operation.usage())
             .or(self.last_slide_usage)
             .ok_or_else(|| JsValue::from_str("slide cursor usage is unavailable"))?;
         serde_json::to_vec(&usage)
@@ -981,7 +982,7 @@ impl PptxArchive {
 /// a compatibility operation while using the same bounded reader path.
 pub(crate) struct PptxZip {
     session: PackageSessionHandle,
-    operation: Option<PackageOperation>,
+    operation: RetainedPackageOperation,
 }
 
 impl PptxZip {
@@ -991,48 +992,28 @@ impl PptxZip {
     }
 
     fn begin_operation(&mut self, name: &str) -> Result<(), String> {
-        if self.operation.is_some() {
-            return Err("pptx package operation is already active".to_string());
-        }
-        self.operation = Some(self.session.begin_operation(name)?);
-        Ok(())
+        self.operation.begin(&self.session, name)
     }
 
     fn operation(&mut self) -> Result<&PackageOperation, String> {
-        if self.operation.is_none() {
-            #[cfg(test)]
-            {
-                self.operation = Some(self.session.begin_operation("pptx-parser-compat")?);
-            }
-            #[cfg(not(test))]
-            {
-                return Err("pptx package read requires an active operation".to_string());
-            }
-        }
-        Ok(self
-            .operation
-            .as_ref()
-            .expect("operation initialized above"))
+        #[cfg(test)]
+        let compatibility_name = Some("pptx-parser-compat");
+        #[cfg(not(test))]
+        let compatibility_name = None;
+        self.operation.operation(&self.session, compatibility_name)
     }
 
     #[cfg(test)]
     fn active_operation(&self) -> Result<&PackageOperation, String> {
-        self.operation
-            .as_ref()
-            .ok_or_else(|| "pptx package operation is not active".to_string())
+        self.operation.active()
     }
 
     fn finish_operation(&mut self) -> Result<(), String> {
-        let Some(mut operation) = self.operation.take() else {
-            return Ok(());
-        };
-        operation.finish()
+        self.operation.finish()
     }
 
     fn cancel_operation(&mut self) {
-        if let Some(mut operation) = self.operation.take() {
-            let _ = operation.cancel();
-        }
+        self.operation.cancel();
     }
 
     fn run_operation<T>(
@@ -1042,23 +1023,7 @@ impl PptxZip {
     ) -> Result<T, String> {
         self.begin_operation(name)?;
         let result = run(self);
-        if let Err(resource_error) = self.assert_healthy() {
-            self.cancel_operation();
-            return Err(resource_error);
-        }
-        match result {
-            Ok(value) => match self.finish_operation() {
-                Ok(()) => Ok(value),
-                Err(error) => {
-                    self.cancel_operation();
-                    Err(error)
-                }
-            },
-            Err(error) => {
-                self.cancel_operation();
-                Err(error)
-            }
-        }
+        self.operation.settle(&self.session, result)
     }
 
     fn assert_healthy(&self) -> Result<(), String> {
@@ -1088,23 +1053,7 @@ impl PptxZip {
 }
 
 fn settle_pptx_operation<T>(zip: &mut PptxZip, result: Result<T, String>) -> Result<T, String> {
-    if let Err(resource_error) = zip.assert_healthy() {
-        zip.cancel_operation();
-        return Err(resource_error);
-    }
-    match result {
-        Ok(value) => match zip.finish_operation() {
-            Ok(()) => Ok(value),
-            Err(error) => {
-                zip.cancel_operation();
-                Err(error)
-            }
-        },
-        Err(error) => {
-            zip.cancel_operation();
-            Err(error)
-        }
-    }
+    zip.operation.settle(&zip.session, result)
 }
 
 pub(crate) fn read_zip_str(
@@ -1899,7 +1848,7 @@ fn open_zip_with_policy(
     )
     .map(|session| PptxZip {
         session,
-        operation: None,
+        operation: RetainedPackageOperation::new("pptx"),
     })
     .map_err(ooxml_common::zip::tag_container_error)
 }

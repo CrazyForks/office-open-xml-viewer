@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { XlsxViewer, type XlsxViewerOptions } from './viewer.js';
 import { XlsxWorkbook } from './workbook.js';
+import type { Worksheet } from './types.js';
 import { installDom, makeContainer } from './viewer-destroy-test-dom.js';
 
 afterEach(() => {
@@ -20,6 +21,24 @@ function fakeWorkbook() {
     getWorksheet: vi.fn().mockResolvedValue(undefined),
   };
   return { wb: wb as unknown as XlsxWorkbook, destroy };
+}
+
+function worksheet(name: string): Worksheet {
+  return {
+    name,
+    rows: [],
+    colWidths: {},
+    rowHeights: {},
+    defaultColWidth: 64,
+    defaultRowHeight: 20,
+    mergeCells: [],
+    freezeRows: 0,
+    freezeCols: 0,
+    conditionalFormats: [],
+    charts: [],
+    images: [],
+    shapeGroups: [],
+  } as unknown as Worksheet;
 }
 
 /**
@@ -61,6 +80,45 @@ describe('XlsxViewer.load() — no orphaned workbook on re-load (SC20)', () => {
 
     v.destroy();
     expect(b.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not report an old worksheet acquisition rejected by a successful reload', async () => {
+    installDom();
+    const onError = vi.fn();
+    const v = new XlsxViewer(makeContainer() as unknown as HTMLElement, { onError });
+    const internals = v as unknown as Record<string, unknown> & {
+      showSheet(index: number): Promise<void>;
+    };
+    for (const method of [
+      'hideCommentPopup', 'hideValidationPanel', 'updateSelectionOverlay', 'updateTabActive',
+      'buildCommentMap', 'buildHyperlinkMap', 'buildOutline', 'layoutGutters', 'updateSpacerSize',
+      'resetHorizontalScroll', 'updateFindOverlay', 'emitViewportChange',
+    ]) internals[method] = vi.fn();
+    internals.renderCurrentSheet = vi.fn(async () => undefined);
+
+    let rejectOldRequest!: (error: Error) => void;
+    const oldRequest = new Promise<Worksheet>((_resolve, reject) => { rejectOldRequest = reject; });
+    const old = fakeWorkbook();
+    const next = fakeWorkbook();
+    const oldGetWorksheet = old.wb.getWorksheet as ReturnType<typeof vi.fn>;
+    oldGetWorksheet.mockResolvedValueOnce(worksheet('Old'));
+    const nextGetWorksheet = next.wb.getWorksheet as ReturnType<typeof vi.fn>;
+    nextGetWorksheet.mockResolvedValue(worksheet('Next'));
+    vi.spyOn(XlsxWorkbook, 'load')
+      .mockResolvedValueOnce(old.wb)
+      .mockResolvedValueOnce(next.wb);
+
+    await v.load('old.xlsx');
+    oldGetWorksheet.mockImplementationOnce(() => oldRequest);
+    const staleNavigation = internals.showSheet(0);
+
+    await v.load('next.xlsx');
+    rejectOldRequest(new Error('old worker terminated'));
+    await staleNavigation;
+
+    expect(old.destroy).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+    v.destroy();
   });
 
   it('keeps the current workbook when the re-load fails (atomic swap)', async () => {

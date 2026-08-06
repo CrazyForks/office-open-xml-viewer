@@ -95,7 +95,7 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
     const loaded = host.archive;
     if (!loaded) throw new Error('No docx loaded');
     const bytes = host.run(() => loaded.extract_image(path));
-    return new Blob([new Uint8Array(bytes).slice()], { type: mimeType });
+    return new Blob([bytes as BlobPart], { type: mimeType });
   });
 }
 
@@ -217,7 +217,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         embeddedFaces = await loadEmbeddedFonts(model, async (p) => {
           const loaded = host.archive;
           if (!loaded) throw new Error('No docx loaded');
-          return new Uint8Array(host.run(() => loaded.extract_image(p))).slice();
+          return host.run(() => loaded.extract_image(p));
         });
       }
       const localMetrics = await loadDocxLocalFontMetrics(model);
@@ -289,8 +289,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       // transfer).
       const archive = host.archive;
       if (!archive) throw new Error('No docx loaded');
-      const raw = host.run(() => archive.extract_image(req.path));
-      const bytes = new Uint8Array(raw).slice().buffer;
+      // wasm-bindgen returns an owned full-span Uint8Array; transfer its
+      // standalone buffer directly, matching the parse worker contract.
+      const bytes = host.run(() => archive.extract_image(req.path).buffer as ArrayBuffer);
       post({ type: 'imageExtracted', id, bytes }, [bytes]);
       return;
     }

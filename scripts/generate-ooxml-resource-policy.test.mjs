@@ -44,6 +44,8 @@ function fixture(policy = {
     maxWorksheetJsonBytes: 640,
     maxWorkbookCachedRows: 200,
     maxWorkbookCachedCells: 500,
+    maxWorkbookCachedCellContentUtf8Bytes: 640,
+    maxWorkbookCachedJsonBytes: 1280,
     maxRendererCoordinateIndexEntries: 250,
   },
 }) {
@@ -103,6 +105,14 @@ test('generates matching TypeScript and Rust constants from one policy source', 
   assert.match(
     readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
     /HARD_MAX_XLSX_WORKSHEET_JSON_BYTES = 640/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
+    /HARD_MAX_XLSX_WORKBOOK_CACHED_CELL_CONTENT_UTF8_BYTES = 640/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
+    /HARD_MAX_XLSX_WORKBOOK_CACHED_JSON_BYTES = 1280/,
   );
   assert.match(
     readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
@@ -200,6 +210,8 @@ test('rejects invalid or internally inconsistent policy values', (context) => {
       maxWorksheetJsonBytes: 640,
       maxWorkbookCachedRows: 200,
       maxWorkbookCachedCells: 500,
+      maxWorkbookCachedCellContentUtf8Bytes: 640,
+      maxWorkbookCachedJsonBytes: 1280,
       maxRendererCoordinateIndexEntries: 250,
     },
   });
@@ -226,6 +238,26 @@ for (const [name, smallerKey, largerKey] of [
     'cached slide projection smaller than one slide',
     'maxPptxCachedSlideProjectionBytes',
     'maxPptxSlideJsonBytes',
+  ],
+  [
+    'workbook cached rows smaller than one worksheet',
+    'maxWorkbookCachedRows',
+    'maxWorksheetRows',
+  ],
+  [
+    'workbook cached cells smaller than one worksheet',
+    'maxWorkbookCachedCells',
+    'maxWorksheetCells',
+  ],
+  [
+    'workbook cached cell content smaller than one worksheet',
+    'maxWorkbookCachedCellContentUtf8Bytes',
+    'maxWorksheetCellContentUtf8Bytes',
+  ],
+  [
+    'workbook cached JSON smaller than one worksheet',
+    'maxWorkbookCachedJsonBytes',
+    'maxWorksheetJsonBytes',
   ],
 ]) {
   test(`rejects ${name}`, (context) => {

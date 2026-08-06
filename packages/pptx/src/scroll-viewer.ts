@@ -1,5 +1,8 @@
 import { computeVisibleRange, EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindHighlightColors, type FindMatch, type FindMatchesOptions, type VisibleRange, type HyperlinkTarget, type OoxmlResourceMetrics, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
-import { StaticCanvasRenderDispatcher } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
+import {
+  StaticCanvasRenderDispatcher,
+  TerminalResourceOwner,
+} from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
@@ -217,7 +220,8 @@ interface SlideSlot {
 }
 
 export class PptxScrollViewer implements ZoomableViewer {
-  private _pres: PptxPresentation | null = null;
+  private readonly _presentationOwner: TerminalResourceOwner<PptxPresentation>;
+  private get _pres(): PptxPresentation | null { return this._presentationOwner.current; }
   private readonly _injected: boolean;
   private readonly _opts: PptxScrollViewerOptions;
   private readonly _container: HTMLElement;
@@ -267,23 +271,6 @@ export class PptxScrollViewer implements ZoomableViewer {
    *  reporting an error so a rejection that lands after teardown is swallowed
    *  rather than surfaced to a `onError` on a dead viewer. */
   private _destroyed = false;
-  /**
-   * Concurrent-load latch (generation token). Every self-loading `load()`
-   * increments this and captures the value; after its engine finishes loading it
-   * re-checks the live value and BAILS (destroying its own just-loaded engine) if
-   * a newer `load()` has since started. Without it, two overlapping
-   * `load(A)`/`load(B)` calls race the WASM parse / worker init, and whichever
-   * RESOLVES last wins the swap — even the stale `load(A)` resolving after
-   * `load(B)`; the loser's freshly created engine (never installed, or installed
-   * then overwritten) then leaks its worker + pinned WASM allocation. The latch
-   * composes with SC20: the check runs AFTER the new engine loads but BEFORE the
-   * field assignment, `previous?.destroy()`, and the recycle/relayout post-load
-   * work, so a superseded load never touches `this._pres` nor frees the current
-   * (newer) engine. Only the self-loading path uses it — the injected path throws
-   * up-front and never reaches here. `destroy()` also bumps it so a load in flight
-   * at teardown is treated as superseded and its engine cleaned up.
-   */
-  private _loadGen = 0;
   /** Worker mode: slide indices whose bitmap render is currently dispatched to the
    *  engine. Coalesces a scroll storm — we never dispatch a second render for a
    *  slide whose first is still in flight — and lets us drop slides that scrolled
@@ -377,9 +364,10 @@ export class PptxScrollViewer implements ZoomableViewer {
             'Omit opts.mode when injecting an engine — the engine owns its render mode.',
         );
       }
-      this._pres = engine;
+      this._presentationOwner = new TerminalResourceOwner('PptxScrollViewer', engine, false);
       this._mode = engine.mode;
     } else {
+      this._presentationOwner = new TerminalResourceOwner('PptxScrollViewer');
       this._mode = opts.mode ?? 'main';
     }
 
@@ -454,6 +442,7 @@ export class PptxScrollViewer implements ZoomableViewer {
    * caller already owns the parsed engine.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
     if (this._injected) {
       throw new Error(
         'PptxScrollViewer.load() is unsupported when an engine is injected via opts.presentation; the injected engine is already loaded.',
@@ -465,10 +454,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     // re-load then keeps the current deck rendered rather than going blank. (The
     // injected path returned above can never reach here, so this only ever frees
     // an engine we created.)
-    const gen = ++this._loadGen;
-    const previous = this._pres;
     try {
-      const pres = await PptxPresentation.load(source, {
+      const pres = await this._presentationOwner.replace(() => PptxPresentation.load(source, {
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
         resourceLimits: this._opts.resourceLimits,
@@ -478,38 +465,25 @@ export class PptxScrollViewer implements ZoomableViewer {
         wasmUrl: this._opts.wasmUrl,
         math: this._opts.math,
         mode: this._mode,
+      }), (ownedPresentation) => {
+        this._find.invalidate();
+        this._findActive = false;
+        if (ownedPresentation) {
+          for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
+          this._lastTopIndex = -1;
+        }
       });
-      if (gen !== this._loadGen) {
-        // A newer load() (or destroy()) started while this one was in flight — we
-        // lost the concurrent-load race. Destroy the engine we just loaded (it was
-        // never installed) and leave the winning load's engine + SC20 swap + its
-        // recycle/relayout work untouched: do NOT touch `this._pres` and do NOT
-        // destroy `previous` (irrelevant to the winner; possibly already stale).
-        pres.destroy();
-        return;
-      }
-      this._pres = pres;
-      previous?.destroy();
+      if (!pres) return;
+      if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
       this._find.invalidate();
       this._findActive = false;
-      if (previous) {
-        // Re-loading over a prior deck: recycle every mounted slot (they hold the
-        // OLD deck's rendered canvases) and reset the top-index latch so the new
-        // deck's first window renders fresh. `_mountVisible` only RE-renders
-        // missing indices, so without this a still-mounted slide 0 would keep the
-        // previous deck's pixels.
-        for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
-        this._lastTopIndex = -1;
-      }
       // Lay out + mount the first window now that the engine exists (mirrors the
       // injected-engine path in the constructor). relayout() is idempotent and
       // defers under a zero-width container — `_onResize` re-runs it once width
       // appears.
       this.relayout();
     } catch (err) {
-      // Superseded loads own no error reporting — the winning load (or destroy())
-      // is the outcome the caller awaits; swallow this stale rejection.
-      if (gen !== this._loadGen) return;
+      if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
       const e = err instanceof Error ? err : new Error(String(err));
       if (this._opts.onError) {
         this._opts.onError(e);
@@ -982,7 +956,14 @@ export class PptxScrollViewer implements ZoomableViewer {
         this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
-        this._reportRenderError(err);
+        if (
+          renderGeneration === slot.renderGeneration &&
+          dispatcher.isCurrent(generation) &&
+          canvas === slot.canvas &&
+          epoch === this._renderEpoch &&
+          this._slots.get(i) === slot &&
+          slot.renderedSlide === i
+        ) this._reportRenderError(err);
       });
   }
 
@@ -1201,7 +1182,14 @@ export class PptxScrollViewer implements ZoomableViewer {
       this._redrawSlotHighlights(i, slot);
       painted = true;
     } catch (err) {
-      this._reportRenderError(err);
+      if (
+        renderGeneration === slot.renderGeneration &&
+        dispatcher.isCurrent(generation) &&
+        canvas === slot.canvas &&
+        epoch === this._renderEpoch &&
+        this._slots.get(i) === slot &&
+        slot.renderedSlide === i
+      ) this._reportRenderError(err);
     } finally {
       this._slideInFlight.delete(i);
       // Re-dispatch ONLY when this invocation went stale — a LIVE slot for slide
@@ -1609,7 +1597,10 @@ export class PptxScrollViewer implements ZoomableViewer {
           epoch !== this._renderEpoch ||
           this._slots.get(i) !== slot ||
           slot.renderedSlide !== i
-        ) return;
+        ) {
+          spareDispatcher.destroy();
+          return;
+        }
         // Swap the freshly-painted spare in for the old (stretched-preview) canvas.
         // The old canvas was the only child that showed content; replacing it in
         // one DOM op means the screen goes from preview → crisp with no blank tick.
@@ -1635,7 +1626,14 @@ export class PptxScrollViewer implements ZoomableViewer {
         this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
-        this._reportRenderError(err);
+        if (
+          renderGeneration === slot.renderGeneration &&
+          spareDispatcher.isCurrent(generation) &&
+          epoch === this._renderEpoch &&
+          this._slots.get(i) === slot &&
+          slot.renderedSlide === i
+        ) this._reportRenderError(err);
+        spareDispatcher.destroy();
       });
   }
 
@@ -2041,11 +2039,8 @@ export class PptxScrollViewer implements ZoomableViewer {
    * owns its lifecycle. Per-slot worker ImageBitmaps are closed on recycle.
    */
   destroy(): void {
+    if (this._destroyed) return;
     this._destroyed = true;
-    // Bump the load generation so a self-loading load() still in flight is treated
-    // as superseded and its engine is cleaned up rather than installed onto a
-    // torn-down viewer.
-    this._loadGen++;
     this._find.invalidate();
     this._findActive = false;
     if (this._scrollListener) {
@@ -2068,10 +2063,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     }
     for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
     this._free.length = 0;
-    if (!this._injected) {
-      this._pres?.destroy();
-    }
-    this._pres = null;
+    this._presentationOwner.close();
     this._wrapper.remove();
   }
 }

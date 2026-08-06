@@ -126,6 +126,43 @@ describe('WasmRuntimeGenerationHost', () => {
     expect(reinit).toHaveBeenCalledOnce();
   });
 
+  it('observes aborts while a recycled runtime is initializing before constructing an archive', async () => {
+    const reinitGate = deferred<void>();
+    const runtime: WasmModuleRuntime = {
+      initSync: vi.fn(),
+      reinit: vi.fn(() => reinitGate.promise),
+    };
+    const host = new WasmRuntimeGenerationHost<Archive>(
+      runtime,
+      new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0])),
+    );
+    const trapped = await host.open(() => ({
+      value: () => { throw new WebAssembly.RuntimeError('unreachable'); },
+      free: vi.fn(),
+    }));
+    expect(() => trapped.proxy.value()).toThrow(WasmTrapError);
+
+    const controller = new AbortController();
+    const create = vi.fn(() => ({ value: () => 2, free: vi.fn() }));
+    const opening = host.open(create, {
+      signal: controller.signal,
+      abortError: () => Object.assign(new Error('format session was aborted'), {
+        name: 'AbortError',
+      }),
+      disposeOnAbort: (archive) => archive.free(),
+    });
+    controller.abort();
+
+    await expect(opening).rejects.toMatchObject({ name: 'AbortError' });
+    expect(create).not.toHaveBeenCalled();
+
+    // Cancellation is caller-local: the shared realm recovery keeps running
+    // and can serve a later caller once it settles.
+    reinitGate.resolve();
+    const recovered = await host.open(() => ({ value: () => 3, free: vi.fn() }));
+    expect(recovered.proxy.value()).toBe(3);
+  });
+
   it('frees a healthy archive exactly once', async () => {
     const { host } = runtimeHost();
     const free = vi.fn();
@@ -137,3 +174,12 @@ describe('WasmRuntimeGenerationHost', () => {
     expect(() => handle.proxy.value()).toThrow(/discarded runtime generation/);
   });
 });
+
+function deferred<T>(): { promise: Promise<T>; resolve(value?: T): void } {
+  let resolvePromise: (value: T | PromiseLike<T>) => void = () => undefined;
+  const promise = new Promise<T>((resolve) => { resolvePromise = resolve; });
+  return {
+    promise,
+    resolve: (value?: T) => resolvePromise(value as T),
+  };
+}

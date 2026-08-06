@@ -197,7 +197,7 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
   private resourceFailure: OoxmlResourceLimitError | null = null;
   private readonly fetchImage = async (path: string, mimeType: string): Promise<Blob> => {
     const bytes = this.archive.extract_image(path);
-    return new Blob([new Uint8Array(bytes).slice() as BlobPart], { type: mimeType });
+    return new Blob([bytes as BlobPart], { type: mimeType });
   };
 
   constructor(
