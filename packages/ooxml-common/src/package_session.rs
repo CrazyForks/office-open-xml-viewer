@@ -986,6 +986,113 @@ impl Drop for PackageOperation {
     }
 }
 
+/// Owns the single retained package operation used by a format parser cursor.
+///
+/// DOCX, XLSX, and PPTX expose different parser models, but their package-read
+/// lifecycle is identical: one explicitly started operation remains active
+/// across the format-specific work and is then committed or canceled as one
+/// unit. Keeping that ownership protocol here prevents the three adapters from
+/// drifting in health checks, error precedence, or cleanup behavior.
+pub struct RetainedPackageOperation {
+    format: &'static str,
+    operation: Option<PackageOperation>,
+}
+
+impl RetainedPackageOperation {
+    pub fn new(format: &'static str) -> Self {
+        Self {
+            format,
+            operation: None,
+        }
+    }
+
+    pub fn begin(&mut self, session: &PackageSessionHandle, name: &str) -> Result<(), String> {
+        if self.operation.is_some() {
+            return Err(format!(
+                "{} package operation is already active",
+                self.format
+            ));
+        }
+        self.operation = Some(session.begin_operation(name)?);
+        Ok(())
+    }
+
+    /// Return the retained operation, optionally creating a test-only
+    /// compatibility scope selected by the format adapter.
+    pub fn operation(
+        &mut self,
+        session: &PackageSessionHandle,
+        compatibility_name: Option<&str>,
+    ) -> Result<&PackageOperation, String> {
+        if self.operation.is_none() {
+            let Some(name) = compatibility_name else {
+                return Err(format!(
+                    "{} package read requires an active operation",
+                    self.format
+                ));
+            };
+            self.operation = Some(session.begin_operation(name)?);
+        }
+        Ok(self
+            .operation
+            .as_ref()
+            .expect("operation initialized above"))
+    }
+
+    pub fn active(&self) -> Result<&PackageOperation, String> {
+        self.operation
+            .as_ref()
+            .ok_or_else(|| format!("{} package operation is not active", self.format))
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.operation.is_some()
+    }
+
+    pub fn usage(&self) -> Option<ResourceUsage> {
+        self.operation.as_ref().and_then(PackageOperation::usage)
+    }
+
+    pub fn finish(&mut self) -> Result<(), String> {
+        let Some(mut operation) = self.operation.take() else {
+            return Ok(());
+        };
+        operation.finish()
+    }
+
+    pub fn cancel(&mut self) {
+        if let Some(mut operation) = self.operation.take() {
+            let _ = operation.cancel();
+        }
+    }
+
+    /// Settle a format operation after its format-specific work finishes.
+    /// Package-wide resource failures take precedence over parse/model errors.
+    pub fn settle<T>(
+        &mut self,
+        session: &PackageSessionHandle,
+        result: Result<T, String>,
+    ) -> Result<T, String> {
+        if let Err(resource_error) = session.assert_healthy() {
+            self.cancel();
+            return Err(resource_error);
+        }
+        match result {
+            Ok(value) => match self.finish() {
+                Ok(()) => Ok(value),
+                Err(error) => {
+                    self.cancel();
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                self.cancel();
+                Err(error)
+            }
+        }
+    }
+}
+
 /// Operation-bound reporting capability for parser/model safety ceilings.
 ///
 /// This capability does not own operation lifecycle. Dropping it is inert, and
@@ -1133,6 +1240,60 @@ mod tests {
                 return Ok(all);
             }
         }
+    }
+
+    #[test]
+    fn retained_operation_requires_explicit_scope_unless_adapter_allows_compatibility() {
+        let bytes = package(&[("word/document.xml", b"<w/>", CompressionMethod::Stored)]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64), None).unwrap();
+        let mut retained = RetainedPackageOperation::new("docx");
+
+        assert_eq!(
+            retained.operation(&handle, None).err().unwrap(),
+            "docx package read requires an active operation"
+        );
+        assert_eq!(
+            retained
+                .operation(&handle, Some("docx-parser-compat"))
+                .unwrap()
+                .read_bytes("word/document.xml")
+                .unwrap(),
+            b"<w/>"
+        );
+        assert!(retained.is_active());
+        retained.cancel();
+        assert!(!retained.is_active());
+    }
+
+    #[test]
+    fn retained_operation_settlement_prioritizes_package_resource_failure() {
+        let bytes = package(&[(
+            "xl/worksheets/sheet1.xml",
+            b"<x/>",
+            CompressionMethod::Stored,
+        )]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64), None).unwrap();
+        let mut retained = RetainedPackageOperation::new("xlsx");
+        retained.begin(&handle, "parse-sheet").unwrap();
+        let reporter = retained.active().unwrap().limit_reporter().unwrap();
+        let resource_error = reporter
+            .observe_hard_limit(
+                HardResourceLimitKind::XmlEventBytes,
+                Some("xl/worksheets/sheet1.xml"),
+                8,
+                9,
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            retained
+                .settle::<()>(&handle, Err("secondary parse failure".to_string()))
+                .unwrap_err(),
+            resource_error
+        );
+        assert!(!retained.is_active());
     }
 
     #[test]

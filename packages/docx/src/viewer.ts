@@ -12,6 +12,7 @@ import {
   CanvasOverlayHost,
   CanvasViewerErrorRouter,
   StaticCanvasRenderDispatcher,
+  TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import { invalidateDocxRenderTarget } from './paint/canvas-document';
 
@@ -68,7 +69,8 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
 }
 
 export class DocxViewer implements ZoomableViewer {
-  private _doc: DocxDocument | null = null;
+  private readonly _documentOwner = new TerminalResourceOwner<DocxDocument>('DocxViewer');
+  private get _doc(): DocxDocument | null { return this._documentOwner.current; }
   private _currentPage = 0;
   /**
    * IX9 explicit zoom factor (`1` = 100% = the page at its natural pt→px width),
@@ -98,22 +100,7 @@ export class DocxViewer implements ZoomableViewer {
   private readonly _mode: 'main' | 'worker';
   private readonly _renderDispatcher: StaticCanvasRenderDispatcher;
   private readonly _errorRouter: CanvasViewerErrorRouter;
-  /**
-   * Concurrent-load latch (generation token). Every {@link load} increments this
-   * and captures the value; after its engine finishes loading it re-checks the
-   * live value and BAILS (destroying its own just-loaded engine) if a newer
-   * `load()` has since started. Without it, two overlapping `load(A)`/`load(B)`
-   * calls race the WASM parse / worker init, and whichever RESOLVES last wins the
-   * swap — even the stale `load(A)` resolving after `load(B)`; the loser's freshly
-   * created engine (never installed, or installed then overwritten) then leaks its
-   * worker + pinned WASM allocation. The latch composes with SC20: the check runs
-   * AFTER the new engine loads but BEFORE the field assignment and
-   * `previous?.destroy()`, so a superseded load never touches `this._doc` nor
-   * frees the current (newer) engine. {@link destroy} also bumps it so a load in
-   * flight at teardown is treated as superseded and its engine cleaned up.
-   */
-  private _loadGen = 0;
-
+  private _destroyed = false;
   constructor(canvas: HTMLCanvasElement, opts: DocxViewerOptions = {}) {
     this._canvas = canvas;
     this._opts = opts;
@@ -150,16 +137,15 @@ export class DocxViewer implements ZoomableViewer {
    *   RESOLVES, matching every subsequent navigation call.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    if (this._destroyed) throw new Error('DocxViewer is destroyed');
     // SC20 atomic swap: retain the previous engine locally and only tear it down
     // AFTER the new one loads successfully. A re-load thus never orphans the old
     // engine's worker + pinned WASM allocation (the leak this guards), yet a
     // FAILED re-load keeps the current document + its rendered page intact rather
     // than dropping to an empty viewer. The 2× memory window is bounded to the
     // load itself (the old engine is freed the moment the new model arrives).
-    const gen = ++this._loadGen;
-    const previous = this._doc;
     try {
-      const doc = await DocxDocument.load(source, {
+      const doc = await this._documentOwner.replace(() => DocxDocument.load(source, {
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
         resourceLimits: this._opts.resourceLimits,
@@ -169,26 +155,21 @@ export class DocxViewer implements ZoomableViewer {
         wasmUrl: this._opts.wasmUrl,
         math: this._opts.math,
         mode: this._mode,
+      }), () => {
+        // Invalidate operations owned by the old document before its worker is
+        // terminated, so their expected rejection cannot surface as a reload
+        // failure for the winning document.
+        this._renderDispatcher.begin();
+        this._find.invalidate();
       });
-      if (gen !== this._loadGen) {
-        // A newer load() (or destroy()) started while this one was in flight — we
-        // lost the concurrent-load race. Destroy the engine we just loaded (it was
-        // never installed) and leave the winning load's engine + SC20 swap
-        // untouched: do NOT touch `this._doc` and do NOT destroy `previous`
-        // (irrelevant to the winner; possibly already stale).
-        doc.destroy();
-        return;
-      }
-      this._doc = doc;
-      previous?.destroy();
+      if (!doc) return;
+      if (this._destroyed) throw new Error('DocxViewer is destroyed');
       this._currentPage = 0;
       // A new document invalidates any prior find state (cached runs / matches).
       this._find.invalidate();
       await this._render();
     } catch (err) {
-      // Superseded loads own no error reporting — the winning load (or destroy())
-      // is the outcome the caller awaits; swallow this stale rejection.
-      if (gen !== this._loadGen) return;
+      if (this._destroyed) throw new Error('DocxViewer is destroyed');
       const e = err instanceof Error ? err : new Error(String(err));
       if (this._opts.onError) {
         this._opts.onError(e);
@@ -412,6 +393,8 @@ export class DocxViewer implements ZoomableViewer {
    * is simply removed from the internal wrapper. Safe to call more than once.
    */
   destroy(): void {
+    if (this._destroyed) return;
+    this._destroyed = true;
     // First line: block any render rejection racing in from surfacing on a dead
     // viewer (checked at the top of _reportRenderError). Bump the load generation
     // too so a load() still in flight is treated as superseded and its engine is
@@ -419,9 +402,7 @@ export class DocxViewer implements ZoomableViewer {
     this._errorRouter.close();
     this._renderDispatcher.destroy();
     invalidateDocxRenderTarget(this._canvas);
-    this._loadGen++;
-    this._doc?.destroy();
-    this._doc = null;
+    this._documentOwner.close();
     // IX2 — drop the find state (matches + cached runs) so a stale
     // findNext()/findPrev() after teardown returns null instead of a match
     // pointing into a dead viewer.

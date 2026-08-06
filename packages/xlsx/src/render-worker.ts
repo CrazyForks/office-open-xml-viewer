@@ -33,12 +33,11 @@ import { resolveSharedStringRows } from './shared-strings.js';
 import {
   addWorksheetCacheUsage,
   assertWorksheetCacheUsage,
-  measureWorksheet,
   type WorksheetCacheUsage,
-  type WorksheetModelUsage,
 } from './worksheet-resource-limits.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
 import { applySizeOverrides } from './worker-protocol.js';
+import { GridGeometry } from './internal/grid-geometry.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
 import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
 
@@ -61,8 +60,10 @@ let workbook: ParsedWorkbook | null = null;
  *  release — only the sequencing (fonts landed before first paint) matters. */
 let fontsLoaded: Promise<unknown> = Promise.resolve();
 const sheetCache = new Map<number, Worksheet>();
-const sheetCacheUsage = new Map<number, WorksheetModelUsage>();
-let retainedSheetUsage: WorksheetCacheUsage = { rows: 0, cells: 0 };
+const sheetCacheUsage = new Map<number, WorksheetCacheUsage>();
+let retainedSheetUsage: WorksheetCacheUsage = {
+  rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0,
+};
 // Fetched image *bytes* (as Blobs) keyed by zip path. Twin of the docx render
 // worker's raw cache. Cleared on re-parse so a reused worker never serves a
 // stale file's image.
@@ -72,10 +73,9 @@ const rawParts = new BoundedRawPartCache({
 });
 const worksheetPull = new WorksheetPullWorker(
   () => host.archive,
-  (sheetIndex, worksheet, resourceUsage) => {
+  (sheetIndex, worksheet, measured, resourceUsage) => {
     const previous = sheetCache.get(sheetIndex);
     const previousUsage = sheetCacheUsage.get(sheetIndex);
-    const measured = measureWorksheet(worksheet);
     const nextUsage = addWorksheetCacheUsage(retainedSheetUsage, measured, previousUsage);
     assertWorksheetCacheUsage(
       nextUsage,
@@ -118,7 +118,7 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
     const loaded = host.archive;
     if (!loaded) throw new Error('Workbook not loaded');
     const bytes = host.run(() => loaded.extract_image(path));
-    return new Blob([new Uint8Array(bytes).slice()], { type: mimeType });
+    return new Blob([bytes as BlobPart], { type: mimeType });
   });
 }
 
@@ -174,7 +174,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
       // workers (issue #781).
       sheetCache.clear();
       sheetCacheUsage.clear();
-      retainedSheetUsage = { rows: 0, cells: 0 };
+      retainedSheetUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 };
       dropDecodedBitmapCache(getImage);
       dropSvgImageCache(getImage);
       rawParts.clear();
@@ -221,6 +221,13 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
       // re-parse rebuilt the cache from the file) always converges.
       const { sizeOverrides, ...renderOpts } = req.opts;
       applySizeOverrides(ws, sizeOverrides);
+      const maximumDigitWidth = req.layoutMetrics?.maximumDigitWidth;
+      if (maximumDigitWidth !== undefined) {
+        if (!Number.isFinite(maximumDigitWidth) || maximumDigitWidth <= 0) {
+          throw new Error('XLSX maximum digit width must be a finite positive number');
+        }
+        GridGeometry.forWorksheet(ws, maximumDigitWidth);
+      }
       const canvas = new OffscreenCanvas(1, 1); // orchestrator resizes it
       await renderWorksheetViewport(
         { ws, styles: workbook.styles },
@@ -241,8 +248,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
       // transfer).
       const archive = host.archive;
       if (!archive) throw new Error('Workbook not loaded');
-      const raw = host.run(() => archive.extract_image(req.path));
-      const bytes = new Uint8Array(raw).slice().buffer;
+      // wasm-bindgen returns an owned full-span Uint8Array; transfer its
+      // standalone buffer directly, matching the parse worker contract.
+      const bytes = host.run(() => archive.extract_image(req.path).buffer as ArrayBuffer);
       post({ type: 'imageExtracted', id, bytes }, [bytes]);
       return;
     }

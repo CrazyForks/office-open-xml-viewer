@@ -10,6 +10,12 @@ export interface WasmModuleRuntime {
   reinit(input: { module_or_path: WebAssembly.Module }): Promise<unknown>;
 }
 
+export interface WasmArchiveOpenOptions<TArchive extends object> {
+  readonly signal?: AbortSignal;
+  readonly abortError?: () => unknown;
+  readonly disposeOnAbort: (archive: TArchive) => void;
+}
+
 function normalizeTrap(error: unknown): WasmTrapError | null {
   if (!isWasmTrap(error)) return null;
   const detail = error instanceof Error ? error.message : String(error);
@@ -33,15 +39,49 @@ export class WasmRuntimeGenerationHost<TArchive extends object> {
     });
   }
 
-  async open(create: () => TArchive): Promise<WasmArchiveHandle<TArchive>> {
+  async open(
+    create: () => TArchive,
+    options?: WasmArchiveOpenOptions<TArchive>,
+  ): Promise<WasmArchiveHandle<TArchive>> {
     for (;;) {
-      await this.realm.ensureReady();
+      this.throwIfOpenAborted(options);
+      await this.awaitReadyOrAbort(options);
+      this.throwIfOpenAborted(options);
       const opened = this.realm.tryRunReady(create);
       if (!opened.current) continue;
       const handle = new WasmArchiveHandle(this, opened.value, opened.generation);
       this.live.add(handle);
+      if (options?.signal?.aborted) {
+        handle.close(options.disposeOnAbort);
+        throw options.abortError?.() ?? new DOMException('The operation was aborted', 'AbortError');
+      }
       return handle;
     }
+  }
+
+  private async awaitReadyOrAbort(
+    options: WasmArchiveOpenOptions<TArchive> | undefined,
+  ): Promise<void> {
+    const signal = options?.signal;
+    if (!signal) {
+      await this.realm.ensureReady();
+      return;
+    }
+    this.throwIfOpenAborted(options);
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => reject(
+        options?.abortError?.() ?? new DOMException('The operation was aborted', 'AbortError'),
+      );
+      signal.addEventListener('abort', abort, { once: true });
+      this.realm.ensureReady().then(resolve, reject).finally(() => {
+        signal.removeEventListener('abort', abort);
+      });
+    });
+  }
+
+  private throwIfOpenAborted(options: WasmArchiveOpenOptions<TArchive> | undefined): void {
+    if (!options?.signal?.aborted) return;
+    throw options.abortError?.() ?? new DOMException('The operation was aborted', 'AbortError');
   }
 
   async ensureReady(): Promise<void> {

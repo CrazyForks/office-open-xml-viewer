@@ -6,7 +6,9 @@ use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::drawing::{parse_xsd_bool, DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use ooxml_common::fill::{parse_fill_rect, parse_tile};
 use ooxml_common::ns::{attr_ns, is_w_ns, is_wp_ns, math, relationships, wordprocessingml};
-use ooxml_common::package_session::{PackageEntryStream, PackageOperation, PackageSessionHandle};
+use ooxml_common::package_session::{
+    PackageEntryStream, PackageOperation, PackageSessionHandle, RetainedPackageOperation,
+};
 use ooxml_common::resource::ResourceUsage;
 // Production parses go through `ooxml_common::depth::parse_guarded` (depth-guarded
 // before roxmltree's recursive tree builder). The `XmlDoc` alias survives only for
@@ -33,7 +35,7 @@ const DEFAULT_FONT_SIZE: f64 = 10.0; // pt fallback
 /// compatibility operation while using the same bounded decoder path.
 pub(crate) struct Zip {
     session: PackageSessionHandle,
-    operation: Option<PackageOperation>,
+    operation: RetainedPackageOperation,
 }
 
 impl Zip {
@@ -43,32 +45,19 @@ impl Zip {
     }
 
     pub(crate) fn begin_operation(&mut self, name: &str) -> Result<(), String> {
-        if self.operation.is_some() {
-            return Err("docx package operation is already active".to_string());
-        }
-        self.operation = Some(self.session.begin_operation(name)?);
-        Ok(())
+        self.operation.begin(&self.session, name)
     }
 
     pub(crate) fn operation(&mut self) -> Result<&PackageOperation, String> {
-        if self.operation.is_none() {
-            #[cfg(test)]
-            {
-                self.operation = Some(self.session.begin_operation("docx-parser-compat")?);
-            }
-            #[cfg(not(test))]
-            {
-                return Err("docx package read requires an active operation".to_string());
-            }
-        }
-        Ok(self
-            .operation
-            .as_ref()
-            .expect("operation initialized above"))
+        #[cfg(test)]
+        let compatibility_name = Some("docx-parser-compat");
+        #[cfg(not(test))]
+        let compatibility_name = None;
+        self.operation.operation(&self.session, compatibility_name)
     }
 
     pub(crate) fn operation_usage(&self) -> Option<ResourceUsage> {
-        self.operation.as_ref().and_then(PackageOperation::usage)
+        self.operation.usage()
     }
 
     pub(crate) fn usage(&self) -> ResourceUsage {
@@ -76,16 +65,11 @@ impl Zip {
     }
 
     pub(crate) fn finish_operation(&mut self) -> Result<(), String> {
-        let Some(mut operation) = self.operation.take() else {
-            return Ok(());
-        };
-        operation.finish()
+        self.operation.finish()
     }
 
     pub(crate) fn cancel_operation(&mut self) {
-        if let Some(mut operation) = self.operation.take() {
-            let _ = operation.cancel();
-        }
+        self.operation.cancel();
     }
 
     pub(crate) fn run_operation<T>(
@@ -95,23 +79,7 @@ impl Zip {
     ) -> Result<T, String> {
         self.begin_operation(name)?;
         let result = run(self);
-        if let Err(resource_error) = self.assert_healthy() {
-            self.cancel_operation();
-            return Err(resource_error);
-        }
-        match result {
-            Ok(value) => match self.finish_operation() {
-                Ok(()) => Ok(value),
-                Err(error) => {
-                    self.cancel_operation();
-                    Err(error)
-                }
-            },
-            Err(error) => {
-                self.cancel_operation();
-                Err(error)
-            }
-        }
+        self.operation.settle(&self.session, result)
     }
 
     pub(crate) fn assert_healthy(&self) -> Result<(), String> {
@@ -711,7 +679,7 @@ pub(crate) fn open_zip_with_policy(
     )
     .map(|session| Zip {
         session,
-        operation: None,
+        operation: RetainedPackageOperation::new("docx"),
     })
     .map_err(ooxml_common::zip::tag_container_error)
 }

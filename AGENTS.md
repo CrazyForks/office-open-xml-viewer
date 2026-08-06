@@ -229,6 +229,28 @@ from the changed worktree against those images. A missing baseline is not a
 successful regression check; report or correct stale sample/page manifests
 instead of treating their skips as coverage.
 
+For the complete private corpus, bind both runs to the same full merge-base SHA.
+Use a clean detached worktree for the previous renderer, rebuild its WASM, and
+use distinct ports so a candidate server can never satisfy the baseline run:
+
+```bash
+git worktree add --detach /tmp/ooxml-vrt-baseline <merge-base-sha>
+cd /tmp/ooxml-vrt-baseline
+pnpm build:wasm
+VRT_BASELINE_REVISION=<full-merge-base-sha> VRT_PORT=5190 pnpm vrt:private:snapshot
+
+cd <candidate-worktree>
+pnpm build:wasm
+VRT_BASELINE_REVISION=<full-merge-base-sha> VRT_PORT=5191 pnpm vrt:private
+```
+
+Snapshot mode rejects a dirty tracked checkout. For the one-time bootstrap of
+this harness against a merge-base that predates it, copy only the allowlisted VRT
+harness files listed in `tests/visual/private-corpus.mjs` and set
+`VRT_ALLOW_HARNESS_CHANGES=1`; renderer/parser changes remain forbidden. The
+baseline manifests record the resolved SHA, each private input's SHA-256, and
+the exact page/sheet/slide sets.
+
 Only update references when the user explicitly asks:
 
 ```bash

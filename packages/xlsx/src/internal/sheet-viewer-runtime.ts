@@ -1,61 +1,31 @@
 import type { XlsxWorkbook } from '../workbook.js';
-import { StaticCanvasRenderDispatcher } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
+import {
+  StaticCanvasRenderDispatcher,
+  TerminalResourceOwner,
+} from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 
 /** Generation-safe workbook ownership for one viewer instance. */
 export class SheetAcquisition {
-  private generation = 0;
-  private currentWorkbook: XlsxWorkbook | null = null;
-  private closed = false;
+  private readonly owner = new TerminalResourceOwner<XlsxWorkbook>('SheetAcquisition');
 
   get current(): XlsxWorkbook | null {
-    return this.currentWorkbook;
+    return this.owner.current;
   }
 
-  async replace(load: () => Promise<XlsxWorkbook>): Promise<XlsxWorkbook | null> {
-    this.assertOpen();
-    const generation = ++this.generation;
-    let candidate: XlsxWorkbook;
-    try {
-      candidate = await load();
-    } catch (error) {
-      if (this.closed) throw this.closedError();
-      if (generation !== this.generation) return null;
-      throw error;
-    }
-    if (this.closed) {
-      candidate.destroy();
-      throw this.closedError();
-    }
-    if (generation !== this.generation) {
-      candidate.destroy();
-      return null;
-    }
-    this.install(candidate);
-    return candidate;
+  async replace(
+    load: () => Promise<XlsxWorkbook>,
+    beforeCommit?: (previous: XlsxWorkbook | null) => void,
+  ): Promise<XlsxWorkbook | null> {
+    return await this.owner.replace(load, beforeCommit);
   }
 
   /** Commit an already acquired workbook, closing the previously owned one. */
   install(candidate: XlsxWorkbook): void {
-    this.assertOpen();
-    const previous = this.currentWorkbook;
-    this.currentWorkbook = candidate;
-    previous?.destroy();
+    this.owner.install(candidate);
   }
 
   destroy(): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.generation++;
-    this.currentWorkbook?.destroy();
-    this.currentWorkbook = null;
-  }
-
-  private assertOpen(): void {
-    if (this.closed) throw this.closedError();
-  }
-
-  private closedError(): Error {
-    return new Error('SheetAcquisition is closed');
+    this.owner.close();
   }
 }
 
@@ -123,6 +93,8 @@ export class ViewportState {
 /** XLSX render scheduling around core-owned static bitmap lifecycle mechanics. */
 export class SheetRenderDispatcher {
   private animationFrame: number | null = null;
+  private activeRender = false;
+  private pendingRender: (() => void | Promise<void>) | null = null;
   private readonly staticDispatcher: StaticCanvasRenderDispatcher | null;
   private generation = 0;
   private destroyed = false;
@@ -167,21 +139,61 @@ export class SheetRenderDispatcher {
     });
   }
 
-  schedule(render: () => void): void {
+  schedule(render: () => void | Promise<void>): void {
+    if (this.destroyed) return;
+    this.pendingRender = render;
+    if (this.activeRender) {
+      // A queued viewport supersedes the frame currently awaiting a worker
+      // bitmap immediately, not only when the queued callback eventually gets
+      // its backpressure slot. Otherwise the old bitmap can still commit after
+      // scroll/resize state has changed and briefly disagree with the live
+      // gutters/overlays. The queued callback calls begin() again when it starts
+      // and becomes the sole current generation.
+      this.begin();
+      return;
+    }
     if (this.animationFrame !== null) return;
+    this.queuePendingRender();
+  }
+
+  private queuePendingRender(): void {
     if (typeof requestAnimationFrame !== 'function') {
-      render();
+      this.startPendingRender();
       return;
     }
     this.animationFrame = requestAnimationFrame(() => {
       this.animationFrame = null;
-      render();
+      this.startPendingRender();
     });
+  }
+
+  private startPendingRender(): void {
+    if (this.destroyed || this.activeRender) return;
+    const render = this.pendingRender;
+    this.pendingRender = null;
+    if (!render) return;
+    this.activeRender = true;
+    let completion: void | Promise<void>;
+    try {
+      completion = render();
+    } catch {
+      completion = undefined;
+    }
+    Promise.resolve(completion)
+      // Scheduling has no returned promise. Callers that need error delivery
+      // route it inside `render`; keep a thrown callback from becoming an
+      // unhandled rejection while still releasing the backpressure slot.
+      .catch(() => undefined)
+      .finally(() => {
+        this.activeRender = false;
+        if (!this.destroyed && this.pendingRender) this.queuePendingRender();
+      });
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.pendingRender = null;
     if (this.animationFrame !== null && typeof cancelAnimationFrame === 'function') {
       cancelAnimationFrame(this.animationFrame);
       this.animationFrame = null;

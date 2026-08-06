@@ -35,6 +35,10 @@ function installRaf(): { flush: () => void; queued: () => number } {
   };
 }
 
+async function settleRenders(): Promise<void> {
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+}
+
 /**
  * The scroll → render path is coalesced through `requestAnimationFrame`
  * (improvement plan C4, commit 1): a burst of scroll events within one frame
@@ -83,7 +87,7 @@ describe('XlsxViewer scroll-render coalescing (C4 commit 1)', () => {
     v.destroy();
   });
 
-  it('renders once per frame across successive scroll bursts', () => {
+  it('renders once per frame across successive scroll bursts', async () => {
     const { v, raf, scrollHost } = build();
     const render = vi.spyOn(
       v as unknown as { renderCurrentSheet: () => Promise<void> },
@@ -93,13 +97,14 @@ describe('XlsxViewer scroll-render coalescing (C4 commit 1)', () => {
       scrollHost.dispatch('scroll');
       scrollHost.dispatch('scroll');
       raf.flush();
+      await settleRenders();
     }
     // Three frames, each with its own scroll → three renders (not six).
     expect(render).toHaveBeenCalledTimes(3);
     v.destroy();
   });
 
-  it('a scroll after the frame flushes schedules a fresh render', () => {
+  it('a scroll after the frame flushes schedules a fresh render', async () => {
     const { v, raf, scrollHost } = build();
     const render = vi.spyOn(
       v as unknown as { renderCurrentSheet: () => Promise<void> },
@@ -108,6 +113,7 @@ describe('XlsxViewer scroll-render coalescing (C4 commit 1)', () => {
     scrollHost.dispatch('scroll');
     raf.flush();
     expect(render).toHaveBeenCalledTimes(1);
+    await settleRenders();
     // A new gesture in a later frame must not be swallowed by the cleared handle.
     scrollHost.dispatch('scroll');
     expect(raf.queued()).toBe(1);

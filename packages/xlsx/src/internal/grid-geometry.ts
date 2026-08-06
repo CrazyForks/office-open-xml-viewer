@@ -1,99 +1,11 @@
 import type { ViewportRange, Worksheet } from '../types.js';
-import { colWidthToPx, rowHeightToPx } from '../renderer.js';
+import { colWidthToPx, rowHeightToPx } from './grid-metrics.js';
+import { GridAxisGeometry } from './grid-axis-geometry.js';
+
+export { GridAxisGeometry } from './grid-axis-geometry.js';
 
 export const MAX_WORKSHEET_ROW = 1_048_576;
 export const MAX_WORKSHEET_COL = 16_384;
-
-/** Sparse cumulative axis geometry. Offsets are logical, unscaled pixels. */
-export class GridAxisGeometry {
-  private readonly indices: number[];
-  private readonly cumulativeDelta: number[];
-  private readonly customPx: number[];
-
-  constructor(
-    customs: Record<number, number>,
-    private readonly defaultPx: number,
-    toPx: (raw: number) => number,
-    private readonly maxIndex: number,
-  ) {
-    this.indices = Object.keys(customs)
-      .map(Number)
-      .filter((value) => value >= 1 && value <= maxIndex)
-      .sort((a, b) => a - b);
-    this.cumulativeDelta = new Array(this.indices.length);
-    this.customPx = new Array(this.indices.length);
-    let accumulated = 0;
-    for (let index = 0; index < this.indices.length; index++) {
-      const px = toPx(customs[this.indices[index]]);
-      this.customPx[index] = px;
-      accumulated += px - defaultPx;
-      this.cumulativeDelta[index] = accumulated;
-    }
-  }
-
-  private deltaBefore(index: number): number {
-    let low = 0;
-    let high = this.indices.length;
-    while (low < high) {
-      const middle = (low + high) >> 1;
-      if (this.indices[middle] < index) low = middle + 1;
-      else high = middle;
-    }
-    return low === 0 ? 0 : this.cumulativeDelta[low - 1];
-  }
-
-  offsetOf(index: number): number {
-    return (index - 1) * this.defaultPx + this.deltaBefore(index);
-  }
-
-  indexAt(offset: number): { index: number; partial: number } {
-    if (offset <= 0) return { index: 1, partial: 0 };
-    let low = 1;
-    let high = this.maxIndex;
-    while (low < high) {
-      const middle = (low + high + 1) >> 1;
-      if (this.offsetOf(middle) <= offset) low = middle;
-      else high = middle - 1;
-    }
-    return { index: low, partial: offset - this.offsetOf(low) };
-  }
-
-  scrollableIndexAt(content: number, firstScrollable: number): number | null {
-    const absoluteOffset = content + this.offsetOf(firstScrollable);
-    if (absoluteOffset >= this.offsetOf(this.maxIndex) + this.sizeOf(this.maxIndex)) {
-      return null;
-    }
-    return this.indexAt(absoluteOffset).index;
-  }
-
-  sizeOf(index: number): number {
-    return this.offsetOf(index + 1) - this.offsetOf(index);
-  }
-
-  /** Same sparse axis after Excel-style per-band scale rounding. */
-  scaled(scale: number): GridAxisGeometry {
-    const customs: Record<number, number> = {};
-    for (let index = 0; index < this.indices.length; index++) {
-      customs[this.indices[index]] = Math.round(this.customPx[index] * scale);
-    }
-    return new GridAxisGeometry(
-      customs,
-      Math.round(this.defaultPx * scale),
-      (value) => value,
-      this.maxIndex,
-    );
-  }
-
-  /** Number of bands required to cover `distance` from the start of `index`. */
-  countToCover(index: number, distance: number): number {
-    if (index > this.maxIndex || distance <= 0) return 0;
-    const target = this.offsetOf(index) + distance;
-    const end = this.offsetOf(this.maxIndex) + this.sizeOf(this.maxIndex);
-    if (target >= end) return this.maxIndex - index + 1;
-    const located = this.indexAt(target);
-    return located.index - index + (located.partial > 0 ? 1 : 0);
-  }
-}
 
 export interface GridCellRectOptions {
   readonly scale: number;
@@ -130,14 +42,27 @@ export interface GridScrollToCellOptions {
 
 /** Pure worksheet geometry shared by both XLSX viewer facades. */
 export class GridGeometry {
-  private static readonly cache = new WeakMap<Worksheet, GridGeometry>();
+  private static readonly cache = new WeakMap<Worksheet, {
+    readonly mdw: number;
+    readonly geometry: GridGeometry;
+  }>();
 
   static forWorksheet(worksheet: Worksheet, mdw: number): GridGeometry {
     const cached = this.cache.get(worksheet);
-    if (cached) return cached;
+    if (cached && Object.is(cached.mdw, mdw)) return cached.geometry;
     const geometry = new GridGeometry(worksheet, mdw);
-    this.cache.set(worksheet, geometry);
+    this.cache.set(worksheet, { mdw, geometry });
     return geometry;
+  }
+
+  /** Resolve MDW only when this worksheet has no live geometry snapshot. */
+  static forWorksheetMeasured(
+    worksheet: Worksheet,
+    measureMdw: () => number,
+  ): GridGeometry {
+    const cached = this.cache.get(worksheet);
+    if (cached) return cached.geometry;
+    return this.forWorksheet(worksheet, measureMdw());
   }
 
   static invalidate(worksheet: Worksheet): void {
@@ -146,6 +71,7 @@ export class GridGeometry {
 
   readonly col: GridAxisGeometry;
   readonly row: GridAxisGeometry;
+  readonly maximumDigitWidth: number;
   private readonly freezeRows: number;
   private readonly freezeCols: number;
   private scaledCache: Readonly<{
@@ -155,6 +81,7 @@ export class GridGeometry {
   }> | null = null;
 
   private constructor(worksheet: Worksheet, mdw: number) {
+    this.maximumDigitWidth = mdw;
     this.freezeRows = Math.min(MAX_WORKSHEET_ROW, Math.max(0, worksheet.freezeRows ?? 0));
     this.freezeCols = Math.min(MAX_WORKSHEET_COL, Math.max(0, worksheet.freezeCols ?? 0));
     this.col = new GridAxisGeometry(
@@ -179,10 +106,37 @@ export class GridGeometry {
   }
 
   roundedFrozenExtent(scale: number): { width: number; height: number } {
-    const axes = this.scaledAxes(scale);
+    const axes = this.axesAtScale(scale);
     return {
       width: axes.col.offsetOf(this.freezeCols + 1),
       height: axes.row.offsetOf(this.freezeRows + 1),
+    };
+  }
+
+  /** Frozen bands that can physically reach a viewport at this scale. */
+  effectiveFrozenBands(options: {
+    readonly scale: number;
+    readonly width: number;
+    readonly height: number;
+    readonly headerWidth: number;
+    readonly headerHeight: number;
+    readonly rows: number;
+    readonly cols: number;
+  }): { rows: number; cols: number } {
+    const axes = this.axesAtScale(options.scale);
+    const rowBands = axes.row.bandsToCover(
+      1,
+      Math.max(0, options.rows),
+      Math.max(0, options.height - Math.round(options.headerHeight * options.scale)),
+    );
+    const colBands = axes.col.bandsToCover(
+      1,
+      Math.max(0, options.cols),
+      Math.max(0, options.width - Math.round(options.headerWidth * options.scale)),
+    );
+    return {
+      rows: rowBands.at(-1)?.index ?? 0,
+      cols: colBands.at(-1)?.index ?? 0,
     };
   }
 
@@ -205,7 +159,7 @@ export class GridGeometry {
     headerWidth: number,
     headerHeight: number,
   ): { width: number; height: number } {
-    const axes = this.scaledAxes(scale);
+    const axes = this.axesAtScale(scale);
     return {
       width: Math.round(headerWidth * scale)
         + axes.col.offsetOf(Math.min(MAX_WORKSHEET_COL, maxCol) + 1),
@@ -217,29 +171,31 @@ export class GridGeometry {
   cellAt(
     innerX: number,
     innerY: number,
-    viewport: { readonly scrollX: number; readonly scrollY: number },
+    viewport: { readonly scrollX: number; readonly scrollY: number; readonly scale?: number },
   ): { row: number; col: number } | null {
     if (innerX < 0 || innerY < 0) return null;
-    const row = this.rowAt(innerY, viewport.scrollY);
+    const row = this.rowAt(innerY, viewport.scrollY, viewport.scale);
     if (row === null) return null;
-    const col = this.colAt(innerX, viewport.scrollX);
+    const col = this.colAt(innerX, viewport.scrollX, viewport.scale);
     return col === null ? null : { row, col };
   }
 
-  rowAt(innerY: number, scrollY: number): number | null {
+  rowAt(innerY: number, scrollY: number, scale = 1): number | null {
     if (innerY < 0) return null;
-    const frozenHeight = this.row.offsetOf(this.freezeRows + 1);
+    const row = this.axesAtScale(scale).row;
+    const frozenHeight = row.offsetOf(this.freezeRows + 1);
     return innerY < frozenHeight
-      ? this.indexWithinFrozen(this.row, innerY, this.freezeRows)
-      : this.row.scrollableIndexAt(innerY - frozenHeight + scrollY, this.freezeRows + 1);
+      ? this.indexWithinFrozen(row, innerY, this.freezeRows)
+      : row.scrollableIndexAt(innerY - frozenHeight + scrollY, this.freezeRows + 1);
   }
 
-  colAt(innerX: number, scrollX: number): number | null {
+  colAt(innerX: number, scrollX: number, scale = 1): number | null {
     if (innerX < 0) return null;
-    const frozenWidth = this.col.offsetOf(this.freezeCols + 1);
+    const col = this.axesAtScale(scale).col;
+    const frozenWidth = col.offsetOf(this.freezeCols + 1);
     return innerX < frozenWidth
-      ? this.indexWithinFrozen(this.col, innerX, this.freezeCols)
-      : this.col.scrollableIndexAt(innerX - frozenWidth + scrollX, this.freezeCols + 1);
+      ? this.indexWithinFrozen(col, innerX, this.freezeCols)
+      : col.scrollableIndexAt(innerX - frozenWidth + scrollX, this.freezeCols + 1);
   }
 
   cellRect(
@@ -248,7 +204,7 @@ export class GridGeometry {
     options: GridCellRectOptions,
   ): { x: number; y: number; w: number; h: number } | null {
     if (row < 1 || row > MAX_WORKSHEET_ROW || col < 1 || col > MAX_WORKSHEET_COL) return null;
-    const axes = this.scaledAxes(options.scale);
+    const axes = this.axesAtScale(options.scale);
     const headerX = Math.round(options.headerWidth * options.scale);
     const headerY = Math.round(options.headerHeight * options.scale);
     const frozen = this.roundedFrozenExtent(options.scale);
@@ -256,46 +212,43 @@ export class GridGeometry {
     const x = col <= this.freezeCols
       ? headerX + axes.col.offsetOf(col)
       : this.scrollableCellPosition(
-          this.col,
           axes.col,
           col,
           this.freezeCols,
           options.scrollX,
-          options.scale,
           headerX + frozen.width,
         );
     const y = row <= this.freezeRows
       ? headerY + axes.row.offsetOf(row)
       : this.scrollableCellPosition(
-          this.row,
           axes.row,
           row,
           this.freezeRows,
           options.scrollY,
-          options.scale,
           headerY + frozen.height,
         );
     return { x, y, w: axes.col.sizeOf(col), h: axes.row.sizeOf(row) };
   }
 
   visibleRange(options: GridVisibleRangeOptions): GridVisibleGeometry {
-    const frozen = this.logicalFrozenExtent();
-    const colStart = this.col.indexAt(options.scrollX + this.col.offsetOf(this.freezeCols + 1));
-    const rowStart = this.row.indexAt(options.scrollY + this.row.offsetOf(this.freezeRows + 1));
-    const cellWidth = options.width / options.scale - options.headerWidth - frozen.width;
-    const cellHeight = options.height / options.scale - options.headerHeight - frozen.height;
+    const axes = this.axesAtScale(options.scale);
+    const frozen = this.roundedFrozenExtent(options.scale);
+    const colStart = axes.col.indexAt(options.scrollX + axes.col.offsetOf(this.freezeCols + 1));
+    const rowStart = axes.row.indexAt(options.scrollY + axes.row.offsetOf(this.freezeRows + 1));
+    const cellWidth = options.width - Math.round(options.headerWidth * options.scale) - frozen.width;
+    const cellHeight = options.height - Math.round(options.headerHeight * options.scale) - frozen.height;
     const buffer = options.buffer ?? 0;
     return {
       range: {
         row: rowStart.index,
         col: colStart.index,
-        rows: this.row.countToCover(rowStart.index, cellHeight + rowStart.partial * 2) + buffer,
-        cols: this.col.countToCover(colStart.index, cellWidth + colStart.partial * 2) + buffer,
+        rows: axes.row.countToCover(rowStart.index, cellHeight + rowStart.partial * 2) + buffer,
+        cols: axes.col.countToCover(colStart.index, cellWidth + colStart.partial * 2) + buffer,
       },
-      offsetX: colStart.partial,
-      offsetY: rowStart.partial,
-      frozenWidth: frozen.width,
-      frozenHeight: frozen.height,
+      offsetX: colStart.partial / options.scale,
+      offsetY: rowStart.partial / options.scale,
+      frozenWidth: frozen.width / options.scale,
+      frozenHeight: frozen.height / options.scale,
     };
   }
 
@@ -308,10 +261,10 @@ export class GridGeometry {
     const viewTop = Math.round(options.headerHeight * options.scale) + scaledFrozen.height;
     const viewLeft = Math.round(options.headerWidth * options.scale) + scaledFrozen.width;
     let y = options.currentY;
+    const axes = this.axesAtScale(options.scale);
     if (row > this.freezeRows && row <= MAX_WORKSHEET_ROW) {
-      const cellStart = (this.row.offsetOf(row) - this.row.offsetOf(this.freezeRows + 1))
-        * options.scale;
-      const cellSize = this.row.sizeOf(row) * options.scale;
+      const cellStart = axes.row.offsetOf(row) - axes.row.offsetOf(this.freezeRows + 1);
+      const cellSize = axes.row.sizeOf(row);
       y = this.alignedOffset(
         cellStart,
         cellSize,
@@ -323,9 +276,8 @@ export class GridGeometry {
     }
     let x = options.currentX;
     if (col > this.freezeCols && col <= MAX_WORKSHEET_COL) {
-      const cellStart = (this.col.offsetOf(col) - this.col.offsetOf(this.freezeCols + 1))
-        * options.scale;
-      const cellSize = this.col.sizeOf(col) * options.scale;
+      const cellStart = axes.col.offsetOf(col) - axes.col.offsetOf(this.freezeCols + 1);
+      const cellSize = axes.col.sizeOf(col);
       x = this.alignedOffset(
         cellStart,
         cellSize,
@@ -338,7 +290,8 @@ export class GridGeometry {
     return { x: Math.max(0, x), y: Math.max(0, y) };
   }
 
-  private scaledAxes(scale: number): { row: GridAxisGeometry; col: GridAxisGeometry } {
+  /** Rounded CSS-pixel axes used by paint, hit testing, and anchored objects. */
+  axesAtScale(scale: number): Readonly<{ row: GridAxisGeometry; col: GridAxisGeometry }> {
     if (this.scaledCache?.scale === scale) return this.scaledCache;
     const scaled = { scale, row: this.row.scaled(scale), col: this.col.scaled(scale) };
     this.scaledCache = scaled;
@@ -356,16 +309,14 @@ export class GridGeometry {
   }
 
   private scrollableCellPosition(
-    logicalAxis: GridAxisGeometry,
     scaledAxis: GridAxisGeometry,
     index: number,
     frozenCount: number,
     scroll: number,
-    scale: number,
     scrollAreaStart: number,
   ): number {
-    const start = logicalAxis.indexAt(scroll + logicalAxis.offsetOf(frozenCount + 1));
-    return scrollAreaStart - start.partial * scale
+    const start = scaledAxis.indexAt(scroll + scaledAxis.offsetOf(frozenCount + 1));
+    return scrollAreaStart - start.partial
       + scaledAxis.offsetOf(index) - scaledAxis.offsetOf(start.index);
   }
 

@@ -16,8 +16,9 @@ import {
   addWorksheetUsage,
   assertWorksheetJsonBytes,
   assertWorksheetModelUsage,
+  completeWorksheetUsage,
   measureRows,
-  measureWorksheet,
+  type WorksheetCacheUsage,
   type WorksheetModelUsage,
 } from './worksheet-resource-limits.js';
 
@@ -55,6 +56,7 @@ export class WorksheetPullWorker {
     private readonly acceptWorksheet?: (
       sheetIndex: number,
       worksheet: Worksheet,
+      modelUsage: WorksheetCacheUsage,
       usage?: OoxmlResourceUsageSnapshot,
     ) => void | (() => void) | { rollback?: () => void; commit?: () => void },
     private readonly executeArchive: <T>(operation: (archive: WorksheetCursorArchive) => T) => T =
@@ -143,8 +145,11 @@ export class WorksheetPullWorker {
             try {
               if (this.acceptWorksheet) {
                 if (!terminal) throw new Error('worksheet terminal payload is missing');
-                terminal.rows = rows;
-                const measured = measureWorksheet(terminal);
+                terminal.rows = terminal.parseError ? [] : rows;
+                const retainedModelUsage = terminal.parseError
+                  ? { rows: 0, cells: 0, ownedUtf8Bytes: 0 }
+                  : modelUsage;
+                const measured = completeWorksheetUsage(terminal, retainedModelUsage);
                 const resourceUsage = this.readResourceUsage();
                 assertWorksheetModelUsage(
                   measured,
@@ -161,6 +166,7 @@ export class WorksheetPullWorker {
                 const accepted = this.acceptWorksheet(
                   sheetIndex,
                   terminal,
+                  measured,
                   resourceUsage,
                 );
                 if (typeof accepted === 'function') rollback = accepted;

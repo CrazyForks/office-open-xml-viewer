@@ -91,8 +91,15 @@ export async function acquireXlsxNodeSession(
     throwIfAborted(options.signal);
     const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(resourceOptions.policy);
     const Archive = (xlsxWasm as unknown as { XlsxArchive: XlsxArchiveConstructor }).XlsxArchive;
-    handle = await formatRuntime(module).open(() =>
-      new Archive(bytes, maxEntry, maxTotal, maxEntries));
+    handle = await formatRuntime(module).open(
+      () => new Archive(bytes, maxEntry, maxTotal, maxEntries),
+      {
+        signal: options.signal,
+        abortError: createAbortError,
+        disposeOnAbort: (archive) => archive.free(),
+      },
+    );
+    throwIfAborted(options.signal);
     const archive = handle.proxy;
     const workbookIndex = JSON.parse(
       new TextDecoder().decode(archive.parse()),
@@ -126,7 +133,11 @@ function decodeUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined 
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
+  throw createAbortError();
+}
+
+function createAbortError(): Error {
   const error = new Error('XLSX workbook session was aborted');
   error.name = 'AbortError';
-  throw error;
+  return error;
 }

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CanvasViewerErrorRouter, StaticCanvasRenderDispatcher } from './canvas-viewer-mechanics.js';
+import {
+  CanvasViewerErrorRouter,
+  StaticCanvasRenderDispatcher,
+  TerminalResourceOwner,
+} from './canvas-viewer-mechanics.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -72,5 +76,127 @@ describe('CanvasViewerErrorRouter', () => {
     router.report(new Error('late'));
     expect(onError).toHaveBeenCalledOnce();
     expect(onError.mock.calls[0][0]).toEqual(new Error('failure'));
+  });
+});
+
+class Resource {
+  destroyed = false;
+  destroy(): void { this.destroyed = true; }
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolvePromise: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((resolve) => { resolvePromise = resolve; });
+  return { promise, resolve: resolvePromise };
+}
+
+describe('TerminalResourceOwner', () => {
+  it('atomically replaces and destroys an owned resource', async () => {
+    const first = new Resource();
+    const second = new Resource();
+    const owner = new TerminalResourceOwner<Resource>('test', first, true);
+
+    await expect(owner.replace(async () => second)).resolves.toBe(second);
+    expect(first.destroyed).toBe(true);
+    expect(second.destroyed).toBe(false);
+    owner.close();
+    expect(second.destroyed).toBe(true);
+  });
+
+  it('permanently rejects acquisition after close without invoking the loader', async () => {
+    const owner = new TerminalResourceOwner<Resource>('test');
+    let invoked = false;
+    owner.close();
+
+    await expect(owner.replace(async () => {
+      invoked = true;
+      return new Resource();
+    })).rejects.toThrow('test is closed');
+    expect(invoked).toBe(false);
+  });
+
+  it('destroys a candidate that resolves after close', async () => {
+    const pending = deferred<Resource>();
+    const owner = new TerminalResourceOwner<Resource>('test');
+    const replacing = owner.replace(() => pending.promise);
+    owner.close();
+    const candidate = new Resource();
+    pending.resolve(candidate);
+
+    await expect(replacing).rejects.toThrow('test is closed');
+    expect(candidate.destroyed).toBe(true);
+  });
+
+  it('direct install supersedes and disposes a pending replacement candidate', async () => {
+    const pending = deferred<Resource>();
+    const owner = new TerminalResourceOwner<Resource>('test');
+    const replacing = owner.replace(() => pending.promise);
+    const installed = new Resource();
+    owner.install(installed);
+    const late = new Resource();
+    pending.resolve(late);
+
+    await expect(replacing).resolves.toBeNull();
+    expect(owner.current).toBe(installed);
+    expect(installed.destroyed).toBe(false);
+    expect(late.destroyed).toBe(true);
+  });
+
+  it('does not destroy a borrowed initial resource', () => {
+    const borrowed = new Resource();
+    const owner = new TerminalResourceOwner<Resource>('test', borrowed, false);
+    owner.close();
+    expect(borrowed.destroyed).toBe(false);
+  });
+
+  it('detaches a throwing resource permanently when closed', () => {
+    const throwing = { destroy: vi.fn(() => { throw new Error('dispose failed'); }) };
+    const owner = new TerminalResourceOwner('test', throwing, true);
+
+    expect(() => owner.close()).not.toThrow();
+    expect(owner.current).toBeNull();
+    owner.close();
+    expect(throwing.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('commits a replacement even when disposal of the previous resource throws', async () => {
+    const throwing = { destroy: vi.fn(() => { throw new Error('dispose failed'); }) };
+    const next = new Resource();
+    const owner = new TerminalResourceOwner<Resource | typeof throwing>('test', throwing, true);
+
+    await expect(owner.replace(async () => next)).resolves.toBe(next);
+    expect(owner.current).toBe(next);
+    expect(throwing.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('lets terminal close win in the microtask after replacement installation', async () => {
+    const first = new Resource();
+    const next = new Resource();
+    const owner = new TerminalResourceOwner<Resource>('test', first, true);
+
+    const replacement = owner.replace(async () => next, () => {
+      queueMicrotask(() => owner.close());
+    });
+
+    await expect(replacement).resolves.toBe(next);
+    expect(first.destroyed).toBe(true);
+    expect(next.destroyed).toBe(true);
+    expect(owner.current).toBeNull();
+  });
+
+  it('preserves stale and closed outcomes when candidate disposal throws', async () => {
+    const closedPending = deferred<{ destroy(): void }>();
+    const closedOwner = new TerminalResourceOwner<{ destroy(): void }>('closed');
+    const closed = closedOwner.replace(() => closedPending.promise);
+    closedOwner.close();
+    closedPending.resolve({ destroy: () => { throw new Error('dispose failed'); } });
+    await expect(closed).rejects.toThrow('closed is closed');
+
+    const stalePending = deferred<{ destroy(): void }>();
+    const staleOwner = new TerminalResourceOwner<{ destroy(): void }>('stale');
+    const stale = staleOwner.replace(() => stalePending.promise);
+    staleOwner.install({ destroy: () => undefined });
+    stalePending.resolve({ destroy: () => { throw new Error('dispose failed'); } });
+    await expect(stale).resolves.toBeNull();
   });
 });

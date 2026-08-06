@@ -1,6 +1,9 @@
 import { computeVisibleRange, openExternalHyperlink, PT_TO_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type VisibleRange } from '@silurus/ooxml-core';
 import type { FindHighlightColors, FindMatch, FindMatchesOptions, HyperlinkTarget, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
-import { StaticCanvasRenderDispatcher } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
+import {
+  StaticCanvasRenderDispatcher,
+  TerminalResourceOwner,
+} from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import { DocxDocument } from './document';
 import type { LoadOptions } from './document';
 import type { DocxTextRunInfo } from './renderer';
@@ -179,7 +182,8 @@ interface PageSlot {
 }
 
 export class DocxScrollViewer implements ZoomableViewer {
-  private _doc: DocxDocument | null = null;
+  private readonly _documentOwner: TerminalResourceOwner<DocxDocument>;
+  private get _doc(): DocxDocument | null { return this._documentOwner.current; }
   private readonly _injected: boolean;
   private readonly _opts: DocxScrollViewerOptions;
   private readonly _container: HTMLElement;
@@ -229,23 +233,6 @@ export class DocxScrollViewer implements ZoomableViewer {
    *  clamp (#836). Lazily created; `null` when canvas metrics are unavailable
    *  (headless), in which case the overlay degrades to the un-clamped span. */
   private _measureCtx: CanvasRenderingContext2D | null | undefined;
-  /**
-   * Concurrent-load latch (generation token). Every self-loading `load()`
-   * increments this and captures the value; after its engine finishes loading it
-   * re-checks the live value and BAILS (destroying its own just-loaded engine) if
-   * a newer `load()` has since started. Without it, two overlapping
-   * `load(A)`/`load(B)` calls race the WASM parse / worker init, and whichever
-   * RESOLVES last wins the swap — even the stale `load(A)` resolving after
-   * `load(B)`; the loser's freshly created engine (never installed, or installed
-   * then overwritten) then leaks its worker + pinned WASM allocation. The latch
-   * composes with SC20: the check runs AFTER the new engine loads but BEFORE the
-   * field assignment, `previous?.destroy()`, and the recycle/relayout post-load
-   * work, so a superseded load never touches `this._doc` nor frees the current
-   * (newer) engine. Only the self-loading path uses it — the injected path throws
-   * up-front and never reaches here. `destroy()` also bumps it so a load in flight
-   * at teardown is treated as superseded and its engine cleaned up.
-   */
-  private _loadGen = 0;
   /** Worker mode: page indices whose bitmap render is currently dispatched to the
    *  engine. Coalesces a scroll storm — we never dispatch a second render for a
    *  page whose first is still in flight — and lets us drop pages that scrolled
@@ -338,9 +325,10 @@ export class DocxScrollViewer implements ZoomableViewer {
             'Omit opts.mode when injecting an engine — the engine owns its render mode.',
         );
       }
-      this._doc = engine;
+      this._documentOwner = new TerminalResourceOwner('DocxScrollViewer', engine, false);
       this._mode = engine.mode;
     } else {
+      this._documentOwner = new TerminalResourceOwner('DocxScrollViewer');
       this._mode = opts.mode ?? 'main';
     }
 
@@ -415,6 +403,7 @@ export class DocxScrollViewer implements ZoomableViewer {
    * caller already owns the parsed engine.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
     if (this._injected) {
       throw new Error(
         'DocxScrollViewer.load() is unsupported when an engine is injected via opts.document; the injected engine is already loaded.',
@@ -426,10 +415,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     // re-load then keeps the current document rendered rather than going blank.
     // (The injected path returned above can never reach here, so this only ever
     // frees an engine we created.)
-    const gen = ++this._loadGen;
-    const previous = this._doc;
     try {
-      const doc = await DocxDocument.load(source, {
+      const doc = await this._documentOwner.replace(() => DocxDocument.load(source, {
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
         resourceLimits: this._opts.resourceLimits,
@@ -439,29 +426,20 @@ export class DocxScrollViewer implements ZoomableViewer {
         wasmUrl: this._opts.wasmUrl,
         math: this._opts.math,
         mode: this._mode,
+      }), (ownedDocument) => {
+        this._find.invalidate();
+        this._findActive = false;
+        if (ownedDocument) {
+          // Recycle before the old worker is terminated. Every captured slot
+          // dispatcher then becomes stale before its expected rejection lands.
+          for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
+          this._lastTopIndex = -1;
+        }
       });
-      if (gen !== this._loadGen) {
-        // A newer load() (or destroy()) started while this one was in flight — we
-        // lost the concurrent-load race. Destroy the engine we just loaded (it was
-        // never installed) and leave the winning load's engine + SC20 swap + its
-        // recycle/relayout work untouched: do NOT touch `this._doc` and do NOT
-        // destroy `previous` (irrelevant to the winner; possibly already stale).
-        doc.destroy();
-        return;
-      }
-      this._doc = doc;
-      previous?.destroy();
+      if (!doc) return;
+      if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
       this._find.invalidate();
       this._findActive = false;
-      if (previous) {
-        // Re-loading over a prior document: recycle every mounted slot (they hold
-        // the OLD document's rendered canvases) and reset the top-index latch so
-        // the new document's first window renders fresh. `_mountVisible` only
-        // RE-renders missing indices, so without this a still-mounted page 0 would
-        // keep the previous document's pixels.
-        for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
-        this._lastTopIndex = -1;
-      }
       // Lay out + mount the first window now that the engine exists (mirrors the
       // injected-engine path in the constructor). relayout() is idempotent and
       // defers under a zero-width container — `_onResize` re-runs it once width
@@ -470,7 +448,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     } catch (err) {
       // Superseded loads own no error reporting — the winning load (or destroy())
       // is the outcome the caller awaits; swallow this stale rejection.
-      if (gen !== this._loadGen) return;
+      if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
       const e = err instanceof Error ? err : new Error(String(err));
       if (this._opts.onError) {
         this._opts.onError(e);
@@ -888,7 +866,12 @@ export class DocxScrollViewer implements ZoomableViewer {
         this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
-        this._reportRenderError(err);
+        if (
+          dispatcher.isCurrent(generation) &&
+          epoch === this._renderEpoch &&
+          this._slots.get(i) === slot &&
+          slot.renderedPage === i
+        ) this._reportRenderError(err);
       });
   }
 
@@ -1060,7 +1043,12 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._redrawSlotHighlights(i, slot);
       painted = true;
     } catch (err) {
-      this._reportRenderError(err);
+      if (
+        dispatcher.isCurrent(generation) &&
+        epoch === this._renderEpoch &&
+        this._slots.get(i) === slot &&
+        slot.renderedPage === i
+      ) this._reportRenderError(err);
     } finally {
       this._bitmapInFlight.delete(i);
       // Re-dispatch ONLY when this invocation went stale — a LIVE slot for page
@@ -1484,7 +1472,13 @@ export class DocxScrollViewer implements ZoomableViewer {
         this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
-        this._reportRenderError(err);
+        if (
+          spareDispatcher.isCurrent(generation) &&
+          epoch === this._renderEpoch &&
+          this._slots.get(i) === slot &&
+          slot.renderedPage === i
+        ) this._reportRenderError(err);
+        spareDispatcher.destroy();
       });
   }
 
@@ -1754,11 +1748,8 @@ export class DocxScrollViewer implements ZoomableViewer {
    * owns its lifecycle. Per-slot worker ImageBitmaps are closed on recycle.
    */
   destroy(): void {
+    if (this._destroyed) return;
     this._destroyed = true;
-    // Bump the load generation so a self-loading load() still in flight is treated
-    // as superseded and its engine is cleaned up rather than installed onto a
-    // torn-down viewer.
-    this._loadGen++;
     this._find.invalidate();
     this._findActive = false;
     if (this._scrollListener) {
@@ -1781,10 +1772,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     }
     for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
     this._free.length = 0;
-    if (!this._injected) {
-      this._doc?.destroy();
-    }
-    this._doc = null;
+    this._documentOwner.close();
     this._wrapper.remove();
   }
 }

@@ -291,7 +291,7 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
       throwIfAborted(this.signal);
       const bytes = extract(this.archive);
       this.refreshResourceUsage();
-      return new Blob([new Uint8Array(bytes).slice() as BlobPart], { type: mimeType });
+      return new Blob([bytes as BlobPart], { type: mimeType });
     });
   }
 

@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Worksheet } from '../types.js';
-import { colWidthToPx, getMdwForWorksheet, rowHeightToPx } from '../renderer.js';
-import { GridGeometry } from './grid-geometry.js';
+import {
+  colWidthToPx,
+  getGridGeometryForWorksheet,
+  getMdwForWorksheet,
+  rowHeightToPx,
+} from '../renderer.js';
+import { GridAxisGeometry, GridGeometry } from './grid-geometry.js';
 
 function worksheet(): Worksheet {
   return {
@@ -20,7 +25,89 @@ function worksheet(): Worksheet {
   } as Worksheet;
 }
 
+afterEach(() => vi.unstubAllGlobals());
+
 describe('GridGeometry', () => {
+  it('keeps offsets finite when a malformed default size reaches the geometry boundary', () => {
+    const axis = new GridAxisGeometry({ 1: 10 }, Number.NaN, (value) => value, 10);
+
+    expect(axis.offsetOf(1)).toBe(0);
+    expect(axis.offsetOf(2)).toBe(10);
+    expect(axis.offsetOf(10)).toBe(10);
+  });
+
+  it('jumps over a worksheet-limit run of default-hidden bands in bounded output', () => {
+    const axis = new GridAxisGeometry(
+      { 1_048_576: 20 },
+      0,
+      (value) => value,
+      1_048_576,
+    );
+
+    expect(axis.bandsToCover(1, 1_048_576, 100)).toEqual([
+      { index: 1_048_576, size: 20 },
+    ]);
+  });
+
+  it('keeps an explicit visible row inside a zero-height default sheet', () => {
+    const ws = worksheet();
+    ws.defaultRowHeight = 0;
+    ws.rowHeights = { 3: 22 };
+    const geometry = GridGeometry.forWorksheet(ws, 8);
+
+    expect(geometry.row.bandsToCover(1, 1_048_576, 100)).toEqual([
+      { index: 3, size: rowHeightToPx(22) },
+    ]);
+  });
+
+  it('reuses one rounded axis pair for every consumer in the same scale', () => {
+    const geometry = GridGeometry.forWorksheet(worksheet(), 8);
+    const first = geometry.axesAtScale(1.25);
+
+    expect(geometry.axesAtScale(1.25)).toBe(first);
+    expect(geometry.axesAtScale(1)).not.toBe(first);
+  });
+
+  it('measures MDW once per worksheet geometry lifetime', () => {
+    let canvases = 0;
+    vi.stubGlobal('OffscreenCanvas', class {
+      constructor() { canvases++; }
+      getContext() {
+        return { font: '', measureText: () => ({ width: 8 }) };
+      }
+    });
+    const ws = worksheet();
+    ws.defaultFontFamily = 'Metric Test';
+    ws.defaultFontSize = 11;
+
+    expect(getGridGeometryForWorksheet(ws)).toBe(getGridGeometryForWorksheet(ws));
+    expect(canvases).toBe(1);
+    GridGeometry.invalidate(ws);
+    getGridGeometryForWorksheet(ws);
+    expect(canvases).toBe(2);
+  });
+
+  it('rebuilds cached column axes when the active font realm changes MDW', () => {
+    const ws = worksheet();
+    const narrow = GridGeometry.forWorksheet(ws, 6);
+    const wide = GridGeometry.forWorksheet(ws, 8);
+
+    expect(wide).not.toBe(narrow);
+    expect(wide.col.sizeOf(1)).not.toBe(narrow.col.sizeOf(1));
+    expect(GridGeometry.forWorksheet(ws, 8)).toBe(wide);
+  });
+
+  it('skips a leading run of zero-sized rows and columns at offset zero', () => {
+    const ws = worksheet();
+    ws.rowHeights = { 1: 0, 2: 0 };
+    ws.colWidths = { 1: 0, 2: 0 };
+    const geometry = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws));
+
+    expect(geometry.row.indexAt(0)).toEqual({ index: 3, partial: 0 });
+    expect(geometry.col.indexAt(0)).toEqual({ index: 3, partial: 0 });
+    expect(geometry.cellAt(0, 0, { scrollX: 0, scrollY: 0 })).toEqual({ row: 3, col: 3 });
+  });
+
   it('computes far-cell rectangles from cumulative axes while preserving per-cell scale rounding', () => {
     const ws = worksheet();
     const geometry = GridGeometry.forWorksheet(ws, getMdwForWorksheet(ws));
@@ -46,17 +133,19 @@ describe('GridGeometry', () => {
       .reduce((sum, index) => sum + scaledRow(index) - defaultRow, 0);
     const frozenW = scaledCol(1) + scaledCol(2);
     const frozenH = scaledRow(1) + scaledRow(2);
-    const logicalColStart = geometry.col.indexAt(scrollX + geometry.col.offsetOf(3));
-    const logicalRowStart = geometry.row.indexAt(scrollY + geometry.row.offsetOf(3));
-    const expectedX = sp(48) + frozenW - logicalColStart.partial * scale
+    const scaledColAxis = geometry.col.scaled(scale);
+    const scaledRowAxis = geometry.row.scaled(scale);
+    const scaledColStart = scaledColAxis.indexAt(scrollX + scaledColAxis.offsetOf(3));
+    const scaledRowStart = scaledRowAxis.indexAt(scrollY + scaledRowAxis.offsetOf(3));
+    const expectedX = sp(48) + frozenW - scaledColStart.partial
       + (16_384 - 1) * defaultCol + sparseColDelta
-      - ((logicalColStart.index - 1) * defaultCol
-        + [1, 2, 4].filter((index) => index < logicalColStart.index)
+      - ((scaledColStart.index - 1) * defaultCol
+        + [1, 2, 4].filter((index) => index < scaledColStart.index)
           .reduce((sum, index) => sum + scaledCol(index) - defaultCol, 0));
-    const expectedY = sp(24) + frozenH - logicalRowStart.partial * scale
+    const expectedY = sp(24) + frozenH - scaledRowStart.partial
       + (1_048_576 - 1) * defaultRow + sparseRowDelta
-      - ((logicalRowStart.index - 1) * defaultRow
-        + [1, 2, 5].filter((index) => index < logicalRowStart.index)
+      - ((scaledRowStart.index - 1) * defaultRow
+        + [1, 2, 5].filter((index) => index < scaledRowStart.index)
           .reduce((sum, index) => sum + scaledRow(index) - defaultRow, 0));
 
     expect(rect).toEqual({

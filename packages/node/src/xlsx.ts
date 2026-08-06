@@ -16,8 +16,8 @@ import {
   assertWorksheetCacheUsage,
   assertWorksheetJsonBytes,
   assertWorksheetModelUsage,
+  completeWorksheetUsage,
   measureRows,
-  measureWorksheet,
   XlsxWorksheetPullClient,
   WorksheetPullWorker,
   type WorksheetCacheUsage,
@@ -332,7 +332,9 @@ export async function materializeXlsxWorkbook(
     () => openXlsxWorkbook(buffer, options),
     async (session) => {
       const worksheets: Worksheet[] = [];
-      let retainedUsage: WorksheetCacheUsage = { rows: 0, cells: 0 };
+      let retainedUsage: WorksheetCacheUsage = {
+        rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0,
+      };
       for (let sheetIndex = 0; sheetIndex < session.sheetCount; sheetIndex += 1) {
         const materialized = await materializeWorksheetFromSession(session, sheetIndex);
         const nextUsage = addWorksheetCacheUsage(retainedUsage, materialized.usage);
@@ -358,11 +360,12 @@ async function materializeWorksheetFromSession(
   sheetIndex: number,
 ): Promise<{
   worksheet: Worksheet;
-  usage: WorksheetModelUsage;
+  usage: WorksheetModelUsage & { jsonBytes: number };
   resourceUsage?: OoxmlResourceUsageSnapshot;
 }> {
   const rows: Row[] = [];
   let modelUsage: WorksheetModelUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0 };
+  let retainedUsage: (WorksheetModelUsage & { jsonBytes: number }) | undefined;
   let terminal: Worksheet | undefined;
   let resourceUsage: OoxmlResourceUsageSnapshot | undefined;
   for await (const chunk of session.worksheetRows(sheetIndex)) {
@@ -380,7 +383,12 @@ async function materializeWorksheetFromSession(
     } else {
       terminal = chunk.worksheet;
       terminal.rows = terminal.parseError ? [] : rows;
-      const measured = measureWorksheet(terminal);
+      const measured = completeWorksheetUsage(
+        terminal,
+        terminal.parseError
+          ? { rows: 0, cells: 0, ownedUtf8Bytes: 0 }
+          : modelUsage,
+      );
       assertWorksheetModelUsage(
         measured,
         'materialize-worksheet',
@@ -394,15 +402,18 @@ async function materializeWorksheetFromSession(
         resourceUsage,
       );
       modelUsage = measured;
+      retainedUsage = measured;
     }
   }
-  if (!terminal) throw new Error(`XLSX worksheet ${sheetIndex} did not produce a terminal model`);
+  if (!terminal || !retainedUsage) {
+    throw new Error(`XLSX worksheet ${sheetIndex} did not produce a terminal model`);
+  }
   return {
     // The coordinator decoded this terminal graph and the retained row units
     // exclusively for this materializer. Transfer ownership directly instead
     // of doubling the complete worksheet graph at the session boundary.
     worksheet: terminal,
-    usage: modelUsage,
+    usage: retainedUsage,
     resourceUsage,
   };
 }
