@@ -24,6 +24,11 @@ describe('official-site home design', () => {
     expect(capabilities).not.toMatch(/border-(?:top|bottom): [2-9]px/);
   });
 
+  it('forces external-link arrows to use text presentation on mobile', () => {
+    expect(capabilities).toContain('Full support matrix &#x2197;&#xFE0E;');
+    expect(home).toContain('GitHub &#x2197;&#xFE0E;');
+  });
+
   it('reserves format colours for format-heading underlines', () => {
     expect(capabilities).toContain('background: linear-gradient(transparent 68%, var(--c) 68%, var(--c) 88%, transparent 88%);');
     expect(capabilities).toContain('border-bottom: 1px solid currentColor;');

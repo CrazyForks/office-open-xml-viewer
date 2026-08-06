@@ -56,7 +56,7 @@ const { announcement } = Astro.props as { announcement: Announcement };
         ))}
         <div class="article-next">
           <span>Questions about the change?</span>
-          <a href="https://github.com/yukiyokotani/office-open-xml-viewer/discussions">Start a GitHub discussion ↗</a>
+          <a href="https://github.com/yukiyokotani/office-open-xml-viewer/discussions">Start a GitHub discussion &#x2197;&#xFE0E;</a>
         </div>
       </div>
     </article>
@@ -74,6 +74,7 @@ const { announcement } = Astro.props as { announcement: Announcement };
   h1 { margin-top: 18px; max-width: 16ch; font-size: clamp(42px, 7vw, 78px); letter-spacing: -.055em; }
   .article-summary { max-width: 70ch; margin: 28px 0 0; color: var(--text-dim); font-size: 19px; }
   .article-grid { display: grid; grid-template-columns: 240px minmax(0, 720px); gap: 80px; padding-top: 72px; padding-bottom: 120px; }
+  aside, .article-body { min-width: 0; overflow-wrap: anywhere; }
   aside { position: sticky; top: 92px; align-self: start; padding-top: 8px; }
   aside span { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .1em; color: var(--text-faint); }
   aside p { font-size: 14px; color: var(--text-dim); }
@@ -103,7 +104,7 @@ const { announcement } = Astro.props as { announcement: Announcement };
   .article-next span { color: var(--text-faint); }
   .article-next a { color: var(--accent); font-weight: 700; }
   @media (max-width: 760px) {
-    .article-grid { grid-template-columns: 1fr; gap: 28px; }
+    .article-grid { grid-template-columns: minmax(0, 1fr); gap: 28px; }
     aside { position: static; border-bottom: 1px solid var(--border); }
     .article-next { flex-direction: column; gap: 6px; }
   }
