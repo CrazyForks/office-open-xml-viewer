@@ -76,6 +76,10 @@ describe('official-site home design', () => {
     expect(live.match(/enableTextSelection:\s*true/g)).toHaveLength(2);
   });
 
+  it('starts paginated samples at the top of the embedded viewport', () => {
+    expect(live.match(/paddingTop:\s*0/g)).toHaveLength(2);
+  });
+
   it('centres a smaller hero icon and aligns the second-row format links on mobile', () => {
     expect(home).toContain('.hero-art { grid-column: 1 / 13; min-height: 280px; margin-top: 16px; opacity: 1; }');
     expect(home).toContain('.hero-icon { width: min(62%, 260px); }');
