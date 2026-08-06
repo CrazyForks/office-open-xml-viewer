@@ -2,8 +2,9 @@
 
 日本語版: [`api-architecture-0.76.ja.md`](api-architecture-0.76.ja.md)
 
-Status: proposed design for the next minor release. No intermediate public API
-surface described by this document is intended to be released.
+Status: implemented in 0.76.0. This document is the architecture baseline for
+maintaining the public API, ownership model, and responsibility boundaries in
+0.76 and later releases.
 
 Related issues: [#1133](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1133),
 [#1134](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1134).
