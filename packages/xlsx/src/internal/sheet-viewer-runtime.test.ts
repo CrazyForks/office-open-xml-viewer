@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import type { XlsxWorkbook } from '../workbook.js';
 import {
   SelectionController,
+  createSheetViewModel,
   SheetAcquisition,
   SheetRenderDispatcher,
   ViewportState,
 } from './sheet-viewer-runtime.js';
+import type { Worksheet } from '../types.js';
 
 function workbook() {
   const destroy = vi.fn();
@@ -47,6 +49,40 @@ describe('XLSX viewer composition roles', () => {
       'SheetAcquisition is closed',
     );
     expect(() => acquisition.install(workbook().value)).toThrow('SheetAcquisition is closed');
+  });
+
+  it('borrows an injected workbook without destroying the caller-owned resource', () => {
+    const acquisition = new SheetAcquisition();
+    const shared = workbook();
+
+    acquisition.install(shared.value, false);
+    acquisition.destroy();
+
+    expect(shared.destroy).not.toHaveBeenCalled();
+  });
+
+  it('copies only viewer-mutable worksheet state', () => {
+    const cell = { row: 1, col: 1 };
+    const source = {
+      rows: [{ index: 1, collapsed: false, cells: [cell] }],
+      rowHeights: { 1: 20 },
+      colWidths: { 1: 8 },
+      colCollapsed: { 1: false },
+    } as unknown as Worksheet;
+
+    const view = createSheetViewModel(source);
+    const viewColCollapsed = view.colCollapsed;
+    if (!viewColCollapsed) throw new Error('Expected colCollapsed projection');
+    view.rows[0].collapsed = true;
+    view.rowHeights[1] = 30;
+    view.colWidths[1] = 12;
+    viewColCollapsed[1] = true;
+
+    expect(source.rows[0].collapsed).toBe(false);
+    expect(source.rowHeights[1]).toBe(20);
+    expect(source.colWidths[1]).toBe(8);
+    expect(source.colCollapsed?.[1]).toBe(false);
+    expect(view.rows[0].cells[0]).toBe(cell);
   });
 
   it('SheetAcquisition reports terminal close when an in-flight loader rejects late', async () => {
@@ -124,6 +160,33 @@ describe('XLSX viewer composition roles', () => {
     await Promise.resolve();
     expect(calls).toEqual(['first', 'latest']);
     dispatcher.destroy();
+  });
+
+  it('schedules and cancels frames in the target canvas realm', () => {
+    let popupFrame: FrameRequestCallback | null = null;
+    const popupScheduler = {
+      requestAnimationFrame: vi.fn((callback: FrameRequestCallback) => {
+        popupFrame = callback;
+        return 41;
+      }),
+      cancelAnimationFrame: vi.fn(),
+    };
+    const render = vi.fn();
+    const dispatcher = new SheetRenderDispatcher(undefined, false, popupScheduler);
+
+    dispatcher.schedule(render);
+    expect(popupScheduler.requestAnimationFrame).toHaveBeenCalledOnce();
+    expect(render).not.toHaveBeenCalled();
+
+    (popupFrame as FrameRequestCallback | null)?.(0);
+    expect(render).toHaveBeenCalledOnce();
+
+    dispatcher.destroy();
+
+    const pending = new SheetRenderDispatcher(undefined, false, popupScheduler);
+    pending.schedule(render);
+    pending.destroy();
+    expect(popupScheduler.cancelAnimationFrame).toHaveBeenCalledWith(41);
   });
 
   it('invalidates an active worker bitmap as soon as a newer viewport is queued', async () => {

@@ -1,5 +1,6 @@
 import { computeVisibleRange, EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindHighlightColors, type FindMatch, type FindMatchesOptions, type VisibleRange, type HyperlinkTarget, type OoxmlResourceMetrics, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
 import {
+  resolveCanvasViewerMode,
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
@@ -355,20 +356,11 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._injected = !!opts.presentation;
     if (this._injected) {
       const engine = opts.presentation as PptxPresentation;
-      // Injected engine ⇒ its own mode is the fact (design §11). An EXPLICITLY
-      // conflicting opts.mode is a mis-configuration and is rejected here; an
-      // absent opts.mode is fine.
-      if (opts.mode !== undefined && opts.mode !== engine.mode) {
-        throw new Error(
-          `PptxScrollViewer: opts.mode='${opts.mode}' conflicts with the injected engine's mode='${engine.mode}'. ` +
-            'Omit opts.mode when injecting an engine — the engine owns its render mode.',
-        );
-      }
       this._presentationOwner = new TerminalResourceOwner('PptxScrollViewer', engine, false);
-      this._mode = engine.mode;
+      this._mode = resolveCanvasViewerMode('PptxScrollViewer', opts.mode, engine);
     } else {
       this._presentationOwner = new TerminalResourceOwner('PptxScrollViewer');
-      this._mode = opts.mode ?? 'main';
+      this._mode = resolveCanvasViewerMode('PptxScrollViewer', opts.mode, undefined);
     }
 
     // container → wrapper → scrollHost → spacer  (design §6)

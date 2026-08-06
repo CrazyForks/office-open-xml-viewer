@@ -28,6 +28,7 @@ import {
   CallerCanvasMount,
   CanvasOverlayHost,
   CanvasViewerErrorRouter,
+  resolveCanvasViewerMode,
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
@@ -39,6 +40,11 @@ export type HiddenSlideMode = 'show' | 'skip' | 'dim';
 const DEFAULT_HIDDEN_DIM: DimOptions = { color: '#ffffff', opacity: 0.6 };
 
 export interface PptxViewerOptions extends RenderOptions, LoadOptions {
+  /**
+   * Borrow an already-loaded presentation. Its mode is authoritative, `load()`
+   * is unavailable, and `destroy()` leaves the caller-owned presentation open.
+   */
+  presentation?: PptxPresentation;
   /** Called when a slide finishes rendering */
   onSlideChange?: (index: number, total: number) => void;
   /**
@@ -151,8 +157,10 @@ export class PptxViewer implements ZoomableViewer {
   private _find: PptxFindController;
   /** Private 2d context for measuring highlight text (own 1×1 canvas). */
   private _measureCtx: CanvasRenderingContext2D | null = null;
-  private readonly presentationOwner = new TerminalResourceOwner<PptxPresentation>('PptxViewer');
+  private readonly presentationOwner: TerminalResourceOwner<PptxPresentation>;
   private get engine(): PptxPresentation | null { return this.presentationOwner.current; }
+  private readonly injected: boolean;
+  private readonly hostWindow: Window & typeof globalThis;
   private readonly opts: PptxViewerOptions;
   private currentSlide = 0;
   private _hiddenMode: HiddenSlideMode;
@@ -164,7 +172,18 @@ export class PptxViewer implements ZoomableViewer {
   constructor(canvas: HTMLCanvasElement, opts: PptxViewerOptions = {}) {
     this.opts = opts;
     this.canvas = canvas;
-    this._mode = opts.mode ?? 'main';
+    const injectedPresentation = opts.presentation;
+    this.injected = injectedPresentation !== undefined;
+    this._mode = resolveCanvasViewerMode('PptxViewer', opts.mode, injectedPresentation);
+    this.presentationOwner = new TerminalResourceOwner(
+      'PptxViewer',
+      injectedPresentation ?? null,
+      false,
+    );
+    const hostWindow = canvas.ownerDocument?.defaultView ??
+      (typeof window !== 'undefined' ? window : null);
+    if (!hostWindow) throw new Error('PptxViewer requires a canvas with an active Window');
+    this.hostWindow = hostWindow;
     this._hiddenMode = opts.hiddenSlideMode ?? 'show';
 
     this.canvasMount = new CallerCanvasMount(canvas, {
@@ -202,6 +221,12 @@ export class PptxViewer implements ZoomableViewer {
    */
   async load(source: string | ArrayBuffer): Promise<void> {
     if (this.destroyed) throw new Error('PptxViewer is destroyed');
+    if (this.injected) {
+      throw new Error(
+        'PptxViewer.load() is unsupported when an engine is injected via opts.presentation; ' +
+          'the injected engine is already loaded.',
+      );
+    }
     // SC20 atomic swap: retain the previous engine locally and only tear it down
     // AFTER the new one loads successfully. A re-load thus never orphans the old
     // engine's worker + pinned WASM allocation (the leak this guards), yet a
@@ -630,7 +655,7 @@ export class PptxViewer implements ZoomableViewer {
       return;
     }
     if (enriched.kind === 'external') {
-      openExternalHyperlink(enriched.url);
+      openExternalHyperlink(enriched.url, undefined, this.hostWindow);
       return;
     }
     if (enriched.slideIndex !== undefined) void this.goToSlide(enriched.slideIndex);

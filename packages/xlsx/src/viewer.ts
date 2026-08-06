@@ -1,8 +1,16 @@
-import { XlsxWorkbook } from './workbook.js';
+import {
+  XlsxWorkbook,
+  releaseXlsxViewerProjection,
+  retainXlsxViewerFonts,
+} from './workbook.js';
 import type { Hyperlink, ViewportRange, Worksheet, XlsxComment } from './types.js';
 import type { FindHighlightColors, HyperlinkTarget, LoadOptions, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale, anchoredZoomOffset, openExternalHyperlink, nextZoomStep, prevZoomStep, fitScale } from '@silurus/ooxml-core';
-import { CallerCanvasMount } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
+import {
+  CallerCanvasMount,
+  resolveCanvasViewerMode,
+  type CanvasViewerRenderMode,
+} from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import {
   HEADER_W,
   HEADER_H,
@@ -19,7 +27,7 @@ import {
   computeValidationPanelPosition,
   type ResolvedList,
 } from './validation-list.js';
-import { withViewerLayoutMetrics, type WireSizeOverrides } from './worker-protocol.js';
+import { withViewerRenderContext, type WireSizeOverrides } from './worker-protocol.js';
 import {
   buildOutlineLayout,
   toggleGroupHidden,
@@ -40,6 +48,7 @@ import {
   SheetRenderDispatcher,
   SelectionController,
   ViewportState,
+  createSheetViewModel,
 } from './internal/sheet-viewer-runtime.js';
 import { CanvasSurface, SheetOverlayHost } from './internal/sheet-surface.js';
 import { withXlsxRenderCommitGuard } from './render-orchestrator.js';
@@ -73,6 +82,7 @@ const TAB_NAV_W = HEADER_W;
 // space so it is offset from the row-header boundary by the same margin that
 // separates tabs from each other.
 const TAB_GAP = 1;
+let nextViewerProjectionId = 1;
 
 /** How {@link XlsxViewer} presents hidden sheets (`<sheet state>`, §18.2.19). */
 export type HiddenSheetMode = 'show' | 'skip' | 'dim';
@@ -103,24 +113,32 @@ const VIEWER_STYLE_CSS =
   `.xlsx-zoom-slider::-moz-range-thumb{width:12px;height:12px;border:none;border-radius:50%;background:#808080;cursor:pointer;}`;
 
 /**
- * Inject the shared viewer stylesheet into `document.head` exactly once for the
- * whole module, keyed by the {@link VIEWER_STYLE_ATTR} marker. Earlier this ran
+ * Inject the shared viewer stylesheet into one owning document exactly once,
+ * keyed by the {@link VIEWER_STYLE_ATTR} marker. Earlier this ran
  * per-instance, so every mount/unmount cycle leaked another `<style>` into the
  * head (unbounded growth). It is deliberately NEVER removed on destroy: the CSS
  * is a class constant that any still-live viewer may depend on, and a single
  * leftover `<style>` after the last teardown is harmless (a fixed, bounded cost,
  * not a per-instance leak).
  */
-function ensureViewerStyleInjected(): void {
-  if (typeof document === 'undefined' || !document.head) return;
-  if (document.head.querySelector(`style[${VIEWER_STYLE_ATTR}]`)) return;
-  const style = document.createElement('style');
+function ensureViewerStyleInjected(ownerDocument: Document): void {
+  if (!ownerDocument.head) return;
+  if (ownerDocument.head.querySelector(`style[${VIEWER_STYLE_ATTR}]`)) return;
+  const style = ownerDocument.createElement('style');
   style.setAttribute(VIEWER_STYLE_ATTR, '');
   style.textContent = VIEWER_STYLE_CSS;
-  document.head.appendChild(style);
+  ownerDocument.head.appendChild(style);
 }
 
 export interface XlsxSheetViewerOptions extends LoadOptions {
+  /**
+   * Borrow an already-loaded workbook, matching `document` / `presentation`
+   * injection on the DOCX/PPTX scroll viewers. The workbook's mode is
+   * authoritative, `load()` is unsupported, and `destroy()` leaves the
+   * caller-owned workbook open. Await `goToSheet()` when first-paint completion
+   * matters.
+   */
+  workbook?: XlsxWorkbook;
   /** Scale factor for cell/header dimensions (default 1). 0.5 = half size. */
   cellScale?: number;
   /**
@@ -327,9 +345,18 @@ export function findHighlightOverlayStyle(
 
 type XlsxViewerMount =
   | { readonly kind: 'composite' }
-  | { readonly kind: 'sheet'; readonly canvas: HTMLCanvasElement };
+  | {
+      readonly kind: 'sheet';
+      readonly canvas: HTMLCanvasElement;
+      /** Resolved before the caller-owned canvas is reparented. */
+      readonly mode: CanvasViewerRenderMode;
+    };
 
 class XlsxViewerEngine implements ZoomableViewer {
+  /** DOM realm of the mount target. Sheet canvases may belong to a same-origin
+   * popup rather than the Window that created the viewer instance. */
+  private readonly hostDocument: Document;
+  private readonly hostWindow: Window & typeof globalThis;
   private readonly acquisition = new SheetAcquisition();
   private readonly viewport: ViewportState;
   private readonly renderDispatcher: SheetRenderDispatcher;
@@ -368,19 +395,21 @@ class XlsxViewerEngine implements ZoomableViewer {
    * Per-sheet cumulative record of every view-only size mutation (outline
    * collapse/expand, drag-to-resize #567), keyed by sheet index. Value = the
    * band's current model size, or `null` when the model has no entry (default
-   * size). Serialized as {@link WireSizeOverrides} with every worker
-   * `renderViewport` so the worker's local sheet cache converges to the
-   * main-thread model — without it the worker keeps drawing the file's
-   * original sizes and the grid bitmap goes stale under the (up-to-date)
-   * gutter and overlays. Entries are updated in place and never removed
-   * (idempotent re-application); the whole store resets when a new workbook
-   * loads. Main mode never reads it (the main renderer draws from the mutated
-   * model directly).
+   * size). Serialized as {@link WireSizeOverrides} with every render so both
+   * modes draw from a render-local projection matching this viewer, while the
+   * workbook cache remains immutable for sibling viewers. Entries are updated
+   * in place and never removed; the whole store resets with a new workbook.
    */
   private sizeOverrideStore = new Map<
     number,
-    { rows: Map<number, number | null>; cols: Map<number, number | null> }
+    {
+      rows: Map<number, number | null>;
+      cols: Map<number, number | null>;
+      revision: number;
+      wire?: WireSizeOverrides;
+    }
   >();
+  private readonly projectionId = nextViewerProjectionId++;
   private canvasArea: HTMLDivElement;
   private scrollHost: HTMLDivElement;
   private spacer: HTMLDivElement;
@@ -404,12 +433,22 @@ class XlsxViewerEngine implements ZoomableViewer {
   /** Atomically commits an asynchronously acquired worksheet with its index.
    * Incremented by every navigation and teardown so late acquisitions are no-ops. */
   private sheetRequestGeneration = 0;
+  private fontBindingGeneration = 0;
+  private fontBinding: Readonly<{ workbook: XlsxWorkbook; release: () => void }> | null = null;
   private _hiddenSheetMode: HiddenSheetMode;
   private currentWorksheet: Worksheet | null = null;
+  /** Viewer-owned projections of workbook-cached worksheets. Only view-mutable
+   * size/outline state is copied; immutable cell/content graphs stay shared. */
+  private sheetViews = new Map<number, Worksheet>();
   private opts: XlsxViewerOptions;
   private readonly _mountKind: XlsxViewerMount['kind'];
   /** 'main' renders on this thread; 'worker' paints worker-produced bitmaps. */
   private readonly _mode: 'main' | 'worker';
+  private _injected = false;
+  /** Workbook for which viewer-local state has been initialized. A borrowed
+   * sheet mount defers this work until the caller's first goToSheet(), so it
+   * never materializes an unrelated first sheet as a constructor side effect. */
+  private preparedWorkbook: XlsxWorkbook | null = null;
   /** Set by {@link destroy} (first line). Guards {@link _reportRenderError} so a
    *  render rejection that lands AFTER teardown is swallowed rather than surfaced
    *  to an `onError` / `console.error` on a dead viewer — parity with the scroll
@@ -532,13 +571,22 @@ class XlsxViewerEngine implements ZoomableViewer {
     opts: XlsxViewerOptions | XlsxSheetViewerOptions = {},
     mount: XlsxViewerMount,
   ) {
+    this.hostDocument =
+      (mount.kind === 'sheet' ? mount.canvas.ownerDocument : container.ownerDocument) ?? document;
+    const hostWindow = this.hostDocument.defaultView;
+    if (!hostWindow) throw new Error('XlsxViewer requires a document with an active Window');
+    this.hostWindow = hostWindow;
     this.opts = opts;
     this._mountKind = mount.kind;
-    this._mode = opts.mode ?? 'main';
+    const injectedWorkbook = opts.workbook;
+    this._injected = injectedWorkbook !== undefined;
+    this._mode = mount.kind === 'sheet'
+      ? mount.mode
+      : resolveCanvasViewerMode('XlsxViewer', opts.mode, injectedWorkbook);
     this._hiddenSheetMode = opts.hiddenSheetMode ?? 'show';
     this.viewport = new ViewportState(opts.cellScale ?? 1);
 
-    this.wrapper = document.createElement('div');
+    this.wrapper = this.hostDocument.createElement('div');
     this.wrapper.style.cssText =
       `position:relative;width:100%;height:100%;` +
       `background:${mount.kind === 'composite' ? '#fff' : 'transparent'};` +
@@ -548,7 +596,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     // (XL4) sit at its top / left edges and {@link canvasArea} is inset by the
     // gutter extents. With no outlining both extents are 0, so canvasArea covers
     // the whole region exactly as before (byte-identical layout).
-    this.gridRegion = document.createElement('div');
+    this.gridRegion = this.hostDocument.createElement('div');
     this.gridRegion.style.cssText = `position:relative;flex:1;min-height:0;overflow:hidden;`;
 
     // Outline gutter canvases. Absolutely positioned inside gridRegion; sized /
@@ -557,30 +605,34 @@ class XlsxViewerEngine implements ZoomableViewer {
     // thread even in worker mode (cheap chrome, independent of the grid bitmap).
     const gutterStyle =
       `position:absolute;top:0;left:0;z-index:3;display:none;background:#f5f5f5;`;
-    this.cornerGutter = document.createElement('canvas');
+    this.cornerGutter = this.hostDocument.createElement('canvas');
     this.cornerGutter.style.cssText = gutterStyle;
     this.cornerGutter.setAttribute('data-xlsx-outline', 'corner');
-    this.colGutter = document.createElement('canvas');
+    this.colGutter = this.hostDocument.createElement('canvas');
     this.colGutter.style.cssText = gutterStyle;
     this.colGutter.setAttribute('data-xlsx-outline', 'col');
-    this.rowGutter = document.createElement('canvas');
+    this.rowGutter = this.hostDocument.createElement('canvas');
     this.rowGutter.style.cssText = gutterStyle;
     this.rowGutter.setAttribute('data-xlsx-outline', 'row');
 
-    this.canvasArea = document.createElement('div');
+    this.canvasArea = this.hostDocument.createElement('div');
     this.canvasArea.style.cssText = `position:absolute;inset:0;overflow:hidden;`;
 
-    this.canvas = mount.kind === 'sheet' ? mount.canvas : document.createElement('canvas');
+    this.canvas = mount.kind === 'sheet' ? mount.canvas : this.hostDocument.createElement('canvas');
     this.canvas.style.cssText = `position:absolute;top:0;left:0;z-index:0;display:block;`;
-    this.renderDispatcher = new SheetRenderDispatcher(this.canvas, this._mode === 'worker');
+    this.renderDispatcher = new SheetRenderDispatcher(
+      this.canvas,
+      this._mode === 'worker',
+      this.hostWindow,
+    );
 
-    this.scrollHost = document.createElement('div');
+    this.scrollHost = this.hostDocument.createElement('div');
     this.scrollHost.setAttribute('data-xlsx-viewport-input', mount.kind);
     this.scrollHost.style.cssText =
       `position:absolute;inset:0;` +
       `overflow:${mount.kind === 'composite' ? 'auto' : 'clip'};` +
       `z-index:2;background:transparent;`;
-    this.spacer = document.createElement('div');
+    this.spacer = this.hostDocument.createElement('div');
     this.spacer.style.cssText = `position:absolute;top:0;left:0;pointer-events:none;`;
     if (mount.kind === 'composite') this.scrollHost.appendChild(this.spacer);
     this.surface = new CanvasSurface(this.canvas, this.canvasArea, this.scrollHost);
@@ -597,10 +649,10 @@ class XlsxViewerEngine implements ZoomableViewer {
     // Inject the shared viewer stylesheet once per module (idempotent). Both
     // mounts use it: the composite footer hides its tab-strip scrollbar and the
     // canvas mount hides native sheet scrollbars while retaining pan input.
-    ensureViewerStyleInjected();
+    ensureViewerStyleInjected(this.hostDocument);
 
     if (mount.kind === 'composite') {
-      this.tabBar = document.createElement('div');
+      this.tabBar = this.hostDocument.createElement('div');
       this.tabBar.style.cssText =
         `display:flex;align-items:flex-end;height:${TAB_BAR_H}px;flex-shrink:0;` +
         `background:#f0f0f0;border-top:1px solid #c8ccd0;`;
@@ -614,7 +666,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
       // Keep the two-button footer control at the row-header width from the 100%
       // view. It is viewer chrome, so workbook zoom must not resize or shift it.
-      const navGroup = document.createElement('div');
+      const navGroup = this.hostDocument.createElement('div');
       navGroup.style.cssText =
         `display:flex;flex-shrink:0;width:${TAB_NAV_W}px;height:100%;`;
       navGroup.appendChild(this.navPrev);
@@ -622,7 +674,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
       // The scrollable strip that actually holds the sheet tabs. position:relative
       // so each tab's offsetLeft is measured against the strip's scroll content.
-      this.tabStrip = document.createElement('div');
+      this.tabStrip = this.hostDocument.createElement('div');
       // Keep the scroll host itself LTR so scrollLeft is consistently 0..max in
       // every browser. The inner tabList owns visual LTR/RTL ordering.
       this.tabStrip.style.cssText =
@@ -633,7 +685,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
       // width:max-content preserves overflow scrolling; min-width:100% makes a
       // short RTL tab row fill the strip so row-reverse can right-align it.
-      this.tabList = document.createElement('div');
+      this.tabList = this.hostDocument.createElement('div');
       this.tabList.style.cssText =
         `display:flex;align-items:flex-end;height:100%;` +
         `gap:${TAB_GAP}px;box-sizing:border-box;`;
@@ -701,7 +753,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     // size change shifts maxScrollLeft, and for RTL sheets the native
     // scrollLeft must be re-derived from the start-anchored position or the
     // view drifts (or, after a hidden mount, stays stranded at the far end).
-    this.resizeObserver = new ResizeObserver(() => {
+    const resizeObserver = new this.hostWindow.ResizeObserver(() => {
       const offset = { x: this.viewport.x, y: this.viewport.y };
       this.viewport.setViewportSize(this.scrollHost.clientWidth, this.scrollHost.clientHeight);
       this.setViewportLeft(offset.x);
@@ -719,7 +771,8 @@ class XlsxViewerEngine implements ZoomableViewer {
       this.updateFindOverlay();
       this.updateNavButtons();
     });
-    this.resizeObserver.observe(this.gridRegion);
+    resizeObserver.observe(this.gridRegion);
+    this.resizeObserver = resizeObserver;
 
     this.setupSelectionEvents();
 
@@ -728,6 +781,14 @@ class XlsxViewerEngine implements ZoomableViewer {
       (sheet) => this.wb?.sheetNames[sheet] ?? '',
       (sheet) => this._collectSheetCells(sheet),
     );
+
+    if (injectedWorkbook) {
+      this.acquisition.install(injectedWorkbook, false);
+      if (this._mountKind === 'composite') {
+        this.activateWorkbook(injectedWorkbook).catch((error) => this._reportRenderError(error));
+      }
+    }
+
   }
 
   /** Every non-empty cell of a sheet with its rendered display text (IX2 find
@@ -762,6 +823,12 @@ class XlsxViewerEngine implements ZoomableViewer {
    */
   async load(source: string | ArrayBuffer): Promise<void> {
     this.assertOpen();
+    if (this._injected) {
+      throw new Error(
+        `${this._mountKind === 'sheet' ? 'XlsxSheetViewer' : 'XlsxViewer'}.load() is unsupported ` +
+          'when an engine is injected via opts.workbook; the injected engine is already loaded.',
+      );
+    }
     // SC20 atomic swap: retain the previous workbook locally and only tear it down
     // AFTER the new one loads successfully. A re-load thus never orphans the old
     // workbook's worker + pinned WASM allocation (the leak this guards), yet a
@@ -787,16 +854,11 @@ class XlsxViewerEngine implements ZoomableViewer {
           this.renderDispatcher.begin();
           this._find.invalidate();
           this.hideValidationPanel();
+          this.releaseHostFonts();
         });
       if (!wb) return;
       if (this._destroyed) throw this.destroyedError();
-      // A new workbook invalidates any prior find state and every accumulated
-      // view-only size override (sheet indices now name different sheets).
-      this._find.invalidate();
-      this.sizeOverrideStore.clear();
-      this.buildTabs();
-      this.opts.onReady?.(wb.sheetNames);
-      await this.showSheet(this._initialSheet());
+      await this.activateWorkbook(wb);
     } catch (err) {
       if (this._destroyed) throw this.destroyedError();
       const e = err instanceof Error ? err : new Error(String(err));
@@ -806,6 +868,56 @@ class XlsxViewerEngine implements ZoomableViewer {
       }
       throw e;
     }
+  }
+
+  /** Bind the current acquisition to its independent viewer state. Parsing,
+   *  worksheet materialization, archive access, and caches remain workbook-owned. */
+  private async activateWorkbook(workbook: XlsxWorkbook, sheetIndex?: number): Promise<void> {
+    if (!this.prepareWorkbook(workbook)) return;
+    await this.showSheet(sheetIndex ?? this._initialSheet());
+  }
+
+  private async ensureHostFonts(workbook: XlsxWorkbook): Promise<boolean> {
+    if (this.fontBinding?.workbook === workbook) return true;
+    const retain = workbook[retainXlsxViewerFonts];
+    // Structural test doubles and pre-feature adapters have no font hook. A
+    // real XlsxWorkbook always does; absence means there is nothing to retain.
+    if (typeof retain !== 'function') return true;
+    const generation = ++this.fontBindingGeneration;
+    const release = await retain.call(workbook, this.hostDocument);
+    if (
+      this._destroyed ||
+      generation !== this.fontBindingGeneration ||
+      this.wb !== workbook
+    ) {
+      release();
+      return false;
+    }
+    this.fontBinding?.release();
+    this.fontBinding = { workbook, release };
+    return true;
+  }
+
+  private releaseHostFonts(): void {
+    this.fontBindingGeneration++;
+    this.fontBinding?.release();
+    this.fontBinding = null;
+  }
+
+  /** Initialize the viewer-local projection state without choosing a sheet.
+   * This split lets a borrowed sheet viewer make goToSheet(index) its first
+   * worksheet materialization, while the composite viewer can still open its
+   * normal initial sheet automatically. */
+  private prepareWorkbook(workbook: XlsxWorkbook): boolean {
+    if (this._destroyed || this.wb !== workbook) return false;
+    if (this.preparedWorkbook === workbook) return true;
+    this._find.invalidate();
+    this.sizeOverrideStore.clear();
+    this.sheetViews.clear();
+    this.buildTabs();
+    this.preparedWorkbook = workbook;
+    this.opts.onReady?.(workbook.sheetNames);
+    return true;
   }
 
   /** The loaded workbook, or throws if {@link load} has not completed. */
@@ -831,7 +943,10 @@ class XlsxViewerEngine implements ZoomableViewer {
     const workbook = this.workbook;
     let worksheet: Worksheet;
     try {
-      worksheet = await workbook.getWorksheet(index);
+      if (!await this.ensureHostFonts(workbook)) return;
+      const source = await workbook.getWorksheet(index);
+      worksheet = this.sheetViews.get(index) ?? createSheetViewModel(source);
+      this.sheetViews.set(index, worksheet);
     } catch (error) {
       if (!this.isCurrentSheetRequest(generation, workbook)) return;
       throw error;
@@ -1261,36 +1376,46 @@ class XlsxViewerEngine implements ZoomableViewer {
         }
       }
     }
-    // Mirror the post-mutation model value into the worker override channel so
-    // a worker-mode grid actually re-lays the band (main mode ignores this).
+    // Mirror the post-mutation model value into the render override channel so
+    // both modes can draw this viewer's projection without mutating the shared
+    // workbook cache.
     this.recordSizeOverride(axis, index);
   }
 
   /** Record band `index`'s CURRENT model size (or `null` = no entry) in the
-   *  per-sheet override store. Called after every view-only size mutation —
-   *  outline hide/show above and drag-to-resize (#567) — so worker renders
-   *  converge to the main model. */
+   *  per-sheet override store. Called after every view-only size mutation so
+   *  both render modes receive this viewer's independent projection. */
   private recordSizeOverride(axis: OutlineAxis, index: number): void {
     const ws = this.currentWorksheet;
     if (!ws) return;
     let entry = this.sizeOverrideStore.get(this.currentSheet);
     if (!entry) {
-      entry = { rows: new Map(), cols: new Map() };
+      entry = { rows: new Map(), cols: new Map(), revision: 0 };
       this.sizeOverrideStore.set(this.currentSheet, entry);
     }
-    if (axis === 'row') entry.rows.set(index, ws.rowHeights[index] ?? null);
-    else entry.cols.set(index, ws.colWidths[index] ?? null);
+    const target = axis === 'row' ? entry.rows : entry.cols;
+    const value = axis === 'row' ? ws.rowHeights[index] ?? null : ws.colWidths[index] ?? null;
+    if (target.get(index) === value && target.has(index)) return;
+    target.set(index, value);
+    entry.revision++;
+    entry.wire = undefined;
   }
 
   /** The current sheet's override store serialized for the wire, or undefined
    *  when nothing has been mutated (keeps the request payload unchanged). */
-  private wireSizeOverrides(): WireSizeOverrides | undefined {
+  private wireSizeOverrides(): Readonly<{
+    overrides: WireSizeOverrides;
+    revision: number;
+  }> | undefined {
     const entry = this.sizeOverrideStore.get(this.currentSheet);
     if (!entry || (entry.rows.size === 0 && entry.cols.size === 0)) return undefined;
-    const o: WireSizeOverrides = {};
-    if (entry.rows.size > 0) o.rows = Object.fromEntries(entry.rows);
-    if (entry.cols.size > 0) o.cols = Object.fromEntries(entry.cols);
-    return o;
+    if (!entry.wire) {
+      const wire: WireSizeOverrides = {};
+      if (entry.rows.size > 0) wire.rows = Object.fromEntries(entry.rows);
+      if (entry.cols.size > 0) wire.cols = Object.fromEntries(entry.cols);
+      entry.wire = wire;
+    }
+    return { overrides: entry.wire, revision: entry.revision };
   }
 
   /** Update the `collapsed` flag on a band's model entry so the outline rebuild
@@ -1462,6 +1587,8 @@ class XlsxViewerEngine implements ZoomableViewer {
    */
   async goToSheet(index: number): Promise<void> {
     if (this.sheetCount === 0) return;
+    const workbook = this.workbook;
+    if (!this.prepareWorkbook(workbook)) return;
     await this.showSheet(Math.max(0, Math.min(index, this.sheetCount - 1)));
   }
 
@@ -1847,7 +1974,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       for (let c = c1; c <= c2; c++) cols.push(cellMap.get(`${r}:${c}`) ?? '');
       lines.push(cols.join('\t'));
     }
-    navigator.clipboard.writeText(lines.join('\n')).catch(() => undefined);
+    this.hostWindow.navigator.clipboard?.writeText(lines.join('\n')).catch(() => undefined);
   }
 
   private updateSelectionOverlay(): void {
@@ -1935,7 +2062,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const { border, background } = selectionOverlayStyle(
       this.opts.selectionColor ?? DEFAULT_SELECTION_COLOR,
     );
-    const box = document.createElement('div');
+    const box = this.hostDocument.createElement('div');
     box.style.cssText =
       `position:absolute;` +
       `left:${screenLeft}px;top:${y}px;width:${w}px;height:${h}px;` +
@@ -1989,7 +2116,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
     const screenLeft = this.screenX(btnLogicalX, side);
 
-    const btn = document.createElement('div');
+    const btn = this.hostDocument.createElement('div');
     btn.setAttribute('data-xlsx-validation-dropdown', '');
     btn.style.cssText =
       `position:absolute;` +
@@ -2063,7 +2190,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       if (w <= 0 || h <= 0) continue;
       const screenLeft = this.screenX(x, w);
       const { border, background } = hl.active ? active : other;
-      const box = document.createElement('div');
+      const box = this.hostDocument.createElement('div');
       box.style.cssText =
         `position:absolute;` +
         `left:${screenLeft}px;top:${y}px;width:${w}px;height:${h}px;` +
@@ -2238,7 +2365,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     if (resolved.kind === 'formula' || resolved.values.length === 0) {
       // Unresolved operand (named range / complex formula) or an empty range:
       // disclose the formula / a placeholder rather than showing a blank box.
-      const note = document.createElement('div');
+      const note = this.hostDocument.createElement('div');
       note.style.cssText = 'padding:4px 8px;color:#666;font-style:italic;white-space:pre-wrap;word-break:break-word;';
       note.textContent =
         resolved.kind === 'formula'
@@ -2248,7 +2375,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       return;
     }
     for (const value of resolved.values) {
-      const item = document.createElement('div');
+      const item = this.hostDocument.createElement('div');
       item.setAttribute('data-xlsx-validation-item', '');
       item.style.cssText = 'padding:3px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:default;';
       item.textContent = value;
@@ -2302,7 +2429,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       this.hideValidationPanel();
     };
     // Capture phase so we see the click before it mutates selection.
-    document.addEventListener('pointerdown', this.validationOutsideHandler, true);
+    this.hostDocument.addEventListener('pointerdown', this.validationOutsideHandler, true);
   }
 
   /** Hide the panel and detach its outside-click listener. Called on re-click,
@@ -2312,7 +2439,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.overlayHost.hideValidation();
     this.validationPanelKey = null;
     if (this.validationOutsideHandler) {
-      document.removeEventListener('pointerdown', this.validationOutsideHandler, true);
+      this.hostDocument.removeEventListener('pointerdown', this.validationOutsideHandler, true);
       this.validationOutsideHandler = null;
     }
   }
@@ -2382,7 +2509,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     // scheme allowlist (a blocked scheme like `javascript:` is a no-op, not a
     // navigation). Internal: best-effort sheet navigation, below.
     if (target.kind === 'external') {
-      openExternalHyperlink(target.url);
+      openExternalHyperlink(target.url, undefined, this.hostWindow);
     } else {
       this.navigateInternalHyperlink(target.ref);
     }
@@ -2448,12 +2575,12 @@ class XlsxViewerEngine implements ZoomableViewer {
     // from comment text.
     this.commentPopup.textContent = '';
     if (comment.author) {
-      const authorEl = document.createElement('div');
+      const authorEl = this.hostDocument.createElement('div');
       authorEl.style.cssText = 'font-weight:bold;margin-bottom:2px;';
       authorEl.textContent = comment.author;
       this.commentPopup.appendChild(authorEl);
     }
-    const bodyEl = document.createElement('div');
+    const bodyEl = this.hostDocument.createElement('div');
     bodyEl.textContent = comment.text;
     this.commentPopup.appendChild(bodyEl);
 
@@ -2830,7 +2957,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.tabs = [];
     this.tabColors = this.workbook.tabColors;
     this.workbook.sheetNames.forEach((name, i) => {
-      const btn = document.createElement('button');
+      const btn = this.hostDocument.createElement('button');
       btn.textContent = name;
       btn.title = name;
       btn.style.cssText = this.tabCss(i, false);
@@ -2842,7 +2969,7 @@ class XlsxViewerEngine implements ZoomableViewer {
   }
 
   private makeNavButton(glyph: string, label: string, onClick: () => void): HTMLButtonElement {
-    const btn = document.createElement('button');
+    const btn = this.hostDocument.createElement('button');
     btn.textContent = glyph;
     btn.setAttribute('aria-label', label);
     btn.title = label;
@@ -2983,7 +3110,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const zoomMax = this.opts.zoomMax ?? 4;
     const cur = this.viewport.scale;
 
-    const wrap = document.createElement('div');
+    const wrap = this.hostDocument.createElement('div');
     wrap.style.cssText =
       `display:flex;align-items:center;flex-shrink:0;gap:2px;` +
       `padding:0 10px;height:100%;color:#555;font-size:12px;user-select:none;`;
@@ -2993,7 +3120,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     // the ZoomableViewer contract land on identical scales (issue #842).
     // Pre-IX9 these stepped ±0.1 linearly.
     const mkBtn = (glyph: string, label: string, step: () => void): HTMLButtonElement => {
-      const b = document.createElement('button');
+      const b = this.hostDocument.createElement('button');
       b.type = 'button';
       b.textContent = glyph;
       b.setAttribute('aria-label', label);
@@ -3009,7 +3136,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     // to 100% so each half is its own linear segment (zoomMin→1 on the left,
     // 1→zoomMax on the right), mirroring Excel's status-bar zoom where 100% sits
     // in the middle even though the range (10%–400%) is asymmetric.
-    const slider = document.createElement('input');
+    const slider = this.hostDocument.createElement('input');
     slider.type = 'range';
     slider.min = '0';
     slider.max = '100';
@@ -3023,7 +3150,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       this.setScale(this.zoomPosToScale(Number(slider.value), zoomMin, zoomMax)),
     );
 
-    const label = document.createElement('span');
+    const label = this.hostDocument.createElement('span');
     label.textContent = `${Math.round(cur * 100)}%`;
     label.style.cssText = `min-width:42px;margin-left:6px;text-align:right;font-variant-numeric:tabular-nums;`;
 
@@ -3343,21 +3470,28 @@ class XlsxViewerEngine implements ZoomableViewer {
       selectedColRange,
     };
 
+    const sizeProjection = this.wireSizeOverrides();
+    const viewerRenderOpts = withViewerRenderContext(
+      sizeProjection ? { ...renderOpts, sizeOverrides: sizeProjection.overrides } : renderOpts,
+      getGridGeometryForWorksheet(ws).maximumDigitWidth,
+      {
+        worksheet: ws,
+        projection: sizeProjection
+          ? { id: this.projectionId, revision: sizeProjection.revision }
+          : undefined,
+      },
+    );
+
     if (this._mode === 'worker') {
       // Render the viewport off the main thread and paint the returned bitmap.
       // The selection overlay (geometry-based, from getCellRect) is unaffected.
       // Attach the cumulative view-only size overrides (outline collapse/
       // expand, drag resize) so the worker re-lays the mutated bands — its
       // local sheet cache never sees main-thread model writes on its own.
-      const sizeOverrides = this.wireSizeOverrides();
-      const workerOpts = withViewerLayoutMetrics(
-        sizeOverrides ? { ...renderOpts, sizeOverrides } : renderOpts,
-        getGridGeometryForWorksheet(ws).maximumDigitWidth,
-      );
       const bmp = await this.workbook.renderViewportToBitmap(
         this.currentSheet,
         viewport,
-        workerOpts,
+        viewerRenderOpts,
       );
       if (!this.renderDispatcher.commitBitmap(seq, bmp, w, h)) return;
     } else {
@@ -3365,7 +3499,7 @@ class XlsxViewerEngine implements ZoomableViewer {
         this.canvas,
         this.currentSheet,
         viewport,
-        withXlsxRenderCommitGuard(renderOpts, () =>
+        withXlsxRenderCommitGuard(viewerRenderOpts, () =>
           !this._destroyed && this.renderDispatcher.isCurrent(seq),
         ),
       );
@@ -3409,7 +3543,7 @@ class XlsxViewerEngine implements ZoomableViewer {
    * explicit removal: removing the subtree makes them unreachable and eligible
    * for GC. Safe to call more than once.
    *
-   * NOTE: the shared `<style>` in `document.head` is intentionally NOT removed —
+   * NOTE: the shared `<style>` in the owning document is intentionally NOT removed —
    * it is a class constant that any still-live viewer may depend on, and one
    * leftover sheet is a bounded, harmless cost (see {@link ensureViewerStyleInjected}).
    */
@@ -3429,6 +3563,11 @@ class XlsxViewerEngine implements ZoomableViewer {
     // findNext()/findPrev() after teardown returns null instead of a match
     // pointing into a dead viewer (same fix as DocxViewer/PptxViewer.destroy).
     this._find.invalidate();
+    this.releaseHostFonts();
+    const releaseProjection = this.wb?.[releaseXlsxViewerProjection];
+    if (typeof releaseProjection === 'function') {
+      releaseProjection.call(this.wb, this.projectionId);
+    }
     this.acquisition.destroy();
     // Remove the whole UI subtree so the container is empty again. This also
     // detaches every listener bound to elements within it (scrollHost pointer/
@@ -3482,6 +3621,7 @@ export class XlsxSheetViewer implements ZoomableViewer {
     readonly canvasElement: HTMLCanvasElement,
     options: XlsxSheetViewerOptions = {},
   ) {
+    const mode = resolveCanvasViewerMode('XlsxSheetViewer', options.mode, options.workbook);
     const rect = canvasElement.getBoundingClientRect();
     this.canvasMount = new CallerCanvasMount(canvasElement, {
       wrapperCssText:
@@ -3499,6 +3639,7 @@ export class XlsxSheetViewer implements ZoomableViewer {
     }, {
       kind: 'sheet',
       canvas: canvasElement,
+      mode,
     });
     this.snapshot = {
       sheetIndex: 0,

@@ -1,6 +1,7 @@
 import { computeVisibleRange, openExternalHyperlink, PT_TO_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type VisibleRange } from '@silurus/ooxml-core';
 import type { FindHighlightColors, FindMatch, FindMatchesOptions, HyperlinkTarget, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
 import {
+  resolveCanvasViewerMode,
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
@@ -316,20 +317,11 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._injected = !!opts.document;
     if (this._injected) {
       const engine = opts.document as DocxDocument;
-      // Injected engine ⇒ its own mode is the fact (design §11). An EXPLICITLY
-      // conflicting opts.mode is a mis-configuration and is rejected here; an
-      // absent opts.mode is fine.
-      if (opts.mode !== undefined && opts.mode !== engine.mode) {
-        throw new Error(
-          `DocxScrollViewer: opts.mode='${opts.mode}' conflicts with the injected engine's mode='${engine.mode}'. ` +
-            'Omit opts.mode when injecting an engine — the engine owns its render mode.',
-        );
-      }
       this._documentOwner = new TerminalResourceOwner('DocxScrollViewer', engine, false);
-      this._mode = engine.mode;
+      this._mode = resolveCanvasViewerMode('DocxScrollViewer', opts.mode, engine);
     } else {
       this._documentOwner = new TerminalResourceOwner('DocxScrollViewer');
-      this._mode = opts.mode ?? 'main';
+      this._mode = resolveCanvasViewerMode('DocxScrollViewer', opts.mode, undefined);
     }
 
     // container → wrapper → scrollHost → spacer  (design §6)

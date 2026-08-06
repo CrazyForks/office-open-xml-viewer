@@ -21,9 +21,9 @@ import { GridGeometry } from './internal/grid-geometry.js';
  * Semantics: keys are 1-based band indices; a number is the band's current
  * `rowHeights` / `colWidths` model value, `null` means "no entry — fall back
  * to the sheet default". The main thread accumulates every band the user has
- * touched this session (entries are updated in place, never removed), so
- * re-applying the full map is idempotent and converges the worker's cached
- * sheet to the main model even across worker-side re-parses.
+ * touched this session (entries are updated in place, never removed). Each
+ * render applies the full map to a render-local worksheet projection, leaving
+ * the workbook/worker cache unchanged for other viewers.
  */
 export interface WireSizeOverrides {
   rows?: Record<number, number | null>;
@@ -32,9 +32,7 @@ export interface WireSizeOverrides {
 
 /**
  * Apply {@link WireSizeOverrides} to a worksheet's size maps (mutates `ws`).
- * Runs worker-side on every `renderViewport` before drawing. Touches only the
- * two size maps, so the worker's memoized render cache (cell map, merge sets —
- * keyed by the Worksheet object identity) stays valid.
+ * Shared render paths call this only on a shallow render-local projection.
  */
 export function applySizeOverrides(ws: Worksheet, overrides: WireSizeOverrides | undefined): void {
   if (!overrides) return;
@@ -70,12 +68,86 @@ export function applySizeOverrides(ws: Worksheet, overrides: WireSizeOverrides |
   if (changed) GridGeometry.invalidate(ws);
 }
 
+/** Return a render-local worksheet when view overrides exist. The cached
+ * worksheet remains immutable across independent viewers. */
+export function createSizeOverriddenWorksheet(
+  source: Worksheet,
+  overrides: WireSizeOverrides | undefined,
+): Worksheet {
+  if (!overrides) return source;
+  const view = {
+    ...source,
+    rowHeights: { ...source.rowHeights },
+    colWidths: { ...source.colWidths },
+  };
+  applySizeOverrides(view, overrides);
+  return view;
+}
+
+export interface WireViewProjection {
+  readonly id: number;
+  readonly revision: number;
+}
+
+/** Worker-local cache for one shallow worksheet projection per viewer/sheet.
+ * Repeated viewport paints at an unchanged revision reuse the same maps. */
+export class WorksheetViewProjectionCache {
+  private readonly entries = new Map<
+    string,
+    Readonly<{ revision: number; source: Worksheet; worksheet: Worksheet }>
+  >();
+  /** Viewer teardown can overtake a render already awaiting fonts/archive work.
+   * A tombstone prevents that late render from resurrecting released entries. */
+  private readonly releasedProjectionIds = new Set<number>();
+
+  resolve(
+    source: Worksheet,
+    sheetIndex: number,
+    projection: WireViewProjection | undefined,
+    overrides: WireSizeOverrides | undefined,
+  ): Readonly<{ worksheet: Worksheet; created: boolean }> {
+    if (!projection) {
+      const worksheet = createSizeOverriddenWorksheet(source, overrides);
+      return { worksheet, created: worksheet !== source };
+    }
+    const cacheable = !this.releasedProjectionIds.has(projection.id);
+    const key = `${projection.id}:${sheetIndex}`;
+    const cached = cacheable ? this.entries.get(key) : undefined;
+    if (
+      cached &&
+      cached.revision === projection.revision &&
+      cached.source === source
+    ) {
+      return { worksheet: cached.worksheet, created: false };
+    }
+    const worksheet = createSizeOverriddenWorksheet(source, overrides);
+    if (worksheet !== source && cacheable) {
+      this.entries.set(key, { revision: projection.revision, source, worksheet });
+      return { worksheet, created: true };
+    }
+    this.entries.delete(key);
+    return { worksheet, created: worksheet !== source };
+  }
+
+  release(projectionId: number): void {
+    this.releasedProjectionIds.add(projectionId);
+    const prefix = `${projectionId}:`;
+    for (const key of this.entries.keys()) {
+      if (key.startsWith(prefix)) this.entries.delete(key);
+    }
+  }
+
+  clear(): void {
+    this.entries.clear();
+    this.releasedProjectionIds.clear();
+  }
+}
+
 /** Serializable subset of RenderViewportOptions: drop the callback, the image
  *  cache, and the `fetchImage` loader (all non-cloneable; the worker owns its
  *  own cache and supplies its own in-worker fetchImage). Extended with the
- *  optional {@link WireSizeOverrides} so view-only size mutations reach the
- *  worker's local sheet copy; absent (the common case) when nothing has been
- *  resized or collapsed, keeping the wire payload unchanged. */
+ *  optional {@link WireSizeOverrides} so view-only size mutations reach a
+ *  render-local sheet projection; absent when nothing changed. */
 export type WireRenderViewportOptions = Omit<
   RenderViewportOptions,
   'onTextRun' | 'loadedImages' | 'fetchImage'
@@ -83,40 +155,60 @@ export type WireRenderViewportOptions = Omit<
   sizeOverrides?: WireSizeOverrides;
 };
 
-const viewerLayoutMetrics = Symbol('xlsx-viewer-layout-metrics');
+const viewerRenderContext = Symbol('xlsx-viewer-render-context');
 
 type ViewerRenderViewportOptions = WireRenderViewportOptions & {
-  [viewerLayoutMetrics]?: Readonly<{ maximumDigitWidth: number }>;
+  [viewerRenderContext]?: Readonly<{
+    maximumDigitWidth: number;
+    worksheet?: Worksheet;
+    projection?: WireViewProjection;
+  }>;
 };
 
-/** @internal Attach the Window-owned layout metric used by the composite
- * viewer. It is a symbol property, so it cannot become a user-facing OOXML
- * rendering knob or accidentally cross structured-clone. Workbook transport
- * extracts it into the internal worker request envelope. */
-export function withViewerLayoutMetrics<T extends WireRenderViewportOptions>(
+/** @internal Attach the viewer-only render context. The symbol keeps the main-
+ * thread worksheet projection out of the public OOXML options and out of
+ * structured clone; workbook transport extracts only serializable fields for
+ * worker rendering. */
+export function withViewerRenderContext<T extends WireRenderViewportOptions>(
   opts: T,
   maximumDigitWidth: number,
+  view?: Readonly<{
+    worksheet: Worksheet;
+    projection?: WireViewProjection;
+  }>,
 ): T {
   if (!Number.isFinite(maximumDigitWidth) || maximumDigitWidth <= 0) {
     throw new Error('XLSX maximum digit width must be a finite positive number');
   }
   return {
     ...opts,
-    [viewerLayoutMetrics]: { maximumDigitWidth },
+    [viewerRenderContext]: {
+      maximumDigitWidth,
+      worksheet: view?.worksheet,
+      projection: view?.projection,
+    },
   } as T & ViewerRenderViewportOptions;
 }
 
-/** @internal Remove the non-cloneable symbol property and return the internal
- * request-envelope metric separately. */
-export function extractViewerLayoutMetrics(opts: WireRenderViewportOptions): {
+/** @internal Split wire options from the viewer-only render context. */
+export function extractViewerRenderContext(opts: WireRenderViewportOptions): {
   readonly opts: WireRenderViewportOptions;
   readonly layoutMetrics?: Readonly<{ maximumDigitWidth: number }>;
+  readonly worksheet?: Worksheet;
+  readonly projection?: WireViewProjection;
 } {
   const internal = opts as ViewerRenderViewportOptions;
-  const layoutMetrics = internal[viewerLayoutMetrics];
+  const layoutMetrics = internal[viewerRenderContext];
   const wire = { ...opts } as ViewerRenderViewportOptions;
-  delete wire[viewerLayoutMetrics];
-  return layoutMetrics ? { opts: wire, layoutMetrics } : { opts: wire };
+  delete wire[viewerRenderContext];
+  return layoutMetrics
+    ? {
+        opts: wire,
+        layoutMetrics: { maximumDigitWidth: layoutMetrics.maximumDigitWidth },
+        worksheet: layoutMetrics.worksheet,
+        projection: layoutMetrics.projection,
+      }
+    : { opts: wire };
 }
 
 // The base `parse` arm from types.ts is intentionally NOT reused: the render
@@ -137,7 +229,11 @@ export type RenderWorkerRequest =
        * render options because it exists only to align viewer interaction and
        * worker paint across font realms. */
       layoutMetrics?: Readonly<{ maximumDigitWidth: number }>;
+      /** Viewer-local projection cache identity. The worker rebuilds its shallow
+       * worksheet projection only when the revision changes. */
+      viewProjection?: WireViewProjection;
     }
+  | { type: 'releaseViewProjection'; projectionId: number }
   // Worker render mode decodes images in-worker via a getImage closure; this arm
   // exists only for protocol parity with worker.ts (so a stray extractImage
   // never hangs). The render worker reads bytes straight from its retained

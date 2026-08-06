@@ -85,6 +85,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       ctor: 'new PptxViewer(canvas: HTMLCanvasElement, options?: PptxViewerOptions)',
       note: 'Opinionated single-canvas viewer. Hand it a <canvas>; it owns parsing, rendering and the current slide.',
       options: [
+        { name: 'presentation', type: 'PptxPresentation', desc: 'Borrow an already-loaded presentation. Its mode is authoritative; load() is then unsupported and destroy() leaves it open.' },
         { name: 'width', type: 'number', def: '960', desc: 'Canvas CSS width in px; height is derived from the slide aspect ratio.' },
         DPR,
         GFONTS,
@@ -107,7 +108,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         VIEWER_ON_ERROR,
       ],
       methods: [
-        { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load from a URL or ArrayBuffer and render the first slide.' },
+        { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load from a URL or ArrayBuffer and render the first slide. Unsupported when presentation is injected.' },
         { sig: 'goToSlide(index: number): Promise<void>', desc: 'Render a specific slide (0-indexed, clamped).' },
         { sig: 'nextSlide(): Promise<void>', desc: 'Advance one slide.' },
         { sig: 'prevSlide(): Promise<void>', desc: 'Go back one slide.' },
@@ -196,6 +197,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       ctor: 'new DocxViewer(canvas: HTMLCanvasElement, options?: DocxViewerOptions)',
       note: 'Single-canvas viewer that paginates the document and tracks the current page.',
       options: [
+        { name: 'document', type: 'DocxDocument', desc: 'Borrow an already-loaded document. Its mode is authoritative; load() is then unsupported and destroy() leaves it open.' },
         { name: 'width', type: 'number', desc: 'Canvas CSS width in px; height is auto-computed from the page aspect ratio.' },
         DPR,
         GFONTS,
@@ -216,7 +218,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         VIEWER_ON_ERROR,
       ],
       methods: [
-        { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load from a URL or ArrayBuffer and render the first page.' },
+        { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load from a URL or ArrayBuffer and render the first page. Unsupported when document is injected.' },
         { sig: 'goToPage(index: number): Promise<void>', desc: 'Render a specific page (0-indexed, clamped).' },
         { sig: 'nextPage(): Promise<void>', desc: 'Advance one page.' },
         { sig: 'prevPage(): Promise<void>', desc: 'Go back one page.' },
@@ -304,6 +306,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'selectionColor', type: 'string', def: "'#1a73e8'", desc: 'Accent color for the cell-selection rectangle (any CSS color). The fill is the same color at 8% opacity.' },
         FIND_HIGHLIGHT_COLORS,
         { name: 'hiddenSheetMode', type: "'show' | 'skip' | 'dim'", def: "'show'", desc: 'How hidden / very-hidden sheets (`<sheet state>`, §18.2.19) appear in the tab bar. `show` renders a tab like any other; `skip` hides the tab (`display:none`) and makes sequential navigation jump over it; `dim` renders the tab at reduced opacity. Mirrors pptx `hiddenSlideMode`.' },
+        { name: 'workbook', type: 'XlsxWorkbook', desc: 'Borrow an already-loaded workbook, matching DOCX/PPTX engine injection. load() is then unsupported and destroy() leaves the caller-owned workbook open.' },
         GFONTS,
         ZIP,
         RESOURCE_LIMITS,
@@ -321,7 +324,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         VIEWER_ON_ERROR,
       ],
       methods: [
-        { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a workbook from a URL or ArrayBuffer and render the first sheet.' },
+        { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a workbook from a URL or ArrayBuffer and render the first sheet. Throws when a workbook was injected through options.' },
         { sig: 'goToSheet(index: number): Promise<void>', desc: 'Show a specific sheet (0-indexed, clamped).' },
         { sig: 'nextSheet(): Promise<void>', desc: 'Advance one sheet.' },
         { sig: 'prevSheet(): Promise<void>', desc: 'Go back one sheet.' },
@@ -344,13 +347,13 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'getCellAt(clientX: number, clientY: number): CellAddress | null', desc: 'Hit-test a viewport coordinate to a cell address.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas the grid is drawn on.' },
         RESOURCE_METRICS_METHOD,
-        { sig: 'destroy(): void', desc: 'Tear down the worker and release resources.' },
+        { sig: 'destroy(): void', desc: 'Tear down the DOM subtree. Destroys a self-loaded workbook; an injected one remains caller-owned.' },
       ],
     },
     {
       name: 'XlsxSheetViewer',
       ctor: 'new XlsxSheetViewer(canvas: HTMLCanvasElement, options?: XlsxSheetViewerOptions)',
-      note: 'Canvas-mounted active-sheet viewport. It uses the caller canvas and the same sheet rendering, selection, find and navigation mechanics as XlsxViewer, but creates no sheet-tab/footer chrome or visible scrollbar.',
+      note: 'Canvas-mounted active-sheet viewport. It uses the caller canvas and the same sheet rendering, selection, find and navigation mechanics as XlsxViewer, but creates no sheet-tab/footer chrome or visible scrollbar. DOM chrome, styles and listeners follow canvas.ownerDocument, so a parent page can mount borrowed workbook sheets into same-origin popup canvases.',
       options: [
         { name: 'cellScale', type: 'number', def: '1', desc: 'Scale factor for cell/header dimensions (0.5 = half size).' },
         { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom bounds as scale factors (10%–400%).' },
@@ -358,6 +361,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'selectionColor', type: 'string', def: "'#1a73e8'", desc: 'Accent color for the cell-selection rectangle.' },
         FIND_HIGHLIGHT_COLORS,
         { name: 'hiddenSheetMode', type: "'show' | 'skip' | 'dim'", def: "'show'", desc: 'Controls sequential navigation and hidden-sheet visibility without adding tab chrome.' },
+        { name: 'workbook', type: 'XlsxWorkbook', desc: 'Borrow an already-loaded workbook so multiple sheet viewers share one parse and cache while retaining independent view state. Await goToSheet(index) for deterministic first-paint completion. load() is then unsupported.' },
         { name: 'onViewportChange', type: '(offset: XlsxViewportOffset) => void', desc: 'Called with the clamped logical CSS-pixel offset after the active viewport moves. Horizontal x is measured from column A independently of browser RTL scrollLeft conventions.' },
         GFONTS,
         WASM_URL,
@@ -377,7 +381,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         VIEWER_ON_ERROR,
       ],
       methods: [
-        { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a workbook and render its first active sheet viewport.' },
+        { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a viewer-owned workbook and render its first active sheet viewport. Throws when a workbook was injected through options.' },
         { sig: 'goToSheet(index: number): Promise<void>', desc: 'Show a specific sheet (0-indexed, clamped).' },
         { sig: 'nextSheet(): Promise<void>', desc: 'Advance one sheet.' },
         { sig: 'prevSheet(): Promise<void>', desc: 'Go back one sheet.' },
@@ -395,7 +399,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'getCellAt(clientX: number, clientY: number): CellAddress | null', desc: 'Hit-test a viewport coordinate to a cell address.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The caller-owned canvas used by the viewer.' },
         RESOURCE_METRICS_METHOD,
-        { sig: 'destroy(): void', desc: 'Permanently close the viewer, release resources, and restore the caller canvas to its original DOM slot and style.' },
+        { sig: 'destroy(): void', desc: 'Permanently close the viewer and restore the caller canvas. A workbook supplied through options remains caller-owned and is not destroyed.' },
       ],
     },
     {
@@ -407,6 +411,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'static load(source, options?): Promise<XlsxWorkbook>', desc: 'Parse a workbook from a URL or ArrayBuffer.' },
         { sig: 'get sheetNames(): string[]', desc: 'Names of all sheets.' },
         { sig: 'get sheetCount(): number', desc: 'Total sheets.' },
+        { sig: 'get mode(): "main" | "worker"', desc: 'The render mode owned by this loaded workbook.' },
         { sig: 'getWorksheet(sheetIndex): Promise<Worksheet>', desc: 'Parse and return one worksheet model. Saved pivot-table facts are exposed read-only via `Worksheet.pivotTables`, with skipped malformed parts reported through `Worksheet.pivotDiagnostics`; saved worksheet cells and styles remain authoritative.' },
         { sig: 'renderViewport(canvas, sheetIndex, viewport, opts?: { width?, height?, dpr?, cellScale?, onTextRun? }): Promise<void>', desc: 'Render a row/col window of a sheet into the given canvas. `onTextRun` receives each text cell as `XlsxTextRunInfo` with required `sheetName` and A1 `cellRef` identity. Equations in shapes render when a `math` engine was passed to `load`. Unavailable in `mode: "worker"` — use renderViewportToBitmap.' },
         { sig: 'renderViewportToBitmap(sheetIndex, viewport, opts: { width, height, dpr?, cellScale? }): Promise<ImageBitmap>', desc: 'Render a sheet viewport and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread). `width` and `height` are required — a worker has no DOM element to measure. Equations in shapes are skipped in `mode: "worker"` (they require `mode: "main"`). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.', emphasis: '`width` and `height` are required — a worker has no DOM element to measure.' },

@@ -54,11 +54,27 @@ import type {
   RenderWorkerResponse,
   WireRenderViewportOptions,
 } from './worker-protocol.js';
-import { extractViewerLayoutMetrics } from './worker-protocol.js';
+import {
+  createSizeOverriddenWorksheet,
+  extractViewerRenderContext,
+} from './worker-protocol.js';
 import {
   isXlsxWorksheetPullResponse,
   XlsxWorksheetPullClient,
 } from './worksheet-pull-client.js';
+import { GridGeometry } from './internal/grid-geometry.js';
+import { inheritSheetRenderCache } from './renderer.js';
+
+/** @internal Viewer-only hook for retaining web fonts in the canvas document. */
+export const retainXlsxViewerFonts = Symbol('retain-xlsx-viewer-fonts');
+/** @internal Release worker-side viewer projection cache entries. */
+export const releaseXlsxViewerProjection = Symbol('release-xlsx-viewer-projection');
+
+interface RetainedFontSet {
+  refs: number;
+  faces: FontFace[] | null;
+  readonly loading: Promise<FontFace[]>;
+}
 
 /** Options for {@link XlsxWorkbook.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, the
@@ -107,12 +123,11 @@ export class XlsxWorkbook {
    *  `renderViewport` call reuses it — equations in shapes render when present,
    *  and are skipped (engine tree-shaken) when omitted. */
   private math: MathRenderer | undefined;
-  /** Google-Fonts `FontFace` objects this workbook preloaded into `document.fonts`
-   *  (main mode only — in worker mode the worker owns them and terminates with its
-   *  own FontFaceSet). Released in {@link destroy} so they do not leak into the
-   *  shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in core,
-   *  so a web font shared with another open workbook survives until both go). */
-  private googleFontFaces: FontFace[] = [];
+  /** Web-font registrations are per FontFaceSet. Same-origin child windows have
+   * their own set even when they share this workbook instance. */
+  private googleFontNames: string[] = [];
+  private readonly retainedFontSets = new Map<FontFaceSet, RetainedFontSet>();
+  private fontsDestroyed = false;
   private _mode: 'main' | 'worker' = 'main';
   private generation = 0;
   private archiveOperationTail: Promise<void> = Promise.resolve();
@@ -149,6 +164,12 @@ export class XlsxWorkbook {
     // relative override is still resolved against `location.href`.
     const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, location.href).href;
     this.bridge.post({ type: 'init', wasmUrl } satisfies WorkerRequest);
+  }
+
+  /** The render mode this loaded workbook owns. Injected viewers use this fact
+   *  to select direct-canvas or worker-bitmap rendering without probing. */
+  get mode(): 'main' | 'worker' {
+    return this._mode;
   }
 
   /** Parse an XLSX from a URL or ArrayBuffer. */
@@ -299,11 +320,45 @@ export class XlsxWorkbook {
       // realm even when paint runs in a worker. Register the same fallback
       // faces in both realms before any worksheet geometry snapshot is made so
       // ECMA-376 MDW is identical across paint and interaction.
-      this.googleFontFaces = await preloadGoogleFonts(
-        xlsxFontPreloadNames(this.parsedWorkbook),
-        XLSX_GOOGLE_FONTS,
-      );
+      this.googleFontNames = [...xlsxFontPreloadNames(this.parsedWorkbook)];
+      if (typeof document !== 'undefined' && document.fonts) {
+        await this.retainFontsInSet(document.fonts);
+      }
     }
+  }
+
+  private async retainFontsInSet(fontSet: FontFaceSet): Promise<() => void> {
+    if (this.googleFontNames.length === 0 || this.fontsDestroyed) return () => undefined;
+    let retained = this.retainedFontSets.get(fontSet);
+    if (retained) {
+      retained.refs++;
+    } else {
+      const loading = preloadGoogleFonts(this.googleFontNames, XLSX_GOOGLE_FONTS, fontSet);
+      retained = { refs: 1, faces: null, loading };
+      this.retainedFontSets.set(fontSet, retained);
+      loading.then((faces) => {
+        retained!.faces = faces;
+        if (this.fontsDestroyed) unloadGoogleFonts(faces);
+      });
+    }
+    await retained.loading;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const current = this.retainedFontSets.get(fontSet);
+      if (current !== retained) return;
+      current.refs--;
+      if (current.refs > 0) return;
+      this.retainedFontSets.delete(fontSet);
+      if (current.faces) unloadGoogleFonts(current.faces);
+      else current.loading.then(unloadGoogleFonts);
+    };
+  }
+
+  /** @internal Retain required faces in the document that owns a viewer canvas. */
+  async [retainXlsxViewerFonts](targetDocument: Document): Promise<() => void> {
+    return await this.retainFontsInSet(targetDocument.fonts);
   }
 
   get sheetNames(): string[] {
@@ -648,15 +703,23 @@ export class XlsxWorkbook {
     }
     if (!this.parsedWorkbook) throw new Error('Workbook not loaded');
     const styles = this.parsedWorkbook.styles;
-    return this.withWorksheetArchiveOperation(sheetIndex, (ws) =>
-      renderWorksheetViewport(
+    const extracted = extractViewerRenderContext(opts as WireRenderViewportOptions);
+    const { sizeOverrides, ...renderOpts } = extracted.opts;
+    return this.withWorksheetArchiveOperation(sheetIndex, (source) => {
+      const ws = extracted.worksheet ?? createSizeOverriddenWorksheet(source, sizeOverrides);
+      if (ws !== source) inheritSheetRenderCache(source, ws);
+      if (extracted.layoutMetrics) {
+        GridGeometry.forWorksheet(ws, extracted.layoutMetrics.maximumDigitWidth);
+      }
+      return renderWorksheetViewport(
         { ws, styles, math: this.math },
         target,
         viewport,
         // The stable closure uses the archive operation already reserved by
         // withWorksheetArchiveOperation, avoiding a nested FIFO acquisition.
-        { ...opts, fetchImage: this._fetchImage },
-      ));
+        { ...renderOpts, fetchImage: this._fetchImage },
+      );
+    });
   }
 
   /**
@@ -676,7 +739,7 @@ export class XlsxWorkbook {
     opts: WireRenderViewportOptions & { width: number; height: number },
   ): Promise<ImageBitmap> {
     this.assertResourceHealthy();
-    const extracted = extractViewerLayoutMetrics(opts);
+    const extracted = extractViewerRenderContext(opts);
     const wireOpts = { ...extracted.opts, dpr: opts.dpr ?? defaultDpr() };
     if (this._mode === 'worker') {
       if (!Number.isInteger(sheetIndex) || sheetIndex < 0 || sheetIndex >= this.sheetCount) {
@@ -691,6 +754,7 @@ export class XlsxWorkbook {
             viewport,
             opts: wireOpts,
             layoutMetrics: extracted.layoutMetrics,
+            viewProjection: extracted.projection,
           }) satisfies RenderWorkerRequest,
         ));
       return (res as Extract<RenderWorkerResponse, { type: 'viewportRendered' }>).bitmap;
@@ -698,6 +762,12 @@ export class XlsxWorkbook {
     const off = new OffscreenCanvas(1, 1);
     await this.renderViewport(off, sheetIndex, viewport, wireOpts);
     return off.transferToImageBitmap();
+  }
+
+  /** @internal Drop projections owned by a destroyed viewer. */
+  [releaseXlsxViewerProjection](projectionId: number): void {
+    if (this._mode !== 'worker') return;
+    this.bridge.post({ type: 'releaseViewProjection', projectionId } satisfies RenderWorkerRequest);
   }
 
   private withWorksheetArchiveOperation<T>(
@@ -750,15 +820,14 @@ export class XlsxWorkbook {
     this.parsedWorkbook = null;
     this.sheetCache.clear();
     this.sheetLoads.clear();
-    // Release the Google-Fonts substitutes this workbook preloaded into the
-    // shared FontFaceSet (main mode). Refcounted in core: a web font also used by
-    // another open workbook stays until that one is destroyed too. Without this,
-    // every opened workbook left its Google FontFace objects in `document.fonts`
-    // forever (SPA memory leak).
-    if (this.googleFontFaces.length > 0) {
-      unloadGoogleFonts(this.googleFontFaces);
-      this.googleFontFaces = [];
+    this.fontsDestroyed = true;
+    for (const retained of this.retainedFontSets.values()) {
+      if (retained.faces) unloadGoogleFonts(retained.faces);
+      // An in-flight registration observes fontsDestroyed in its own completion
+      // callback and releases exactly once when the faces become available.
     }
+    this.retainedFontSets.clear();
+    this.googleFontNames = [];
     // Frame-local lookup maps never escape the renderer; drop the owning core
     // caches to release decoded surfaces and SVG references.
     dropDecodedBitmapCache(this._fetchImage);

@@ -417,5 +417,96 @@ h1, h2, h3 { line-height: 1.08; letter-spacing: -0.035em; margin: 0; }
   .demo-detail { min-width: 0; padding: 10px; }
 }
 
+/* xlsx sheet windows — one parent-owned workbook, many popup canvases */
+.demo-sheet-window-launcher {
+  padding: clamp(12px, 2.5vw, 24px);
+  background: radial-gradient(120% 80% at 50% 0%, var(--preview-top), var(--preview-bottom) 70%);
+}
+.demo-sheet-window-summary {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 18px;
+  margin-bottom: 12px;
+  border: 1px solid color-mix(in srgb, var(--preview-text) 18%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, #fff 94%, var(--accent));
+  box-shadow: var(--document-shadow);
+  color: #172333;
+}
+.demo-sheet-window-summary > div { min-width: 0; display: grid; gap: 3px; }
+.demo-sheet-window-summary strong { font-size: 15px; }
+.demo-sheet-window-summary span { font: 11px var(--mono); color: #69778a; }
+.demo-sheet-window-actions {
+  margin-left: auto;
+  display: flex !important;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 8px !important;
+}
+.demo-sheet-window-badge {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  border: 1px solid #9bd8bd;
+  border-radius: 999px;
+  background: #e8f8f0;
+  color: #18794e !important;
+  font-weight: 700 !important;
+}
+.demo-sheet-window-actions button {
+  padding: 6px 10px;
+  border: 1px solid #b8c5d2;
+  border-radius: 6px;
+  background: #fff;
+  color: #172333;
+  font: 600 11px var(--sans);
+  cursor: pointer;
+}
+.demo-sheet-window-actions button:hover:not(:disabled) { border-color: #5d7187; background: #eef3f7; }
+.demo-sheet-window-actions button:disabled { cursor: default; opacity: 0.45; }
+.demo-sheet-window-list { display: grid; gap: 8px; }
+.demo-sheet-window-error {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border: 1px solid #efb5b5;
+  border-radius: 7px;
+  background: #fff1f1;
+  color: #9d2525;
+  font-size: 12px;
+}
+.demo-sheet-window-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--preview-text) 16%, transparent);
+  border-radius: 8px;
+  background: #fff;
+  color: #172333;
+}
+.demo-sheet-window-identity { min-width: 0; display: flex; align-items: center; gap: 12px; }
+.demo-sheet-window-identity span { flex: 0 0 auto; font: 11px var(--mono); color: #8a98a9; }
+.demo-sheet-window-identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.demo-sheet-window-row button {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 7px 11px;
+  border: 1px solid #b8c5d2;
+  border-radius: 6px;
+  background: #f7f9fb;
+  color: #172333;
+  font: 600 12px var(--sans);
+  cursor: pointer;
+}
+.demo-sheet-window-row button:hover { border-color: #5d7187; background: #eef3f7; }
+
+@media (max-width: 620px) {
+  .demo-sheet-window-summary { align-items: flex-start; }
+  .demo-sheet-window-actions { align-items: flex-end; grid-auto-flow: row; }
+  .demo-sheet-window-row { align-items: flex-start; flex-direction: column; }
+  .demo-sheet-window-row button { width: 100%; margin-left: 0; }
+}
+
 /* xlsx full viewer */
 .demo-xlsx { width: 100%; height: 560px; background: #fff; }

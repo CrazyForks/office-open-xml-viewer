@@ -28,6 +28,7 @@ import {
   type PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
 import { renderWorksheetViewport } from './render-orchestrator.js';
+import { inheritSheetRenderCache } from './renderer.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { resolveSharedStringRows } from './shared-strings.js';
 import {
@@ -36,7 +37,7 @@ import {
   type WorksheetCacheUsage,
 } from './worksheet-resource-limits.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
-import { applySizeOverrides } from './worker-protocol.js';
+import { WorksheetViewProjectionCache } from './worker-protocol.js';
 import { GridGeometry } from './internal/grid-geometry.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
 import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
@@ -60,6 +61,7 @@ let workbook: ParsedWorkbook | null = null;
  *  release — only the sequencing (fonts landed before first paint) matters. */
 let fontsLoaded: Promise<unknown> = Promise.resolve();
 const sheetCache = new Map<number, Worksheet>();
+const viewProjectionCache = new WorksheetViewProjectionCache();
 const sheetCacheUsage = new Map<number, WorksheetCacheUsage>();
 let retainedSheetUsage: WorksheetCacheUsage = {
   rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0,
@@ -132,6 +134,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
     host.setWasmInput(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
     return;
   }
+  if (req.type === 'releaseViewProjection') {
+    viewProjectionCache.release(req.projectionId);
+    return;
+  }
   const id = req.id;
   if (req.type === 'openSheetSession') worksheetPull.reserveOpen(req);
   try {
@@ -173,6 +179,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
       // zip path. Symmetric with XlsxWorkbook.destroy() and the docx/pptx render
       // workers (issue #781).
       sheetCache.clear();
+      viewProjectionCache.clear();
       sheetCacheUsage.clear();
       retainedSheetUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 };
       dropDecodedBitmapCache(getImage);
@@ -212,25 +219,28 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest | PullSessionCommand
       await fontsLoaded;
       const ws = sheetCache.get(req.sheetIndex);
       if (!ws) throw new Error('Worksheet is not loaded through its pull session');
-      // Converge this worker-local sheet to the main-thread model before
-      // drawing: view-only size mutations (outline collapse/expand, drag
-      // resize #567) happen on the main thread's Worksheet copy and would
-      // otherwise never reach this cache — the gutter/overlays would update
-      // while the grid bitmap stayed stale. The override map is cumulative and
-      // idempotent, so re-applying it every frame (and after a worker-side
-      // re-parse rebuilt the cache from the file) always converges.
+      // Apply view-only size mutations to a render-local projection. Multiple
+      // viewers may share this worker cache while retaining different outline
+      // and resize state, so the cached worksheet itself must stay unchanged.
       const { sizeOverrides, ...renderOpts } = req.opts;
-      applySizeOverrides(ws, sizeOverrides);
+      const projected = viewProjectionCache.resolve(
+        ws,
+        req.sheetIndex,
+        req.viewProjection,
+        sizeOverrides,
+      );
+      const renderWorksheet = projected.worksheet;
+      if (projected.created) inheritSheetRenderCache(ws, renderWorksheet);
       const maximumDigitWidth = req.layoutMetrics?.maximumDigitWidth;
       if (maximumDigitWidth !== undefined) {
         if (!Number.isFinite(maximumDigitWidth) || maximumDigitWidth <= 0) {
           throw new Error('XLSX maximum digit width must be a finite positive number');
         }
-        GridGeometry.forWorksheet(ws, maximumDigitWidth);
+        GridGeometry.forWorksheet(renderWorksheet, maximumDigitWidth);
       }
       const canvas = new OffscreenCanvas(1, 1); // orchestrator resizes it
       await renderWorksheetViewport(
-        { ws, styles: workbook.styles },
+        { ws: renderWorksheet, styles: workbook.styles },
         canvas,
         req.viewport,
         // Supply the in-worker byte loader so embedded images decode straight

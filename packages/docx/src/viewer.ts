@@ -11,12 +11,18 @@ import {
   CallerCanvasMount,
   CanvasOverlayHost,
   CanvasViewerErrorRouter,
+  resolveCanvasViewerMode,
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import { invalidateDocxRenderTarget } from './paint/canvas-document';
 
 export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
+  /**
+   * Borrow an already-loaded document. Its mode is authoritative, `load()` is
+   * unavailable, and `destroy()` leaves the caller-owned document open.
+   */
+  document?: DocxDocument;
   container?: HTMLElement;
   /**
    * When true, adds a transparent text overlay div over the canvas so the
@@ -69,8 +75,10 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
 }
 
 export class DocxViewer implements ZoomableViewer {
-  private readonly _documentOwner = new TerminalResourceOwner<DocxDocument>('DocxViewer');
+  private readonly _documentOwner: TerminalResourceOwner<DocxDocument>;
   private get _doc(): DocxDocument | null { return this._documentOwner.current; }
+  private readonly _injected: boolean;
+  private readonly _hostWindow: Window & typeof globalThis;
   private _currentPage = 0;
   /**
    * IX9 explicit zoom factor (`1` = 100% = the page at its natural pt→px width),
@@ -104,7 +112,18 @@ export class DocxViewer implements ZoomableViewer {
   constructor(canvas: HTMLCanvasElement, opts: DocxViewerOptions = {}) {
     this._canvas = canvas;
     this._opts = opts;
-    this._mode = opts.mode ?? 'main';
+    const injectedDocument = opts.document;
+    this._injected = injectedDocument !== undefined;
+    this._mode = resolveCanvasViewerMode('DocxViewer', opts.mode, injectedDocument);
+    this._documentOwner = new TerminalResourceOwner(
+      'DocxViewer',
+      injectedDocument ?? null,
+      false,
+    );
+    const hostWindow = canvas.ownerDocument?.defaultView ??
+      (typeof window !== 'undefined' ? window : null);
+    if (!hostWindow) throw new Error('DocxViewer requires a canvas with an active Window');
+    this._hostWindow = hostWindow;
 
     this._canvasMount = new CallerCanvasMount(canvas, {
       wrapperCssText: 'position:relative;display:inline-block;vertical-align:top;',
@@ -138,6 +157,12 @@ export class DocxViewer implements ZoomableViewer {
    */
   async load(source: string | ArrayBuffer): Promise<void> {
     if (this._destroyed) throw new Error('DocxViewer is destroyed');
+    if (this._injected) {
+      throw new Error(
+        'DocxViewer.load() is unsupported when an engine is injected via opts.document; ' +
+          'the injected engine is already loaded.',
+      );
+    }
     // SC20 atomic swap: retain the previous engine locally and only tear it down
     // AFTER the new one loads successfully. A re-load thus never orphans the old
     // engine's worker + pinned WASM allocation (the leak this guards), yet a
@@ -584,7 +609,7 @@ export class DocxViewer implements ZoomableViewer {
     if (custom) return custom;
     return (target: HyperlinkTarget): void => {
       if (target.kind === 'external') {
-        openExternalHyperlink(target.url);
+        openExternalHyperlink(target.url, undefined, this._hostWindow);
         return;
       }
       // Internal anchor (IX-nav): map the bookmark name to its destination page
