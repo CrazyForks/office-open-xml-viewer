@@ -165,7 +165,7 @@ function mountSheetWindows(el: HTMLElement, url: string): void {
 
         const open = document.createElement('button');
         open.type = 'button';
-        open.textContent = 'Open in window ↗';
+        open.textContent = 'Open in window \u2197\uFE0E';
         sheetButtons.push(open);
         open.addEventListener('click', () => {
           const existing = sessions.get(index);
@@ -239,7 +239,7 @@ function mountSheetWindows(el: HTMLElement, url: string): void {
           popup.addEventListener('pagehide', () => {
             viewer.destroy();
             if (sessions.get(index) === session) sessions.delete(index);
-            open.textContent = 'Open in window ↗';
+            open.textContent = 'Open in window \u2197\uFE0E';
             open.disabled = false;
             closeAll.disabled = sessions.size === 0;
           }, { once: true });
@@ -247,17 +247,17 @@ function mountSheetWindows(el: HTMLElement, url: string): void {
           viewer.goToSheet(index)
             .then(() => {
               if (sessions.get(index) !== session) return;
-              if (renderState.error) open.textContent = 'View error ↗';
+              if (renderState.error) open.textContent = 'View error \u2197\uFE0E';
               else {
                 loading.remove();
-                open.textContent = 'Focus window ↗';
+                open.textContent = 'Focus window \u2197\uFE0E';
               }
               open.disabled = false;
             })
             .catch((error) => {
               if (sessions.get(index) !== session) return;
               loading.textContent = err(error);
-              open.textContent = 'View error ↗';
+              open.textContent = 'View error \u2197\uFE0E';
               open.disabled = false;
             });
         });
@@ -274,7 +274,7 @@ function mountSheetWindows(el: HTMLElement, url: string): void {
           popup.close();
         });
         sheetButtons.forEach((button) => {
-          button.textContent = 'Open in window ↗';
+          button.textContent = 'Open in window \u2197\uFE0E';
           button.disabled = false;
         });
         closeAll.disabled = true;

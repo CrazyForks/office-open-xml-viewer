@@ -32,6 +32,36 @@ const borrowedEngine = {
       <code>load()</code> is unavailable, and the caller must destroy the borrowed engine after every
       view has been destroyed.
     </p>
+    <p>
+      Loading ownership and execution mode are separate choices. Both loading modes support both
+      execution modes:
+    </p>
+    <div class="api-mode-table-wrap">
+      <table class="api-mode-table">
+        <thead>
+          <tr><th>Loading ownership</th><th><code>mode: 'main'</code></th><th><code>mode: 'worker'</code></th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>Viewer-owned</th>
+            <td>Pass <code>mode: 'main'</code> to the Viewer, then call <code>load(source)</code>.</td>
+            <td>Pass <code>mode: 'worker'</code> to the Viewer, then call <code>load(source)</code>.</td>
+          </tr>
+          <tr>
+            <th>Shared engine</th>
+            <td><code>{borrowedEngine.className}.load(source, {'{'} mode: 'main' {'}'})</code>, then <code>{borrowedEngine.factory}</code>.</td>
+            <td><code>{borrowedEngine.className}.load(source, {'{'} mode: 'worker' {'}'})</code>, then <code>{borrowedEngine.factory}</code>.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      On the shared-engine path, the engine's mode is authoritative: <code>{borrowedEngine.factory}</code>
+      deliberately does not accept a mode and cannot switch an already-loaded engine. Here,
+      <code>main</code> means parsing in a Worker and rendering on the main thread; <code>worker</code>
+      means both parsing and rendering in a Worker. Worker rendering requires Worker and
+      OffscreenCanvas support and may have format-specific feature limitations.
+    </p>
   </div>
 
   <div class="api-errors">
@@ -107,6 +137,13 @@ const borrowedEngine = {
   .api-ownership h4 { margin: 0; font-size: 19px; }
   .api-ownership p { max-width: 92ch; margin: 10px 0 0; color: var(--text-dim); font-size: 14.5px; }
   .api-ownership code { font-family: var(--mono); font-size: 0.9em; color: var(--text); }
+  .api-mode-table-wrap { margin-top: 14px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  .api-mode-table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 13.5px; }
+  .api-mode-table th, .api-mode-table td { padding: 10px 12px; text-align: left; vertical-align: top; border-top: 1px solid var(--border); }
+  .api-mode-table thead th { border-top: 0; background: var(--code-bg); color: var(--text); font-weight: 700; }
+  .api-mode-table tbody th { width: 150px; color: var(--text); white-space: nowrap; }
+  .api-mode-table td { color: var(--text-dim); }
+  .api-mode-table th + th, .api-mode-table th + td, .api-mode-table td + td { border-left: 1px solid var(--border); }
 
   .api-errors { margin-top: 30px; padding: 26px 28px 28px; border: 1px solid var(--border); background: var(--bg-elev); }
   .api-errors h4 { margin: 0; font-size: 19px; }

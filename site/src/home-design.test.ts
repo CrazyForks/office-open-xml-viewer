@@ -24,6 +24,11 @@ describe('official-site home design', () => {
     expect(capabilities).not.toMatch(/border-(?:top|bottom): [2-9]px/);
   });
 
+  it('forces external-link arrows to use text presentation on mobile', () => {
+    expect(capabilities).toContain('Full support matrix &#x2197;&#xFE0E;');
+    expect(home).toContain('GitHub &#x2197;&#xFE0E;');
+  });
+
   it('reserves format colours for format-heading underlines', () => {
     expect(capabilities).toContain('background: linear-gradient(transparent 68%, var(--c) 68%, var(--c) 88%, transparent 88%);');
     expect(capabilities).toContain('border-bottom: 1px solid currentColor;');
@@ -74,6 +79,10 @@ describe('official-site home design', () => {
     expect(live).toContain('DocxScrollViewer.fromDocument');
     expect(live).toContain('PptxScrollViewer.fromPresentation');
     expect(live.match(/enableTextSelection:\s*true/g)).toHaveLength(2);
+  });
+
+  it('starts paginated samples at the top of the embedded viewport', () => {
+    expect(live.match(/paddingTop:\s*0/g)).toHaveLength(2);
   });
 
   it('centres a smaller hero icon and aligns the second-row format links on mobile', () => {

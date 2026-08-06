@@ -80,6 +80,7 @@ function mountPaginated(
       maxScale = MAX_SAMPLE_WIDTH / (presentation.slideWidth / EMU_PER_PX);
       viewer = PptxScrollViewer.fromPresentation(host, presentation, {
         gap: 26,
+        paddingTop: 0,
         overscan: presentation.slideCount,
         enableTextSelection: true,
         pageShadow: 'var(--document-shadow)',
@@ -105,6 +106,7 @@ function mountPaginated(
       maxScale = widestPage > 0 ? MAX_SAMPLE_WIDTH / widestPage : Number.POSITIVE_INFINITY;
       viewer = DocxScrollViewer.fromDocument(host, document, {
         gap: 26,
+        paddingTop: 0,
         overscan: document.pageCount,
         enableTextSelection: true,
         pageShadow: 'var(--document-shadow)',
