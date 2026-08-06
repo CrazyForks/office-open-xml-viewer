@@ -2976,7 +2976,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     return css;
   }
 
-  /** Excel-style zoom control pinned to the right end of the tab bar:
+  /** Excel-style zoom control pinned to the footer's logical end:
    *  `−  [────slider────]  +  100%`. Live-updates the cell scale on input. */
   private buildZoomControl(): HTMLDivElement {
     const zoomMin = this.opts.zoomMin ?? 0.1;

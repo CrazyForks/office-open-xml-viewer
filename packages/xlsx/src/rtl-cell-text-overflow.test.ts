@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { colWidthToPx, getMdwForWorksheet, renderViewport } from './renderer.js';
+import { colWidthToPx, getMdwForWorksheet, HEADER_W, renderViewport } from './renderer.js';
 import type { Styles, Worksheet } from './types.js';
 
 const TEXT = 'ورقة ثانية بالعربية';
+const CENTER_TEXT = TEXT.repeat(2);
 
 const STYLES: Styles = {
   fonts: [{
@@ -22,8 +23,19 @@ const STYLES: Styles = {
     borderId: 0,
     numFmtId: 0,
     alignH: 'right',
+    alignV: null,
+    wrapText: false,
     readingOrder: 2,
-  } as Styles['cellXfs'][number]],
+  }, {
+    fontId: 0,
+    fillId: 0,
+    borderId: 0,
+    numFmtId: 0,
+    alignH: 'centerContinuous',
+    alignV: null,
+    wrapText: false,
+    readingOrder: 2,
+  }],
   numFmts: [],
   dxfs: [],
 };
@@ -64,7 +76,7 @@ function recordingContext(): {
   let lastRect = { x: 0, width: 0 };
   const textClips: Array<{ text: string; x: number; width: number }> = [];
   const state: Record<string, unknown> = {
-    canvas: { width: 240, height: 100 },
+    canvas: { width: 400, height: 100 },
     fillStyle: '#000000',
     strokeStyle: '#000000',
     lineWidth: 1,
@@ -108,5 +120,37 @@ describe('RTL cell text overflow', () => {
     const cellWidth = colWidthToPx(sheet.colWidths[1], getMdwForWorksheet(sheet));
     expect(textDraw).toBeDefined();
     expect(textDraw?.width).toBe(cellWidth * 2);
+  });
+
+  it('centers across the physical RTL range and overflows beyond its left edge', () => {
+    const recording = recordingContext();
+    const sheet = worksheet();
+    sheet.colWidths[3] = 8.43;
+    sheet.rows[0].cells = [{
+      row: 1,
+      col: 1,
+      styleIndex: 1,
+      value: { type: 'text', text: CENTER_TEXT },
+    }, {
+      row: 1,
+      col: 2,
+      styleIndex: 1,
+      value: { type: 'empty' },
+    }];
+
+    renderViewport(
+      recording.ctx,
+      sheet,
+      STYLES,
+      { row: 1, col: 1, rows: 1, cols: 3 },
+    );
+
+    const textDraw = recording.textClips.find((call) => call.text === CENTER_TEXT);
+    const cellWidth = colWidthToPx(sheet.colWidths[1], getMdwForWorksheet(sheet));
+    expect(textDraw).toEqual({
+      text: CENTER_TEXT,
+      x: 400 - HEADER_W - cellWidth * 3,
+      width: cellWidth * 3,
+    });
   });
 });
