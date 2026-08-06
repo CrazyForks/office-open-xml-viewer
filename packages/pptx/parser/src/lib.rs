@@ -916,9 +916,9 @@ impl PptxArchive {
     pub fn extract_media(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
         let zip = self
             .archive
-            .as_mut()
+            .as_ref()
             .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
-        zip.run_operation("extract-media", |zip| read_zip_bytes(zip, path))
+        zip.read_part_in_independent_operation("extract-media", path)
             .map_err(|e| JsValue::from_str(&e))
     }
 
@@ -929,9 +929,9 @@ impl PptxArchive {
     pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
         let zip = self
             .archive
-            .as_mut()
+            .as_ref()
             .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
-        zip.run_operation("extract-image", |zip| read_zip_bytes(zip, path))
+        zip.read_part_in_independent_operation("extract-image", path)
             .map_err(|e| JsValue::from_str(&e))
     }
 
@@ -1067,6 +1067,19 @@ impl PptxZip {
 
     fn usage(&self) -> ResourceUsage {
         self.session.usage()
+    }
+
+    /// Raw package parts are independent of the retained slide cursor. Give
+    /// each read its own package operation so rendering slide N may overlap the
+    /// acknowledged pull lifecycle for slide N+1 without sharing ownership or
+    /// accounting state.
+    fn read_part_in_independent_operation(
+        &self,
+        operation_name: &str,
+        path: &str,
+    ) -> Result<Vec<u8>, String> {
+        self.session
+            .run_operation(operation_name, |operation| operation.read_bytes(path))
     }
 
     fn index_for_name(&self, path: &str) -> Option<()> {

@@ -107,13 +107,13 @@ export interface BitmapCommitSize {
 export class StaticCanvasRenderDispatcher {
   private generation = 0;
   private destroyed = false;
-  private bitmapContext: ImageBitmapRenderingContext | null | undefined;
+  private readonly bitmapContext: ImageBitmapRenderingContext | null;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
-    private readonly bitmapMode: boolean,
+    bitmapMode: boolean,
   ) {
-    this.bitmapContext = undefined;
+    this.bitmapContext = bitmapMode ? canvas.getContext('bitmaprenderer') : null;
   }
 
   begin(): number {
@@ -134,15 +134,12 @@ export class StaticCanvasRenderDispatcher {
       bitmap.close();
       return false;
     }
-    if (this.bitmapContext === undefined) {
-      this.bitmapContext = this.bitmapMode ? this.canvas.getContext('bitmaprenderer') : null;
-    }
     if (!this.bitmapContext) {
       bitmap.close();
       throw new Error('bitmaprenderer context not available');
     }
-    this.canvas.width = bitmap.width;
-    this.canvas.height = bitmap.height;
+    if (this.canvas.width !== bitmap.width) this.canvas.width = bitmap.width;
+    if (this.canvas.height !== bitmap.height) this.canvas.height = bitmap.height;
     if (size.cssWidth !== undefined) this.canvas.style.width = `${size.cssWidth}px`;
     if (size.cssHeight !== undefined) this.canvas.style.height = `${size.cssHeight}px`;
     try {

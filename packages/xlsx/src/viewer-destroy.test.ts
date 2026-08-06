@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { XlsxViewer } from './viewer.js';
+import { XlsxWorkbook } from './workbook.js';
 import { installDom, makeContainer, type FakeDocument, type FakeEl } from './viewer-destroy-test-dom.js';
 
 afterEach(() => {
@@ -91,5 +92,16 @@ describe('XlsxViewer.destroy() — subtree + listeners + style', () => {
     v.destroy();
     expect(() => v.destroy()).not.toThrow();
     expect(container.childNodes.length).toBe(0);
+  });
+
+  it('permanently rejects a new load after destroy without acquiring a workbook', async () => {
+    installDom();
+    const viewer = new XlsxViewer(makeContainer() as unknown as HTMLElement);
+    const load = vi.spyOn(XlsxWorkbook, 'load');
+    viewer.destroy();
+
+    const closed = 'XlsxViewer is destroyed';
+    await expect(viewer.load(new ArrayBuffer(0))).rejects.toThrow(closed);
+    expect(load).not.toHaveBeenCalled();
   });
 });

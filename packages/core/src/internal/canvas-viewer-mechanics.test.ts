@@ -4,6 +4,29 @@ import { CanvasViewerErrorRouter, StaticCanvasRenderDispatcher } from './canvas-
 afterEach(() => vi.restoreAllMocks());
 
 describe('StaticCanvasRenderDispatcher', () => {
+  it('acquires the bitmap context once and avoids redundant backing-store resets', () => {
+    const bitmapContext = { transferFromImageBitmap: vi.fn() };
+    let width = 10;
+    let height = 20;
+    const setWidth = vi.fn((value: number) => { width = value; });
+    const setHeight = vi.fn((value: number) => { height = value; });
+    const canvas = {
+      get width() { return width; },
+      set width(value: number) { setWidth(value); },
+      get height() { return height; },
+      set height(value: number) { setHeight(value); },
+      style: {},
+      getContext: vi.fn(() => bitmapContext),
+    } as unknown as HTMLCanvasElement;
+    const dispatcher = new StaticCanvasRenderDispatcher(canvas, true);
+    const bitmap = { width: 10, height: 20, close: vi.fn() } as unknown as ImageBitmap;
+
+    expect(dispatcher.commitBitmap(dispatcher.begin(), bitmap)).toBe(true);
+    expect(canvas.getContext).toHaveBeenCalledOnce();
+    expect(setWidth).not.toHaveBeenCalled();
+    expect(setHeight).not.toHaveBeenCalled();
+  });
+
   it('closes a stale worker bitmap instead of committing it', () => {
     const transferFromImageBitmap = vi.fn();
     const canvas = {

@@ -74,6 +74,29 @@ describe('Node bounded PPTX presentation session', () => {
     }
   });
 
+  it('keeps raw-part extraction independent while a slide cursor awaits acknowledgement', async () => {
+    const prototype = archivePrototype();
+    const originalPullSlide = prototype.pull_slide;
+    let extractedBytes = 0;
+    const pullSlide = vi.spyOn(prototype, 'pull_slide').mockImplementation(function (
+      this: ArchivePrototype,
+      ...args: Parameters<ArchivePrototype['pull_slide']>
+    ) {
+      const payload = originalPullSlide.apply(this, args);
+      extractedBytes = this.extract_image('ppt/media/image1.jpeg').byteLength;
+      return payload;
+    });
+    try {
+      const session = await openPptxPresentation(bytes);
+      const iterator = session.slides();
+      await expect(iterator.next()).resolves.toMatchObject({ done: false });
+      expect(extractedBytes).toBeGreaterThan(0);
+      await iterator.return();
+    } finally {
+      pullSlide.mockRestore();
+    }
+  });
+
   it('invalidates sibling sessions after a trap and recovers on one fresh generation', async () => {
     const extract = vi.spyOn(archivePrototype(), 'extract_image')
       .mockImplementationOnce(() => { throw new RangeError('synthetic trap'); });
@@ -245,6 +268,12 @@ describe('Node bounded PPTX presentation session', () => {
 type ArchivePrototype = {
   free(): void;
   extract_image(path: string): Uint8Array;
+  pull_slide(
+    slideIndex: number,
+    operationId: number,
+    generation: number,
+    byteCredit: number,
+  ): Uint8Array;
 };
 
 function archivePrototype(): ArchivePrototype {
