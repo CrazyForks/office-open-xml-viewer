@@ -3,18 +3,18 @@
 // Do not edit by hand.
 
 // --- file: docx.d.ts ---
-export declare interface AnchorHostMetrics {
+export interface AnchorHostMetrics {
     fontSize: number;
     fontFamily?: string | null;
     fontFamilyEastAsia?: string | null;
     bold?: boolean;
     italic?: boolean;
 }
-export declare function autoResize(render: (width: number, height: number) => void | Promise<void>, element: Element, opts?: AutoResizeOptions): () => void;
-export declare interface AutoResizeOptions {
+export function autoResize(render: (width: number, height: number) => void | Promise<void>, element: Element, opts?: AutoResizeOptions): () => void;
+export interface AutoResizeOptions {
     pauseWhenHidden?: boolean;
 }
-export declare type BodyElement = ({
+export type BodyElement = ({
     type: 'paragraph';
 } & DocParagraph) | ({
     type: 'table';
@@ -35,14 +35,14 @@ export declare type BodyElement = ({
     pageNumType?: PageNumType | null;
     textDirection?: string | null;
 };
-export declare interface BorderSpec {
+export interface BorderSpec {
     width: number;
     color: string | null;
     style: string;
 }
-export declare function buildDocxHighlightLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[], matches: DocxHighlightMatch[], cssWidth: number, cssHeight: number, measureForFont: (font: string) => (s: string) => number, colors?: DocxHighlightColors): void;
-export declare function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[], cssWidth: number, cssHeight: number, onHyperlinkClick?: (target: HyperlinkTarget) => void, measureForFont?: (font: string) => (s: string) => number): void;
-export declare interface CellBorders {
+export function buildDocxHighlightLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[], matches: DocxHighlightMatch[], cssWidth: number, cssHeight: number, measureForFont: (font: string) => (s: string) => number, colors?: DocxHighlightColors): void;
+export function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[], cssWidth: number, cssHeight: number, onHyperlinkClick?: (target: HyperlinkTarget) => void, measureForFont?: (font: string) => (s: string) => number): void;
+export interface CellBorders {
     top: BorderSpec | null;
     bottom: BorderSpec | null;
     left: BorderSpec | null;
@@ -50,12 +50,12 @@ export declare interface CellBorders {
     insideH: BorderSpec | null;
     insideV: BorderSpec | null;
 }
-export declare type CellElement = ({
+export type CellElement = ({
     type: 'paragraph';
 } & DocParagraph) | ({
     type: 'table';
 } & DocTable);
-declare interface ChartDataLabelOverride {
+interface ChartDataLabelOverride {
     idx: number;
     text: string;
     position?: string;
@@ -69,7 +69,7 @@ declare interface ChartDataLabelOverride {
     showPercent?: boolean;
     deleted?: boolean;
 }
-declare interface ChartDataPointOverride {
+interface ChartDataPointOverride {
     idx: number;
     color?: string;
     markerSymbol?: string;
@@ -78,7 +78,7 @@ declare interface ChartDataPointOverride {
     markerLine?: string;
     explosion?: number;
 }
-declare interface ChartErrBars {
+interface ChartErrBars {
     dir: string;
     barType: string;
     plus: (number | null)[];
@@ -88,7 +88,7 @@ declare interface ChartErrBars {
     lineWidthEmu?: number;
     dash?: string;
 }
-declare interface ChartexBoxSeries {
+interface ChartexBoxSeries {
     name: string;
     color?: string | null;
     valuesByCategory: number[][];
@@ -98,23 +98,23 @@ declare interface ChartexBoxSeries {
     showNonoutliers: boolean;
     quartileMethod: string;
 }
-declare interface ChartexBoxWhisker {
+interface ChartexBoxWhisker {
     categories: string[];
     series: ChartexBoxSeries[];
 }
-declare interface ChartexSunburst {
+interface ChartexSunburst {
     rows: ChartexSunburstRow[];
 }
-declare interface ChartexSunburstRow {
+interface ChartexSunburstRow {
     path: string[];
     size: number;
 }
-declare interface ChartLabelBox {
+interface ChartLabelBox {
     fill?: string;
     borderColor?: string;
     borderWidthEmu?: number;
 }
-declare interface ChartManualLayout {
+interface ChartManualLayout {
     xMode: string;
     yMode: string;
     layoutTarget?: string;
@@ -123,7 +123,7 @@ declare interface ChartManualLayout {
     w?: number;
     h?: number;
 }
-declare interface ChartModel {
+interface ChartModel {
     chartType: ChartType;
     title: string | null;
     categories: string[];
@@ -227,7 +227,7 @@ declare interface ChartModel {
     chartexSunburst?: ChartexSunburst | null;
     chartexAccents?: string[] | null;
 }
-export declare interface ChartRun {
+export interface ChartRun {
     chart: ChartModel;
     widthPt: number;
     heightPt: number;
@@ -248,7 +248,7 @@ export declare interface ChartRun {
     anchorXRelativeFrom?: string | null;
     anchorYRelativeFrom?: string | null;
 }
-declare interface ChartSeries {
+interface ChartSeries {
     name: string;
     color: string | null;
     values: (number | null)[];
@@ -273,7 +273,7 @@ declare interface ChartSeries {
     trendLines?: ChartTrendline[] | null;
     lineHidden?: boolean | null;
 }
-declare interface ChartSeriesDataLabels {
+interface ChartSeriesDataLabels {
     showVal: boolean;
     showCatName: boolean;
     showSerName: boolean;
@@ -288,7 +288,7 @@ declare interface ChartSeriesDataLabels {
     leaderLineColor?: string;
     leaderLineWidthEmu?: number;
 }
-declare interface ChartTrendline {
+interface ChartTrendline {
     trendlineType: string;
     order?: number | null;
     period?: number | null;
@@ -300,30 +300,30 @@ declare interface ChartTrendline {
     lineColor?: string | null;
     lineWidthEmu?: number | null;
 }
-declare type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | string;
-export declare interface ColSpec {
+type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | string;
+export interface ColSpec {
     widthPt: number;
     spacePt: number;
 }
-export declare interface ColumnsSpec {
+export interface ColumnsSpec {
     count: number;
     spacePt: number;
     equalWidth: boolean;
     sep: boolean;
     cols: ColSpec[];
 }
-export declare interface DocComment {
+export interface DocComment {
     id: string;
     author?: string;
     initials?: string;
     date?: string;
     text: string;
 }
-export declare interface DocNote {
+export interface DocNote {
     id: string;
     content: BodyElement[];
 }
-export declare interface DocParagraph {
+export interface DocParagraph {
     paragraphId?: string;
     alignment: 'left' | 'start' | 'center' | 'right' | 'end' | 'justify' | 'both' | 'distribute' | 'lowKashida' | 'mediumKashida' | 'highKashida' | 'thaiDistribute' | string;
     indentLeft: number;
@@ -354,13 +354,13 @@ export declare interface DocParagraph {
     snapToGrid?: boolean;
     framePr?: FramePr;
 }
-export declare interface DocRevision {
+export interface DocRevision {
     kind: 'insertion' | 'deletion' | string;
     author?: string;
     date?: string;
     text: string;
 }
-export declare type DocRun = ({
+export type DocRun = ({
     type: 'text';
 } & DocxTextRun) | ({
     type: 'anchorHost';
@@ -384,7 +384,7 @@ export declare type DocRun = ({
 } | ({
     type: 'ptab';
 } & PTabRun);
-export declare interface DocSettings {
+export interface DocSettings {
     kinsoku?: boolean;
     noLineBreaksBefore?: string;
     noLineBreaksAfter?: string;
@@ -395,7 +395,7 @@ export declare interface DocSettings {
     balanceSingleByteDoubleByteWidth?: boolean;
     adjustLineHeightInTable?: boolean;
 }
-export declare interface DocTable {
+export interface DocTable {
     colWidths: number[];
     rows: DocTableRow[];
     borders: TableBorders;
@@ -412,7 +412,7 @@ export declare interface DocTable {
     tblpPr?: TblpPr;
     overlap?: string;
 }
-export declare interface DocTableCell {
+export interface DocTableCell {
     content: CellElement[];
     colSpan: number;
     vMerge: boolean | null;
@@ -426,7 +426,7 @@ export declare interface DocTableCell {
     marginLeft?: number | null;
     marginRight?: number | null;
 }
-export declare interface DocTableRow {
+export interface DocTableRow {
     cells: DocTableCell[];
     gridBefore?: number;
     gridAfter?: number;
@@ -435,22 +435,8 @@ export declare interface DocTableRow {
     isHeader: boolean;
     cantSplit?: boolean;
 }
-export declare class DocxDocument {
-    private _document;
-    private _meta;
-    private _pages;
-    private _bookmarkPages;
-    private _mode;
-    private _worker;
-    private _bridge;
-    private readonly _rawParts;
-    private _embeddedFontFaces;
-    private _googleFontFaces;
-    private _localMetricFontFaces;
-    private readonly _fetchImage;
-    private constructor();
+export class DocxDocument {
     static load(source: string | ArrayBuffer, opts?: LoadOptions): Promise<DocxDocument>;
-    private _parse;
     destroy(): void;
     getImage(imagePath: string, mimeType: string): Promise<Blob>;
     getFontBytes(partPath: string): Promise<Uint8Array>;
@@ -462,8 +448,6 @@ export declare class DocxDocument {
     get comments(): DocComment[];
     get footnotes(): DocNote[];
     get endnotes(): DocNote[];
-    private _getPages;
-    private _getBookmarkPages;
     getBookmarkPage(bookmarkName: string): number | undefined;
     pageSize(pageIndex: number): {
         widthPt: number;
@@ -472,8 +456,10 @@ export declare class DocxDocument {
     renderPage(target: HTMLCanvasElement | OffscreenCanvas, pageIndex: number, opts?: RenderPageOptions): Promise<void>;
     renderPageToBitmap(pageIndex: number, opts?: RenderPageToBitmapOptions): Promise<ImageBitmap>;
     collectPageRuns(pageIndex: number, opts?: WireRenderPageOptions): Promise<DocxTextRunInfo[]>;
+    private __privatePresence;
+    private constructor();
 }
-export declare interface DocxDocumentModel {
+export interface DocxDocumentModel {
     section: SectionProps;
     body: BodyElement[];
     headers: HeadersFooters;
@@ -490,94 +476,31 @@ export declare interface DocxDocumentModel {
     settings?: DocSettings;
     parseError?: string;
 }
-export declare type DocxHighlightColors = FindHighlightColors;
-export declare interface DocxHighlightMatch {
+export type DocxHighlightColors = FindHighlightColors;
+export interface DocxHighlightMatch {
     slices: MatchRunSlice[];
     active: boolean;
 }
-export declare interface DocxMatchLocation {
+export interface DocxMatchLocation {
     page: number;
 }
-export declare interface DocxRunBorder {
+export interface DocxRunBorder {
     style: string;
     color?: string | null;
     width: number;
     space: number;
 }
-export declare class DocxScrollViewer implements ZoomableViewer {
-    private _doc;
-    private readonly _injected;
-    private readonly _opts;
-    private readonly _container;
-    private readonly _wrapper;
-    private readonly _scrollHost;
-    private readonly _spacer;
-    private _mode;
-    private _scale;
-    private _scaleEstablished;
-    private _pendingScale;
-    private readonly _slots;
-    private readonly _free;
-    private _heights;
-    private _lastRange;
-    private _lastTopIndex;
-    private _scrollListener;
-    private _destroyed;
-    private _measureCtx;
-    private _loadGen;
-    private readonly _bitmapInFlight;
-    private _renderEpoch;
-    private _settleTimer;
-    private _wheelListener;
-    private _pendingZoomAnchor;
-    private _resizeObserver;
-    private _prevBase;
-    private _lastFitWidth;
-    private readonly _pageShadow;
-    private readonly _find;
-    private _findActive;
+export class DocxScrollViewer implements ZoomableViewer {
     constructor(container: HTMLElement, opts?: DocxScrollViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     get pageCount(): number;
-    private _pageWidthPx;
-    private _pageHeightPx;
-    private _fitWidthPx;
-    private _baseScale;
     relayout(): void;
-    private _recomputeHeights;
-    private _gap;
-    private _overscan;
-    private _pad;
-    private _padH;
-    private _pageIndexAtOffset;
-    private _range;
-    private _syncSpacer;
-    private _syncSpacerWidth;
-    private _onScroll;
-    private _mountVisible;
-    private _applyPageShadow;
-    private _acquireSlot;
-    private _recycleSlot;
-    private _positionSlot;
-    private _dpr;
-    private _renderSlot;
-    private _hyperlinkHandler;
-    private _measureForFont;
-    private _canvasCssPx;
-    private _reportRenderError;
-    private _renderSlotBitmap;
     setScale(scale: number): void;
     getScale(): number;
     zoomIn(): void;
     zoomOut(): void;
     fitWidth(): void;
     fitPage(): void;
-    private _fit;
-    private _previewVisible;
-    private _previewSlot;
-    private _scheduleSettle;
-    private _settleRender;
-    private _settleSlot;
     scrollToPage(index: number, opts?: {
         behavior?: 'auto' | 'smooth';
     }): void;
@@ -585,16 +508,12 @@ export declare class DocxScrollViewer implements ZoomableViewer {
     findNext(): Promise<FindMatch<DocxMatchLocation> | null>;
     findPrev(): Promise<FindMatch<DocxMatchLocation> | null>;
     clearFind(): void;
-    private _activateMatch;
-    private _collectPageRuns;
-    private _redrawHighlights;
-    private _redrawSlotHighlights;
-    private _onResize;
     get topVisiblePage(): number;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     destroy(): void;
+    private __privatePresence;
 }
-export declare interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>, LoadOptions {
+export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>, LoadOptions {
     width?: number;
     gap?: number;
     paddingTop?: number;
@@ -617,7 +536,7 @@ export declare interface DocxScrollViewerOptions extends Omit<RenderPageOptions,
     enableHyperlinks?: boolean;
     onError?: (err: Error) => void;
 }
-export declare interface DocxTextRun {
+export interface DocxTextRun {
     text: string;
     bold: boolean;
     italic: boolean;
@@ -663,7 +582,7 @@ export declare interface DocxTextRun {
     eastAsianCombineBrackets?: string;
     noteRef?: NoteRef;
 }
-export declare interface DocxTextRunInfo {
+export interface DocxTextRunInfo {
     paragraphId?: string;
     text: string;
     x: number;
@@ -677,24 +596,7 @@ export declare interface DocxTextRunInfo {
     hyperlink?: HyperlinkTarget;
     eastAsianVert?: boolean;
 }
-export declare class DocxViewer implements ZoomableViewer {
-    private _doc;
-    private _currentPage;
-    private _scale;
-    private _canvas;
-    private _wrapper;
-    private _originalParent;
-    private _originalNextSibling;
-    private _originalDisplay;
-    private _textLayer;
-    private _highlightLayer;
-    private _find;
-    private _measureCtx;
-    private _opts;
-    private readonly _mode;
-    private _bitmapCtx;
-    private _destroyed;
-    private _loadGen;
+export class DocxViewer implements ZoomableViewer {
     constructor(canvas: HTMLCanvasElement, opts?: DocxViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     get pageCount(): number;
@@ -703,37 +605,22 @@ export declare class DocxViewer implements ZoomableViewer {
     goToPage(index: number): Promise<void>;
     nextPage(): Promise<void>;
     prevPage(): Promise<void>;
-    private _naturalWidthPx;
-    private _renderWidth;
     getScale(): number;
-    private _zoomMin;
-    private _zoomMax;
     setScale(scale: number): Promise<void>;
     zoomIn(): Promise<void>;
     zoomOut(): Promise<void>;
     fitWidth(): Promise<void>;
     fitPage(): Promise<void>;
-    private _fit;
-    private _fitContainer;
     findText(query: string, opts?: FindMatchesOptions): Promise<FindMatch<DocxMatchLocation>[]>;
     findNext(): Promise<FindMatch<DocxMatchLocation> | null>;
     findPrev(): Promise<FindMatch<DocxMatchLocation> | null>;
     clearFind(): void;
-    private _activateMatch;
-    private _redrawHighlights;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     destroy(): void;
-    private _render;
-    private _reportRenderError;
-    private _renderPage;
-    private _buildHighlightLayer;
-    private _canvasCssPx;
-    private _measureForFont;
-    private _collectPageRuns;
-    private _buildTextLayer;
-    private _hyperlinkHandler;
+    private __privatePresence;
 }
-export declare interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
+export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
+    document?: DocxDocument;
     container?: HTMLElement;
     enableTextSelection?: boolean;
     findHighlightColors?: FindHighlightColors;
@@ -745,18 +632,19 @@ export declare interface DocxViewerOptions extends RenderPageOptions, LoadOption
     enableHyperlinks?: boolean;
     onError?: (err: Error) => void;
 }
-declare interface Duotone {
+interface Duotone {
     clr1: string;
     clr2: string;
 }
-export declare interface EmbeddedFontRef {
+export interface EmbeddedFontRef {
     fontName: string;
     style: 'regular' | 'bold' | 'italic' | 'boldItalic';
     partPath: string;
     fontKey: string;
 }
-declare type EmphasisMark = 'dot' | 'comma' | 'circle' | 'underDot';
-export declare interface FieldRun {
+type EmphasisMark = 'dot' | 'comma' | 'circle' | 'underDot';
+type ExtensibleLiteral<Known extends string> = Known | (string & Record<never, never>);
+export interface FieldRun {
     fieldType: string;
     instruction: string;
     fallbackText: string;
@@ -775,25 +663,25 @@ export declare interface FieldRun {
     highlight?: string | null;
     emphasisMark?: EmphasisMark;
 }
-declare interface FillRect {
+interface FillRect {
     l?: number;
     t?: number;
     r?: number;
     b?: number;
 }
-export declare interface FindMatch<Loc = unknown> {
+export interface FindHighlightColors {
+    match?: string;
+    active?: string;
+}
+export interface FindMatch<Loc = unknown> {
     matchIndex: number;
     text: string;
     location: Loc;
 }
-export declare interface FindHighlightColors {
-    match?: string;
-    active?: string;
-}
-export declare interface FindMatchesOptions {
+export interface FindMatchesOptions {
     caseSensitive?: boolean;
 }
-export declare interface FramePr {
+export interface FramePr {
     dropCap: 'none' | 'drop' | 'margin' | string;
     lines: number;
     wrap: 'around' | 'auto' | 'none' | 'notBeside' | 'through' | 'tight' | string;
@@ -809,19 +697,19 @@ export declare interface FramePr {
     xAlign?: 'left' | 'center' | 'right' | 'inside' | 'outside' | string;
     yAlign?: 'inline' | 'top' | 'center' | 'bottom' | 'inside' | 'outside' | string;
 }
-export declare interface GradientStop {
+export interface GradientStop {
     position: number;
     color: string;
 }
-export declare interface HeaderFooter {
+export interface HeaderFooter {
     body: BodyElement[];
 }
-export declare interface HeadersFooters {
+export interface HeadersFooters {
     default: HeaderFooter | null;
     first: HeaderFooter | null;
     even: HeaderFooter | null;
 }
-export declare type HyperlinkTarget = {
+export type HyperlinkTarget = {
     kind: 'external';
     url: string;
 } | {
@@ -829,7 +717,7 @@ export declare type HyperlinkTarget = {
     ref: string;
     slideIndex?: number;
 };
-export declare interface ImageRun {
+export interface ImageRun {
     imagePath: string;
     mimeType: string;
     svgImagePath?: string;
@@ -864,7 +752,8 @@ export declare interface ImageRun {
     anchorXRelativeFrom?: string | null;
     anchorYRelativeFrom?: string | null;
 }
-declare interface LegendManualLayout {
+export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
+interface LegendManualLayout {
     xMode: string;
     yMode: string;
     x: number;
@@ -872,27 +761,27 @@ declare interface LegendManualLayout {
     w: number;
     h: number;
 }
-export declare interface LineEnd {
+export interface LineEnd {
     type: string;
     w: string;
     len: string;
 }
-export declare interface LineNumbering {
+export interface LineNumbering {
     countBy: number;
     start: number;
     distance?: number;
     restart: string;
 }
-export declare interface LineSpacing {
+export interface LineSpacing {
     value: number;
     rule: 'auto' | 'exact' | 'atLeast';
     explicit?: boolean;
 }
-export declare interface LoadOptions extends LoadOptions_2 {
+export interface LoadOptions extends LoadOptions__emitterCollision1 {
     math?: MathRenderer;
     mode?: 'main' | 'worker';
 }
-declare interface LoadOptions_2 {
+interface LoadOptions__emitterCollision1 {
     useGoogleFonts?: boolean;
     password?: string;
     wasmUrl?: string | URL;
@@ -903,27 +792,27 @@ declare interface LoadOptions_2 {
     workerTimeoutMs?: number;
     math?: MathRenderer;
 }
-declare interface MatchRunSlice {
+interface MatchRunSlice {
     runIndex: number;
     start: number;
     end: number;
 }
-declare interface MathAccent {
+interface MathAccent {
     kind: 'accent';
     char: string;
     base: MathNode[];
 }
-declare interface MathArray {
+interface MathArray {
     kind: 'array';
     rows: MathNode[][][];
     align: 'eq' | 'center' | 'left';
 }
-declare interface MathBar {
+interface MathBar {
     kind: 'bar';
     pos: 'top' | 'bot';
     base: MathNode[];
 }
-declare interface MathBorderBox {
+interface MathBorderBox {
     kind: 'borderBox';
     hideTop?: boolean;
     hideBot?: boolean;
@@ -935,44 +824,44 @@ declare interface MathBorderBox {
     strikeTlbr?: boolean;
     base: MathNode[];
 }
-declare interface MathBox {
+interface MathBox {
     kind: 'box';
     base: MathNode[];
 }
-declare interface MathDelimiter {
+interface MathDelimiter {
     kind: 'delimiter';
     begChar: string;
     endChar: string;
     items: MathNode[][];
 }
-declare interface MathFraction {
+interface MathFraction {
     kind: 'fraction';
     num: MathNode[];
     den: MathNode[];
     bar?: boolean;
 }
-declare interface MathFunc {
+interface MathFunc {
     kind: 'func';
     name: MathNode[];
     arg: MathNode[];
 }
-declare interface MathGroup {
+interface MathGroup {
     kind: 'group';
     items: MathNode[];
 }
-declare interface MathGroupChr {
+interface MathGroupChr {
     kind: 'groupChr';
     char: string;
     pos: 'top' | 'bot';
     base: MathNode[];
 }
-declare interface MathLimit {
+interface MathLimit {
     kind: 'limit';
     base: MathNode[];
     lower?: MathNode[];
     upper?: MathNode[];
 }
-declare interface MathNary {
+interface MathNary {
     kind: 'nary';
     op: string;
     limLoc?: string;
@@ -980,8 +869,8 @@ declare interface MathNary {
     sup?: MathNode[];
     body: MathNode[];
 }
-declare type MathNode = MathRun | MathFraction | MathScript | MathNary | MathDelimiter | MathRadical | MathLimit | MathArray | MathGroupChr | MathBar | MathAccent | MathFunc | MathGroup | MathPhant | MathSPre | MathBox | MathBorderBox;
-declare interface MathPhant {
+type MathNode = MathRun | MathFraction | MathScript | MathNary | MathDelimiter | MathRadical | MathLimit | MathArray | MathGroupChr | MathBar | MathAccent | MathFunc | MathGroup | MathPhant | MathSPre | MathBox | MathBorderBox;
+interface MathPhant {
     kind: 'phant';
     show: boolean;
     zeroWid?: boolean;
@@ -989,45 +878,45 @@ declare interface MathPhant {
     zeroDesc?: boolean;
     base: MathNode[];
 }
-declare interface MathRadical {
+interface MathRadical {
     kind: 'radical';
     index?: MathNode[];
     radicand: MathNode[];
 }
-declare interface MathRenderer {
+interface MathRenderer {
     loadMathJax(): Promise<void>;
     mathMLToSvg(mathml: string): Promise<MathSvg>;
 }
-declare interface MathRun {
+interface MathRun {
     kind: 'run';
     text: string;
     style: MathStyle;
 }
-declare interface MathScript {
+interface MathScript {
     kind: 'sup' | 'sub' | 'subSup';
     base: MathNode[];
     sup?: MathNode[];
     sub?: MathNode[];
 }
-declare interface MathSPre {
+interface MathSPre {
     kind: 'sPre';
     sub: MathNode[];
     sup: MathNode[];
     base: MathNode[];
 }
-declare type MathStyle = 'roman' | 'italic' | 'bold' | 'boldItalic';
-declare interface MathSvg {
+type MathStyle = 'roman' | 'italic' | 'bold' | 'boldItalic';
+interface MathSvg {
     svg: string;
     widthEm: number;
     ascentEm: number;
     descentEm: number;
 }
-export declare interface NoteRef {
+export interface NoteRef {
     kind: 'footnote' | 'endnote' | string;
     id: string;
 }
-export declare function noteText(note: DocNote): string;
-export declare interface NumberingInfo {
+export function noteText(note: DocNote): string;
+export interface NumberingInfo {
     numId: number;
     level: number;
     format: string;
@@ -1045,41 +934,39 @@ export declare interface NumberingInfo {
     picBulletWidthPt?: number;
     picBulletHeightPt?: number;
 }
-export declare type OoxmlDecodedImageLimitMetric = 'image-pixels' | 'active-decoded-bytes';
-export declare class OoxmlDecodedImageLimitError extends RangeError {
+export class OoxmlDecodedImageLimitError extends RangeError {
     readonly metric: OoxmlDecodedImageLimitMetric;
     readonly limit: number;
     readonly observed: number;
-    readonly code: "ooxml-decoded-image-limit";
+    readonly code: 'ooxml-decoded-image-limit';
     constructor(metric: OoxmlDecodedImageLimitMetric, limit: number, observed: number);
 }
-export declare function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
-export declare class OoxmlError extends Error {
+export type OoxmlDecodedImageLimitMetric = 'image-pixels' | 'active-decoded-bytes';
+export class OoxmlError extends Error {
     readonly code: OoxmlErrorCode;
     constructor(code: OoxmlErrorCode, message: string);
 }
-export declare type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml';
-export declare type OoxmlErrorSource = 'container' | 'zip-part' | 'parser' | 'serializer' | 'layout' | 'renderer' | 'worker';
-export declare type OoxmlErrorStage = 'container' | 'decompression' | 'parsing' | 'serialization' | 'layout' | 'rendering' | 'worker';
-declare type ExtensibleLiteral<Known extends string> = Known | (string & Record<never, never>);
-export declare type OoxmlFormat = 'docx' | 'xlsx' | 'pptx';
-export declare type OoxmlResourceLimit = number | null;
-export declare class OoxmlResourceLimitError extends Error {
+export type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml';
+export type OoxmlErrorSource = 'container' | 'zip-part' | 'parser' | 'serializer' | 'layout' | 'renderer' | 'worker';
+export type OoxmlErrorStage = 'container' | 'decompression' | 'parsing' | 'serialization' | 'layout' | 'rendering' | 'worker';
+export type OoxmlFormat = 'docx' | 'xlsx' | 'pptx';
+export type OoxmlResourceLimit = number | null;
+export class OoxmlResourceLimitError extends Error {
     readonly code: 'ooxml-resource-limit';
     readonly details: OoxmlResourceLimitErrorDetails;
     constructor(message: string, details: OoxmlResourceLimitErrorDetails);
 }
-export declare interface OoxmlResourceLimitErrorDetails {
+export interface OoxmlResourceLimitErrorDetails {
     readonly stage: OoxmlErrorStage;
     readonly violation: OoxmlResourceViolation;
 }
-export declare interface OoxmlResourceLimits {
+export interface OoxmlResourceLimits {
     maxArchiveEntryBytes?: OoxmlResourceLimit;
     maxTotalInflatedBytes?: OoxmlResourceLimit;
     maxArchiveEntries?: OoxmlResourceLimit;
 }
-export declare type OoxmlResourceMetric = ExtensibleLiteral<'declared-inflated-bytes' | 'actual-inflated-bytes' | 'entry-count' | 'central-directory-bytes' | 'distinct-inflated-bytes' | 'bytes' | 'depth' | 'projected-bytes'>;
-export declare interface OoxmlResourceMetrics {
+export type OoxmlResourceMetric = ExtensibleLiteral<'declared-inflated-bytes' | 'actual-inflated-bytes' | 'entry-count' | 'central-directory-bytes' | 'distinct-inflated-bytes' | 'bytes' | 'depth' | 'projected-bytes'>;
+export interface OoxmlResourceMetrics {
     readonly schemaVersion: 1;
     readonly scope: 'load' | 'session';
     readonly format: OoxmlFormat;
@@ -1098,26 +985,25 @@ export declare interface OoxmlResourceMetrics {
         readonly metric?: string;
     }>;
 }
-export declare interface OoxmlResourceMetricsCheckpoint {
+export interface OoxmlResourceMetricsCheckpoint {
     readonly name: string;
     readonly elapsedMs: number;
     readonly usage?: OoxmlResourceUsageSnapshot;
 }
-export declare type OoxmlResourceName = ExtensibleLiteral<'archive' | 'archive-entry' | 'xml-event' | 'xml-context' | 'xml-tree' | 'worksheet-row' | 'worksheet-shell'>;
-export declare interface OoxmlResourcePolicySnapshot {
+export type OoxmlResourceName = ExtensibleLiteral<'archive' | 'archive-entry' | 'xml-event' | 'xml-context' | 'xml-tree' | 'worksheet-row' | 'worksheet-shell'>;
+export interface OoxmlResourcePolicySnapshot {
     readonly maxArchiveEntryBytes: number | null;
     readonly maxTotalInflatedBytes: number | null;
     readonly maxArchiveEntries: number | null;
 }
-export declare interface OoxmlResourceUsageSnapshot {
+export interface OoxmlResourceUsageSnapshot {
     readonly archiveEntryCount: number;
     readonly declaredInflatedBytes: number;
-    /** Largest actual decompressed size observed for one ZIP entry. */
     readonly largestInflatedEntryBytes?: number;
     readonly distinctInflatedBytes: number;
     readonly operationInflatedBytes: number;
 }
-export declare interface OoxmlResourceViolation {
+export interface OoxmlResourceViolation {
     readonly format: OoxmlFormat;
     readonly operation: string;
     readonly resource: OoxmlResourceName;
@@ -1128,14 +1014,14 @@ export declare interface OoxmlResourceViolation {
     readonly configurable: boolean;
     readonly usage: OoxmlResourceUsageSnapshot;
 }
-export declare function openExternalHyperlink(url: string, allowed?: readonly string[], win?: Pick<Window, 'open'> | undefined): boolean;
-export declare interface PageBorderEdge {
+export function openExternalHyperlink(url: string, allowed?: readonly string[], win?: Pick<Window, 'open'> | undefined): boolean;
+export interface PageBorderEdge {
     style: string;
     color?: string;
     width: number;
     space: number;
 }
-export declare interface PageBorders {
+export interface PageBorders {
     offsetFrom: string;
     display: string;
     zOrder: string;
@@ -1144,24 +1030,24 @@ export declare interface PageBorders {
     left?: PageBorderEdge;
     right?: PageBorderEdge;
 }
-export declare interface PageNumType {
+export interface PageNumType {
     start?: number;
     fmt?: string;
 }
-export declare interface ParaBorderEdge {
+export interface ParaBorderEdge {
     style: string;
     color: string | null;
     width: number;
     space: number;
 }
-export declare interface ParagraphBorders {
+export interface ParagraphBorders {
     top: ParaBorderEdge | null;
     bottom: ParaBorderEdge | null;
     left: ParaBorderEdge | null;
     right: ParaBorderEdge | null;
     between: ParaBorderEdge | null;
 }
-export declare type PathCmd = {
+export type PathCmd = {
     cmd: 'moveTo';
     x: number;
     y: number;
@@ -1186,13 +1072,13 @@ export declare type PathCmd = {
 } | {
     cmd: 'close';
 };
-export declare interface PTabRun {
+export interface PTabRun {
     alignment: 'left' | 'center' | 'right';
     relativeTo: 'margin' | 'indent';
     leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'middleDot';
     fontSize: number;
 }
-export declare interface RenderPageOptions {
+export interface RenderPageOptions {
     width?: number;
     dpr?: number;
     defaultTextColor?: string;
@@ -1209,20 +1095,20 @@ export declare interface RenderPageOptions {
     showTrackChanges?: boolean;
     currentDate?: Date | number;
 }
-export declare type RenderPageToBitmapOptions = WireRenderPageOptions & {
+export type RenderPageToBitmapOptions = WireRenderPageOptions & {
     onTextRun?: (run: DocxTextRunInfo) => void;
 };
-export declare interface RubyAnnotation {
+export interface RubyAnnotation {
     text: string;
     fontSizePt: number;
     hpsRaisePt?: number;
 }
-export declare interface RunRevision {
+export interface RunRevision {
     kind: 'insertion' | 'deletion' | string;
     author?: string;
     date?: string;
 }
-declare interface SecondaryValueAxis {
+interface SecondaryValueAxis {
     min: number | null;
     max: number | null;
     title: string | null;
@@ -1239,7 +1125,7 @@ declare interface SecondaryValueAxis {
     titleFontBold?: boolean | null;
     titleFontColor?: string | null;
 }
-export declare interface SectionGeom {
+export interface SectionGeom {
     pageWidth: number;
     pageHeight: number;
     marginTop: number;
@@ -1249,7 +1135,7 @@ export declare interface SectionGeom {
     headerDistance: number;
     footerDistance: number;
 }
-export declare interface SectionProps {
+export interface SectionProps {
     pageWidth: number;
     pageHeight: number;
     marginTop: number;
@@ -1271,7 +1157,7 @@ export declare interface SectionProps {
     lineNumbering?: LineNumbering | null;
     vAlign?: string | null;
 }
-declare type ShapeFill = {
+type ShapeFill = {
     fillType: 'solid';
     color: string;
 } | {
@@ -1295,7 +1181,7 @@ declare type ShapeFill = {
     alpha?: number;
     duotone?: Duotone;
 };
-export declare interface ShapeRun {
+export interface ShapeRun {
     inline?: boolean;
     widthPt: number;
     heightPt: number;
@@ -1348,7 +1234,7 @@ export declare interface ShapeRun {
     textPath?: TextPath | null;
     fillOpacity?: number | null;
 }
-export declare interface ShapeText {
+export interface ShapeText {
     text: string;
     fontSizePt: number;
     color?: string | null;
@@ -1376,7 +1262,7 @@ export declare interface ShapeText {
     imageWidthPt?: number;
     imageHeightPt?: number;
 }
-export declare interface ShapeTextRun {
+export interface ShapeTextRun {
     text: string;
     fontSizePt: number;
     color?: string | null;
@@ -1386,7 +1272,7 @@ export declare interface ShapeTextRun {
     italic?: boolean;
     ruby?: RubyAnnotation | null;
 }
-export declare interface TableBorders {
+export interface TableBorders {
     top: BorderSpec | null;
     bottom: BorderSpec | null;
     left: BorderSpec | null;
@@ -1394,12 +1280,12 @@ export declare interface TableBorders {
     insideH: BorderSpec | null;
     insideV: BorderSpec | null;
 }
-export declare interface TabStop {
+export interface TabStop {
     pos: number;
     alignment: 'left' | 'start' | 'center' | 'right' | 'end' | 'decimal' | 'bar' | 'clear' | 'num';
     leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'heavy' | 'middleDot';
 }
-export declare interface TblpPr {
+export interface TblpPr {
     leftFromText: number;
     rightFromText: number;
     topFromText: number;
@@ -1412,13 +1298,13 @@ export declare interface TblpPr {
     tblpXSpec?: 'left' | 'center' | 'right' | 'inside' | 'outside' | string;
     tblpYSpec?: 'inline' | 'top' | 'center' | 'bottom' | 'inside' | 'outside' | string;
 }
-export declare interface TextPath {
+export interface TextPath {
     string: string;
     fontFamily?: string | null;
     bold?: boolean;
     italic?: boolean;
 }
-declare interface TileInfo {
+interface TileInfo {
     tx: number;
     ty: number;
     sx: number;
@@ -1426,8 +1312,8 @@ declare interface TileInfo {
     flip: string;
     algn?: string;
 }
-export declare type WireRenderPageOptions = Omit<RenderPageOptions, 'onTextRun'>;
-declare interface ZoomableViewer {
+export type WireRenderPageOptions = Omit<RenderPageOptions, 'onTextRun'>;
+interface ZoomableViewer {
     getScale(): number;
     setScale(scale: number): void | Promise<void>;
     zoomIn(): void | Promise<void>;
@@ -1435,4 +1321,3 @@ declare interface ZoomableViewer {
     fitWidth(): void | Promise<void>;
     fitPage(): void | Promise<void>;
 }
-export {};

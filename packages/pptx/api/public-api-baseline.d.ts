@@ -354,6 +354,7 @@ export interface ImageFill {
     alpha?: number;
     duotone?: Duotone;
 }
+export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
 interface LegendManualLayout {
     xMode: string;
     yMode: string;
@@ -521,15 +522,14 @@ export interface MediaElement {
 export interface NoFill {
     fillType: 'none';
 }
-export type OoxmlDecodedImageLimitMetric = 'image-pixels' | 'active-decoded-bytes';
 export class OoxmlDecodedImageLimitError extends RangeError {
     readonly metric: OoxmlDecodedImageLimitMetric;
     readonly limit: number;
     readonly observed: number;
-    readonly code: "ooxml-decoded-image-limit";
+    readonly code: 'ooxml-decoded-image-limit';
     constructor(metric: OoxmlDecodedImageLimitMetric, limit: number, observed: number);
 }
-export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
+export type OoxmlDecodedImageLimitMetric = 'image-pixels' | 'active-decoded-bytes';
 export class OoxmlError extends Error {
     readonly code: OoxmlErrorCode;
     constructor(code: OoxmlErrorCode, message: string);
@@ -587,7 +587,6 @@ export interface OoxmlResourcePolicySnapshot {
 export interface OoxmlResourceUsageSnapshot {
     readonly archiveEntryCount: number;
     readonly declaredInflatedBytes: number;
-    /** Largest actual decompressed size observed for one ZIP entry. */
     readonly largestInflatedEntryBytes?: number;
     readonly distinctInflatedBytes: number;
     readonly operationInflatedBytes: number;
@@ -820,6 +819,7 @@ export class PptxViewer implements ZoomableViewer {
     private __privatePresence;
 }
 export interface PptxViewerOptions extends RenderOptions, LoadOptions {
+    presentation?: PptxPresentation;
     onSlideChange?: (index: number, total: number) => void;
     onError?: (err: Error) => void;
     zoomMin?: number;

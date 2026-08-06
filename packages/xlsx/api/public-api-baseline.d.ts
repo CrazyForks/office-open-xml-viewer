@@ -21,6 +21,7 @@ export interface BorderEdge {
     style: string;
     color: string | null;
 }
+type CanvasViewerRenderMode = 'main' | 'worker';
 export interface Cell {
     col: number;
     row: number;
@@ -1260,6 +1261,7 @@ export class XlsxSheetViewer implements ZoomableViewer {
     private __privatePresence;
 }
 export interface XlsxSheetViewerOptions extends LoadOptions__emitterCollision1 {
+    workbook?: XlsxWorkbook;
     cellScale?: number;
     resizable?: boolean;
     zoomMin?: number;
@@ -1292,7 +1294,7 @@ export class XlsxViewer extends XlsxViewerEngine {
     constructor(container: HTMLElement, opts?: XlsxViewerOptions);
 }
 class XlsxViewerEngine implements ZoomableViewer {
-    constructor(container: HTMLElement, opts: (XlsxViewerOptions | XlsxSheetViewerOptions) | undefined, mount: XlsxViewerMount);
+    constructor(container: HTMLElement, opts: XlsxViewerOptions | XlsxSheetViewerOptions | undefined, mount: XlsxViewerMount);
     load(source: string | ArrayBuffer): Promise<void>;
     showSheet(index: number): Promise<void>;
     get sheetIndex(): number;
@@ -1332,6 +1334,7 @@ type XlsxViewerMount = {
 } | {
     readonly kind: 'sheet';
     readonly canvas: HTMLCanvasElement;
+    readonly mode: CanvasViewerRenderMode;
 };
 export interface XlsxViewerOptions extends XlsxSheetViewerOptions {
     showZoomSlider?: boolean;
@@ -1341,6 +1344,7 @@ export interface XlsxViewportOffset {
     readonly y: number;
 }
 export class XlsxWorkbook {
+    get mode(): 'main' | 'worker';
     static load(source: string | ArrayBuffer, opts?: LoadOptions): Promise<XlsxWorkbook>;
     get sheetNames(): string[];
     get sheetCount(): number;
