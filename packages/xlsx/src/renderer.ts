@@ -3021,6 +3021,13 @@ export function getSheetRenderCache(worksheet: Worksheet): SheetRenderCache {
   return entry;
 }
 
+/** Reuse viewport-independent indexes for a render-local worksheet projection.
+ * The projection may differ only in row/column sizing and outline flags; cells,
+ * merges, formatting, tables, links, comments, and sparklines remain source-owned. */
+export function inheritSheetRenderCache(source: Worksheet, projection: Worksheet): void {
+  sheetRenderCache.set(projection, getSheetRenderCache(source));
+}
+
 export function renderViewport(
   ctx: CanvasRenderingContext2D,
   worksheet: Worksheet,

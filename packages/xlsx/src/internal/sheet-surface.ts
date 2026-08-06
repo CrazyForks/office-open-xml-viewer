@@ -1,12 +1,17 @@
 /** DOM event adapter shared by the workbook and canvas-mounted sheet facades. */
 export class CanvasSurface {
   private readonly cleanups: Array<() => void> = [];
+  private readonly ownerDocument: Document;
+  private readonly ownerWindow: Window | null;
 
   constructor(
     readonly canvas: HTMLCanvasElement,
     readonly area: HTMLDivElement,
     readonly input: HTMLDivElement,
-  ) {}
+  ) {
+    this.ownerDocument = input.ownerDocument ?? document;
+    this.ownerWindow = this.ownerDocument.defaultView;
+  }
 
   on<K extends keyof HTMLElementEventMap>(
     type: K,
@@ -23,7 +28,7 @@ export class CanvasSurface {
     return { width: this.input.clientWidth, height: this.input.clientHeight };
   }
 
-  get dpr(): number { return window.devicePixelRatio ?? 1; }
+  get dpr(): number { return this.ownerWindow?.devicePixelRatio ?? 1; }
 
   localPoint(clientX: number, clientY: number): { x: number; y: number } {
     const rect = this.area.getBoundingClientRect();
@@ -31,8 +36,8 @@ export class CanvasSurface {
   }
 
   onDocumentKeydown(listener: (event: KeyboardEvent) => void): () => void {
-    document.addEventListener('keydown', listener);
-    const cleanup = () => document.removeEventListener('keydown', listener);
+    this.ownerDocument.addEventListener('keydown', listener);
+    const cleanup = () => this.ownerDocument.removeEventListener('keydown', listener);
     this.cleanups.push(cleanup);
     return cleanup;
   }
@@ -72,15 +77,16 @@ export class SheetOverlayHost {
     input: HTMLDivElement,
     options: SheetOverlayHostOptions,
   ) {
-    this.selection = document.createElement('div');
+    const ownerDocument = area.ownerDocument ?? document;
+    this.selection = ownerDocument.createElement('div');
     this.selection.style.cssText =
       `position:absolute;top:0;left:0;z-index:1;pointer-events:none;overflow:hidden;width:100%;height:100%;`;
 
-    this.find = document.createElement('div');
+    this.find = ownerDocument.createElement('div');
     this.find.style.cssText =
       `position:absolute;top:0;left:0;z-index:1;pointer-events:none;overflow:hidden;width:100%;height:100%;`;
 
-    this.comment = document.createElement('div');
+    this.comment = ownerDocument.createElement('div');
     this.comment.style.cssText =
       `position:absolute;z-index:3;pointer-events:none;display:none;` +
       `max-width:${options.commentMaxWidth}px;max-height:${options.commentMaxHeight}px;overflow:hidden;` +
@@ -89,7 +95,7 @@ export class SheetOverlayHost {
       `box-shadow:1px 2px 5px rgba(0,0,0,0.25);` +
       `font:12px/1.4 sans-serif;color:#222;white-space:pre-wrap;word-break:break-word;`;
 
-    this.validation = document.createElement('div');
+    this.validation = ownerDocument.createElement('div');
     this.validation.setAttribute('data-xlsx-validation-panel', '');
     this.validation.style.cssText =
       `position:absolute;z-index:4;pointer-events:auto;display:none;` +

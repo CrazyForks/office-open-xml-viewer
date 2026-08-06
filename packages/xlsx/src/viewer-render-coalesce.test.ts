@@ -14,17 +14,20 @@ afterEach(() => {
  * removes a still-queued callback. Installed into globals so the viewer's
  * `scheduleRender` coalesces against it. Returns the queue controls.
  */
-function installRaf(): { flush: () => void; queued: () => number } {
+function installRaf(target?: Record<string, unknown>): { flush: () => void; queued: () => number } {
   let nextHandle = 1;
   const cbs = new Map<number, FrameRequestCallback>();
-  vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback): number => {
+  const requestAnimationFrame = (cb: FrameRequestCallback): number => {
     const h = nextHandle++;
     cbs.set(h, cb);
     return h;
-  });
-  vi.stubGlobal('cancelAnimationFrame', (h: number): void => {
+  };
+  const cancelAnimationFrame = (h: number): void => {
     cbs.delete(h);
-  });
+  };
+  vi.stubGlobal('requestAnimationFrame', requestAnimationFrame);
+  vi.stubGlobal('cancelAnimationFrame', cancelAnimationFrame);
+  if (target) Object.assign(target, { requestAnimationFrame, cancelAnimationFrame });
   return {
     flush() {
       const pending = [...cbs.values()];
@@ -54,8 +57,8 @@ async function settleRenders(): Promise<void> {
  */
 describe('XlsxViewer scroll-render coalescing (C4 commit 1)', () => {
   function build() {
-    installDom();
-    const raf = installRaf();
+    const doc = installDom();
+    const raf = installRaf(doc.defaultView);
     const container = makeContainer();
     const v = new XlsxViewer(container as unknown as HTMLElement);
     // The scrollHost lives inside canvasArea (canvas, overlay, scrollHost…).

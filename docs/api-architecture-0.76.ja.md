@@ -128,11 +128,21 @@ sheet描画・interactionとcontainer chromeが1つの大きなclassに結合し
 既存の公開名は維持する。`XlsxScrollViewer` aliasは追加しない。Container componentは
 whole sheetの一覧ではなく、sheet tabとscrollable cell gridを持つWorkbook Viewerだからである。
 
+すべてのCanvasマウント型unit viewerは、対応するload済みengine（`document`、
+`presentation`、`workbook`）を受け取れる。Containerマウント型Viewerも同じoptionを持つ。
+6つすべてで、注入されたengineがrender modeとlifecycleを所有する。明示的に競合する
+`mode`は拒否し、`load()`は利用不可、Viewerの破棄では借用engineを破棄しない。
+
 ### XLSX Canvas Viewerのcontract
 
 `XlsxSheetViewer`は、1つのactive worksheet viewportをCanvasへマウントして表示する。
 sheet tab/footer chromeとscrollbarは所有しない。worksheetは有限pageではないため、
 形式固有のviewport移動を追加で公開する。この状態をDOCX/PPTXへ無理に持ち込まない。
+
+mount用DOM、style、DPR参照、document listenerは`canvas.ownerDocument`とその
+`defaultView`を基準に解決する。これにより親画面が1つの`XlsxWorkbook`を保持したまま、
+同一originの別WindowにあるCanvasへ借用Sheet Viewerをマウントでき、packageの再parseは
+発生しない。
 
 実装前に、次のcontractを中心に公開declarationを確定する。
 
@@ -149,6 +159,8 @@ export interface XlsxScrollToCellOptions {
 }
 
 export interface XlsxSheetViewerOptions extends LoadOptions {
+  /** load済みengineを借用する。lifecycleはcallerが所有する。 */
+  readonly workbook?: XlsxWorkbook;
   readonly cellScale?: number;
   readonly resizable?: boolean;
   readonly zoomMin?: number;
@@ -206,6 +218,12 @@ export interface XlsxViewerOptions extends XlsxSheetViewerOptions {
   readonly showZoomSlider?: boolean;
 }
 ```
+
+`workbook`は、DOCX Viewerの`document`、PPTX Viewerの`presentation`と同じ
+option注入contractに従う。`load()`は利用不可、engine自身のrender modeを正とし、Viewerの破棄では
+caller-owned engineを破棄しない。初回描画の完了点が必要なcallerは`goToSheet(index)`をawaitする。
+複数のsheet viewerはparse、archive access、worksheet materialization、immutable content cacheを
+共有しながら、viewport、selection、zoom、resize、outline、render generationを独立して保持する。
 
 Offsetは現在scaleにおけるlogical CSS pixelとする。`x`はBrowserのRTL `scrollLeft`
 規則に依存せず、column A側のlogical startから後続column方向へ増加し、`y`は下方向へ

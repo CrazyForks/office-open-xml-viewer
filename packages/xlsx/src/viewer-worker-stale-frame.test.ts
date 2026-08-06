@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { XlsxViewer } from './viewer.js';
 import { installDom, makeContainer, type FakeEl } from './viewer-destroy-test-dom.js';
 import type { Worksheet } from './types.js';
-import { extractViewerLayoutMetrics } from './worker-protocol.js';
+import { extractViewerRenderContext } from './worker-protocol.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -111,7 +111,7 @@ describe('XlsxViewer worker-mode stale-frame drop (C4 commit 3)', () => {
     const pending = render();
     const call = renderViewportToBitmap.mock.calls[0] as unknown[] | undefined;
     const options = call?.[2];
-    expect(extractViewerLayoutMetrics(options as never).layoutMetrics).toEqual({
+    expect(extractViewerRenderContext(options as never).layoutMetrics).toEqual({
       maximumDigitWidth: 13,
     });
     inflight[0].resolve(fakeBitmap());

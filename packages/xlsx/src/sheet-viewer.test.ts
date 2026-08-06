@@ -2,7 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { XlsxSheetViewer } from './viewer.js';
 import { XlsxWorkbook } from './workbook.js';
 import type { OoxmlResourceMetrics } from '@silurus/ooxml-core';
-import { installDom, makeContainer, makeEl, type FakeEl } from './viewer-destroy-test-dom.js';
+import type { Worksheet } from './types.js';
+import {
+  installDom,
+  makeContainer,
+  makeDocument,
+  makeEl,
+  type FakeEl,
+} from './viewer-destroy-test-dom.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -13,7 +20,66 @@ function descendants(root: FakeEl): FakeEl[] {
   return root.children.flatMap((child) => [child, ...descendants(child)]);
 }
 
+function worksheet(name: string): Worksheet {
+  return {
+    name,
+    rows: [],
+    colWidths: {},
+    rowHeights: {},
+    defaultColWidth: 64,
+    defaultRowHeight: 20,
+    mergeCells: [],
+    freezeRows: 0,
+    freezeCols: 0,
+    conditionalFormats: [],
+    charts: [],
+    images: [],
+    shapeGroups: [],
+  } as unknown as Worksheet;
+}
+
 describe('XlsxSheetViewer canvas mount', () => {
+  it('creates chrome, styles, and document listeners in the canvas owner window', () => {
+    const openerDocument = installDom();
+    const popupDocument = makeDocument(2);
+    const parent = makeContainer(800, 600, popupDocument);
+    const canvas = makeEl('canvas', popupDocument);
+    parent.appendChild(canvas);
+
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const mounted = descendants(parent);
+
+    expect(mounted.every((element) => element.ownerDocument === popupDocument)).toBe(true);
+    expect(popupDocument.head.querySelector('style[data-xlsx-viewer-styles]')).not.toBeNull();
+    expect(openerDocument.head.querySelector('style[data-xlsx-viewer-styles]')).toBeNull();
+    expect(popupDocument.listenerCount('keydown')).toBe(1);
+    expect(openerDocument.listenerCount('keydown')).toBe(0);
+
+    const popupWrite = vi.fn(() => Promise.resolve());
+    const openerWrite = vi.fn(() => Promise.resolve());
+    Object.assign(popupDocument.defaultView, { navigator: { clipboard: { writeText: popupWrite } } });
+    Object.assign(openerDocument.defaultView, { navigator: { clipboard: { writeText: openerWrite } } });
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      selectionController: { select(cell: { row: number; col: number }): void };
+      copySelection(): void;
+    } }).engine;
+    engine.currentWorksheet = {
+      ...worksheet('Popup'),
+      rows: [{
+        index: 1,
+        cells: [{ row: 1, col: 1, value: { type: 'text', text: 'popup' } }],
+      }],
+    } as unknown as Worksheet;
+    engine.selectionController.select({ row: 1, col: 1 });
+    engine.copySelection();
+    expect(popupWrite).toHaveBeenCalledWith('popup');
+    expect(openerWrite).not.toHaveBeenCalled();
+
+    viewer.destroy();
+    expect(popupDocument.listenerCount('keydown')).toBe(0);
+  });
+
   it('uses the caller canvas without constructing workbook footer chrome', () => {
     installDom();
     const parent = makeContainer();
@@ -176,5 +242,97 @@ describe('XlsxSheetViewer canvas mount', () => {
     viewer.destroy();
 
     await expect(viewer.getResourceMetrics()).resolves.toEqual(metrics);
+  });
+
+  it('borrows one loaded workbook, opens the requested sheet, and leaves workbook cleanup to the caller', async () => {
+    installDom();
+    const destroy = vi.fn();
+    const getWorksheet = vi.fn((index: number) => Promise.resolve(worksheet(`Sheet${index + 1}`)));
+    const workbook = {
+      mode: 'main',
+      sheetCount: 2,
+      sheetNames: ['Sheet1', 'Sheet2'],
+      tabColors: {} as Record<number, string>,
+      getWorksheet,
+      isHidden: () => false,
+      destroy,
+    } as unknown as XlsxWorkbook;
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, { workbook });
+    await viewer.goToSheet(1);
+
+    expect(viewer.sheetIndex).toBe(1);
+    expect(getWorksheet).toHaveBeenCalledWith(1);
+    expect(getWorksheet).not.toHaveBeenCalledWith(0);
+    await expect(viewer.load(new ArrayBuffer(0))).rejects.toThrow(
+      'XlsxSheetViewer.load() is unsupported when an engine is injected',
+    );
+
+    viewer.destroy();
+    expect(destroy).not.toHaveBeenCalled();
+    expect(parent.children).toEqual([canvas]);
+  });
+
+  it('validates an injected mode conflict before mounting the caller canvas', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const workbook = {
+      mode: 'worker',
+      sheetCount: 1,
+      sheetNames: ['Sheet1'],
+      destroy: vi.fn(),
+    } as unknown as XlsxWorkbook;
+
+    expect(() => new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      workbook,
+      mode: 'main',
+    })).toThrow("opts.mode='main' conflicts with the injected engine's mode='worker'");
+    expect(parent.children).toEqual([canvas]);
+  });
+
+  it('keeps mutable view state independent when two viewers borrow the same cached sheet', async () => {
+    installDom();
+    const source = worksheet('Shared');
+    const workbook = {
+      mode: 'main',
+      sheetCount: 1,
+      sheetNames: ['Shared'],
+      tabColors: {} as Record<number, string>,
+      getWorksheet: vi.fn().mockResolvedValue(source),
+      isHidden: () => false,
+      destroy: vi.fn(),
+    } as unknown as XlsxWorkbook;
+    const first = new XlsxSheetViewer(
+      makeEl('canvas') as unknown as HTMLCanvasElement,
+      { workbook },
+    );
+    const second = new XlsxSheetViewer(
+      makeEl('canvas') as unknown as HTMLCanvasElement,
+      { workbook },
+    );
+    await Promise.all([first.goToSheet(0), second.goToSheet(0)]);
+    const firstWorksheet = (first as unknown as {
+      engine: { currentWorksheet: Worksheet };
+    }).engine.currentWorksheet;
+    const secondWorksheet = (second as unknown as {
+      engine: { currentWorksheet: Worksheet };
+    }).engine.currentWorksheet;
+
+    firstWorksheet.rowHeights[1] = 40;
+    firstWorksheet.colWidths[1] = 16;
+
+    expect(firstWorksheet).not.toBe(secondWorksheet);
+    expect(secondWorksheet.rowHeights[1]).toBeUndefined();
+    expect(secondWorksheet.colWidths[1]).toBeUndefined();
+    expect(source.rowHeights[1]).toBeUndefined();
+    expect(source.colWidths[1]).toBeUndefined();
+
+    first.destroy();
+    second.destroy();
   });
 });

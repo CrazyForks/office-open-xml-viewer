@@ -72,7 +72,8 @@ describe('XlsxViewer sheet acquisition generation', () => {
     await first;
 
     expect(engine.currentSheet).toBe(1);
-    expect(engine.currentWorksheet).toBe(b);
+    expect(engine.currentWorksheet).not.toBe(b);
+    expect(engine.currentWorksheet).toMatchObject(b);
     expect(onSheetChange).toHaveBeenCalledOnce();
     expect(onSheetChange).toHaveBeenCalledWith(1, 2);
     viewer.destroy();

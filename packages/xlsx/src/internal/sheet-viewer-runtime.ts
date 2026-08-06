@@ -1,3 +1,4 @@
+import type { Worksheet } from '../types.js';
 import type { XlsxWorkbook } from '../workbook.js';
 import {
   StaticCanvasRenderDispatcher,
@@ -19,14 +20,28 @@ export class SheetAcquisition {
     return await this.owner.replace(load, beforeCommit);
   }
 
-  /** Commit an already acquired workbook, closing the previously owned one. */
-  install(candidate: XlsxWorkbook): void {
-    this.owner.install(candidate);
+  /** Commit an already acquired workbook, closing the previously owned one.
+   *  Pass `owned: false` when the caller retains workbook lifecycle ownership. */
+  install(candidate: XlsxWorkbook, owned = true): void {
+    this.owner.install(candidate, owned);
   }
 
   destroy(): void {
     this.owner.close();
   }
+}
+
+/** Create the viewer-owned mutable projection of one cached worksheet.
+ * Cell/content graphs remain shared and read-only; only the maps and row flags
+ * changed by view-only resize/outline interactions are copied. */
+export function createSheetViewModel(source: Worksheet): Worksheet {
+  return {
+    ...source,
+    rows: source.rows.map((row) => ({ ...row })),
+    rowHeights: { ...source.rowHeights },
+    colWidths: { ...source.colWidths },
+    colCollapsed: source.colCollapsed ? { ...source.colCollapsed } : undefined,
+  };
 }
 
 /** Logical viewport independent of native browser scrolling. */
@@ -96,13 +111,24 @@ export class SheetRenderDispatcher {
   private activeRender = false;
   private pendingRender: (() => void | Promise<void>) | null = null;
   private readonly staticDispatcher: StaticCanvasRenderDispatcher | null;
+  private readonly frameScheduler: Pick<Window, 'requestAnimationFrame' | 'cancelAnimationFrame'> | null;
   private generation = 0;
   private destroyed = false;
 
   constructor(
     canvas?: HTMLCanvasElement,
     workerBitmapMode = false,
+    frameScheduler?: Partial<Pick<Window, 'requestAnimationFrame' | 'cancelAnimationFrame'>> | null,
   ) {
+    const scheduler = frameScheduler ?? globalThis;
+    this.frameScheduler =
+      typeof scheduler.requestAnimationFrame === 'function' &&
+      typeof scheduler.cancelAnimationFrame === 'function'
+        ? {
+            requestAnimationFrame: (callback) => scheduler.requestAnimationFrame!(callback),
+            cancelAnimationFrame: (handle) => scheduler.cancelAnimationFrame!(handle),
+          }
+        : null;
     this.staticDispatcher = canvas
       ? new StaticCanvasRenderDispatcher(canvas, workerBitmapMode)
       : null;
@@ -157,11 +183,11 @@ export class SheetRenderDispatcher {
   }
 
   private queuePendingRender(): void {
-    if (typeof requestAnimationFrame !== 'function') {
+    if (!this.frameScheduler) {
       this.startPendingRender();
       return;
     }
-    this.animationFrame = requestAnimationFrame(() => {
+    this.animationFrame = this.frameScheduler.requestAnimationFrame(() => {
       this.animationFrame = null;
       this.startPendingRender();
     });
@@ -194,8 +220,8 @@ export class SheetRenderDispatcher {
     if (this.destroyed) return;
     this.destroyed = true;
     this.pendingRender = null;
-    if (this.animationFrame !== null && typeof cancelAnimationFrame === 'function') {
-      cancelAnimationFrame(this.animationFrame);
+    if (this.animationFrame !== null && this.frameScheduler) {
+      this.frameScheduler.cancelAnimationFrame(this.animationFrame);
       this.animationFrame = null;
     }
     this.staticDispatcher?.destroy();

@@ -79,12 +79,12 @@ pnpm add @silurus/ooxml
 
 ```typescript
 import { DocxViewer } from '@silurus/ooxml/docx';
-import { XlsxSheetViewer, XlsxViewer } from '@silurus/ooxml/xlsx';
+import { XlsxSheetViewer, XlsxViewer, XlsxWorkbook } from '@silurus/ooxml/xlsx';
 import { PptxViewer } from '@silurus/ooxml/pptx';
 
 // DOCX — caller provides the <canvas>
-const canvas = document.getElementById('docx-canvas') as HTMLCanvasElement;
-const docx = new DocxViewer(canvas);
+const docxCanvas = document.getElementById('docx-canvas') as HTMLCanvasElement;
+const docx = new DocxViewer(docxCanvas);
 await docx.load('/document.docx');
 docx.nextPage();
 
@@ -99,9 +99,26 @@ const sheet = new XlsxSheetViewer(sheetCanvas);
 await sheet.load('/workbook.xlsx');
 await sheet.goToSheet(1);
 
+// Share one parsed workbook across independently scrollable sheet canvases,
+// including canvases created in same-origin popup windows.
+const workbook = await XlsxWorkbook.load('/workbook.xlsx');
+const firstCanvas = document.getElementById('xlsx-first-canvas') as HTMLCanvasElement;
+const secondCanvas = document.getElementById('xlsx-second-canvas') as HTMLCanvasElement;
+const firstSheet = new XlsxSheetViewer(firstCanvas, { workbook });
+const secondSheet = new XlsxSheetViewer(secondCanvas, { workbook });
+await Promise.all([
+  firstSheet.goToSheet(0),
+  secondSheet.goToSheet(1),
+]);
+
+// Each viewer borrows the workbook; the caller closes it after the viewers.
+firstSheet.destroy();
+secondSheet.destroy();
+workbook.destroy();
+
 // PPTX — caller provides the <canvas>
-const canvas = document.getElementById('pptx-canvas') as HTMLCanvasElement;
-const pptx = new PptxViewer(canvas);
+const pptxCanvas = document.getElementById('pptx-canvas') as HTMLCanvasElement;
+const pptx = new PptxViewer(pptxCanvas);
 await pptx.load('/deck.pptx');
 pptx.nextSlide();
 ```
@@ -261,7 +278,8 @@ Pass `enableHyperlinks: false` to disable hyperlink interactivity entirely — n
 hit-testing, no pointer cursor over links, no default navigation, and
 `onHyperlinkClick` is never called; links still render as authored but are inert.
 This applies to every viewer that supports hyperlinks (`DocxViewer`,
-`DocxScrollViewer`, `PptxViewer`, `PptxScrollViewer`, `XlsxViewer`).
+`DocxScrollViewer`, `PptxViewer`, `PptxScrollViewer`, `XlsxViewer`,
+`XlsxSheetViewer`).
 
 **Master–detail / shared engine.** Inject an already-loaded headless engine so a
 paged viewer and a scroll viewer (or several panes) share **one** parse. When you
@@ -270,17 +288,20 @@ inject, `load()` is unsupported (the engine is already loaded), the engine's own
 its lifecycle:
 
 ```typescript
-import { DocxDocument, DocxScrollViewer } from '@silurus/ooxml/docx';
+import { DocxDocument, DocxScrollViewer, DocxViewer } from '@silurus/ooxml/docx';
 
 const doc = await DocxDocument.load('/document.docx'); // parse once
 const scroll = new DocxScrollViewer(container, { document: doc });
-// ...also drive a thumbnail grid, a paged view, etc. from the same `doc`.
+const page = new DocxViewer(canvas, { document: doc });
+await page.goToPage(0);
+// ...also drive a thumbnail grid or more panes from the same `doc`.
+page.destroy();
 scroll.destroy(); // the injected `doc` is NOT destroyed — you own it
 doc.destroy();    // release it yourself when every pane is gone
 ```
 
-`PptxScrollViewer` takes the same shape with `{ presentation: pres }`
-(`await PptxPresentation.load(...)`).
+`PptxViewer` and `PptxScrollViewer` take the same shape with
+`{ presentation: pres }` (`await PptxPresentation.load(...)`).
 
 For presentations, `enableMediaPlayback: true` makes embedded audio and video
 interactive inside the real viewport plus `mediaOverscan` slides. Other mounted
@@ -790,7 +811,7 @@ await viewer.load(file);
   The package counters and raster-image guards are deterministic admission limits, not exact JavaScript/WASM process-memory accounting. XML trees, document models, canvas backing stores, browser decoder overhead, renderer state, and browser-managed SVG/vector parse or decoded storage can still require several times the measured input. SVG has no portable decoded-byte measure or explicit browser release primitive; the library count-bounds its cache and revokes owned object URLs, but cannot charge it as RGBA bytes. The defaults therefore reduce risk but cannot promise that an OOM is impossible on every device. Running parse and render work in `mode: 'worker'` can contain many failures away from the main UI thread, but a Worker is not a separate operating-system process or a strict memory sandbox.
 
   A measured limit crossing is reported as `OoxmlResourceLimitError`. A residual WASM failure that reaches a recognized trap-shaped boundary is reported conservatively as `parser-crashed`, not `parser-oom`: with the current aborting Rust/WASM boundary, panic, allocation failure, explicit `unreachable`, and stack overflow can lose their distinct causes and converge on the same generic runtime error. Inferring OOM from an exception class or message would misclassify some parser defects as large-file failures. Reliable OOM classification would require preserving a structured cause before the trap across every relevant allocation path; it cannot be recovered from the generic trap afterward. The WebAssembly JavaScript embedding also permits implementation-defined stack/OOM failures, including an indistinguishable plain `Error` or process termination, so converting and poisoning every engine-level failure cannot be guaranteed.
-- **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, theme webfonts, Office font metric substitutes (Carlito/Caladea), and the script fallback fonts are **not** loaded from Google Fonts unless you pass `useGoogleFonts: true` to the relevant `Viewer` / `load(...)` options — supported uniformly by `DocxViewer`, `PptxViewer`, and `XlsxViewer`. When enabled, fonts for non-Latin scripts are supplied on demand from Noto families so text does not fall back to tofu: Arabic (Noto Naskh/Sans Arabic), CJK (Noto Sans/Serif KR · SC · TC · JP, picked per document language so shared Han glyphs take the right shapes), Cyrillic (Noto Sans/Serif), Hebrew (Noto Sans/Serif Hebrew, RTL), Thai (Noto Sans Thai) and Devanagari (Noto Sans Devanagari). No font binaries ship in the bundle. Enabling this option causes the end-user's browser to send an HTTP request (IP and User-Agent) to `fonts.googleapis.com`, which may have GDPR implications for your application — consider self-hosting the required fonts via `@font-face` instead.
+- **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, theme webfonts, Office font metric substitutes (Carlito/Caladea), and the script fallback fonts are **not** loaded from Google Fonts unless you pass `useGoogleFonts: true` to the relevant `Viewer` / `load(...)` options — supported uniformly by `DocxViewer`, `PptxViewer`, `XlsxViewer`, and `XlsxSheetViewer`. When enabled, fonts for non-Latin scripts are supplied on demand from Noto families so text does not fall back to tofu: Arabic (Noto Naskh/Sans Arabic), CJK (Noto Sans/Serif KR · SC · TC · JP, picked per document language so shared Han glyphs take the right shapes), Cyrillic (Noto Sans/Serif), Hebrew (Noto Sans/Serif Hebrew, RTL), Thai (Noto Sans Thai) and Devanagari (Noto Sans Devanagari). No font binaries ship in the bundle. Enabling this option causes the end-user's browser to send an HTTP request (IP and User-Agent) to `fonts.googleapis.com`, which may have GDPR implications for your application — consider self-hosting the required fonts via `@font-face` instead.
 - **XML parsing.** Uses `roxmltree`, which does not resolve external entities (XXE-safe by default).
 - **Encrypted OOXML ([MS-OFFCRYPTO] Agile Encryption).** Password-protected `.docx` / `.xlsx` / `.pptx` files are OLE2/CFB containers, not ZIPs. Pass `password` to `load(...)` and the file is decrypted **client-side** via WebCrypto — no bytes and no password leave the browser:
   ```ts

@@ -145,12 +145,23 @@ The existing public names remain stable. We do not add an `XlsxScrollViewer`
 alias: the container component is a workbook viewer with sheet tabs and a
 scrollable cell grid, not a list of whole sheets.
 
+Every canvas-mounted unit viewer accepts its corresponding already-loaded
+engine (`document`, `presentation`, or `workbook`). Every container-mounted
+viewer accepts the same option. In all six cases the injected engine owns its
+render mode and lifecycle: a conflicting explicit `mode` is rejected, `load()`
+is unavailable, and viewer teardown does not destroy the borrowed engine.
+
 ### XLSX canvas-viewer contract
 
 `XlsxSheetViewer` is a canvas-mounted view of one active worksheet viewport. It
 owns no sheet-tab/footer chrome and creates no scrollbar. Because a worksheet is
 not a finite page, it additionally exposes format-specific viewport movement.
 That extra state is not forced onto DOCX or PPTX.
+
+All mount DOM, styles, DPR reads, and document listeners resolve from
+`canvas.ownerDocument` and its `defaultView`. A parent page can therefore retain
+one `XlsxWorkbook` and mount borrowed sheet viewers into same-origin popup
+canvases without reparsing the package.
 
 The public declaration is frozen before implementation around this contract:
 
@@ -167,6 +178,8 @@ export interface XlsxScrollToCellOptions {
 }
 
 export interface XlsxSheetViewerOptions extends LoadOptions {
+  /** Borrow one loaded engine; the caller retains its lifecycle. */
+  readonly workbook?: XlsxWorkbook;
   readonly cellScale?: number;
   readonly resizable?: boolean;
   readonly zoomMin?: number;
@@ -224,6 +237,15 @@ export interface XlsxViewerOptions extends XlsxSheetViewerOptions {
   readonly showZoomSlider?: boolean;
 }
 ```
+
+`workbook` follows the same option-injection contract as `document` on the DOCX
+viewers and `presentation` on the PPTX viewers. `load()` is
+unsupported, the engine's render mode is authoritative, and viewer teardown
+does not destroy the caller-owned engine. Callers await `goToSheet(index)` when
+they need deterministic first-paint completion. Multiple sheet viewers share
+parsing, archive access, worksheet materialization, and immutable content caches
+while retaining independent viewport, selection, zoom, resize, outline, and
+render-generation state.
 
 Offsets are logical CSS pixels at the current scale: `x` increases from the
 logical sheet start (column A, independent of browser RTL `scrollLeft`

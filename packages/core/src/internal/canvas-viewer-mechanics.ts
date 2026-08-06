@@ -37,7 +37,8 @@ export class CallerCanvasMount {
     this.originalWidth = canvas.width;
     this.originalHeight = canvas.height;
 
-    this.wrapper = document.createElement('div');
+    const ownerDocument = canvas.ownerDocument ?? document;
+    this.wrapper = ownerDocument.createElement('div');
     this.wrapper.style.cssText = options.wrapperCssText;
     if (options.forceDisplayBlock && !canvas.style.display) canvas.style.display = 'block';
     if (this.originalParent) this.originalParent.insertBefore(this.wrapper, canvas);
@@ -83,12 +84,13 @@ export class CanvasOverlayHost {
   readonly highlightLayer: HTMLDivElement;
 
   constructor(wrapper: HTMLElement, enableTextSelection: boolean) {
-    this.textLayer = enableTextSelection ? document.createElement('div') : null;
+    const ownerDocument = wrapper.ownerDocument ?? document;
+    this.textLayer = enableTextSelection ? ownerDocument.createElement('div') : null;
     if (this.textLayer) {
       this.textLayer.style.cssText = TEXT_LAYER_STYLE;
       wrapper.appendChild(this.textLayer);
     }
-    this.highlightLayer = document.createElement('div');
+    this.highlightLayer = ownerDocument.createElement('div');
     this.highlightLayer.style.cssText = HIGHLIGHT_LAYER_STYLE;
     wrapper.appendChild(this.highlightLayer);
   }
@@ -101,6 +103,24 @@ export interface BitmapCommitSize {
 
 export interface DestroyableResource {
   destroy(): void;
+}
+
+export type CanvasViewerRenderMode = 'main' | 'worker';
+
+/** Resolve the mode of a viewer that may borrow an already-loaded engine. */
+export function resolveCanvasViewerMode(
+  viewerName: string,
+  requestedMode: CanvasViewerRenderMode | undefined,
+  engine: Readonly<{ mode: CanvasViewerRenderMode }> | undefined,
+): CanvasViewerRenderMode {
+  if (engine && requestedMode !== undefined && requestedMode !== engine.mode) {
+    throw new Error(
+      `${viewerName}: opts.mode='${requestedMode}' conflicts with the injected engine's ` +
+        `mode='${engine.mode}'. Omit opts.mode when injecting an engine — ` +
+        'the engine owns its render mode.',
+    );
+  }
+  return engine?.mode ?? requestedMode ?? 'main';
 }
 
 /**

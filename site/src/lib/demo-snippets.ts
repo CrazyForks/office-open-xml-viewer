@@ -85,6 +85,40 @@ for (let i = 0; i < doc.${c.count}; i++) {
 export const pptxSnippets = build(pptx);
 export const docxSnippets = build(docx);
 
+export const xlsxSheetWindowsSnippet = `import { XlsxSheetViewer, XlsxWorkbook } from '@silurus/ooxml/xlsx';
+
+const workbook = await XlsxWorkbook.load('/sample.xlsx');
+const viewers = new Map<Window, XlsxSheetViewer>();
+
+async function openSheetInWindow(sheetIndex: number): Promise<void> {
+  // Call this function directly from a click handler so popup blockers allow it.
+  const popup = window.open('', '_blank', 'popup,width=1100,height=720,resizable=yes');
+  if (!popup) throw new Error('The browser blocked the popup');
+
+  const canvas = popup.document.createElement('canvas');
+  canvas.style.cssText = 'display:block;width:100%;height:100%';
+  popup.document.body.style.margin = '0';
+  popup.document.body.appendChild(canvas);
+
+  const viewer = new XlsxSheetViewer(canvas, { workbook });
+  viewers.set(popup, viewer);
+  popup.addEventListener('pagehide', () => {
+    viewer.destroy();
+    viewers.delete(popup);
+  }, { once: true });
+
+  await viewer.goToSheet(sheetIndex);
+}
+
+// Example: openSheetInWindow(1) from a sheet button's click handler.
+window.addEventListener('pagehide', () => {
+  viewers.forEach((viewer, popup) => {
+    viewer.destroy();
+    popup.close();
+  });
+  workbook.destroy();
+}, { once: true });`;
+
 export const xlsxSheetSnippet = `import { XlsxViewer } from '@silurus/ooxml/xlsx';
 
 // XlsxViewer owns its canvas, sheet-tab bar and zoom slider — hand it a

@@ -1,11 +1,28 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CanvasViewerErrorRouter,
+  resolveCanvasViewerMode,
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
 } from './canvas-viewer-mechanics.js';
 
 afterEach(() => vi.restoreAllMocks());
+
+describe('resolveCanvasViewerMode', () => {
+  it('uses the injected engine mode and rejects only an explicit conflict', () => {
+    const engine = { mode: 'worker' as const };
+    expect(resolveCanvasViewerMode('Viewer', undefined, engine)).toBe('worker');
+    expect(resolveCanvasViewerMode('Viewer', 'worker', engine)).toBe('worker');
+    expect(() => resolveCanvasViewerMode('Viewer', 'main', engine)).toThrow(
+      "Viewer: opts.mode='main' conflicts with the injected engine's mode='worker'",
+    );
+  });
+
+  it('defaults a self-loading viewer to main mode', () => {
+    expect(resolveCanvasViewerMode('Viewer', undefined, undefined)).toBe('main');
+    expect(resolveCanvasViewerMode('Viewer', 'worker', undefined)).toBe('worker');
+  });
+});
 
 describe('StaticCanvasRenderDispatcher', () => {
   it('acquires the bitmap context once and avoids redundant backing-store resets', () => {
