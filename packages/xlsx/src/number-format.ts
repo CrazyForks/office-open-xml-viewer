@@ -2,6 +2,23 @@ import { excelSerialToUtcDate, roundDecimalHalfUp } from '@silurus/ooxml-core';
 import type { Cell, CellValue, Styles } from './types.js';
 import { todaySerial, nowSerial } from './formula.js';
 
+const localizedShortDateFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function localizedShortDateFormatter(locale: string | undefined): Intl.DateTimeFormat {
+  const cacheKey = locale ?? '';
+  const cached = localizedShortDateFormatters.get(cacheKey);
+  if (cached) return cached;
+
+  const formatter = new Intl.DateTimeFormat(locale, {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
+  localizedShortDateFormatters.set(cacheKey, formatter);
+  return formatter;
+}
+
 
 function cellValueText(value: CellValue): string {
   switch (value.type) {
@@ -508,12 +525,7 @@ function applyFormat(num: number, numFmtId: number, formatCode: string | null, d
     const locale = typeof navigator === 'undefined' ? undefined : navigator.language;
     const date = excelSerialToUtcDate(num, date1904);
     return {
-      text: new Intl.DateTimeFormat(locale, {
-        year: 'numeric',
-        month: 'numeric',
-        day: 'numeric',
-        timeZone: 'UTC',
-      }).format(date),
+      text: localizedShortDateFormatter(locale).format(date),
     };
   }
   // Built-in date/time numFmtIds (ECMA-376 §18.8.30 table)

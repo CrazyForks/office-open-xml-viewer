@@ -188,6 +188,24 @@ describe('date formats (Excel serial; 45292 = 2024-01-01)', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it('reuses the localized short-date formatter for cells in the same UI locale', () => {
+    vi.stubGlobal('navigator', { language: 'ko-KR' });
+    const NativeDateTimeFormat = Intl.DateTimeFormat;
+    const formatter = vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(
+      function dateTimeFormat(locales, options) {
+        return new NativeDateTimeFormat(locales, options);
+      },
+    );
+    try {
+      formatCellValue(numCell(45306), builtinStyles(14));
+      formatCellValue(numCell(45307), builtinStyles(14));
+      expect(formatter).toHaveBeenCalledTimes(1);
+    } finally {
+      formatter.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('date formats — 1900 Lotus leap-year-bug compat (§18.17.4.1)', () => {
