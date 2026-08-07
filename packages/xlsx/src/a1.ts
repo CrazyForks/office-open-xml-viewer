@@ -1,3 +1,5 @@
+import { MAX_WORKSHEET_COL, MAX_WORKSHEET_ROW } from './internal/grid-geometry.js';
+
 /**
  * Shared A1-style cell-reference parser (ECMA-376 §18.3.1.95 `ST_CellRef`).
  * Used by the renderer (comment-indicator placement), data-validation sqref
@@ -13,7 +15,9 @@ export function parseA1(ref: string): { row: number; col: number } | null {
   for (let i = 0; i < letters.length; i++) {
     col = col * 26 + (letters.charCodeAt(i) - 64);
   }
-  return { row: parseInt(m[2], 10), col };
+  const row = parseInt(m[2], 10);
+  if (row < 1 || row > MAX_WORKSHEET_ROW || col > MAX_WORKSHEET_COL) return null;
+  return { row, col };
 }
 
 /** Parse a single A1 cell or a two-endpoint A1 range. The first endpoint is

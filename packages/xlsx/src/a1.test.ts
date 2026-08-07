@@ -18,6 +18,16 @@ describe('parseA1Range', () => {
     expect(parseA1Range('B2:D5:F7')).toBeNull();
     expect(parseA1Range('Sheet1!B2:D5')).toBeNull();
   });
+
+  it('rejects endpoints outside the worksheet grid', () => {
+    expect(parseA1Range('A0:B2')).toBeNull();
+    expect(parseA1Range('A1:XFE2')).toBeNull();
+    expect(parseA1Range('A1048577:B2')).toBeNull();
+    expect(parseA1Range('XFD1048576')).toEqual({
+      anchor: { row: 1_048_576, col: 16_384 },
+      active: { row: 1_048_576, col: 16_384 },
+    });
+  });
 });
 
 describe('formatA1', () => {
