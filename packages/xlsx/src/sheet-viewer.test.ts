@@ -80,7 +80,7 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(popupDocument.listenerCount('keydown')).toBe(0);
   });
 
-  it('uses the caller canvas without constructing workbook footer chrome', () => {
+  it('uses the caller canvas with native scrollbars and without workbook footer chrome', () => {
     installDom();
     const parent = makeContainer();
     const canvas = makeEl('canvas');
@@ -96,10 +96,97 @@ describe('XlsxSheetViewer canvas mount', () => {
     const viewportInput = descendants(parent).find(
       (element) => element.getAttribute('data-xlsx-viewport-input') === 'sheet',
     );
+    expect(viewportInput?.style.overflow).toBe('auto');
+    expect(viewportInput?.children).toHaveLength(1);
+    expect(descendants(parent).some((element) => element.style.overflow === 'auto')).toBe(true);
+
+    viewer.destroy();
+  });
+
+  it('can hide native sheet scrollbars without adding workbook footer chrome', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      showScrollbars: false,
+    });
+
+    const viewportInput = descendants(parent).find(
+      (element) => element.getAttribute('data-xlsx-viewport-input') === 'sheet',
+    );
     expect(viewportInput?.style.overflow).toBe('clip');
     expect(viewportInput?.children).toHaveLength(0);
-    expect(descendants(parent).some((element) => element.style.overflow === 'auto')).toBe(false);
+    expect(descendants(parent).filter((element) => element.tag === 'button')).toHaveLength(0);
 
+    viewer.destroy();
+  });
+
+  it('continues drag selection beyond the visible viewport while auto-scrolling', () => {
+    const doc = installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      canvasArea: FakeEl;
+      scrollHost: FakeEl;
+      viewport: {
+        setExtent(width: number, height: number): void;
+        setViewportSize(width: number, height: number): void;
+      };
+      scheduleRender(): void;
+    } }).engine;
+    engine.currentWorksheet = {
+      ...worksheet('Long sheet'),
+      defaultColWidth: 8.43,
+    };
+    engine.canvasArea.clientWidth = 800;
+    engine.canvasArea.clientHeight = 600;
+    engine.scrollHost.clientWidth = 800;
+    engine.scrollHost.clientHeight = 600;
+    engine.scrollHost.scrollWidth = 5_000;
+    engine.scrollHost.scrollHeight = 5_000;
+    engine.viewport.setExtent(5_000, 5_000);
+    engine.viewport.setViewportSize(800, 600);
+    engine.scheduleRender = () => undefined;
+
+    const frames: FrameRequestCallback[] = [];
+    Object.assign(doc.defaultView, {
+      requestAnimationFrame: (callback: FrameRequestCallback) => {
+        frames.push(callback);
+        return frames.length;
+      },
+      cancelAnimationFrame: () => undefined,
+    });
+    const pointer = (overrides: Record<string, unknown>) => ({
+      button: 0,
+      pointerId: 1,
+      pointerType: 'mouse',
+      clientX: 100,
+      clientY: 100,
+      shiftKey: false,
+      preventDefault: () => undefined,
+      ...overrides,
+    });
+
+    engine.scrollHost.dispatch('pointerdown', pointer({}));
+    engine.scrollHost.dispatch('pointermove', pointer({ clientX: 790, clientY: 590 }));
+    const visibleEdgeSelection = viewer.selection;
+    for (let frame = 1; frame <= 20; frame += 1) {
+      const callback = frames.shift();
+      expect(callback).toBeDefined();
+      callback?.(frame * 16);
+    }
+
+    expect(viewer.getViewportOffset().x).toBeGreaterThan(0);
+    expect(viewer.getViewportOffset().y).toBeGreaterThan(0);
+    expect(viewer.selection?.active.row).toBeGreaterThan(visibleEdgeSelection?.active.row ?? 0);
+    expect(viewer.selection?.active.col).toBeGreaterThan(visibleEdgeSelection?.active.col ?? 0);
+
+    engine.scrollHost.dispatch('pointerup', pointer({ clientX: 790, clientY: 590 }));
     viewer.destroy();
   });
 

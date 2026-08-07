@@ -303,6 +303,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'showZoomSlider', type: 'boolean', def: 'true', desc: 'Show the Excel-style zoom slider at the end of the tab bar. Zooming (slider, Ctrl/⌘+wheel, trackpad pinch) is view-only.' },
         { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom slider bounds as scale factors (10%–400%).' },
         { name: 'resizable', type: 'boolean', def: 'true', desc: 'Allow resizing columns/rows by dragging header borders. View-only — it changes the on-screen view only and never modifies the loaded file. Set false to disable.', emphasis: 'View-only — it changes the on-screen view only and never modifies the loaded file.' },
+        { name: 'showScrollbars', type: 'boolean', def: 'true', desc: 'Show native worksheet scrollbars. Set false only when the host supplies another viewport navigation UI.' },
         { name: 'selectionColor', type: 'string', def: "'#1a73e8'", desc: 'Accent color for the cell-selection rectangle (any CSS color). The fill is the same color at 8% opacity.' },
         FIND_HIGHLIGHT_COLORS,
         { name: 'hiddenSheetMode', type: "'show' | 'skip' | 'dim'", def: "'show'", desc: 'How hidden / very-hidden sheets (`<sheet state>`, §18.2.19) appear in the tab bar. `show` renders a tab like any other; `skip` hides the tab (`display:none`) and makes sequential navigation jump over it; `dim` renders the tab at reduced opacity. Mirrors pptx `hiddenSlideMode`.' },
@@ -353,11 +354,12 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
     {
       name: 'XlsxSheetViewer',
       ctor: 'new XlsxSheetViewer(canvas: HTMLCanvasElement, options?: XlsxSheetViewerOptions)',
-      note: 'Canvas-mounted active-sheet viewport. It uses the caller canvas and the same sheet rendering, selection, find and navigation mechanics as XlsxViewer, but creates no sheet-tab/footer chrome or visible scrollbar. DOM chrome, styles and listeners follow canvas.ownerDocument, so a parent page can mount borrowed workbook sheets into same-origin popup canvases.',
+      note: 'Canvas-mounted active-sheet viewport. It uses the caller canvas and the same sheet rendering, selection, find and navigation mechanics as XlsxViewer, but creates no sheet-tab/footer chrome. Native worksheet scrollbars are visible by default. DOM chrome, styles and listeners follow canvas.ownerDocument, so a parent page can mount borrowed workbook sheets into same-origin popup canvases.',
       options: [
         { name: 'cellScale', type: 'number', def: '1', desc: 'Scale factor for cell/header dimensions (0.5 = half size).' },
         { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom bounds as scale factors (10%–400%).' },
         { name: 'resizable', type: 'boolean', def: 'true', desc: 'Allow resizing columns/rows by dragging header borders. View-only.' },
+        { name: 'showScrollbars', type: 'boolean', def: 'true', desc: 'Show native worksheet scrollbars. Set false only when the host supplies another viewport navigation UI.' },
         { name: 'selectionColor', type: 'string', def: "'#1a73e8'", desc: 'Accent color for the cell-selection rectangle.' },
         FIND_HIGHLIGHT_COLORS,
         { name: 'hiddenSheetMode', type: "'show' | 'skip' | 'dim'", def: "'show'", desc: 'Controls sequential navigation and hidden-sheet visibility without adding tab chrome.' },

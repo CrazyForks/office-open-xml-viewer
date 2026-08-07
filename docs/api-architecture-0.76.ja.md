@@ -177,8 +177,9 @@ whole sheetの一覧ではなく、sheet tabとscrollable cell gridを持つWork
 ### XLSX Canvas Viewerのcontract
 
 `XlsxSheetViewer`は、1つのactive worksheet viewportをCanvasへマウントして表示する。
-sheet tab/footer chromeとscrollbarは所有しない。worksheetは有限pageではないため、
-形式固有のviewport移動を追加で公開する。この状態をDOCX/PPTXへ無理に持ち込まない。
+sheet tab/footer chromeは所有しない。worksheetのnative scrollbarは既定で有効とし、host側が
+独自のviewport navigationを提供する場合だけ明示的に無効化できる。worksheetは有限pageでは
+ないため、形式固有のviewport移動を追加で公開する。この状態をDOCX/PPTXへ無理に持ち込まない。
 
 `XlsxWorkbook.renderSheet()`は意図的に用意しない。OOXML worksheetは最大1,048,576行、
 16,384列を持ち、Browser Canvasのdimensionとbacking memoryの上限を大幅に超えうる。
@@ -222,6 +223,7 @@ export interface XlsxScrollToCellOptions {
 export interface XlsxSheetViewerOptions extends LoadOptions {
   readonly cellScale?: number;
   readonly resizable?: boolean;
+  readonly showScrollbars?: boolean;
   readonly zoomMin?: number;
   readonly zoomMax?: number;
   readonly onScaleChange?: (scale: number) => void;
@@ -297,8 +299,8 @@ clampし、callbackにはclamp後の値を渡す。
 
 CanvasのCSS boxをviewport width/heightとし、DPRはbacking-store resolutionだけに影響する。
 `relayout()`でCSS boxを再取得する。共有caller-canvas lifecycleでcanvasをwrapし、
-destroy時に元へ戻す。Wheel/trackpadはscrollbarを作らずviewportをpanする。touch-pinchは今回の
-scope外とする。
+destroy時に元へ戻す。Native scrollbarを明示的に隠した場合もWheel/trackpadでviewportを
+panできる。touch-pinchは今回のscope外とする。
 
 `destroy()`はidempotentでinstanceを恒久的にcloseする。Destroy後のasync mutation
 （`load`、navigation、viewport/relayout、hidden-mode変更、find traversal）は
