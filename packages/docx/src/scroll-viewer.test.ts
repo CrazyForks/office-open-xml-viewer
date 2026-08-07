@@ -1706,6 +1706,15 @@ describe('DocxScrollViewer — paddingTop/paddingBottom (desk margin)', () => {
     expect(Math.abs(scrollHost.scrollTop - (24 + 3 * 810))).toBeLessThan(2);
     v.destroy();
   });
+
+  it('keeps the leading desk padding visible when setScale runs at the top', () => {
+    const { v, scrollHost } = setup({ paddingTop: 24, paddingBottom: 24, zoomMin: 0.5, zoomMax: 3 });
+    expect(scrollHost.scrollTop).toBe(0);
+    v.setScale(v.scaleForTest() * 0.75);
+    expect(scrollHost.scrollTop).toBe(0);
+    expect(slotTopFor(scrollHost, 0, PAGE_H * 0.75 + GAP, 24)).toBeDefined();
+    v.destroy();
+  });
 });
 
 describe('DocxScrollViewer — paddingLeft/paddingRight (horizontal desk gutters)', () => {

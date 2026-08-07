@@ -81,8 +81,9 @@ describe('official-site home design', () => {
     expect(live.match(/enableTextSelection:\s*true/g)).toHaveLength(2);
   });
 
-  it('starts paginated samples at the top of the embedded viewport', () => {
-    expect(live.match(/paddingTop:\s*0/g)).toHaveLength(2);
+  it('starts paginated samples at the top without removing their desk margin', () => {
+    expect(live).not.toMatch(/paddingTop:\s*0/);
+    expect(live.match(/gap:\s*26/g)).toHaveLength(2);
   });
 
   it('centres a smaller hero icon and aligns the second-row format links on mobile', () => {
