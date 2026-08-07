@@ -1154,7 +1154,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     // content under the pointer: content-y = scrollTop + anchorY (anchorY 0 ⇒ the
     // viewport top, the historical behaviour).
     const r0 = this._range();
-    const anchorContentY = this._scrollHost.scrollTop + anchorY;
+    const scrollTop0 = this._scrollHost.scrollTop;
+    const anchorContentY = scrollTop0 + anchorY;
     // Which page does that content-y fall in? `computeVisibleRange` attributes a
     // point in the trailing gap to the page ABOVE it, so clamp the fraction to
     // [0,1] to pin the page rather than drift into the gap.
@@ -1196,7 +1197,14 @@ export class DocxScrollViewer implements ZoomableViewer {
     // must stay at `anchorY`, so newScrollTop = newContentY − anchorY.
     const maxTop = Math.max(0, r1.totalHeight - this._scrollHost.clientHeight);
     const newContentY = (r1.offsets[top] ?? 0) + intraFrac * (this._heights[top] || 0);
-    this._scrollHost.scrollTop = Math.min(maxTop, Math.max(0, newContentY - anchorY));
+    // The leading desk padding is fixed viewport space: none of it scales. If the
+    // anchor is still inside that padding, keep the native scroll offset instead
+    // of snapping to page 0's offset and hiding the margin after a programmatic
+    // zoom at scrollTop 0.
+    const reanchoredTop = anchorContentY < (r0.offsets[0] ?? 0)
+      ? scrollTop0
+      : newContentY - anchorY;
+    this._scrollHost.scrollTop = Math.min(maxTop, Math.max(0, reanchoredTop));
 
     // Re-anchor horizontally for a gesture zoom. `padL` is a FIXED (non-scaling)
     // gutter, so it is subtracted from the ANCHOR only — the scroll offset stays
