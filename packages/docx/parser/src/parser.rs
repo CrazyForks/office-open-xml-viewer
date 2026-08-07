@@ -2794,12 +2794,47 @@ impl BodyParseCursor {
                 } else {
                     None
                 };
+                let paragraph_sect_pr =
+                    child_w(child, "pPr").and_then(|ppr| child_w(ppr, "sectPr"));
+                let mut push_section_break = |output: &mut Vec<BodyElement>| {
+                    if let Some(sect_pr) = paragraph_sect_pr {
+                        output.push(section_break_element(
+                            sect_pr,
+                            section_hf,
+                            format!("section:{}", self.section_ordinal),
+                        ));
+                        self.section_ordinal += 1;
+                    }
+                };
                 match lone_break {
-                    Some(BreakType::Page) => output.push(BodyElement::PageBreak {
-                        parity: None,
-                        same_paragraph_as_previous: None,
-                    }),
-                    Some(BreakType::Column) => output.push(BodyElement::ColumnBreak),
+                    Some(BreakType::Page) => {
+                        // §17.6.17 + §17.18.77: sectPr on this paragraph is
+                        // still the section terminator even when the paragraph's
+                        // only run is normalized away as a hard break. A
+                        // page-advancing section mark already provides the same
+                        // physical transition, so retaining both would create a
+                        // spurious blank page. `continuous` and `nextColumn` do
+                        // not subsume the authored page break and therefore keep
+                        // both events in source order.
+                        let section_subsumes_page_break =
+                            paragraph_sect_pr.is_some_and(|sect_pr| {
+                                !matches!(
+                                    read_section_break_type(sect_pr).as_deref(),
+                                    Some("continuous" | "nextColumn")
+                                )
+                            });
+                        if !section_subsumes_page_break {
+                            output.push(BodyElement::PageBreak {
+                                parity: None,
+                                same_paragraph_as_previous: None,
+                            });
+                        }
+                        push_section_break(&mut output);
+                    }
+                    Some(BreakType::Column) => {
+                        output.push(BodyElement::ColumnBreak);
+                        push_section_break(&mut output);
+                    }
                     _ => {
                         for piece in split_para_on_page_breaks(result) {
                             match piece {
@@ -2816,16 +2851,7 @@ impl BodyParseCursor {
                                 ParaPiece::ColumnBreak => output.push(BodyElement::ColumnBreak),
                             }
                         }
-                        if let Some(sect_pr) =
-                            child_w(child, "pPr").and_then(|ppr| child_w(ppr, "sectPr"))
-                        {
-                            output.push(section_break_element(
-                                sect_pr,
-                                section_hf,
-                                format!("section:{}", self.section_ordinal),
-                            ));
-                            self.section_ordinal += 1;
-                        }
+                        push_section_break(&mut output);
                     }
                 }
             }
@@ -19926,6 +19952,60 @@ mod column_tests {
             }
             other => panic!("expected SectionBreak, got {other:?}"),
         }
+    }
+
+    /// ECMA-376 §17.6.17 `sectPr` in a paragraph's properties terminates the
+    /// section at that paragraph. A paragraph containing only a hard page break
+    /// is normally collapsed to `BodyElement::PageBreak`, but that normalization
+    /// must not discard the paragraph-owned section properties. When the section
+    /// mark itself is page-advancing (the absent `w:type` defaults to nextPage),
+    /// retain the single section boundary rather than emitting two page advances.
+    #[test]
+    fn lone_page_break_paragraph_preserves_its_page_advancing_section_mark() {
+        let body = body_from(
+            r#"<w:p>
+                 <w:pPr>
+                   <w:sectPr>
+                     <w:pgSz w:w="11906" w:h="16838"/>
+                     <w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"
+                              w:header="708" w:footer="708"/>
+                   </w:sectPr>
+                 </w:pPr>
+                 <w:r><w:br w:type="page"/></w:r>
+               </w:p>"#,
+        );
+
+        assert_eq!(
+            body.len(),
+            1,
+            "the redundant hard break must not add a page"
+        );
+        match &body[0] {
+            BodyElement::SectionBreak { kind, geom, .. } => {
+                assert_eq!(kind, "nextPage");
+                let geometry = geom.as_ref().expect("authored page geometry");
+                assert_eq!(geometry.margin_top, 36.0);
+                assert_eq!(geometry.margin_left, 36.0);
+            }
+            other => panic!("expected the paragraph-owned SectionBreak, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lone_page_break_before_continuous_section_retains_both_transitions() {
+        let body = body_from(
+            r#"<w:p>
+                 <w:pPr><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr>
+                 <w:r><w:br w:type="page"/></w:r>
+               </w:p>"#,
+        );
+
+        assert_eq!(body.len(), 2);
+        assert!(matches!(body[0], BodyElement::PageBreak { .. }));
+        assert!(matches!(
+            &body[1],
+            BodyElement::SectionBreak { kind, .. } if kind == "continuous"
+        ));
     }
 
     #[test]
