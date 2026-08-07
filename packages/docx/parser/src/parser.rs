@@ -4703,6 +4703,9 @@ struct FieldFrame {
     field_type: String,
     /// REF/PAGEREF bookmark when the field-specific `\\h` switch is authored.
     hyperlink_anchor: Option<String>,
+    /// ECMA-376 §17.16.17 ffData legacy checkbox state. `checked` overrides
+    /// `default`; absence means this field is not a checkbox form field.
+    legacy_checkbox_checked: Option<bool>,
 }
 
 /// Stack of open field frames for the current paragraph content walk.
@@ -5004,8 +5007,37 @@ fn handle_run_in_para(
                 // TOC field's result region may itself open PAGEREF fields.
                 let occurrence_id = field.next_occurrence_id;
                 field.next_occurrence_id = field.next_occurrence_id.saturating_add(1);
+                let legacy_checkbox_checked = r_node
+                    .descendants()
+                    .find(|node| node.is_element() && node.tag_name().name() == "checkBox")
+                    .map(|check_box| {
+                        let on_off = |name: &str| {
+                            child_w(check_box, name).map(|value| {
+                                attr_w(value, "val")
+                                    .as_deref()
+                                    .and_then(parse_on_off)
+                                    .unwrap_or(true)
+                            })
+                        };
+                        on_off("checked")
+                            .or_else(|| on_off("default"))
+                            .unwrap_or(false)
+                    });
+                // Legacy form fields keep their visible control formatting on
+                // the fldChar begin run. Other complex fields continue to use
+                // the first instruction run, as required by the existing field
+                // projection (notably PAGE/NUMPAGES in headers and footers).
+                let legacy_checkbox_fmt = legacy_checkbox_checked.map(|_| {
+                    let mut fmt = base_run.clone();
+                    if let Some(rpr) = child_w(r_node, "rPr") {
+                        apply_direct_run(&mut fmt, &parse_run_fmt(rpr));
+                    }
+                    fmt
+                });
                 field.stack.push(FieldFrame {
                     occurrence_id,
+                    fmt: legacy_checkbox_fmt,
+                    legacy_checkbox_checked,
                     ..FieldFrame::default()
                 });
             }
@@ -5016,7 +5048,8 @@ fn handle_run_in_para(
                     // Complex fields (TOC, PAGEREF, REF, HYPERLINK, …) render their result
                     // content as normal runs — so multi-paragraph / nested fields like a TOC
                     // keep their headings, tabs and page numbers.
-                    frame.substitute = classify_field(&frame.instruction) != "other";
+                    frame.substitute = frame.legacy_checkbox_checked.is_some()
+                        || classify_field(&frame.instruction) != "other";
                     let semantics = classify_complex_field(&frame.instruction);
                     frame.field_type = semantics.field_type;
                     frame.hyperlink_anchor = semantics.hyperlink_anchor;
@@ -5033,10 +5066,20 @@ fn handle_run_in_para(
                 if let Some(frame) = field.stack.pop() {
                     if frame.substitute {
                         let fmt = frame.fmt.clone().unwrap_or_else(|| base_run.clone());
+                        let fallback = frame.legacy_checkbox_checked.map_or_else(
+                            || frame.fallback.clone(),
+                            |checked| {
+                                if checked {
+                                    "☒".to_string()
+                                } else {
+                                    "☐".to_string()
+                                }
+                            },
+                        );
                         runs.push(make_field_run(
                             &frame.instruction,
                             &fmt,
-                            &frame.fallback,
+                            &fallback,
                             theme,
                             revision,
                         ));
@@ -5498,6 +5541,10 @@ fn classify_field(instr: &str) -> String {
         // the injected current time from the instruction's picture instead.
         "DATE" => "date".to_string(),
         "TIME" => "time".to_string(),
+        // §17.16.17 ffData/checkBox supplies the semantic state. The parser
+        // emits a stable text fallback so Canvas layout and paint retain one
+        // visible inline control even when the legacy field has no cached run.
+        "FORMCHECKBOX" => "checkbox".to_string(),
         _ => "other".to_string(),
     }
 }
@@ -9814,41 +9861,10 @@ fn parse_vml_pict(
     // alignment (absolute|left|center|right|inside|outside); their `-relative`
     // companions give the container (margin|page|text|char|line). Map them onto
     // the shared anchor model the renderer already understands (align + relativeFrom).
-    let map_align = |v: &str| match v {
-        "center" => Some("center".to_string()),
-        "left" | "inside" => Some("left".to_string()),
-        "right" | "outside" => Some("right".to_string()),
-        _ => None, // "absolute" ⇒ use the numeric margin-left/top offset instead
-    };
-    let map_valign = |v: &str| match v {
-        "center" => Some("center".to_string()),
-        "top" | "inside" => Some("top".to_string()),
-        "bottom" | "outside" => Some("bottom".to_string()),
-        _ => None,
-    };
-    let anchor_x_align = vml_css_str(style, "mso-position-horizontal").and_then(map_align);
-    let anchor_y_align = vml_css_str(style, "mso-position-vertical").and_then(map_valign);
-    // VML's `text` base is the containing text column horizontally (including a
-    // table cell's inner text box) and the anchor paragraph vertically. Carry
-    // those explicit containers instead of degrading them to the page margins.
-    let map_x_rel = |v: &str| match v {
-        "margin" => Some("margin".to_string()),
-        "page" => Some("page".to_string()),
-        "text" => Some("column".to_string()),
-        "char" => Some("character".to_string()),
-        _ => None,
-    };
-    let map_y_rel = |v: &str| match v {
-        "margin" => Some("margin".to_string()),
-        "page" => Some("page".to_string()),
-        "text" => Some("paragraph".to_string()),
-        "line" => Some("line".to_string()),
-        _ => None,
-    };
-    let anchor_x_relative_from =
-        vml_css_str(style, "mso-position-horizontal-relative").and_then(map_x_rel);
-    let anchor_y_relative_from =
-        vml_css_str(style, "mso-position-vertical-relative").and_then(map_y_rel);
+    let anchor_x_align = parse_vml_anchor_x_align(style);
+    let anchor_y_align = parse_vml_anchor_y_align(style);
+    let anchor_x_relative_from = parse_vml_anchor_x_relative_from(style);
+    let anchor_y_relative_from = parse_vml_anchor_y_relative_from(style);
 
     // §19.1.2.19 style `z-index` — a negative value places the shape BEHIND the
     // document text (a watermark), matching wp:anchor behindDoc semantics.
@@ -10317,6 +10333,47 @@ fn vml_css_str<'a>(style: &'a str, prop: &str) -> Option<&'a str> {
     None
 }
 
+fn parse_vml_anchor_x_align(style: &str) -> Option<String> {
+    match vml_css_str(style, "mso-position-horizontal")? {
+        "center" => Some("center".to_string()),
+        "left" | "inside" => Some("left".to_string()),
+        "right" | "outside" => Some("right".to_string()),
+        // "absolute" uses the numeric margin-left/left offset instead.
+        _ => None,
+    }
+}
+
+fn parse_vml_anchor_y_align(style: &str) -> Option<String> {
+    match vml_css_str(style, "mso-position-vertical")? {
+        "center" => Some("center".to_string()),
+        "top" | "inside" => Some("top".to_string()),
+        "bottom" | "outside" => Some("bottom".to_string()),
+        _ => None,
+    }
+}
+
+/// VML's `text` horizontal base is the containing text column (including a
+/// table cell's inner text box); vertically it is the anchor paragraph.
+fn parse_vml_anchor_x_relative_from(style: &str) -> Option<String> {
+    match vml_css_str(style, "mso-position-horizontal-relative")? {
+        "margin" => Some("margin".to_string()),
+        "page" => Some("page".to_string()),
+        "text" => Some("column".to_string()),
+        "char" => Some("character".to_string()),
+        _ => None,
+    }
+}
+
+fn parse_vml_anchor_y_relative_from(style: &str) -> Option<String> {
+    match vml_css_str(style, "mso-position-vertical-relative")? {
+        "margin" => Some("margin".to_string()),
+        "page" => Some("page".to_string()),
+        "text" => Some("paragraph".to_string()),
+        "line" => Some("line".to_string()),
+        _ => None,
+    }
+}
+
 /// Resolve a VML color value (ECMA-376 Part 4 §19.1.2 — `fillcolor` /
 /// `strokecolor`, or a CSS color word) to the renderer's 6-hex form WITHOUT a
 /// leading `#`. Accepts `#rrggbb` / `rrggbb` hex and the CSS/VML named colors
@@ -10494,6 +10551,42 @@ fn parse_vml_pict_image(
         return None;
     }
 
+    // VML §19.1.2.19 uses CSS-like positioning for both text shapes and
+    // imagedata pictures. `position:absolute` is a floating anchor; treating it
+    // as an inline glyph applies line-height/baseline positioning and clips a
+    // page-sized scan. The mso-position-*-relative values select the same page,
+    // margin, column, and paragraph frames used by DrawingML anchors.
+    let anchor =
+        vml_css_str(style, "position").is_some_and(|value| value.eq_ignore_ascii_case("absolute"));
+    let anchor_x_pt = if anchor {
+        vml_css_length_pt(style, "margin-left")
+            .or_else(|| vml_css_length_pt(style, "left"))
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    let anchor_y_pt = if anchor {
+        vml_css_length_pt(style, "margin-top")
+            .or_else(|| vml_css_length_pt(style, "top"))
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    let anchor_x_align = anchor.then(|| parse_vml_anchor_x_align(style)).flatten();
+    let anchor_y_align = anchor.then(|| parse_vml_anchor_y_align(style)).flatten();
+    let anchor_x_relative_from = anchor
+        .then(|| parse_vml_anchor_x_relative_from(style))
+        .flatten();
+    let anchor_y_relative_from = anchor
+        .then(|| parse_vml_anchor_y_relative_from(style))
+        .flatten();
+    let anchor_x_from_margin = anchor && anchor_x_relative_from.as_deref() != Some("page");
+    let anchor_y_from_para = anchor
+        && matches!(
+            anchor_y_relative_from.as_deref(),
+            None | Some("paragraph") | Some("line") | Some("character")
+        );
+
     Some(ImageRun {
         image_path,
         mime_type,
@@ -10504,11 +10597,11 @@ fn parse_vml_pict_image(
         rotation: 0.0,
         flip_h: false,
         flip_v: false,
-        anchor: false,
-        anchor_x_pt: 0.0,
-        anchor_y_pt: 0.0,
-        anchor_x_from_margin: false,
-        anchor_y_from_para: false,
+        anchor,
+        anchor_x_pt,
+        anchor_y_pt,
+        anchor_x_from_margin,
+        anchor_y_from_para,
         color_replace_from: None,
         duotone: None,
         alpha: None,
@@ -10519,10 +10612,10 @@ fn parse_vml_pict_image(
         dist_right: 0.0,
         wrap_side: None,
         allow_overlap: true,
-        anchor_x_align: None,
-        anchor_y_align: None,
-        anchor_x_relative_from: None,
-        anchor_y_relative_from: None,
+        anchor_x_align,
+        anchor_y_align,
+        anchor_x_relative_from,
+        anchor_y_relative_from,
         anchor_acquisition: None,
     })
 }
@@ -10709,8 +10802,8 @@ fn parse_shape_fill(
 
 /// Resolve a wps:style/a:fillRef into a concrete ShapeFill using the theme's
 /// fmtScheme/fillStyleLst (idx 1..) or bgFillStyleLst (idx 1000+). The fillRef
-/// also carries a `<a:schemeClr>` child whose name substitutes for `phClr`
-/// placeholders in the recipe (ECMA-376 §20.1.4.1.7 / §20.1.4.1.30).
+/// also carries an `EG_ColorChoice` child whose resolved color substitutes for
+/// `phClr` placeholders in the recipe (ECMA-376 §20.1.4.1.7 / §20.1.4.1.30).
 ///
 /// Resume / cover templates lean on this: their backgrounds are described
 /// indirectly as `fillRef idx="1003"` with the actual color and gradient
@@ -10721,11 +10814,10 @@ fn resolve_fill_ref(fill_ref: roxmltree::Node, theme: &ThemeColors) -> Option<Sh
     if idx == 0 {
         return None;
     }
-    let scheme_clr = fill_ref
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "schemeClr")
-        .and_then(|n| n.attribute("val"))
-        .unwrap_or("dk1");
+    // CT_StyleMatrixReference carries the full EG_ColorChoice, not only
+    // schemeClr. Resolve srgbClr/sysClr/prstClr/etc. (and their transforms)
+    // before substituting the result for the theme recipe's phClr.
+    let placeholder_color = resolve_color_element(fill_ref, theme)?;
 
     let xml = theme.theme_xml.as_ref()?;
     let doc = parse_guarded(xml).ok()?;
@@ -10747,22 +10839,22 @@ fn resolve_fill_ref(fill_ref: roxmltree::Node, theme: &ThemeColors) -> Option<Sh
     let entry = lst.children().filter(|n| n.is_element()).nth(local_idx)?;
 
     match entry.tag_name().name() {
-        "solidFill" => resolve_color_element_with_phclr(entry, theme, scheme_clr)
+        "solidFill" => resolve_color_element_with_phclr(entry, theme, Some(&placeholder_color))
             .map(|c| ShapeFill::Solid { color: c }),
-        "gradFill" => parse_grad_fill_phclr(entry, theme, scheme_clr),
+        "gradFill" => parse_grad_fill_phclr(entry, theme, Some(&placeholder_color)),
         // blipFill / pattFill recipes aren't supported yet — fall back to no fill.
         _ => None,
     }
 }
 
 fn parse_grad_fill(node: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeFill> {
-    parse_grad_fill_phclr(node, theme, "")
+    parse_grad_fill_phclr(node, theme, None)
 }
 
 fn parse_grad_fill_phclr(
     node: roxmltree::Node,
     theme: &ThemeColors,
-    ph_clr: &str,
+    placeholder_color: Option<&str>,
 ) -> Option<ShapeFill> {
     let gs_lst = node
         .children()
@@ -10777,7 +10869,7 @@ fn parse_grad_fill_phclr(
             .and_then(|v| v.parse::<f64>().ok())
             .map(|p| p / 100000.0)
             .unwrap_or(0.0);
-        if let Some(color) = resolve_color_element_with_phclr(gs, theme, ph_clr) {
+        if let Some(color) = resolve_color_element_with_phclr(gs, theme, placeholder_color) {
             stops.push(GradientStop {
                 position: pos,
                 color,
@@ -10918,35 +11010,34 @@ fn parse_custom_geometry(cust_geom: roxmltree::Node) -> Vec<Vec<PathCmd>> {
 /// inspecting its child: <a:srgbClr>, <a:schemeClr>, or <a:sysClr>, applying
 /// any lumMod/lumOff/alpha modifiers declared on the inner color element.
 fn resolve_color_element(container: roxmltree::Node, theme: &ThemeColors) -> Option<String> {
-    resolve_color_element_with_phclr(container, theme, "")
+    resolve_color_element_with_phclr(container, theme, None)
 }
 
 /// Resolves a `<a:schemeClr val>` name to its base theme hex the Word way, for
-/// the shared [`ooxml_common::color::parse_color_node`]. Carries the `ph_clr`
-/// substitution name: when the scheme name is `phClr` (a placeholder color from
-/// a wps:style/fillRef) and `ph_clr` is non-empty, that name is resolved
-/// instead. The color grammar (srgbClr/sysClr/prstClr + transforms) is shared;
-/// only this theme-slot lookup + phClr substitution is docx-specific.
+/// the shared [`ooxml_common::color::parse_color_node`]. Carries the resolved
+/// placeholder color: when the scheme name is `phClr` (from a
+/// wps:style/fillRef recipe), that concrete color is returned instead. The
+/// color grammar (srgbClr/sysClr/prstClr + transforms) is shared; only this
+/// theme-slot lookup + phClr substitution is docx-specific.
 struct DocxSchemeResolver<'a> {
     theme: &'a ThemeColors,
-    ph_clr: &'a str,
+    placeholder_color: Option<&'a str>,
 }
 
 impl ooxml_common::color::ThemeResolver for DocxSchemeResolver<'_> {
     fn resolve_scheme_color(&self, name: &str) -> Option<String> {
-        let resolved = if name == "phClr" && !self.ph_clr.is_empty() {
-            self.ph_clr
+        if name == "phClr" {
+            self.placeholder_color.map(str::to_owned)
         } else {
-            name
-        };
-        self.theme.resolve(resolved)
+            self.theme.resolve(name)
+        }
     }
 }
 
 /// Like `resolve_color_element` but, when an inner `<a:schemeClr val="phClr"/>`
-/// is encountered, substitutes the scheme name `ph_clr` (the `<a:schemeClr>`
-/// child of the wps:style/fillRef that triggered theme lookup). Pass an empty
-/// string to disable the substitution.
+/// is encountered, substitutes `placeholder_color` (the resolved
+/// `EG_ColorChoice` child of the wps:style/fillRef that triggered theme lookup).
+/// Pass `None` to disable the substitution.
 ///
 /// Thin wrapper over the shared [`ooxml_common::color::parse_color_node`] with
 /// `TintMode::WordLiteral` (the spec-literal `tint = val·input + (1-val)·white`
@@ -10958,11 +11049,14 @@ impl ooxml_common::color::ThemeResolver for DocxSchemeResolver<'_> {
 fn resolve_color_element_with_phclr(
     container: roxmltree::Node,
     theme: &ThemeColors,
-    ph_clr: &str,
+    placeholder_color: Option<&str>,
 ) -> Option<String> {
     ooxml_common::color::parse_color_node(
         container,
-        &DocxSchemeResolver { theme, ph_clr },
+        &DocxSchemeResolver {
+            theme,
+            placeholder_color,
+        },
         ooxml_common::color::TintMode::WordLiteral,
     )
 }
@@ -10976,7 +11070,10 @@ fn resolve_color_element_with_phclr(
 fn parse_blip_duotone_docx(blip_fill: roxmltree::Node, theme: &ThemeColors) -> Option<Duotone> {
     parse_blip_duotone(
         blip_fill,
-        &DocxSchemeResolver { theme, ph_clr: "" },
+        &DocxSchemeResolver {
+            theme,
+            placeholder_color: None,
+        },
         ooxml_common::color::TintMode::WordLiteral,
     )
 }
@@ -13221,6 +13318,42 @@ mod tests {
                 .any(|r| matches!(r, DocRun::Text(t) if t.text == "2019")),
             "cached result swallowed, not rendered as text"
         );
+    }
+
+    #[test]
+    fn legacy_form_checkbox_emits_visible_state_without_cached_result() {
+        let base = RunFmt::default();
+        let styles = StyleMap::parse("");
+        let parse_checkbox = |state: &str| {
+            parse_para(
+                &format!(
+                    r#"<w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:fldChar w:fldCharType="begin">
+                          <w:ffData><w:checkBox><w:sizeAuto/>{state}</w:checkBox></w:ffData>
+                        </w:fldChar></w:r>
+                        <w:r><w:instrText> FORMCHECKBOX </w:instrText></w:r>
+                        <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+                        <w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+                ),
+                &base,
+                &styles,
+            )
+        };
+        fn field(runs: &[DocRun]) -> &FieldRun {
+            runs.iter()
+                .find_map(|run| match run {
+                    DocRun::Field(field) => Some(field.as_ref()),
+                    _ => None,
+                })
+                .expect("checkbox field")
+        }
+
+        let unchecked = parse_checkbox(r#"<w:default w:val="0"/>"#);
+        assert_eq!(field(&unchecked).field_type, "checkbox");
+        assert_eq!(field(&unchecked).fallback_text, "☐");
+        assert_eq!(field(&unchecked).font_size, 10.0);
+
+        let checked = parse_checkbox(r#"<w:default w:val="0"/><w:checked w:val="1"/>"#);
+        assert_eq!(field(&checked).fallback_text, "☒");
     }
 
     // A styles part defining a `Hyperlink` character style (blue + underline),
@@ -22228,6 +22361,27 @@ mod shape_preset_geometry_tests {
         )
     }
 
+    fn theme_with_placeholder_fill() -> ThemeColors {
+        ThemeColors::parse(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <a:themeElements>
+                   <a:clrScheme name="t">
+                     <a:dk1><a:srgbClr val="000000"/></a:dk1>
+                     <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+                   </a:clrScheme>
+                   <a:fmtScheme name="s">
+                     <a:fillStyleLst>
+                       <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+                     </a:fillStyleLst>
+                     <a:lnStyleLst/>
+                     <a:effectStyleLst/>
+                     <a:bgFillStyleLst/>
+                   </a:fmtScheme>
+                 </a:themeElements>
+               </a:theme>"#,
+        )
+    }
+
     fn shape_with_sppr_and_style(sp_pr_body: &str, style: &str, theme: &ThemeColors) -> ShapeRun {
         let xml = format!(
             r#"<wps:wsp
@@ -22332,6 +22486,25 @@ mod shape_preset_geometry_tests {
 
         assert_eq!(shape.stroke.as_deref(), Some("4472C4"));
         assert!((shape.stroke_width - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fillref_srgb_color_substitutes_theme_placeholder_color() {
+        let theme = theme_with_placeholder_fill();
+        let shape = shape_with_sppr_and_style(
+            r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#,
+            r#"<wps:style><a:fillRef idx="1"><a:srgbClr val="EBF3FB"/></a:fillRef></wps:style>"#,
+            &theme,
+        );
+
+        assert_eq!(
+            shape.fill.as_ref().and_then(|fill| match fill {
+                ShapeFill::Solid { color } => Some(color.as_str()),
+                _ => None,
+            }),
+            Some("EBF3FB"),
+            "fillRef accepts the full EG_ColorChoice, not only schemeClr",
+        );
     }
 }
 
@@ -24921,6 +25094,41 @@ mod vml_pict_tests {
             shape_runs(&body, &media).is_empty(),
             "an imagedata pict is an image, not a shape panel"
         );
+    }
+
+    /// VML §19.1.2.19: `position:absolute` plus page-relative positioning makes
+    /// a bare imagedata picture a floating page anchor, not an inline glyph.
+    /// Scanned-page DOCX files commonly use this form with a full-page image at
+    /// margin-left/top zero.
+    #[test]
+    fn absolute_page_relative_pict_imagedata_emits_anchored_image() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shape id="s1" type="#_x0000_t75"
+                  style="position:absolute;margin-left:0;margin-top:0;width:596.15pt;height:842.05pt;mso-position-horizontal-relative:page;mso-position-vertical-relative:page">
+                  <v:imagedata r:id="rIdImg"/>
+                  <w10:wrap anchorx="page" anchory="page"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let media = HashMap::from([(
+            "rIdImg".to_string(),
+            "word/media/scanned-page.png".to_string(),
+        )]);
+
+        let imgs = image_runs(&body, &media);
+        assert_eq!(imgs.len(), 1);
+        let image = &imgs[0];
+        assert!(image.anchor);
+        assert_eq!(image.anchor_x_pt, 0.0);
+        assert_eq!(image.anchor_y_pt, 0.0);
+        assert!(!image.anchor_x_from_margin);
+        assert!(!image.anchor_y_from_para);
+        assert_eq!(image.anchor_x_relative_from.as_deref(), Some("page"));
+        assert_eq!(image.anchor_y_relative_from.as_deref(), Some("page"));
     }
 
     /// A bare `<w:pict>` imagedata with a dangling `r:id` (not in the media map)
