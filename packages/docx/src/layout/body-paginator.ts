@@ -32,6 +32,7 @@ import {
   accumulatePageSectionRegion,
   bodyFlowDomainId,
   createParityBlankLayoutPage,
+  finalizePageBookmarkStarts,
   finalizeLayoutPage,
   type PageSectionRegionInput,
 } from './page-factory.js';
@@ -2195,5 +2196,9 @@ export function paginateBody(
           ...withEndnotes.diagnostics,
         ]),
       });
-  return assertAndDeepFreezeDocumentLayout(withParserDiagnostics) as DocumentLayout;
+  const finalized = Object.freeze({
+    ...withParserDiagnostics,
+    pages: Object.freeze(withParserDiagnostics.pages.map(finalizePageBookmarkStarts)),
+  });
+  return assertAndDeepFreezeDocumentLayout(finalized) as DocumentLayout;
 }

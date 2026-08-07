@@ -9,7 +9,7 @@ import {
 import { columnSeparatorSegments } from './column-separators.js';
 import { orderedPagePaintNodes, pageLayerNodes, PageGraphError } from './page-graph.js';
 import {
-  derivePageBookmarkStarts,
+  deriveRetainedPageBookmarkStarts,
   sectionLayoutContextsEqual,
 } from './page-factory.js';
 import type {
@@ -939,11 +939,7 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
           region.sectionOccurrenceId,
         ]),
       );
-      const expectedBookmarkStarts = derivePageBookmarkStarts(
-        orderedPagePaintNodes(page),
-        page.sectionOccurrenceId ?? '',
-        sectionByDomain,
-      );
+      const expectedBookmarkStarts = deriveRetainedPageBookmarkStarts(page, sectionByDomain);
       const bookmarkOwnersAreValid = expectedBookmarkStarts.every((bookmark) =>
         bookmark.sectionOccurrenceId.length > 0
         && sectionOccurrenceIds.has(bookmark.sectionOccurrenceId));
