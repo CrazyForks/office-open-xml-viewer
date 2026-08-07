@@ -492,6 +492,10 @@ describe('layout compatibility inventory', () => {
       { xPt: 20, yPt: 30, widthPt: 40, heightPt: 50 },
       { xPt: 5, yPt: 10, widthPt: 100, heightPt: 200 },
     )).toEqual({ xPt: 5, yPt: 30, widthPt: 100, heightPt: 50 });
+    expect(wordExactRowVerticalClipBounds(
+      { xPt: -5, yPt: 30, widthPt: 40, heightPt: 50 },
+      { xPt: 5, yPt: 10, widthPt: 100, heightPt: 200 },
+    )).toEqual({ xPt: -5, yPt: 30, widthPt: 110, heightPt: 50 });
     expect(wordClipsOverPageCantSplitRow({
       compatibility: 'word',
       availableHeightPt: 99.99995,
