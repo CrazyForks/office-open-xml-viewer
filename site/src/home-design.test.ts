@@ -75,6 +75,15 @@ describe('official-site home design', () => {
     expect(showcase).toContain('for (const entry of cache.values()) entry.controller.destroy();');
   });
 
+  it('preserves the live viewers across back-forward cache restores', () => {
+    expect(showcase).toContain("window.addEventListener('pagehide', (event) => {");
+    expect(showcase).toContain('if (event.persisted) return;');
+    expect(showcase).not.toMatch(/pagehide[\s\S]*?\{ once: true \}/);
+    expect(showcase).toContain("window.addEventListener('pageshow', (event) => {");
+    expect(showcase).toContain('if (!event.persisted || !loaded) return;');
+    expect(showcase).toContain('cache.get(loaded)?.controller.activate?.();');
+  });
+
   it('uses selectable scroll viewers for the DOCX and PPTX samples', () => {
     expect(live).toContain('DocxScrollViewer.fromDocument');
     expect(live).toContain('PptxScrollViewer.fromPresentation');
