@@ -5,6 +5,29 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.76.1 — 2026-08-07
+
+Patch. Improves Word-compatible legacy layout, stabilizes public-site demos,
+and repairs the release workflows without changing the 0.76 public API.
+
+- **docx fidelity:** retain section properties on break-only paragraphs; resolve
+  the complete DrawingML style-matrix color choice; preserve absolute VML image
+  anchors, CSS declaration precedence, wrap distances, coordinate ownership,
+  and signed stacking; render legacy form-checkbox state and sizing; and allow
+  authored fixed nested tables to overflow a containing cell when Word does.
+  (ECMA-376 §§17.16.29–30, 17.18.87, 19.1.2.19, 20.1.4.1.7 and
+  20.1.4.1.30; MS-OE376 §§2.1.505, 2.1.1692, 2.1.1701 and 2.1.1710;
+  #1167, #1168)
+- **viewer and website stability:** keep the first-page leading padding while
+  paginated DOCX/PPTX demos start at scroll position zero, restore homepage
+  viewers after browser history navigation, normalize external-link arrows on
+  mobile, prevent announcement pages from causing horizontal overflow, and
+  document that loading ownership and main/worker execution mode are independent
+  choices. (#1164, #1165, #1166)
+- **release infrastructure:** isolate VS Code extension package builds from stale
+  workspace output and update the GitHub Pages artifact upload action for the
+  current runner runtime. (#1162, #1163)
+
 ## 0.76.0 — 2026-08-06
 
 Breaking minor release. Unifies Browser Viewer ownership, replaces the legacy
