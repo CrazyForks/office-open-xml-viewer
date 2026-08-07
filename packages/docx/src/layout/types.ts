@@ -1181,7 +1181,9 @@ export interface TableColumnRowConstraint {
 /** Plain inputs for the §17.18.87 fixed/autofit column algorithm. */
 export interface TableColumnLayoutInput {
   readonly layout: 'fixed' | 'autofit';
-  readonly availableWidthPt: number;
+  /** Physical occurrence ceiling. `null` means the containing frame imposes
+   * no width ceiling (for example, an authored fixed table nested in a cell). */
+  readonly availableWidthPt: number | null;
   readonly gridWidthsPt: readonly number[];
   readonly gridWidthKeys?: readonly (string | null)[];
   readonly tablePreferredWidthPt: number | null;

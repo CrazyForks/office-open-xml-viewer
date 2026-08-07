@@ -881,7 +881,7 @@ export function tableColumnLayoutInput(
   table: TableLayoutSource,
   availableWidthPt: number,
   intrinsicWidths: (cell: TableLayoutSource['rows'][number]['cells'][number]) => CellIntrinsicWidths,
-  maximumWidthPt: number = availableWidthPt,
+  maximumWidthPt: number | null = availableWidthPt,
 ): import('./layout/types.js').TableColumnLayoutInput {
   const source = tableSourceAcquisitionInput(table);
   return projectTableColumnLayoutInput(
