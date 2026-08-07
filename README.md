@@ -92,6 +92,7 @@ docx.nextPage();
 const container = document.getElementById('xlsx-container') as HTMLElement;
 const xlsx = new XlsxViewer(container);
 await xlsx.load('/workbook.xlsx');
+xlsx.select('B2:D5'); // first endpoint is the anchor; second is the active cell
 
 // XLSX active-sheet surface only — caller provides the <canvas>
 const sheetCanvas = document.getElementById('xlsx-canvas') as HTMLCanvasElement;
@@ -548,7 +549,7 @@ file without uploading it.
 | | Cell comments / notes (classic `xl/commentsN.xml` + Office-365 threaded comments — red triangle indicator + author / text via the worksheet model, shown in an Excel-style hover popup) | ✅ |
 | | Data validation (rules via the worksheet model; `list`-type dropdown arrow on the selected cell whose click opens a panel showing the allowed values — read-only) | ✅ |
 | | Markdown export (`XlsxWorkbook.toMarkdown()` — each sheet as a `## SheetName` pipe table; also `@silurus/ooxml-markdown` + the `ooxml-md` CLI) | ✅ |
-| **Interaction** | Cell selection (single / range / row / column / all) | ✅ |
+| **Interaction** | Cell selection (single / range / row / column / all; `select('B2:D5')` for programmatic ranges) | ✅ |
 | | Excel-style row / column header highlight on selection | ✅ |
 | | Shift+click to extend, Ctrl+C to copy as TSV | ✅ |
 | | Text selection inside cells (transparent overlay) | ✅ |

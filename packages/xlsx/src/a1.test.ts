@@ -1,5 +1,24 @@
 import { describe, it, expect } from 'vitest';
-import { parseA1, formatA1 } from './a1.js';
+import { parseA1, parseA1Range, formatA1 } from './a1.js';
+
+describe('parseA1Range', () => {
+  it('preserves single-cell and directional range endpoints', () => {
+    expect(parseA1Range('B2')).toEqual({
+      anchor: { row: 2, col: 2 },
+      active: { row: 2, col: 2 },
+    });
+    expect(parseA1Range('$D$5:$B$2')).toEqual({
+      anchor: { row: 5, col: 4 },
+      active: { row: 2, col: 2 },
+    });
+  });
+
+  it('rejects malformed and multi-area references', () => {
+    expect(parseA1Range('B2:')).toBeNull();
+    expect(parseA1Range('B2:D5:F7')).toBeNull();
+    expect(parseA1Range('Sheet1!B2:D5')).toBeNull();
+  });
+});
 
 describe('formatA1', () => {
   it('formats single-letter columns', () => {

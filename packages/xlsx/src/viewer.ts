@@ -20,7 +20,7 @@ import {
   rtlMirrorX,
 } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
-import { parseA1 } from './a1.js';
+import { parseA1, parseA1Range } from './a1.js';
 import { XlsxFindController, type FindCell, type XlsxMatchLocation } from './find.js';
 import { computeCommentPopupPosition } from './comment-popup.js';
 import {
@@ -1747,17 +1747,19 @@ class XlsxViewerEngine implements ZoomableViewer {
   }
 
   /**
-   * Programmatically select a single cell by A1 reference (e.g. `"B2"`), as if
-   * the user had clicked it: updates the active/anchor cell, redraws the
+   * Programmatically select a cell or range by A1 reference (e.g. `"B2"` or
+   * `"B2:D5"`), as if the user had clicked or Shift-clicked it: updates the
+   * active/anchor cells while preserving the endpoint direction, redraws the
    * selection overlay (including any list-validation dropdown arrow), and fires
    * `onSelectionChange`. A no-op for malformed refs. Closes any open validation
    * panel, matching the click path.
    */
   select(ref: string): void {
-    const p = parseA1(ref);
-    if (!p) return;
+    const range = parseA1Range(ref);
+    if (!range) return;
     this.hideValidationPanel();
-    this.selectionController.select({ row: p.row, col: p.col });
+    this.selectionController.select(range.anchor);
+    this.selectionController.extend(range.active);
     this.updateSelectionOverlay();
     if (this.wb) this.renderCurrentSheet().catch((error) => this._reportRenderError(error));
     this.opts.onSelectionChange?.(this.selection);

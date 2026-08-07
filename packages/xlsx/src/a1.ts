@@ -16,6 +16,20 @@ export function parseA1(ref: string): { row: number; col: number } | null {
   return { row: parseInt(m[2], 10), col };
 }
 
+/** Parse a single A1 cell or a two-endpoint A1 range. The first endpoint is
+ * retained as the selection anchor and the second as its active cell, matching
+ * Excel's Shift-selection direction instead of normalizing the rectangle. */
+export function parseA1Range(ref: string): {
+  anchor: { row: number; col: number };
+  active: { row: number; col: number };
+} | null {
+  const parts = ref.split(':');
+  if (parts.length > 2) return null;
+  const anchor = parseA1(parts[0]);
+  const active = parts.length === 2 ? parseA1(parts[1]) : anchor;
+  return anchor && active ? { anchor, active } : null;
+}
+
 /**
  * Inverse of {@link parseA1}: format a 1-based (row, col) as an A1 reference
  * (e.g. `(7, 2)` → `"B7"`). Used by IX2 findText to report a match's cell in the

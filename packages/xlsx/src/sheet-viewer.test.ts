@@ -39,6 +39,23 @@ function worksheet(name: string): Worksheet {
 }
 
 describe('XlsxSheetViewer canvas mount', () => {
+  it('selects an A1 range while preserving its anchor and active endpoints', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+
+    viewer.select('B2:D5');
+
+    expect(viewer.selection).toEqual({
+      anchor: { row: 2, col: 2 },
+      active: { row: 5, col: 4 },
+      mode: 'cells',
+    });
+    viewer.destroy();
+  });
+
   it('creates chrome, styles, and document listeners in the canvas owner window', () => {
     const openerDocument = installDom();
     const popupDocument = makeDocument(2);
