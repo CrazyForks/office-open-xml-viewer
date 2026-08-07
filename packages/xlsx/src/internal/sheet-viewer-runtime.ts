@@ -241,7 +241,7 @@ export class SelectionController {
   private anchorCell: SheetCellAddress | null = null;
   private activeCell: SheetCellAddress | null = null;
   private selectionMode: SheetSelectionMode = 'cells';
-  private dragActive = false;
+  private dragPointerId: number | null = null;
 
   get anchor(): SheetCellAddress | null {
     return this.anchorCell ? { ...this.anchorCell } : null;
@@ -252,7 +252,8 @@ export class SelectionController {
   }
 
   get mode(): SheetSelectionMode { return this.selectionMode; }
-  get dragging(): boolean { return this.dragActive; }
+  get dragging(): boolean { return this.dragPointerId !== null; }
+  get draggingPointerId(): number | null { return this.dragPointerId; }
 
   setAnchor(cell: SheetCellAddress | null): void {
     this.anchorCell = cell ? { ...cell } : null;
@@ -263,13 +264,20 @@ export class SelectionController {
   }
 
   setMode(mode: SheetSelectionMode): void { this.selectionMode = mode; }
-  setDragging(dragging: boolean): void { this.dragActive = dragging; }
+
+  beginDrag(pointerId: number): void {
+    this.dragPointerId = pointerId;
+  }
+
+  endDrag(pointerId?: number): void {
+    if (pointerId === undefined || pointerId === this.dragPointerId) this.dragPointerId = null;
+  }
 
   reset(): void {
     this.anchorCell = null;
     this.activeCell = null;
     this.selectionMode = 'cells';
-    this.dragActive = false;
+    this.dragPointerId = null;
   }
 
   select(cell: SheetCellAddress, mode: SheetSelectionMode = 'cells'): void {

@@ -6,13 +6,16 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const extensionRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const vsce = resolve(extensionRoot, 'node_modules/.bin/vsce');
+const require = createRequire(import.meta.url);
+const vscePackage = require.resolve('@vscode/vsce/package.json');
+const vsce = resolve(dirname(vscePackage), 'vsce');
 const fixtures: string[] = [];
 
 afterEach(() => {
@@ -32,10 +35,10 @@ describe('VS Code extension package boundary', () => {
     writeFileSync(resolve(fixture, 'dist/extension.js.map'), '{"version":3}');
     writeFileSync(resolve(fixture, 'dist/webview.js.map'), '{"version":3}');
 
-    const files = execFileSync(vsce, ['ls', '--no-dependencies'], {
+    const files = execFileSync(process.execPath, [vsce, 'ls', '--no-dependencies'], {
       cwd: fixture,
       encoding: 'utf8',
-    }).trim().split('\n');
+    }).trim().split(/\r?\n/);
 
     expect(files).toContain('dist/extension.js');
     expect(files).toContain('dist/webview.js');

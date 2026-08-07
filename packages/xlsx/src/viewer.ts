@@ -495,8 +495,16 @@ class XlsxViewerEngine implements ZoomableViewer {
     return this.selectionController.dragging;
   }
 
-  private set isSelecting(value: boolean) {
-    this.selectionController.setDragging(value);
+  private get selectionPointerId(): number | null {
+    return this.selectionController.draggingPointerId;
+  }
+
+  /** Claim drag-selection ownership and discard deferred gestures from any
+   * other pointer that began before this drag. */
+  private beginSelectionDrag(pointerId: number): void {
+    if (this.pendingTap?.pointerId !== pointerId) this.pendingTap = null;
+    if (this.pendingClick?.pointerId !== pointerId) this.pendingClick = null;
+    this.selectionController.beginDrag(pointerId);
   }
 
   /** Gesture-only pointer anchor for the NEXT `setScale`, in canvasArea-viewport
@@ -2634,7 +2642,7 @@ class XlsxViewerEngine implements ZoomableViewer {
         this.selectionMode = 'all';
         this.anchorCell = { row: 1, col: 1 };
         this.activeCell = { row: 1, col: 1 };
-        this.isSelecting = false;
+        this.selectionController.endDrag();
       } else if (headerHit.kind === 'row') {
         if (shiftKey && this.anchorCell && this.selectionMode === 'rows') {
           this.selectionController.extend({ row: headerHit.row, col: 1 });
@@ -2643,7 +2651,7 @@ class XlsxViewerEngine implements ZoomableViewer {
           this.anchorCell = { row: headerHit.row, col: 1 };
           this.activeCell = { row: headerHit.row, col: 1 };
           if (allowDrag) {
-            this.isSelecting = true;
+            this.beginSelectionDrag(pointerId);
             this.scrollHost.setPointerCapture(pointerId);
           }
         }
@@ -2655,7 +2663,7 @@ class XlsxViewerEngine implements ZoomableViewer {
           this.anchorCell = { row: 1, col: headerHit.col };
           this.activeCell = { row: 1, col: headerHit.col };
           if (allowDrag) {
-            this.isSelecting = true;
+            this.beginSelectionDrag(pointerId);
             this.scrollHost.setPointerCapture(pointerId);
           }
         }
@@ -2677,7 +2685,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       this.activeCell = cell;
     }
     if (allowDrag) {
-      this.isSelecting = true;
+      this.beginSelectionDrag(pointerId);
       this.scrollHost.setPointerCapture(pointerId);
     }
     this.updateSelectionOverlay();
@@ -2687,9 +2695,24 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.opts.onSelectionChange?.(this.selection);
   }
 
-  /** Extend the active drag selection to the pointer's cell. Auto-scroll ticks
-   * clamp an outside pointer to the visible data edge so each viewport movement
-   * advances the active cell even when no new pointermove event is emitted. */
+  /** Browser-visible input box, excluding classic native scrollbar gutters. */
+  private viewportInputBounds(): { left: number; top: number; width: number; height: number } {
+    const rect = this.canvasArea.getBoundingClientRect();
+    const left = rect.left + this.scrollHost.clientLeft;
+    const top = rect.top + this.scrollHost.clientTop;
+    const availableWidth = Math.max(0, rect.width - this.scrollHost.clientLeft);
+    const availableHeight = Math.max(0, rect.height - this.scrollHost.clientTop);
+    return {
+      left,
+      top,
+      width: Math.min(availableWidth, this.scrollHost.clientWidth || availableWidth),
+      height: Math.min(availableHeight, this.scrollHost.clientHeight || availableHeight),
+    };
+  }
+
+  /** Extend the active drag selection to the pointer's cell. Captured pointers
+   * outside the canvas and auto-scroll ticks clamp to the visible data edge so
+   * selection never jumps ahead of the viewport. */
   private extendDragSelection(
     clientX: number,
     clientY: number,
@@ -2697,15 +2720,20 @@ class XlsxViewerEngine implements ZoomableViewer {
   ): boolean {
     let pointerX = clientX;
     let pointerY = clientY;
-    if (clampToViewport) {
-      const rect = this.canvasArea.getBoundingClientRect();
+    const bounds = this.viewportInputBounds();
+    const outsideViewport = clientX < bounds.left || clientX >= bounds.left + bounds.width ||
+      clientY < bounds.top || clientY >= bounds.top + bounds.height;
+    if (clampToViewport || outsideViewport) {
       const cs = this.viewport.scale;
       const headerW = Math.round(HEADER_W * cs);
       const headerH = Math.round(HEADER_H * cs);
-      const dataLeft = rect.left + (this.isRtl ? 0 : headerW);
-      const dataRight = rect.left + rect.width - (this.isRtl ? headerW : 0);
+      const dataLeft = bounds.left + (this.isRtl ? 0 : headerW);
+      const dataRight = bounds.left + bounds.width - (this.isRtl ? headerW : 0);
       pointerX = Math.min(dataRight - 1, Math.max(dataLeft + 1, pointerX));
-      pointerY = Math.min(rect.top + rect.height - 1, Math.max(rect.top + headerH + 1, pointerY));
+      pointerY = Math.min(
+        bounds.top + bounds.height - 1,
+        Math.max(bounds.top + headerH + 1, pointerY),
+      );
     }
 
     if (this.selectionMode === 'rows') {
@@ -2739,16 +2767,17 @@ class XlsxViewerEngine implements ZoomableViewer {
   private selectionAutoScrollSpeed(): { x: number; y: number } {
     const pointer = this.selectionAutoScrollPointer;
     if (!pointer) return { x: 0, y: 0 };
-    const rect = this.canvasArea.getBoundingClientRect();
+    const bounds = this.viewportInputBounds();
     return selectionAutoScrollVelocity(
-      { x: pointer.clientX - rect.left, y: pointer.clientY - rect.top },
-      { width: rect.width, height: rect.height },
+      { x: pointer.clientX - bounds.left, y: pointer.clientY - bounds.top },
+      { width: bounds.width, height: bounds.height },
       this.isRtl,
       this.selectionMode,
     );
   }
 
   private trackSelectionAutoScroll(e: PointerEvent): void {
+    if (e.pointerId !== this.selectionPointerId) return;
     this.selectionAutoScrollPointer = {
       clientX: e.clientX,
       clientY: e.clientY,
@@ -2769,7 +2798,12 @@ class XlsxViewerEngine implements ZoomableViewer {
   private runSelectionAutoScroll(time: number): void {
     this.selectionAutoScrollFrame = null;
     const pointer = this.selectionAutoScrollPointer;
-    if (!pointer || !this.isSelecting || this._destroyed) {
+    if (
+      !pointer ||
+      pointer.pointerId !== this.selectionPointerId ||
+      !this.isSelecting ||
+      this._destroyed
+    ) {
       this.stopSelectionAutoScroll();
       return;
     }
@@ -2825,6 +2859,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
     this.surface.on('pointerdown', (e: PointerEvent) => {
       if (e.button !== 0) return;
+      if (this.isSelecting && e.pointerId !== this.selectionPointerId) return;
 
       // Drag-to-resize a column/row from its header border (issue #567). Checked
       // before selection so grabbing the border never moves the cell selection.
@@ -2953,7 +2988,7 @@ class XlsxViewerEngine implements ZoomableViewer {
           hovered && this.hyperlinkAtCell(hovered) ? 'pointer' : '';
       }
 
-      if (!this.isSelecting) return;
+      if (!this.isSelecting || e.pointerId !== this.selectionPointerId) return;
 
       this.trackSelectionAutoScroll(e);
       if (!this.extendDragSelection(e.clientX, e.clientY, false)) return;
@@ -2994,7 +3029,8 @@ class XlsxViewerEngine implements ZoomableViewer {
         }
         this.pendingTap = null;
       }
-      this.stopSelectionAutoScroll();
+      const endsSelectionDrag = e.pointerId === this.selectionPointerId;
+      if (endsSelectionDrag) this.stopSelectionAutoScroll();
       // IX1 — a mouse click (press+release without a drag) on a hyperlinked cell
       // activates it. The release must still land on the same cell the press did.
       if (this.pendingClick && this.pendingClick.pointerId === e.pointerId) {
@@ -3011,7 +3047,7 @@ class XlsxViewerEngine implements ZoomableViewer {
         }
         this.pendingClick = null;
       }
-      this.isSelecting = false;
+      if (endsSelectionDrag) this.selectionController.endDrag(e.pointerId);
     });
 
     this.surface.on('pointercancel', (e: PointerEvent) => {
@@ -3024,8 +3060,10 @@ class XlsxViewerEngine implements ZoomableViewer {
       if (this.pendingClick && this.pendingClick.pointerId === e.pointerId) {
         this.pendingClick = null;
       }
-      this.stopSelectionAutoScroll();
-      this.isSelecting = false;
+      if (e.pointerId === this.selectionPointerId) {
+        this.stopSelectionAutoScroll();
+        this.selectionController.endDrag(e.pointerId);
+      }
     });
 
     // Ctrl/⌘ + mouse wheel (and trackpad pinch, which the browser reports as a
