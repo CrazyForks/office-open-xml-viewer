@@ -117,10 +117,21 @@ const formats = [
       io.observe(root);
     }
 
-    window.addEventListener('pagehide', () => {
+    window.addEventListener('pagehide', (event) => {
+      // A persisted pagehide means the browser is freezing this page in the
+      // back-forward cache. Keep the viewers and their DOM alive so the cached
+      // page can resume without rerunning this initialization script.
+      if (event.persisted) return;
       for (const entry of cache.values()) entry.controller.destroy();
       cache.clear();
-    }, { once: true });
+    });
+
+    window.addEventListener('pageshow', (event) => {
+      // Layout may have changed while the page was frozen. The active viewer is
+      // retained across BFCache restores; re-fit it without reparsing the file.
+      if (!event.persisted || !loaded) return;
+      cache.get(loaded)?.controller.activate?.();
+    });
   });
 </script>
 
