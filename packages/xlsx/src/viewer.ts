@@ -42,7 +42,11 @@ import {
   type OutlineLayout,
   type OutlineAxis,
 } from './outline.js';
-import { GridGeometry } from './internal/grid-geometry.js';
+import {
+  GridGeometry,
+  MAX_WORKSHEET_COL,
+  MAX_WORKSHEET_ROW,
+} from './internal/grid-geometry.js';
 import {
   SheetAcquisition,
   SheetRenderDispatcher,
@@ -288,6 +292,10 @@ const DEFAULT_SELECTION_COLOR = '#1a73e8';
  *  dragged to (logical px) so a collapsed band keeps a grabbable border. */
 const RESIZE_GRAB_PX = 4;
 const RESIZE_MIN_PX = 5;
+// Keep clipboard materialization within the same hard cell-count envelope as a
+// worksheet. A sparse range can span billions of coordinates even when only a
+// handful of cells are populated, so its rectangular TSV must never be built.
+const MAX_CLIPBOARD_CELLS = 250_000;
 
 /**
  * Pure hit predicate for drag-to-resize (issue #567): given a pointer
@@ -1757,8 +1765,21 @@ class XlsxViewerEngine implements ZoomableViewer {
   select(ref: string): void {
     const range = parseA1Range(ref);
     if (!range) return;
+    const spansAllRows =
+      Math.min(range.anchor.row, range.active.row) === 1 &&
+      Math.max(range.anchor.row, range.active.row) === MAX_WORKSHEET_ROW;
+    const spansAllCols =
+      Math.min(range.anchor.col, range.active.col) === 1 &&
+      Math.max(range.anchor.col, range.active.col) === MAX_WORKSHEET_COL;
+    const mode: SelectionMode = spansAllRows && spansAllCols
+      ? 'all'
+      : spansAllRows
+        ? 'cols'
+        : spansAllCols
+          ? 'rows'
+          : 'cells';
     this.hideValidationPanel();
-    this.selectionController.select(range.anchor);
+    this.selectionController.select(range.anchor, mode);
     this.selectionController.extend(range.active);
     this.updateSelectionOverlay();
     if (this.wb) this.renderCurrentSheet().catch((error) => this._reportRenderError(error));
@@ -1975,6 +1996,10 @@ class XlsxViewerEngine implements ZoomableViewer {
       c1 = Math.min(this.anchorCell.col, this.activeCell.col);
       c2 = Math.max(this.anchorCell.col, this.activeCell.col);
     }
+
+    const rowCount = r2 - r1 + 1;
+    const colCount = c2 - c1 + 1;
+    if (rowCount > Math.floor(MAX_CLIPBOARD_CELLS / colCount)) return;
 
     const cellMap = new Map<string, string>();
     for (const row of ws.rows) {

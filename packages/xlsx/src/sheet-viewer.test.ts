@@ -56,6 +56,55 @@ describe('XlsxSheetViewer canvas mount', () => {
     viewer.destroy();
   });
 
+  it('maps full-axis A1 ranges to bounded selection modes', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+
+    viewer.select('A1:XFD1048576');
+    expect(viewer.selection?.mode).toBe('all');
+    viewer.select('A2:XFD4');
+    expect(viewer.selection?.mode).toBe('rows');
+    viewer.select('B1:D1048576');
+    expect(viewer.selection?.mode).toBe('cols');
+
+    viewer.destroy();
+  });
+
+  it('does not materialize a programmatic clipboard range above the cell limit', () => {
+    const document = installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.assign(document.defaultView, { navigator: { clipboard: { writeText } } });
+    const engine = (viewer as unknown as {
+      engine: {
+        currentWorksheet: Worksheet;
+        copySelection(): void;
+      };
+    }).engine;
+    engine.currentWorksheet = {
+      ...worksheet('Sparse'),
+      rows: [
+        { index: 2, cells: [{ row: 2, col: 2, value: { type: 'text', text: 'first' } }] },
+        {
+          index: 1_048_575,
+          cells: [{ row: 1_048_575, col: 16_383, value: { type: 'text', text: 'last' } }],
+        },
+      ],
+    } as unknown as Worksheet;
+
+    viewer.select('B2:XFC1048575');
+    engine.copySelection();
+
+    expect(writeText).not.toHaveBeenCalled();
+    viewer.destroy();
+  });
+
   it('creates chrome, styles, and document listeners in the canvas owner window', () => {
     const openerDocument = installDom();
     const popupDocument = makeDocument(2);
