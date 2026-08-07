@@ -105,6 +105,34 @@ describe('XlsxSheetViewer canvas mount', () => {
     viewer.destroy();
   });
 
+  it('preserves clipboard copying for existing large selections', () => {
+    const document = installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.assign(document.defaultView, { navigator: { clipboard: { writeText } } });
+    const engine = (viewer as unknown as {
+      engine: {
+        currentWorksheet: Worksheet;
+        selectionController: {
+          select(cell: { row: number; col: number }): void;
+          extend(cell: { row: number; col: number }): void;
+        };
+        copySelection(): void;
+      };
+    }).engine;
+    engine.currentWorksheet = worksheet('Large selection');
+    engine.selectionController.select({ row: 1, col: 1 });
+    engine.selectionController.extend({ row: 501, col: 500 });
+
+    engine.copySelection();
+
+    expect(writeText).toHaveBeenCalledOnce();
+    viewer.destroy();
+  });
+
   it('creates chrome, styles, and document listeners in the canvas owner window', () => {
     const openerDocument = installDom();
     const popupDocument = makeDocument(2);

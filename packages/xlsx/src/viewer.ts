@@ -474,6 +474,9 @@ class XlsxViewerEngine implements ZoomableViewer {
    *  engine prevents a programmatic scroll followed by the browser's native
    *  scroll event from producing duplicate notifications. */
   private _lastViewportNotification: XlsxViewportOffset | null = null;
+  /** Whether the current endpoints came from {@link select}. Programmatic A1
+   * ranges can span the entire sparse worksheet, unlike pointer selections. */
+  private selectionIsProgrammatic = false;
 
   private get anchorCell(): CellAddress | null {
     return this.selectionController.anchor;
@@ -1779,6 +1782,7 @@ class XlsxViewerEngine implements ZoomableViewer {
           ? 'rows'
           : 'cells';
     this.hideValidationPanel();
+    this.selectionIsProgrammatic = true;
     this.selectionController.select(range.anchor, mode);
     this.selectionController.extend(range.active);
     this.updateSelectionOverlay();
@@ -1999,7 +2003,10 @@ class XlsxViewerEngine implements ZoomableViewer {
 
     const rowCount = r2 - r1 + 1;
     const colCount = c2 - c1 + 1;
-    if (rowCount > Math.floor(MAX_CLIPBOARD_CELLS / colCount)) return;
+    if (
+      this.selectionIsProgrammatic &&
+      rowCount > Math.floor(MAX_CLIPBOARD_CELLS / colCount)
+    ) return;
 
     const cellMap = new Map<string, string>();
     for (const row of ws.rows) {
@@ -2664,6 +2671,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const headerHit = this.getHeaderHit(clientX, clientY);
 
     if (headerHit) {
+      this.selectionIsProgrammatic = false;
       if (headerHit.kind === 'corner') {
         // Select all — no drag extension needed
         this.selectionMode = 'all';
@@ -2704,6 +2712,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const cell = this.getCellAt(clientX, clientY);
     if (!cell) return;
 
+    this.selectionIsProgrammatic = false;
     if (shiftKey && this.anchorCell && this.selectionMode === 'cells') {
       this.selectionController.extend(cell);
     } else {
