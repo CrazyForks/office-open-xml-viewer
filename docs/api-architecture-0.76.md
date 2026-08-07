@@ -199,9 +199,11 @@ and navigation remain asynchronous where they were asynchronous before.
 ### XLSX canvas-viewer contract
 
 `XlsxSheetViewer` is a canvas-mounted view of one active worksheet viewport. It
-owns no sheet-tab/footer chrome and creates no scrollbar. Because a worksheet is
-not a finite page, it additionally exposes format-specific viewport movement.
-That extra state is not forced onto DOCX or PPTX.
+owns no sheet-tab/footer chrome. Native worksheet scrollbars are enabled by
+default and can be disabled explicitly when a host supplies its own viewport
+navigation. Because a worksheet is not a finite page, it additionally exposes
+format-specific viewport movement. That extra state is not forced onto DOCX or
+PPTX.
 
 `XlsxWorkbook.renderSheet()` is deliberately absent. An OOXML worksheet can
 contain 1,048,576 rows and 16,384 columns, far beyond browser Canvas dimension
@@ -248,6 +250,7 @@ export interface XlsxScrollToCellOptions {
 export interface XlsxSheetViewerOptions extends LoadOptions {
   readonly cellScale?: number;
   readonly resizable?: boolean;
+  readonly showScrollbars?: boolean;
   readonly zoomMin?: number;
   readonly zoomMax?: number;
   readonly onScaleChange?: (scale: number) => void;
@@ -328,8 +331,8 @@ callback receives the resulting clamped value.
 The canvas CSS box defines viewport width/height; DPR affects only backing-store
 resolution. `relayout()` re-reads that box. The viewer uses the shared
 caller-canvas lifecycle to wrap and restore the canvas. Wheel/trackpad input pans
-the viewport without creating a scrollbar; touch-pinch remains outside this
-release.
+the viewport, including when native scrollbars are explicitly hidden;
+touch-pinch remains outside this release.
 
 `destroy()` is idempotent and permanently closes the instance. After destroy,
 async mutations (`load`, navigation, viewport/relayout, hidden-mode changes,

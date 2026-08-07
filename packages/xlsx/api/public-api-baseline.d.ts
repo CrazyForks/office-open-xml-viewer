@@ -1264,6 +1264,7 @@ export class XlsxSheetViewer implements ZoomableViewer {
 export interface XlsxSheetViewerOptions extends LoadOptions__emitterCollision1 {
     cellScale?: number;
     resizable?: boolean;
+    showScrollbars?: boolean;
     zoomMin?: number;
     zoomMax?: number;
     onScaleChange?: (scale: number) => void;

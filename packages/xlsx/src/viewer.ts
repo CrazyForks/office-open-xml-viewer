@@ -52,6 +52,7 @@ import {
 } from './internal/sheet-viewer-runtime.js';
 import { CanvasSurface, SheetOverlayHost } from './internal/sheet-surface.js';
 import { withXlsxRenderCommitGuard } from './render-orchestrator.js';
+import { selectionAutoScrollVelocity } from './selection-auto-scroll.js';
 
 const borrowedWorkbookOption = Symbol('XlsxViewer.borrowedWorkbook');
 
@@ -141,6 +142,12 @@ export interface XlsxSheetViewerOptions extends LoadOptions {
    * loaded file. Default: true.
    */
   resizable?: boolean;
+  /**
+   * Show native horizontal and vertical scrollbars for the worksheet viewport.
+   * Default: true. Wheel/trackpad panning remains available when explicitly
+   * disabled.
+   */
+  showScrollbars?: boolean;
   /** Lower/upper bounds for the zoom slider as scale factors. Default 0.1–4
    *  (10%–400%, matching Excel's zoom range). Also the clamp range for the IX9
    *  {@link ZoomableViewer} zoom contract ({@link XlsxViewer.setScale} etc.). */
@@ -440,6 +447,8 @@ class XlsxViewerEngine implements ZoomableViewer {
   private sheetViews = new Map<number, Worksheet>();
   private opts: XlsxViewerOptions;
   private readonly _mountKind: XlsxViewerMount['kind'];
+  /** Whether this mount delegates viewport movement to a native scroll host. */
+  private readonly _nativeScrollbars: boolean;
   /** 'main' renders on this thread; 'worker' paints worker-produced bitmaps. */
   private readonly _mode: 'main' | 'worker';
   private _borrowed = false;
@@ -527,6 +536,12 @@ class XlsxViewerEngine implements ZoomableViewer {
   private resizeDrag:
     | { kind: 'col' | 'row'; index: number; originScaled: number; mdw: number; pointerId: number }
     | null = null;
+  /** Last captured drag-selection pointer, retained while edge scrolling runs. */
+  private selectionAutoScrollPointer:
+    | { clientX: number; clientY: number; pointerId: number }
+    | null = null;
+  private selectionAutoScrollFrame: number | null = null;
+  private selectionAutoScrollLastTime: number | null = null;
 
   // ─── Comment hover popup (Excel-style note) ───────────────────────────────
   /** DOM overlay element that shows the hovered cell's comment. Lives in
@@ -576,6 +591,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.hostWindow = hostWindow;
     this.opts = opts;
     this._mountKind = mount.kind;
+    this._nativeScrollbars = opts.showScrollbars ?? true;
     const borrowedWorkbook = (opts as InternalXlsxViewerOptions)[borrowedWorkbookOption];
     this._borrowed = borrowedWorkbook !== undefined;
     this._mode = mount.kind === 'sheet'
@@ -628,11 +644,11 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.scrollHost.setAttribute('data-xlsx-viewport-input', mount.kind);
     this.scrollHost.style.cssText =
       `position:absolute;inset:0;` +
-      `overflow:${mount.kind === 'composite' ? 'auto' : 'clip'};` +
+      `overflow:${this._nativeScrollbars ? 'auto' : 'clip'};` +
       `z-index:2;background:transparent;`;
     this.spacer = this.hostDocument.createElement('div');
     this.spacer.style.cssText = `position:absolute;top:0;left:0;pointer-events:none;`;
-    if (mount.kind === 'composite') this.scrollHost.appendChild(this.spacer);
+    if (this._nativeScrollbars) this.scrollHost.appendChild(this.spacer);
     this.surface = new CanvasSurface(this.canvas, this.canvasArea, this.scrollHost);
     this.overlayHost = new SheetOverlayHost(this.canvasArea, this.canvas, this.scrollHost, {
       commentMaxWidth: COMMENT_POPUP_MAX_W,
@@ -645,8 +661,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.commentPopup = this.overlayHost.comment;
     this.validationPanel = this.overlayHost.validation;
     // Inject the shared viewer stylesheet once per module (idempotent). Both
-    // mounts use it: the composite footer hides its tab-strip scrollbar and the
-    // canvas mount hides native sheet scrollbars while retaining pan input.
+    // mounts use it; the composite footer also hides its tab-strip scrollbar.
     ensureViewerStyleInjected(this.hostDocument);
 
     if (mount.kind === 'composite') {
@@ -716,7 +731,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.rowGutter.addEventListener('pointerdown', (e) => this.onGutterPointerDown(e, 'row'));
     this.colGutter.addEventListener('pointerdown', (e) => this.onGutterPointerDown(e, 'col'));
 
-    if (mount.kind === 'composite') this.surface.on('scroll', () => {
+    if (this._nativeScrollbars) this.surface.on('scroll', () => {
       // Any scroll cancels a deferred tap: the press that started it was a
       // scrollbar-thumb drag (overlay scrollbars) or a touch swipe, not a
       // cell click.
@@ -1481,13 +1496,13 @@ class XlsxViewerEngine implements ZoomableViewer {
   }
 
   private syncNativeViewportExtent(): void {
-    if (this._mountKind !== 'composite') return;
+    if (!this._nativeScrollbars) return;
     this.viewport.setViewportSize(this.scrollHost.clientWidth, this.scrollHost.clientHeight);
     this.viewport.ensureExtent(this.scrollHost.scrollWidth, this.scrollHost.scrollHeight);
   }
 
   private get viewportTop(): number {
-    if (this._mountKind === 'composite') {
+    if (this._nativeScrollbars) {
       this.syncNativeViewportExtent();
       this.viewport.adoptNativeOffset(this.viewport.x, this.scrollHost.scrollTop);
     }
@@ -1496,7 +1511,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
   private set viewportTop(value: number) {
     this.viewport.setOffset(this.viewport.x, value);
-    if (this._mountKind === 'composite') this.scrollHost.scrollTop = this.viewport.y;
+    if (this._nativeScrollbars) this.scrollHost.scrollTop = this.viewport.y;
   }
 
   /**
@@ -1515,7 +1530,7 @@ class XlsxViewerEngine implements ZoomableViewer {
    * `scrollLeft` sign conventions.
    */
   private get effectiveScrollLeft(): number {
-    if (this._mountKind === 'composite') {
+    if (this._nativeScrollbars) {
       this.syncNativeViewportExtent();
       const raw = this.scrollHost.scrollLeft;
       this.viewport.adoptNativeOffset(this.isRtl ? this.maxScrollLeft - raw : raw, this.viewport.y);
@@ -1525,7 +1540,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
   private setViewportLeft(value: number): void {
     this.viewport.setOffset(value, this.viewport.y);
-    if (this._mountKind === 'composite') {
+    if (this._nativeScrollbars) {
       this.scrollHost.scrollLeft = this.isRtl
         ? Math.max(0, this.maxScrollLeft - this.viewport.x)
         : this.viewport.x;
@@ -1550,7 +1565,7 @@ class XlsxViewerEngine implements ZoomableViewer {
    *  the right end for RTL (so col A shows first). */
   private resetHorizontalScroll(): void {
     this.viewport.setOffset(0, this.viewport.y);
-    if (this._mountKind === 'composite') {
+    if (this._nativeScrollbars) {
       this.scrollHost.scrollLeft = this.isRtl ? this.maxScrollLeft : 0;
     }
   }
@@ -1560,7 +1575,7 @@ class XlsxViewerEngine implements ZoomableViewer {
    *  for LTR the native scrollLeft *is* start-anchored and the browser
    *  already clamps it sensibly on resize. */
   private reanchorHorizontalScroll(): void {
-    if (this._mountKind === 'sheet') return;
+    if (!this._nativeScrollbars) return;
     if (!this.isRtl || this.scrollHost.clientWidth === 0) return;
     const want = Math.max(0, this.maxScrollLeft - this.viewport.x);
     if (Math.abs(this.scrollHost.scrollLeft - want) > 1) {
@@ -2672,6 +2687,138 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.opts.onSelectionChange?.(this.selection);
   }
 
+  /** Extend the active drag selection to the pointer's cell. Auto-scroll ticks
+   * clamp an outside pointer to the visible data edge so each viewport movement
+   * advances the active cell even when no new pointermove event is emitted. */
+  private extendDragSelection(
+    clientX: number,
+    clientY: number,
+    clampToViewport: boolean,
+  ): boolean {
+    let pointerX = clientX;
+    let pointerY = clientY;
+    if (clampToViewport) {
+      const rect = this.canvasArea.getBoundingClientRect();
+      const cs = this.viewport.scale;
+      const headerW = Math.round(HEADER_W * cs);
+      const headerH = Math.round(HEADER_H * cs);
+      const dataLeft = rect.left + (this.isRtl ? 0 : headerW);
+      const dataRight = rect.left + rect.width - (this.isRtl ? headerW : 0);
+      pointerX = Math.min(dataRight - 1, Math.max(dataLeft + 1, pointerX));
+      pointerY = Math.min(rect.top + rect.height - 1, Math.max(rect.top + headerH + 1, pointerY));
+    }
+
+    if (this.selectionMode === 'rows') {
+      const hit = clampToViewport ? null : this.getHeaderHit(pointerX, pointerY);
+      const row = hit?.kind === 'row'
+        ? hit.row
+        : this.getCellAt(pointerX, pointerY)?.row;
+      if (!row || row === this.activeCell?.row) return false;
+      this.selectionController.extend({ row, col: 1 });
+      return true;
+    }
+
+    if (this.selectionMode === 'cols') {
+      const hit = clampToViewport ? null : this.getHeaderHit(pointerX, pointerY);
+      const col = hit?.kind === 'col'
+        ? hit.col
+        : this.getCellAt(pointerX, pointerY)?.col;
+      if (!col || col === this.activeCell?.col) return false;
+      this.selectionController.extend({ row: 1, col });
+      return true;
+    }
+
+    const cell = this.getCellAt(pointerX, pointerY);
+    if (!cell || (cell.row === this.activeCell?.row && cell.col === this.activeCell?.col)) {
+      return false;
+    }
+    this.selectionController.extend(cell);
+    return true;
+  }
+
+  private selectionAutoScrollSpeed(): { x: number; y: number } {
+    const pointer = this.selectionAutoScrollPointer;
+    if (!pointer) return { x: 0, y: 0 };
+    const rect = this.canvasArea.getBoundingClientRect();
+    return selectionAutoScrollVelocity(
+      { x: pointer.clientX - rect.left, y: pointer.clientY - rect.top },
+      { width: rect.width, height: rect.height },
+      this.isRtl,
+      this.selectionMode,
+    );
+  }
+
+  private trackSelectionAutoScroll(e: PointerEvent): void {
+    this.selectionAutoScrollPointer = {
+      clientX: e.clientX,
+      clientY: e.clientY,
+      pointerId: e.pointerId,
+    };
+    const speed = this.selectionAutoScrollSpeed();
+    if (speed.x === 0 && speed.y === 0) {
+      this.stopSelectionAutoScroll();
+      return;
+    }
+    if (this.selectionAutoScrollFrame !== null) return;
+    this.selectionAutoScrollLastTime = null;
+    this.selectionAutoScrollFrame = this.hostWindow.requestAnimationFrame(
+      (time) => this.runSelectionAutoScroll(time),
+    );
+  }
+
+  private runSelectionAutoScroll(time: number): void {
+    this.selectionAutoScrollFrame = null;
+    const pointer = this.selectionAutoScrollPointer;
+    if (!pointer || !this.isSelecting || this._destroyed) {
+      this.stopSelectionAutoScroll();
+      return;
+    }
+
+    const speed = this.selectionAutoScrollSpeed();
+    if (speed.x === 0 && speed.y === 0) {
+      this.stopSelectionAutoScroll();
+      return;
+    }
+
+    const previousTime = this.selectionAutoScrollLastTime;
+    const elapsedSeconds = previousTime === null
+      ? 1 / 60
+      : Math.min(0.05, Math.max(0, time - previousTime) / 1000);
+    this.selectionAutoScrollLastTime = time;
+
+    const beforeX = this.effectiveScrollLeft;
+    const beforeY = this.viewportTop;
+    this.setViewportLeft(beforeX + speed.x * elapsedSeconds);
+    this.viewportTop = beforeY + speed.y * elapsedSeconds;
+    const moved = this.effectiveScrollLeft !== beforeX || this.viewportTop !== beforeY;
+    const extended = moved && this.extendDragSelection(pointer.clientX, pointer.clientY, true);
+
+    if (moved) {
+      this.updateSelectionOverlay();
+      this.updateFindOverlay();
+      this.scheduleRender();
+      this.emitViewportChange();
+      if (extended) this.opts.onSelectionChange?.(this.selection);
+    }
+
+    if (!moved) {
+      this.stopSelectionAutoScroll();
+      return;
+    }
+    this.selectionAutoScrollFrame = this.hostWindow.requestAnimationFrame(
+      (nextTime) => this.runSelectionAutoScroll(nextTime),
+    );
+  }
+
+  private stopSelectionAutoScroll(): void {
+    if (this.selectionAutoScrollFrame !== null) {
+      this.hostWindow.cancelAnimationFrame(this.selectionAutoScrollFrame);
+      this.selectionAutoScrollFrame = null;
+    }
+    this.selectionAutoScrollPointer = null;
+    this.selectionAutoScrollLastTime = null;
+  }
+
   private setupSelectionEvents(): void {
     // Distance (CSS px) beyond which a touch/pen pointerdown→pointerup is treated as a swipe (scroll), not a tap.
     const TAP_SLOP = 8;
@@ -2728,7 +2875,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       }
       // Overlay scrollbar hit band (~15 CSS px on macOS / Windows 11).
       const OVERLAY_SCROLLBAR_BAND = 16;
-      const inOverlayBand = this._mountKind === 'composite' && (
+      const inOverlayBand = this._nativeScrollbars && (
         (this.scrollHost.scrollWidth > this.scrollHost.clientWidth &&
           this.scrollHost.clientHeight - localY <= OVERLAY_SCROLLBAR_BAND) ||
         (this.scrollHost.scrollHeight > this.scrollHost.clientHeight &&
@@ -2808,21 +2955,8 @@ class XlsxViewerEngine implements ZoomableViewer {
 
       if (!this.isSelecting) return;
 
-      if (this.selectionMode === 'rows') {
-        const hit = this.getHeaderHit(e.clientX, e.clientY);
-        const row = hit?.kind === 'row' ? hit.row : this.getCellAt(e.clientX, e.clientY)?.row;
-        if (!row || row === this.activeCell?.row) return;
-        this.selectionController.extend({ row, col: 1 });
-      } else if (this.selectionMode === 'cols') {
-        const hit = this.getHeaderHit(e.clientX, e.clientY);
-        const col = hit?.kind === 'col' ? hit.col : this.getCellAt(e.clientX, e.clientY)?.col;
-        if (!col || col === this.activeCell?.col) return;
-        this.selectionController.extend({ row: 1, col });
-      } else {
-        const cell = this.getCellAt(e.clientX, e.clientY);
-        if (!cell || (cell.row === this.activeCell?.row && cell.col === this.activeCell?.col)) return;
-        this.selectionController.extend(cell);
-      }
+      this.trackSelectionAutoScroll(e);
+      if (!this.extendDragSelection(e.clientX, e.clientY, false)) return;
 
       this.updateSelectionOverlay();
       // Drag-select fires per pointermove; coalesce the canvas repaint (the
@@ -2860,6 +2994,7 @@ class XlsxViewerEngine implements ZoomableViewer {
         }
         this.pendingTap = null;
       }
+      this.stopSelectionAutoScroll();
       // IX1 — a mouse click (press+release without a drag) on a hyperlinked cell
       // activates it. The release must still land on the same cell the press did.
       if (this.pendingClick && this.pendingClick.pointerId === e.pointerId) {
@@ -2889,6 +3024,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       if (this.pendingClick && this.pendingClick.pointerId === e.pointerId) {
         this.pendingClick = null;
       }
+      this.stopSelectionAutoScroll();
       this.isSelecting = false;
     });
 
@@ -2902,7 +3038,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       'wheel',
       (e: WheelEvent) => {
         if (!(e.ctrlKey || e.metaKey)) {
-          if (this._mountKind === 'sheet') {
+          if (!this._nativeScrollbars) {
             e.preventDefault();
             const unit = e.deltaMode === WheelEvent.DOM_DELTA_LINE
               ? 16
@@ -3551,6 +3687,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     // viewer (checked at the top of _reportRenderError). The acquisition owner
     // invalidates any load still in flight below.
     this._destroyed = true;
+    this.stopSelectionAutoScroll();
     this.sheetRequestGeneration++;
     this.resizeObserver?.disconnect();
     this.renderDispatcher.destroy();

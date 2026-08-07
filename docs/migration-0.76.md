@@ -152,9 +152,11 @@ There is intentionally no synchronous wrapper around these asynchronous APIs.
 `XlsxSheetViewer` renders one active worksheet viewport into a caller-owned
 `HTMLCanvasElement`. It includes selection, search, zoom, and
 logical viewport APIs, but no sheet tabs, footer controls, zoom chrome, or
-native scrollbar. Use the existing container-mounted `XlsxViewer` when those
-workbook controls are wanted. This is an XLSX-specific Viewer boundary; it does
-not imply that a worksheet is equivalent to a DOCX page or PPTX slide.
+workbook controls. Native worksheet scrollbars are visible by default; set
+`showScrollbars: false` only when the host provides another viewport navigation
+UI. Use the existing container-mounted `XlsxViewer` when sheet tabs and footer
+controls are wanted. This is an XLSX-specific Viewer boundary; it does not imply
+that a worksheet is equivalent to a DOCX page or PPTX slide.
 
 ```ts
 import { XlsxSheetViewer } from '@silurus/ooxml/xlsx';

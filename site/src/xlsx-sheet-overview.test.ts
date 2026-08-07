@@ -21,6 +21,8 @@ describe('XLSX multi-window sheet demo', () => {
     expect(demos).toContain("window.open(");
     expect(demos).toContain('const popupDocument = popup.document');
     expect(demos).toContain('const viewer = XlsxSheetViewer.fromWorkbook(canvas, workbook, {');
+    expect(demos).not.toContain('showScrollbars: false');
+    expect(demos).not.toContain('scrollbars=no');
     expect(demos).toContain('workbook,');
     expect(demos).toContain('viewer.goToSheet(index)');
     expect(demos).toContain('popup.addEventListener(\'pagehide\'');

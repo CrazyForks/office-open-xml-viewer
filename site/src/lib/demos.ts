@@ -177,7 +177,7 @@ function mountSheetWindows(el: HTMLElement, url: string): void {
           const popup = window.open(
             '',
             '_blank',
-            'popup=yes,width=1100,height=720,resizable=yes,scrollbars=no',
+            'popup=yes,width=1100,height=720,resizable=yes',
           );
           if (!popup) {
             popupError.textContent = 'The browser blocked the popup. Allow popups and try again.';
