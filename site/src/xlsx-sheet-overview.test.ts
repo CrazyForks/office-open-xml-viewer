@@ -47,4 +47,16 @@ describe('XLSX multi-window sheet demo', () => {
     expect(demos).toContain('const openSessions = [...sessions.values()]');
     expect(demos.match(/if \(sessions\.get\(index\) !== session\) return;/g)).toHaveLength(2);
   });
+
+  it('uses the site theme for launcher controls and keeps popup themes in sync', () => {
+    expect(styles).toMatch(/\.demo-sheet-window-summary\s*\{[\s\S]*?background: var\(--bg-elev\);[\s\S]*?color: var\(--text\);/);
+    expect(styles).toMatch(/\.demo-sheet-window-row\s*\{[\s\S]*?background: var\(--bg-elev\);[\s\S]*?color: var\(--text\);/);
+    expect(styles).toMatch(/\.demo-sheet-window-row button\s*\{[\s\S]*?background: var\(--bg-elev-2\);[\s\S]*?color: var\(--text\);/);
+    expect(styles).toMatch(/\.demo-sheet-window-identity span\s*\{[^}]*color: var\(--text-faint\);/);
+    expect(styles).not.toContain('background: color-mix(in srgb, #fff 94%, var(--accent));');
+    expect(demos).toContain('--sheet-window-bar-dark:#05090e');
+    expect(demos).toContain("document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'");
+    expect(demos).toContain("attributeFilter: ['data-theme']");
+    expect(demos).toContain('themeObserver.disconnect()');
+  });
 });
