@@ -137,6 +137,7 @@ describe('XlsxSheetViewer canvas mount', () => {
         setExtent(width: number, height: number): void;
         setViewportSize(width: number, height: number): void;
       };
+      getCellAt(clientX: number, clientY: number): { row: number; col: number } | null;
       scheduleRender(): void;
     } }).engine;
     engine.currentWorksheet = {
@@ -145,8 +146,10 @@ describe('XlsxSheetViewer canvas mount', () => {
     };
     engine.canvasArea.clientWidth = 800;
     engine.canvasArea.clientHeight = 600;
-    engine.scrollHost.clientWidth = 800;
-    engine.scrollHost.clientHeight = 600;
+    // Simulate classic scrollbars that reserve a 20px gutter inside the
+    // canvasArea (unlike overlay scrollbars on macOS).
+    engine.scrollHost.clientWidth = 780;
+    engine.scrollHost.clientHeight = 580;
     engine.scrollHost.scrollWidth = 5_000;
     engine.scrollHost.scrollHeight = 5_000;
     engine.viewport.setExtent(5_000, 5_000);
@@ -172,9 +175,49 @@ describe('XlsxSheetViewer canvas mount', () => {
       ...overrides,
     });
 
+    engine.scrollHost.dispatch('pointerdown', pointer({
+      pointerId: 2,
+      pointerType: 'touch',
+      clientX: 400,
+      clientY: 300,
+    }));
     engine.scrollHost.dispatch('pointerdown', pointer({}));
-    engine.scrollHost.dispatch('pointermove', pointer({ clientX: 790, clientY: 590 }));
+    const primarySelection = viewer.selection;
+    engine.scrollHost.dispatch('pointerup', pointer({
+      pointerId: 2,
+      pointerType: 'touch',
+      clientX: 400,
+      clientY: 300,
+    }));
+    expect(viewer.selection).toEqual(primarySelection);
+
+    engine.scrollHost.dispatch('pointerdown', pointer({
+      pointerId: 2,
+      pointerType: 'touch',
+      clientX: 400,
+      clientY: 300,
+    }));
+    engine.scrollHost.dispatch('pointerup', pointer({
+      pointerId: 2,
+      pointerType: 'touch',
+      clientX: 400,
+      clientY: 300,
+    }));
+    engine.scrollHost.dispatch('pointermove', pointer({
+      pointerId: 2,
+      clientX: 1_600,
+      clientY: 1_200,
+    }));
+    engine.scrollHost.dispatch('pointerup', pointer({ pointerId: 2 }));
+    engine.scrollHost.dispatch('pointercancel', pointer({ pointerId: 2 }));
+    expect(frames).toHaveLength(0);
+    expect(viewer.selection).toEqual(primarySelection);
+
+    engine.scrollHost.dispatch('pointermove', pointer({ clientX: 1_600, clientY: 1_200 }));
+    expect(viewer.selection?.active).toEqual(engine.getCellAt(779, 579));
     const visibleEdgeSelection = viewer.selection;
+    engine.scrollHost.dispatch('pointerup', pointer({ pointerId: 2 }));
+    engine.scrollHost.dispatch('pointercancel', pointer({ pointerId: 2 }));
     for (let frame = 1; frame <= 20; frame += 1) {
       const callback = frames.shift();
       expect(callback).toBeDefined();
@@ -186,7 +229,7 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(viewer.selection?.active.row).toBeGreaterThan(visibleEdgeSelection?.active.row ?? 0);
     expect(viewer.selection?.active.col).toBeGreaterThan(visibleEdgeSelection?.active.col ?? 0);
 
-    engine.scrollHost.dispatch('pointerup', pointer({ clientX: 790, clientY: 590 }));
+    engine.scrollHost.dispatch('pointerup', pointer({ clientX: 1_600, clientY: 1_200 }));
     viewer.destroy();
   });
 

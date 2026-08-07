@@ -117,6 +117,21 @@ describe('XLSX viewer composition roles', () => {
     expect(selection.active).toBeNull();
   });
 
+  it('SelectionController only ends a drag for its active pointer', () => {
+    const selection = new SelectionController();
+    selection.beginDrag(7);
+    expect(selection.dragging).toBe(true);
+    expect(selection.draggingPointerId).toBe(7);
+
+    selection.endDrag(9);
+    expect(selection.dragging).toBe(true);
+    expect(selection.draggingPointerId).toBe(7);
+
+    selection.endDrag(7);
+    expect(selection.dragging).toBe(false);
+    expect(selection.draggingPointerId).toBeNull();
+  });
+
   it('SelectionController owns range extension and renderer header projection', () => {
     const selection = new SelectionController();
     selection.select({ row: 2, col: 1 }, 'rows');
