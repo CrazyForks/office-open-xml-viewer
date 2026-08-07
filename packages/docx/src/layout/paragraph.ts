@@ -2420,7 +2420,9 @@ function drawingForShape(
       behindDoc: shape.behindDoc === true,
       relativeHeight: Number.isFinite(shape.zOrder) ? shape.zOrder : runIndex,
       sourceOrder: runIndex,
-      horizontalOwnership: shape.anchorXRelativeFrom === 'character' ? 'host' : 'page',
+      horizontalOwnership: shape.anchorXRelativeFrom === 'character'
+        || shape.anchorXRelativeFrom === 'column'
+        ? 'host' : 'page',
       verticalOwnership: shape.anchorYRelativeFrom === 'paragraph'
         || shape.anchorYRelativeFrom === 'line'
         || shape.anchorYRelativeFrom === 'character'

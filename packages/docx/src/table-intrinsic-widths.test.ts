@@ -284,6 +284,35 @@ describe('table intrinsic content widths', () => {
     expect(resolveColumnWidths(source, 200, columnState(measuringContext()))).toEqual([80]);
   });
 
+  it('does not shrink a fixed nested table to its containing cell width', () => {
+    const nested = table([
+      row([cell([]), cell([])]),
+    ], [60, 60], 'fixed');
+    const outer = table([
+      row([cell([nested as CellElement])]),
+    ], [100], 'fixed');
+    const document = model([outer as BodyElement]);
+    const layout = layoutDocument(
+      document,
+      createLayoutServices(document, { measureContext: measuringContext() }),
+      { currentDateMs: 0 },
+    );
+    const retainedOuter = layout.pages[0]?.layers.body.find((node) => node.kind === 'table');
+    if (!retainedOuter || retainedOuter.kind !== 'table') {
+      throw new Error('Expected outer retained table');
+    }
+    const retainedNested = retainedOuter.rows[0]?.cells[0]?.blocks[0]?.layout;
+    if (!retainedNested || retainedNested.kind !== 'table') {
+      throw new Error('Expected nested retained table');
+    }
+
+    // ECMA-376 §17.18.87 fixed layout resolves tblGrid/tcW against an authored
+    // tblW; the containing cell is not an implicit preferred table width.
+    // Word therefore permits a fixed nested table to overflow its cell.
+    expect(retainedNested.columnWidthsPt).toEqual([60, 60]);
+    expect(retainedNested.flowBounds.widthPt).toBe(120);
+  });
+
   it('shapes identical formatting across a run seam as one proportional atom', () => {
     const ctx = measuringContext((text) => text === 'AV' ? 15 : [...text].length * 10);
     const source = table([row([cell([

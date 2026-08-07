@@ -2252,6 +2252,11 @@ function resolveColumnWidths(
   const maximumTableWidthPt = isLeadingMarginPageStoryTable
     ? Math.max(contentWPt, pageFitCeilingPt)
     : contentWPt;
+  const effectiveLayout = format.firstRowException?.layout === 'fixed'
+    ? 'fixed'
+    : table.layout;
+  const isFixedNestedTable = effectiveLayout === 'fixed'
+    && state.storyContext?.containers.some((container) => container.kind === 'tableCell');
 
   const intrinsicWidthsForTable = (
     owner: TableLayoutSource,
@@ -2321,7 +2326,14 @@ function resolveColumnWidths(
     table,
     contentWPt,
     intrinsicWidthsForTable(table, format),
-    state.acquisitionInputs.tableParticipatesInOrdinaryFlow(table)
+    isFixedNestedTable
+      // ECMA-376 §17.18.87 resolves a fixed table from its authored tblGrid,
+      // tblW, and tcW constraints. A containing cell is not an implicit tblW:
+      // Word permits such a table to overflow its cell instead of scaling it.
+      // `null` explicitly removes the unrelated physical cell ceiling; it is
+      // not a numeric width and therefore cannot alter authored geometry.
+      ? null
+      : state.acquisitionInputs.tableParticipatesInOrdinaryFlow(table)
       ? maximumTableWidthPt
       : Math.max(contentWPt, state.pageWidth),
   ))];
