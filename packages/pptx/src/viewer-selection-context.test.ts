@@ -25,12 +25,12 @@ function elementContext(shapeId: string): PptxElementSelectionContext {
   };
 }
 
-async function mount(mode: 'main' | 'worker' = 'main') {
+async function mount(mode: 'main' | 'worker' = 'main', slideCount = 1) {
   installDom();
   const canvas = makeEl('canvas');
   canvas.clientWidth = 960;
   canvas.clientHeight = 720;
-  const engine = new FakePptxEngine(1, SLIDE_WIDTH, SLIDE_HEIGHT, mode);
+  const engine = new FakePptxEngine(slideCount, SLIDE_WIDTH, SLIDE_HEIGHT, mode);
   const onSelectionContextChange = vi.fn();
   vi.spyOn(PptxPresentation, 'load').mockResolvedValue(engine.asPres());
   const viewer = new PptxViewer(canvas as unknown as HTMLCanvasElement, {
@@ -107,6 +107,38 @@ describe('PptxViewer selection context', () => {
 
     expect(mounted.viewer.getSelectionContext()).toMatchObject({ shapeId: 'new' });
     expect(mounted.onSelectionContextChange).toHaveBeenCalledTimes(1);
+    mounted.viewer.destroy();
+  });
+
+  it('invalidates focus and pending hits across reload and slide ABA navigation', async () => {
+    const mounted = await mount('main', 2);
+    const resolvers: Array<(value: PptxElementSelectionContext | null) => void> = [];
+    mounted.engine.getElementContextAt = vi.fn(
+      (): Promise<PptxElementSelectionContext | null> =>
+        new Promise((resolve) => resolvers.push(resolve)),
+    );
+
+    mounted.wrapper.dispatch('click', {
+      button: 0, clientX: 100, clientY: 100, defaultPrevented: false,
+    });
+    await mounted.viewer.goToSlide(1);
+    await mounted.viewer.goToSlide(0);
+    resolvers[0](elementContext('stale-after-aba'));
+    await Promise.resolve();
+    expect(mounted.viewer.getSelectionContext()).toBeNull();
+
+    mounted.engine.getElementContextAt = vi.fn(async () => elementContext('old-deck'));
+    mounted.wrapper.dispatch('click', {
+      button: 0, clientX: 100, clientY: 100, defaultPrevented: false,
+    });
+    await Promise.resolve();
+    expect(mounted.viewer.getSelectionContext()).toMatchObject({ shapeId: 'old-deck' });
+
+    const replacement = new FakePptxEngine(1, SLIDE_WIDTH, SLIDE_HEIGHT);
+    vi.mocked(PptxPresentation.load).mockResolvedValueOnce(replacement.asPres());
+    await mounted.viewer.load('replacement.pptx');
+    expect(mounted.viewer.getSelectionContext()).toBeNull();
+    expect(mounted.onSelectionContextChange).toHaveBeenLastCalledWith(null);
     mounted.viewer.destroy();
   });
 

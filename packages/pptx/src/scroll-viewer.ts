@@ -522,6 +522,9 @@ export class PptxScrollViewer implements ZoomableViewer {
       });
       if (!pres) return;
       if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
+      // A successful reload replaces the selection surface. Retire hit tests
+      // issued against the old engine and notify that its element focus ended.
+      this._invalidateElementSelection();
       this._find.invalidate();
       this._findActive = false;
       // Lay out + mount the first window now that the engine exists (mirrors the
@@ -2122,6 +2125,11 @@ export class PptxScrollViewer implements ZoomableViewer {
   private _setElementSelectionContext(context: PptxElementSelectionContext | null): void {
     this._elementSelectionContext = context ? structuredClone(context) : null;
     this._emitSelectionContextChange();
+  }
+
+  private _invalidateElementSelection(): void {
+    this._elementHitGeneration++;
+    this._setElementSelectionContext(null);
   }
 
   private async _onElementClick(event: MouseEvent): Promise<void> {

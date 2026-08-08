@@ -307,6 +307,10 @@ export class PptxViewer implements ZoomableViewer {
       });
       if (!engine) return;
       if (this.destroyed) throw new Error('PptxViewer is destroyed');
+      // The loaded presentation is a new selection surface. Invalidate both a
+      // retained element focus and every hit-test promise issued against the
+      // previous engine before rendering the replacement deck.
+      this._invalidateElementSelection();
       // Discard the stale slide's media handle before swapping engines so its RAF
       // loop / object URLs don't outlive the replaced presentation.
       this.currentSlide = this._initialSlide();
@@ -328,7 +332,7 @@ export class PptxViewer implements ZoomableViewer {
   async goToSlide(index: number): Promise<void> {
     if (!this.engine || this.slideCount === 0) return;
     const next = Math.max(0, Math.min(index, this.slideCount - 1));
-    if (next !== this.currentSlide) this._setElementSelectionContext(null);
+    if (next !== this.currentSlide) this._invalidateElementSelection();
     this.currentSlide = next;
     await this.renderCurrentSlide();
   }
@@ -778,6 +782,11 @@ export class PptxViewer implements ZoomableViewer {
   private _setElementSelectionContext(context: PptxElementSelectionContext | null): void {
     this.elementSelectionContext = context ? structuredClone(context) : null;
     this._emitSelectionContextChange();
+  }
+
+  private _invalidateElementSelection(): void {
+    this.elementHitGeneration++;
+    this._setElementSelectionContext(null);
   }
 
   private async _onElementClick(event: MouseEvent): Promise<void> {

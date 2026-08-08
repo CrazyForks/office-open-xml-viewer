@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { PptxPresentation } from './presentation.js';
+import { PptxScrollViewer } from './scroll-viewer.js';
 import type { PptxElementSelectionContext } from './element-selection.js';
 import {
   FakePptxEngine,
@@ -65,5 +67,39 @@ describe('PptxScrollViewer selection context', () => {
 
     viewer.destroy();
     expect(() => viewer.getSelectionContext()).toThrow('PptxScrollViewer is destroyed');
+  });
+
+  it('clears element focus when a successful reload replaces the deck', async () => {
+    installDom();
+    const container = makeContainer(960, 720);
+    const first = new FakePptxEngine(1, 9_144_000, 6_858_000);
+    first.elementContext = context();
+    const replacement = new FakePptxEngine(1, 9_144_000, 6_858_000);
+    vi.spyOn(PptxPresentation, 'load')
+      .mockResolvedValueOnce(first.asPres())
+      .mockResolvedValueOnce(replacement.asPres());
+    const onSelectionContextChange = vi.fn();
+    const viewer = new PptxScrollViewer(container as unknown as HTMLElement, {
+      enableElementSelection: true,
+      onSelectionContextChange,
+    });
+    await viewer.load('first.pptx');
+    const internals = viewer as unknown as {
+      _scrollHost: FakeEl;
+      _slots: Map<number, { wrapper: FakeEl; canvas: FakeEl }>;
+    };
+    const slot = internals._slots.get(0) as { wrapper: FakeEl; canvas: FakeEl };
+    slot.canvas.clientWidth = 960;
+    slot.canvas.clientHeight = 720;
+    internals._scrollHost.dispatch('click', {
+      target: slot.canvas, button: 0, clientX: 480, clientY: 360, defaultPrevented: false,
+    });
+    await Promise.resolve();
+    expect(viewer.getSelectionContext()).toMatchObject({ shapeId: '9' });
+
+    await viewer.load('replacement.pptx');
+    expect(viewer.getSelectionContext()).toBeNull();
+    expect(onSelectionContextChange).toHaveBeenLastCalledWith(null);
+    viewer.destroy();
   });
 });
