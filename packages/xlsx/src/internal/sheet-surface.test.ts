@@ -5,8 +5,8 @@ import { CanvasSurface, SheetOverlayHost } from './sheet-surface.js';
 afterEach(() => vi.unstubAllGlobals());
 
 describe('XLSX sheet surface roles', () => {
-  it('CanvasSurface owns input/document listener teardown and local coordinates', () => {
-    const document = installDom();
+  it('CanvasSurface owns focus-scoped input listener teardown and local coordinates', () => {
+    installDom();
     const canvas = makeEl('canvas');
     const area = makeEl('div');
     const input = makeEl('div');
@@ -18,15 +18,15 @@ describe('XLSX sheet surface roles', () => {
     const pointer = vi.fn();
     const keyboard = vi.fn();
     surface.on('pointerdown', pointer);
-    surface.onDocumentKeydown(keyboard);
+    surface.on('keydown', keyboard);
     input.dispatch('pointerdown', {});
-    document.dispatchEvent('keydown', {});
+    input.dispatch('keydown', {});
     expect(pointer).toHaveBeenCalledOnce();
     expect(keyboard).toHaveBeenCalledOnce();
 
     surface.destroy();
     input.dispatch('pointerdown', {});
-    document.dispatchEvent('keydown', {});
+    input.dispatch('keydown', {});
     expect(pointer).toHaveBeenCalledOnce();
     expect(keyboard).toHaveBeenCalledOnce();
   });

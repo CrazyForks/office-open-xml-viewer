@@ -137,9 +137,10 @@ describe('XLSX viewer composition roles', () => {
     selection.select({ row: 2, col: 1 }, 'rows');
     selection.extend({ row: 5, col: 1 });
     expect(selection.snapshot()).toEqual({
-      anchor: { row: 2, col: 1 },
-      active: { row: 5, col: 1 },
-      mode: 'rows',
+      areas: [{ kind: 'rows', firstRow: 2, lastRow: 5 }],
+      activeAreaIndex: 0,
+      activeCell: { row: 5, col: 1 },
+      extensionAnchor: { row: 2, col: 1 },
     });
     expect(selection.headerHighlight()).toEqual({
       selectedRowRange: { start: 2, end: 5, strong: true },

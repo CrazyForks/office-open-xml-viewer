@@ -13,6 +13,7 @@ describe('public deprecation documentation', () => {
       'XlsxChartSeries',
       'WasmParserHost.setWasmUrl()',
       'dropBitmapCacheByPath()',
+      'onSelectionChange',
     ]) {
       expect(page).toContain(api);
     }

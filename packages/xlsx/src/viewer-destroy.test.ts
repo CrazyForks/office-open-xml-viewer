@@ -14,7 +14,7 @@ afterEach(() => {
  * into `document.head`. destroy() must (1) remove that subtree so the container
  * returns to the empty state it had before construction, and (2) NOT leak a new
  * <style> per instance. These tests pin both, plus removal of the document-level
- * keydown listener.
+ * focus-scoped viewport keydown listener.
  */
 describe('XlsxViewer.destroy() — subtree + listeners + style', () => {
   it('leaves outer framing to the caller-owned container', () => {
@@ -72,14 +72,14 @@ describe('XlsxViewer.destroy() — subtree + listeners + style', () => {
     c.destroy();
   });
 
-  it('removes the document-level keydown listener on destroy', () => {
+  it('never installs a document-level copy listener', () => {
     const doc = installDom() as FakeDocument;
     const container = makeContainer();
     const v = new XlsxViewer(container as unknown as HTMLElement);
-    // The constructor registered exactly one keydown handler on document.
-    expect(doc.listenerCount('keydown')).toBe(1);
+    // Copy is scoped to the focusable viewport, so unrelated document input and
+    // other Viewer instances cannot race to overwrite the clipboard.
+    expect(doc.listenerCount('keydown')).toBe(0);
     v.destroy();
-    // destroy() detached it — dispatching now reaches no viewer handler.
     expect(doc.listenerCount('keydown')).toBe(0);
     // Dispatching a keydown after destroy must not throw (no live handler).
     expect(() => doc.dispatchEvent('keydown', { key: 'c', ctrlKey: true })).not.toThrow();

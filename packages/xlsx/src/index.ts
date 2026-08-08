@@ -9,10 +9,24 @@ export type {
   XlsxViewportOffset,
   XlsxScrollToCellOptions,
   HiddenSheetMode,
-  CellAddress,
   CellRange,
   SelectionMode,
+  XlsxCopyResult,
 } from './viewer.js';
+export type {
+  CellAddress,
+  XlsxSelectionArea,
+  XlsxSelectionContext,
+  XlsxSelectionContextCell,
+  XlsxSelectionContextOptions,
+  XlsxSelectionInput,
+  XlsxSelectionState,
+} from './selection.js';
+export {
+  MAX_SELECTION_AREAS,
+  MAX_SELECTION_CONTEXT_CELLS,
+  MAX_SELECTION_CONTEXT_TEXT_CHARACTERS,
+} from './selection.js';
 // IX2 find-in-document: the xlsx match-location shape (sheet + A1 cell ref).
 // `FindMatch` / `FindMatchesOptions` come from core (shared across formats).
 export type { XlsxMatchLocation } from './find.js';

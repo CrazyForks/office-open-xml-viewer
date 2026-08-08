@@ -21,6 +21,24 @@ import {
 } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
+import type {
+  CellAddress,
+  XlsxSelectionArea,
+  XlsxSelectionContext,
+  XlsxSelectionContextCell,
+  XlsxSelectionContextOptions,
+  XlsxSelectionInput,
+  XlsxSelectionState,
+} from './selection.js';
+import {
+  MAX_SELECTION_CONTEXT_CELLS,
+  MAX_SELECTION_CONTEXT_TEXT_CHARACTERS,
+  normalizeSelectionState,
+  selectionCoordinateCountUpperBound,
+  selectionStateFromReference,
+  selectionStatesEqual,
+} from './selection.js';
+export type { CellAddress } from './selection.js';
 import { XlsxFindController, type FindCell, type XlsxMatchLocation } from './find.js';
 import { computeCommentPopupPosition } from './comment-popup.js';
 import {
@@ -42,7 +60,11 @@ import {
   type OutlineLayout,
   type OutlineAxis,
 } from './outline.js';
-import { GridGeometry } from './internal/grid-geometry.js';
+import {
+  GridGeometry,
+  MAX_WORKSHEET_COL,
+  MAX_WORKSHEET_ROW,
+} from './internal/grid-geometry.js';
 import {
   SheetAcquisition,
   SheetRenderDispatcher,
@@ -187,7 +209,13 @@ export interface XlsxSheetViewerOptions extends LoadOptions {
    * trap, not a reliably classified OOM.
    */
   onError?: (err: Error) => void;
-  /** Called when the selected cell range changes. null means no selection. */
+  /** Called with the canonical selection state whenever it actually changes. */
+  onSelectionStateChange?: (selection: XlsxSelectionState | null) => void;
+  /**
+   * @deprecated Use `onSelectionStateChange`. Scheduled for removal in 0.77.0.
+   * This compatibility projection cannot represent multiple areas or an
+   * ActiveCell that is independent of the selected rectangle.
+   */
   onSelectionChange?: (selection: CellRange | null) => void;
   /**
    * IX1 (design decision — NOT user-confirmed, integrator may veto). Fires when a
@@ -266,17 +294,115 @@ export interface XlsxScrollToCellOptions {
   readonly align?: 'nearest' | 'start' | 'center' | 'end';
 }
 
-export interface CellAddress {
-  row: number;
-  col: number;
-}
-
+/** @deprecated Use `XlsxSelectionArea['kind']`. Scheduled for removal in 0.77.0. */
 export type SelectionMode = 'cells' | 'rows' | 'cols' | 'all';
 
+/**
+ * @deprecated Use `XlsxSelectionState`. Scheduled for removal in 0.77.0.
+ * This endpoint model conflates range geometry with ActiveCell semantics.
+ */
 export interface CellRange {
   anchor: CellAddress;
   active: CellAddress;
   mode: SelectionMode;
+}
+
+export type XlsxCopyResult =
+  | Readonly<{ status: 'copied'; cellCount: number; utf16CodeUnits: number }>
+  | Readonly<{ status: 'empty-selection' }>
+  | Readonly<{ status: 'unsupported-multiple-areas' }>
+  | Readonly<{ status: 'too-large'; limit: 'cells' | 'text' }>
+  | Readonly<{ status: 'clipboard-unavailable' }>
+  | Readonly<{ status: 'clipboard-denied' }>;
+
+function legacySelectionProjection(state: XlsxSelectionState | null): CellRange | null {
+  if (!state) return null;
+  const area = state.areas[state.activeAreaIndex];
+  switch (area.kind) {
+    case 'cells':
+      {
+        const extensionAnchor = state.extensionAnchor;
+        const anchorIsCorner = (extensionAnchor.row === area.top || extensionAnchor.row === area.bottom) &&
+          (extensionAnchor.col === area.left || extensionAnchor.col === area.right);
+        // The deprecated endpoint model cannot represent an interior extension
+        // anchor without shrinking the area. Preserve complete geometry instead.
+        const anchor = anchorIsCorner
+          ? extensionAnchor
+          : { row: area.top, col: area.left };
+        const active = anchorIsCorner
+          ? {
+              row: anchor.row === area.top ? area.bottom : area.top,
+              col: anchor.col === area.left ? area.right : area.left,
+            }
+          : { row: area.bottom, col: area.right };
+      return {
+        anchor: { ...anchor },
+        active,
+        mode: 'cells',
+      };
+      }
+    case 'rows':
+      {
+        const anchorRow = state.extensionAnchor.row === area.firstRow ||
+          state.extensionAnchor.row === area.lastRow
+          ? state.extensionAnchor.row
+          : area.firstRow;
+        return {
+          anchor: { row: anchorRow, col: 1 },
+          active: {
+            row: anchorRow === area.lastRow ? area.firstRow : area.lastRow,
+            col: 1,
+          },
+          mode: 'rows',
+        };
+      }
+    case 'columns':
+      {
+        const anchorColumn = state.extensionAnchor.col === area.firstColumn ||
+          state.extensionAnchor.col === area.lastColumn
+          ? state.extensionAnchor.col
+          : area.firstColumn;
+        return {
+          anchor: { row: 1, col: anchorColumn },
+          active: {
+            row: 1,
+            col: anchorColumn === area.lastColumn ? area.firstColumn : area.lastColumn,
+          },
+          mode: 'cols',
+        };
+      }
+    case 'sheet':
+      return { anchor: { row: 1, col: 1 }, active: { row: 1, col: 1 }, mode: 'all' };
+  }
+}
+
+type SelectionInterval = Readonly<{ first: number; last: number }>;
+
+function mergeSelectionIntervals(intervals: readonly SelectionInterval[]): SelectionInterval[] {
+  const sorted = [...intervals].sort((a, b) => a.first - b.first || a.last - b.last);
+  const merged: SelectionInterval[] = [];
+  for (const interval of sorted) {
+    const previous = merged.at(-1);
+    if (!previous || interval.first > previous.last + 1) {
+      merged.push({ ...interval });
+    } else if (interval.last > previous.last) {
+      merged[merged.length - 1] = { first: previous.first, last: interval.last };
+    }
+  }
+  return merged;
+}
+
+function intervalContains(intervals: readonly SelectionInterval[], value: number): boolean {
+  let low = 0;
+  let high = intervals.length - 1;
+  while (low <= high) {
+    const middle = (low + high) >>> 1;
+    const interval = intervals[middle];
+    if (value < interval.first) high = middle - 1;
+    else if (value > interval.last) low = middle + 1;
+    else return true;
+  }
+  return false;
 }
 
 /** Default cell-selection accent (Google blue), used when no `selectionColor`
@@ -288,6 +414,40 @@ const DEFAULT_SELECTION_COLOR = '#1a73e8';
  *  dragged to (logical px) so a collapsed band keeps a grabbable border. */
 const RESIZE_GRAB_PX = 4;
 const RESIZE_MIN_PX = 5;
+// Keep clipboard materialization within the same hard cell-count envelope as a
+// worksheet. A sparse range can span billions of coordinates even when only a
+// handful of cells are populated, so its rectangular TSV must never be built.
+const MAX_CLIPBOARD_CELLS = 250_000;
+// Bound the retained TSV and its final joined copy. This is a resource-safety
+// contract, not a worksheet semantic limit; callers can handle `too-large`
+// without the viewer attempting an unbounded JavaScript string allocation.
+const MAX_CLIPBOARD_UTF16_CODE_UNITS = 8 * 1_024 * 1_024;
+const DEFAULT_SELECTION_CONTEXT_TEXT_CHARACTERS = 1 * 1_024 * 1_024;
+const MAX_SELECTION_CONTEXT_FIELD_CHARACTERS = 65_536;
+const MAX_REENTRANT_SELECTION_NOTIFICATIONS = 100;
+
+function safeUtf16Prefix(value: string, maxCodeUnits: number): string {
+  let end = Math.min(value.length, Math.max(0, maxCodeUnits));
+  if (end > 0 && end < value.length) {
+    const previous = value.charCodeAt(end - 1);
+    const next = value.charCodeAt(end);
+    if (previous >= 0xD800 && previous <= 0xDBFF && next >= 0xDC00 && next <= 0xDFFF) end--;
+  }
+  return value.slice(0, end);
+}
+
+function encodeTsvFieldWithin(value: string, remaining: number): string | null {
+  let quoteCount = 0;
+  let needsQuotes = false;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code === 34) { quoteCount++; needsQuotes = true; }
+    else if (code === 9 || code === 10 || code === 13) needsQuotes = true;
+  }
+  const length = value.length + (needsQuotes ? quoteCount + 2 : 0);
+  if (length > remaining) return null;
+  return needsQuotes ? `"${value.replace(/"/g, '""')}"` : value;
+}
 
 /**
  * Pure hit predicate for drag-to-resize (issue #567): given a pointer
@@ -466,29 +626,16 @@ class XlsxViewerEngine implements ZoomableViewer {
    *  engine prevents a programmatic scroll followed by the browser's native
    *  scroll event from producing duplicate notifications. */
   private _lastViewportNotification: XlsxViewportOffset | null = null;
-
   private get anchorCell(): CellAddress | null {
     return this.selectionController.anchor;
-  }
-
-  private set anchorCell(value: CellAddress | null) {
-    this.selectionController.setAnchor(value);
   }
 
   private get activeCell(): CellAddress | null {
     return this.selectionController.active;
   }
 
-  private set activeCell(value: CellAddress | null) {
-    this.selectionController.setActive(value);
-  }
-
   private get selectionMode(): SelectionMode {
     return this.selectionController.mode;
-  }
-
-  private set selectionMode(value: SelectionMode) {
-    this.selectionController.setMode(value);
   }
 
   private get isSelecting(): boolean {
@@ -519,6 +666,11 @@ class XlsxViewerEngine implements ZoomableViewer {
 
   // Selection state
   private readonly selectionController = new SelectionController();
+  private lastNotifiedSelectionState: XlsxSelectionState | null = null;
+  private emittingSelectionChange = false;
+  private pendingSelectionChange = false;
+  private selectionNotificationScheduled = false;
+  private selectionNotificationCount = 0;
   private selectionOverlay: HTMLDivElement;
   /** IX2 — find-highlight overlay (matched-cell boxes). */
   private findOverlay!: HTMLDivElement;
@@ -650,6 +802,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
     this.scrollHost = this.hostDocument.createElement('div');
     this.scrollHost.setAttribute('data-xlsx-viewport-input', mount.kind);
+    this.scrollHost.tabIndex = 0;
     this.scrollHost.style.cssText =
       `position:absolute;inset:0;` +
       `overflow:${this._nativeScrollbars ? 'auto' : 'clip'};` +
@@ -979,6 +1132,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.updateFooterDirection();
     this.viewportTop = 0;
     this.selectionController.reset();
+    this.emitSelectionChange();
     this.hideCommentPopup();
     this.hideValidationPanel();
     this.updateSelectionOverlay();
@@ -1741,26 +1895,244 @@ class XlsxViewerEngine implements ZoomableViewer {
     });
   }
 
-  /** Returns the current selection, including mode. */
-  get selection(): CellRange | null {
+  /** Returns the full selection model, detached from viewer-owned state. */
+  get selectionState(): XlsxSelectionState | null {
     return this.selectionController.snapshot();
   }
 
   /**
-   * Programmatically select a single cell by A1 reference (e.g. `"B2"`), as if
-   * the user had clicked it: updates the active/anchor cell, redraws the
-   * selection overlay (including any list-validation dropdown arrow), and fires
-   * `onSelectionChange`. A no-op for malformed refs. Closes any open validation
-   * panel, matching the click path.
+   * Set an A1 area (`B2:D5`, `2:4`, `B:D`), a complete canonical state, or
+   * `null`. A string describes selection geometry only; its normalized
+   * upper-left cell becomes ActiveCell and the Shift-extension anchor.
+   */
+  setSelection(input: XlsxSelectionInput): void {
+    if (this._destroyed) throw new Error('XlsxViewer has been destroyed');
+    let next: XlsxSelectionState | null;
+    if (typeof input === 'string') {
+      next = selectionStateFromReference(input);
+      if (!next) throw new SyntaxError(`Invalid XLSX selection reference: ${input}`);
+    } else {
+      next = input ? normalizeSelectionState(input) : null;
+    }
+    this.commitSelection(next);
+  }
+
+  /**
+   * Return a serializable, bounded snapshot of the current selection and the
+   * populated cells it covers. Intended for read-only AI/MCP context handoff;
+   * it exposes no mutable workbook objects and does not touch the Clipboard API.
+   */
+  getSelectionContext(options: XlsxSelectionContextOptions = {}): XlsxSelectionContext | null {
+    this.assertOpen();
+    const worksheet = this.currentWorksheet;
+    const selection = this.selectionState;
+    if (!worksheet || !selection) return null;
+    const requestedMax = options.maxCells ?? 1_000;
+    if (!Number.isFinite(requestedMax) || requestedMax < 0) {
+      throw new RangeError('maxCells must be a finite non-negative number.');
+    }
+    const maxCells = Math.min(MAX_SELECTION_CONTEXT_CELLS, Math.floor(requestedMax));
+    const requestedTextMax = options.maxTextCharacters ?? DEFAULT_SELECTION_CONTEXT_TEXT_CHARACTERS;
+    if (!Number.isFinite(requestedTextMax) || requestedTextMax < 0) {
+      throw new RangeError('maxTextCharacters must be a finite non-negative number.');
+    }
+    const maxTextCharacters = Math.min(
+      MAX_SELECTION_CONTEXT_TEXT_CHARACTERS,
+      Math.floor(requestedTextMax),
+    );
+    let textCharacters = 0;
+    let textTruncated = false;
+    const boundedField = (input: string | readonly Readonly<{ text: string }>[]): string => {
+      const parts: readonly (string | Readonly<{ text: string }>)[] =
+        typeof input === 'string' ? [input] : input;
+      const chunks: string[] = [];
+      let fieldCharacters = 0;
+      for (let index = 0; index < parts.length; index++) {
+        const sourcePart = parts[index];
+        const part = typeof sourcePart === 'string' ? sourcePart : sourcePart.text;
+        const allowed = Math.max(0, Math.min(
+          MAX_SELECTION_CONTEXT_FIELD_CHARACTERS - fieldCharacters,
+          maxTextCharacters - textCharacters,
+        ));
+        const chunk = safeUtf16Prefix(part, allowed);
+        chunks.push(chunk);
+        fieldCharacters += chunk.length;
+        textCharacters += chunk.length;
+        if (chunk.length < part.length || index + 1 < parts.length && allowed === 0) {
+          textTruncated = true;
+          break;
+        }
+      }
+      return chunks.join('');
+    };
+    const sheetSelected = selection.areas.some((area) => area.kind === 'sheet');
+    const rowIntervals = mergeSelectionIntervals(selection.areas.flatMap((area) =>
+      area.kind === 'rows' ? [{ first: area.firstRow, last: area.lastRow }] : []));
+    const columnIntervals = mergeSelectionIntervals(selection.areas.flatMap((area) =>
+      area.kind === 'columns'
+        ? [{ first: area.firstColumn, last: area.lastColumn }]
+        : []));
+    const rectangles = selection.areas.flatMap((area) => area.kind === 'cells' ? [area] : []);
+    const events = rectangles.flatMap((area, index) => [
+      { row: area.top, index, active: true },
+      { row: area.bottom + 1, index, active: false },
+    ]).sort((a, b) => a.row - b.row || Number(a.active) - Number(b.active));
+    const activeRectangles = new Set<number>();
+    let eventIndex = 0;
+    let lastWorksheetRow = 0;
+    let activeColumnIntervals: SelectionInterval[] = [];
+    const cells: XlsxSelectionContextCell[] = [];
+    let cellsTruncated = false;
+
+    cellScan: for (const row of worksheet.rows) {
+      let cellIntervals: SelectionInterval[];
+      if (row.index >= lastWorksheetRow) {
+        let changed = false;
+        while (eventIndex < events.length && events[eventIndex].row <= row.index) {
+          const event = events[eventIndex++];
+          if (event.active) activeRectangles.add(event.index);
+          else activeRectangles.delete(event.index);
+          changed = true;
+        }
+        if (changed) {
+          activeColumnIntervals = mergeSelectionIntervals([...activeRectangles].map((index) => ({
+            first: rectangles[index].left,
+            last: rectangles[index].right,
+          })));
+        }
+        cellIntervals = activeColumnIntervals;
+      } else {
+        // Structural fixtures may provide rows out of order. Real worksheets
+        // are ordered, but keep this public context snapshot correct for both.
+        cellIntervals = mergeSelectionIntervals(rectangles
+          .filter((area) => row.index >= area.top && row.index <= area.bottom)
+          .map((area) => ({ first: area.left, last: area.right })));
+      }
+      lastWorksheetRow = row.index;
+      const wholeRow = sheetSelected || intervalContains(rowIntervals, row.index);
+      for (const cell of row.cells) {
+        if (!wholeRow &&
+            !intervalContains(columnIntervals, cell.col) &&
+            !intervalContains(cellIntervals, cell.col)) continue;
+        if (cells.length >= maxCells) { cellsTruncated = true; break cellScan; }
+        const raw = cell.value;
+        const displayText = boundedField(this.wb?.cellText(worksheet, cell) ?? '');
+        const value = raw.type === 'text'
+          ? boundedField(raw.runs ?? raw.text)
+          : raw.type === 'number'
+            ? raw.number
+            : raw.type === 'bool'
+              ? raw.bool
+              : raw.type === 'error'
+                ? boundedField(raw.error)
+                : null;
+        cells.push({
+          address: { row: cell.row, col: cell.col },
+          displayText,
+          valueType: raw.type,
+          value,
+          ...(cell.formula === undefined ? {} : { formula: boundedField(cell.formula) }),
+        });
+        if (textTruncated) break cellScan;
+      }
+    }
+    const truncationReasons: Array<'cells' | 'text'> = [];
+    if (cellsTruncated) truncationReasons.push('cells');
+    if (textTruncated) truncationReasons.push('text');
+    return {
+      format: 'xlsx',
+      sheetIndex: this.currentSheet,
+      sheetName: worksheet.name,
+      selection,
+      coordinateCountUpperBound: selectionCoordinateCountUpperBound(selection),
+      cells,
+      truncated: truncationReasons.length > 0,
+      truncationReasons,
+      maxCells,
+      textCharacters,
+      maxTextCharacters,
+    };
+  }
+
+  /**
+   * @deprecated Use `selectionState`. Scheduled for removal in 0.77.0.
+   * This is a lossy projection of the active area.
+   */
+  get selection(): CellRange | null {
+    return legacySelectionProjection(this.selectionState);
+  }
+
+  /**
+   * @deprecated Use `setSelection`. Scheduled for removal in 0.77.0.
+   * Retains the old no-op behavior for malformed references.
    */
   select(ref: string): void {
-    const p = parseA1(ref);
-    if (!p) return;
+    this.assertOpen();
+    const state = selectionStateFromReference(ref);
+    if (!state) return;
+    this.commitSelection(state);
+  }
+
+  private commitSelection(next: XlsxSelectionState | null): void {
+    const current = this.selectionState;
+    if (selectionStatesEqual(current, next)) return;
     this.hideValidationPanel();
-    this.selectionController.select({ row: p.row, col: p.col });
+    this.selectionController.setState(next);
     this.updateSelectionOverlay();
-    if (this.wb) this.renderCurrentSheet().catch((error) => this._reportRenderError(error));
-    this.opts.onSelectionChange?.(this.selection);
+    if (this.wb) this.scheduleRender();
+    this.emitSelectionChange();
+  }
+
+  private emitSelectionChange(): void {
+    if (this.emittingSelectionChange) {
+      this.pendingSelectionChange = true;
+      this.scheduleSelectionNotification();
+      return;
+    }
+    this.pendingSelectionChange = false;
+    const state = this.selectionState;
+    if (selectionStatesEqual(state, this.lastNotifiedSelectionState)) {
+      this.finishSelectionNotificationChain();
+      return;
+    }
+
+    if (this.selectionNotificationCount >= MAX_REENTRANT_SELECTION_NOTIFICATIONS) {
+      // A callback feedback cycle must not monopolize the main thread. The
+      // canonical state remains authoritative; only notifications beyond the
+      // documented per-chain safety limit are suppressed.
+      this.lastNotifiedSelectionState = state ? structuredClone(state) : null;
+      this.finishSelectionNotificationChain();
+      return;
+    }
+    this.selectionNotificationCount++;
+    this.lastNotifiedSelectionState = state ? structuredClone(state) : null;
+    this.emittingSelectionChange = true;
+    try {
+      this.opts.onSelectionStateChange?.(state ? structuredClone(state) : null);
+      this.opts.onSelectionChange?.(legacySelectionProjection(state));
+    } finally {
+      this.emittingSelectionChange = false;
+      if (this.pendingSelectionChange ||
+          !selectionStatesEqual(this.selectionState, this.lastNotifiedSelectionState)) {
+        this.scheduleSelectionNotification();
+      } else {
+        this.finishSelectionNotificationChain();
+      }
+    }
+  }
+
+  private scheduleSelectionNotification(): void {
+    if (this.selectionNotificationScheduled || this._destroyed) return;
+    this.selectionNotificationScheduled = true;
+    queueMicrotask(() => {
+      this.selectionNotificationScheduled = false;
+      if (!this._destroyed) this.emitSelectionChange();
+    });
+  }
+
+  private finishSelectionNotificationChain(): void {
+    this.pendingSelectionChange = false;
+    this.selectionNotificationCount = 0;
   }
 
   /**
@@ -1942,12 +2314,20 @@ class XlsxViewerEngine implements ZoomableViewer {
     return countVisible((i) => wb.isHidden(i), this.sheetCount);
   }
 
-  /** Copy the selected cell range as tab-separated text to the clipboard. */
-  private copySelection(): void {
+  /**
+   * Copy the selected area as bounded TSV. The same limits apply regardless of
+   * whether pointer, keyboard, or API created the selection.
+   */
+  async copySelection(): Promise<XlsxCopyResult> {
+    this.assertOpen();
     const ws = this.currentWorksheet;
-    if (!ws || !this.anchorCell || !this.activeCell) return;
+    const state = this.selectionState;
+    if (!ws || !state) return { status: 'empty-selection' };
+    if (state.areas.length !== 1) return { status: 'unsupported-multiple-areas' };
+    const area = state.areas[0];
 
-    // Determine actual data extent for rows/cols/all modes
+    // Whole-row/column/sheet selections are unbounded Excel concepts. Copying
+    // narrows them to used cells without changing the logical selection.
     let maxRow = 1, maxCol = 1;
     for (const row of ws.rows) {
       if (row.index > maxRow) maxRow = row.index;
@@ -1956,140 +2336,194 @@ class XlsxViewerEngine implements ZoomableViewer {
       }
     }
 
-    let r1: number, r2: number, c1: number, c2: number;
-    if (this.selectionMode === 'all') {
-      r1 = 1; r2 = maxRow; c1 = 1; c2 = maxCol;
-    } else if (this.selectionMode === 'rows') {
-      r1 = Math.min(this.anchorCell.row, this.activeCell.row);
-      r2 = Math.max(this.anchorCell.row, this.activeCell.row);
-      c1 = 1; c2 = maxCol;
-    } else if (this.selectionMode === 'cols') {
-      c1 = Math.min(this.anchorCell.col, this.activeCell.col);
-      c2 = Math.max(this.anchorCell.col, this.activeCell.col);
-      r1 = 1; r2 = maxRow;
-    } else {
-      r1 = Math.min(this.anchorCell.row, this.activeCell.row);
-      r2 = Math.max(this.anchorCell.row, this.activeCell.row);
-      c1 = Math.min(this.anchorCell.col, this.activeCell.col);
-      c2 = Math.max(this.anchorCell.col, this.activeCell.col);
-    }
+    const { r1, r2, c1, c2 } = area.kind === 'sheet'
+      ? { r1: 1, r2: maxRow, c1: 1, c2: maxCol }
+      : area.kind === 'rows'
+        ? { r1: area.firstRow, r2: area.lastRow, c1: 1, c2: maxCol }
+        : area.kind === 'columns'
+          ? { r1: 1, r2: maxRow, c1: area.firstColumn, c2: area.lastColumn }
+          : { r1: area.top, r2: area.bottom, c1: area.left, c2: area.right };
 
-    const cellMap = new Map<string, string>();
+    const rowCount = r2 - r1 + 1;
+    const colCount = c2 - c1 + 1;
+    if (rowCount > Math.floor(MAX_CLIPBOARD_CELLS / colCount)) {
+      return { status: 'too-large', limit: 'cells' };
+    }
+    const cellCount = rowCount * colCount;
+
+    let utf16CodeUnits = Math.max(0, rowCount - 1) + rowCount * Math.max(0, colCount - 1);
+    if (utf16CodeUnits > MAX_CLIPBOARD_UTF16_CODE_UNITS) {
+      return { status: 'too-large', limit: 'text' };
+    }
+    const cellMap = new Map<number, Map<number, string>>();
     for (const row of ws.rows) {
       if (row.index < r1 || row.index > r2) continue;
       for (const cell of row.cells) {
         if (cell.col < c1 || cell.col > c2) continue;
         const v = cell.value;
-        let text = '';
-        if (v.type === 'text') text = v.runs ? v.runs.map((r) => r.text).join('') : v.text;
-        else if (v.type === 'number') text = String(v.number);
-        else if (v.type === 'bool') text = v.bool ? 'TRUE' : 'FALSE';
-        else if (v.type === 'error') text = v.error;
-        if (text) cellMap.set(`${row.index}:${cell.col}`, text);
+        let text = this.wb?.cellText(ws, cell) ?? '';
+        if (!this.wb) {
+          if (v.type === 'text') text = v.runs ? v.runs.map((r) => r.text).join('') : v.text;
+          else if (v.type === 'number') text = String(v.number);
+          else if (v.type === 'bool') text = v.bool ? 'TRUE' : 'FALSE';
+          else if (v.type === 'error') text = v.error;
+        }
+        if (text) {
+          const encoded = encodeTsvFieldWithin(
+            text,
+            MAX_CLIPBOARD_UTF16_CODE_UNITS - utf16CodeUnits,
+          );
+          if (encoded === null) return { status: 'too-large', limit: 'text' };
+          utf16CodeUnits += encoded.length;
+          let values = cellMap.get(row.index);
+          if (!values) { values = new Map(); cellMap.set(row.index, values); }
+          values.set(cell.col, encoded);
+        }
       }
     }
 
     const lines: string[] = [];
     for (let r = r1; r <= r2; r++) {
       const cols: string[] = [];
-      for (let c = c1; c <= c2; c++) cols.push(cellMap.get(`${r}:${c}`) ?? '');
+      const values = cellMap.get(r);
+      for (let c = c1; c <= c2; c++) {
+        const value = values?.get(c) ?? '';
+        cols.push(value);
+      }
       lines.push(cols.join('\t'));
     }
-    this.hostWindow.navigator.clipboard?.writeText(lines.join('\n')).catch(() => undefined);
+    const clipboard = this.hostWindow.navigator.clipboard;
+    if (!clipboard) return { status: 'clipboard-unavailable' };
+    try {
+      await clipboard.writeText(lines.join('\n'));
+      return { status: 'copied', cellCount, utf16CodeUnits };
+    } catch {
+      return { status: 'clipboard-denied' };
+    }
   }
 
   private updateSelectionOverlay(): void {
     this.overlayHost.clearSelection();
-    if (!this.anchorCell || !this.activeCell) return;
-
+    const state = this.selectionState;
+    if (!state) return;
     const cs = this.viewport.scale;
     const ws = this.currentWorksheet;
-    const freezeRows = ws?.freezeRows ?? 0;
-    const freezeCols = ws?.freezeCols ?? 0;
-    // Same per-cell rounding as getCellRect / the renderer, so clamp
-    // boundaries land on the canvas's actual pixel edges.
+    if (!ws) return;
     const sp = (px: number) => Math.round(px * cs);
     const headerW = sp(HEADER_W);
     const headerH = sp(HEADER_H);
-
-    const frozen = ws
-      ? getGridGeometryForWorksheet(ws).roundedFrozenExtent(cs)
-      : { width: 0, height: 0 };
-
-    let x: number, y: number, w: number, h: number;
-    let selR1 = 1, selC1 = 1;
-
-    if (this.selectionMode === 'all') {
-      x = headerW;
-      y = headerH;
-      w = this.canvasArea.clientWidth - headerW;
-      h = this.canvasArea.clientHeight - headerH;
-    } else if (this.selectionMode === 'rows') {
-      selR1 = Math.min(this.anchorCell.row, this.activeCell.row);
-      const r2 = Math.max(this.anchorCell.row, this.activeCell.row);
-      const top = this.getCellRect(selR1, 1);
-      const bot = this.getCellRect(r2, 1);
-      if (!top || !bot) return;
-      x = headerW;
-      y = top.y;
-      w = this.canvasArea.clientWidth - headerW;
-      h = bot.y + bot.h - top.y;
-    } else if (this.selectionMode === 'cols') {
-      selC1 = Math.min(this.anchorCell.col, this.activeCell.col);
-      const c2 = Math.max(this.anchorCell.col, this.activeCell.col);
-      const left = this.getCellRect(1, selC1);
-      const right = this.getCellRect(1, c2);
-      if (!left || !right) return;
-      x = left.x;
-      y = headerH;
-      w = right.x + right.w - left.x;
-      h = this.canvasArea.clientHeight - headerH;
-    } else {
-      selR1 = Math.min(this.anchorCell.row, this.activeCell.row);
-      const r2 = Math.max(this.anchorCell.row, this.activeCell.row);
-      selC1 = Math.min(this.anchorCell.col, this.activeCell.col);
-      const c2 = Math.max(this.anchorCell.col, this.activeCell.col);
-      const tl = this.getCellRect(selR1, selC1);
-      const br = this.getCellRect(r2, c2);
-      if (!tl || !br) return;
-      x = tl.x; y = tl.y;
-      w = br.x + br.w - tl.x;
-      h = br.y + br.h - tl.y;
-    }
-
-    // Clamp to header boundaries so the overlay never overlaps fixed headers.
-    if (x < headerW) { w -= headerW - x; x = headerW; }
-    if (y < headerH) { h -= headerH - y; y = headerH; }
-
-    // Clamp scrollable-region selections at the frozen pane boundary.
-    // Frozen cells legitimately live inside the frozen area; scrollable cells
-    // that have scrolled behind the frozen area must be clipped there instead.
-    const frozenBoundX = headerW + frozen.width;
-    const frozenBoundY = headerH + frozen.height;
-    if (selC1 > freezeCols && x < frozenBoundX) { w -= frozenBoundX - x; x = frozenBoundX; }
-    if (selR1 > freezeRows && y < frozenBoundY) { h -= frozenBoundY - y; y = frozenBoundY; }
-
-    if (w <= 0 || h <= 0) return;
-
-    // The rect above is in the logical-LTR layout (header on the left), the
-    // same space getCellRect / the all|rows|cols branches use. For an RTL sheet
-    // the renderer mirrors every cell about canvasW (ECMA-376 §18.3.1.87), so
-    // mirror the final [x, x+w] band once with the same transform the renderer
-    // uses. Doing it here — after the LTR clamps — keeps the header/frozen
-    // clamping correct and guarantees the overlay lands exactly on the drawn
-    // cell at every scroll offset (cell→px uses the same map as px→cell above).
-    const screenLeft = this.screenX(x, w);
-
+    const width = this.canvasArea.clientWidth;
+    const height = this.canvasArea.clientHeight;
+    const geometry = getGridGeometryForWorksheet(ws);
+    // Match renderViewport's physical freeze materialization. A legal freeze
+    // count may cover the full sheet; it must never create million-row overlay
+    // geometry when only a handful of bands can reach this viewport.
+    const effective = geometry.effectiveFrozenBands({
+      scale: cs, width, height, headerWidth: HEADER_W, headerHeight: HEADER_H,
+      rows: ws.freezeRows ?? 0, cols: ws.freezeCols ?? 0,
+    });
+    const axes = geometry.axesAtScale(cs);
+    const frozenW = axes.col.offsetOf(effective.cols + 1);
+    const frozenH = axes.row.offsetOf(effective.rows + 1);
+    const xPanes = effective.cols > 0
+      ? [
+          { first: 1, last: effective.cols, start: headerW, end: Math.min(width, headerW + frozenW) },
+          { first: effective.cols + 1, last: MAX_WORKSHEET_COL, start: Math.min(width, headerW + frozenW), end: width },
+        ]
+      : [{ first: 1, last: MAX_WORKSHEET_COL, start: headerW, end: width }];
+    const yPanes = effective.rows > 0
+      ? [
+          { first: 1, last: effective.rows, start: headerH, end: Math.min(height, headerH + frozenH) },
+          { first: effective.rows + 1, last: MAX_WORKSHEET_ROW, start: Math.min(height, headerH + frozenH), end: height },
+        ]
+      : [{ first: 1, last: MAX_WORKSHEET_ROW, start: headerH, end: height }];
     const { border, background } = selectionOverlayStyle(
       this.opts.selectionColor ?? DEFAULT_SELECTION_COLOR,
     );
-    const box = this.hostDocument.createElement('div');
-    box.style.cssText =
-      `position:absolute;` +
-      `left:${screenLeft}px;top:${y}px;width:${w}px;height:${h}px;` +
-      `box-sizing:border-box;border:${border};` +
-      `background:${background};pointer-events:none;`;
-    this.overlayHost.appendSelection(box);
+    const seenFragments = new Set<string>();
+    const fillSubpaths: string[] = [];
+    const borderFragments: HTMLElement[] = [];
+
+    for (const area of state.areas) {
+      const bounds = area.kind === 'cells'
+        ? { top: area.top, bottom: area.bottom, left: area.left, right: area.right,
+            topEdge: true, bottomEdge: true, leftEdge: true, rightEdge: true }
+        : area.kind === 'rows'
+          ? { top: area.firstRow, bottom: area.lastRow, left: 1, right: MAX_WORKSHEET_COL,
+              topEdge: true, bottomEdge: true, leftEdge: false, rightEdge: false }
+          : area.kind === 'columns'
+            ? { top: 1, bottom: MAX_WORKSHEET_ROW, left: area.firstColumn, right: area.lastColumn,
+                topEdge: false, bottomEdge: false, leftEdge: true, rightEdge: true }
+            : { top: 1, bottom: MAX_WORKSHEET_ROW, left: 1, right: MAX_WORKSHEET_COL,
+                topEdge: false, bottomEdge: false, leftEdge: false, rightEdge: false };
+
+      for (const yp of yPanes) for (const xp of xPanes) {
+        if (xp.end <= xp.start || yp.end <= yp.start) continue;
+        const top = Math.max(bounds.top, yp.first);
+        const bottom = Math.min(bounds.bottom, yp.last);
+        const left = Math.max(bounds.left, xp.first);
+        const right = Math.min(bounds.right, xp.last);
+        if (top > bottom || left > right) continue;
+        const tl = this.getCellRect(top, left);
+        const br = this.getCellRect(bottom, right);
+        if (!tl || !br) continue;
+        const rawLeft = tl.x;
+        const rawTop = tl.y;
+        const rawRight = br.x + br.w;
+        const rawBottom = br.y + br.h;
+        const x = Math.max(rawLeft, xp.start);
+        const y = Math.max(rawTop, yp.start);
+        const x2 = Math.min(rawRight, xp.end);
+        const y2 = Math.min(rawBottom, yp.end);
+        const fragmentW = x2 - x;
+        const fragmentH = y2 - y;
+        if (fragmentW <= 0 || fragmentH <= 0) continue;
+
+        // Only paint a border where the logical selection itself ends. Pane and
+        // viewport clips are not selection edges and must not create fake lines.
+        const topBorder = bounds.topEdge && top === bounds.top && rawTop >= yp.start ? border : 'none';
+        const bottomBorder = bounds.bottomEdge && bottom === bounds.bottom && rawBottom <= yp.end ? border : 'none';
+        const leftBorder = bounds.leftEdge && left === bounds.left && rawLeft >= xp.start ? border : 'none';
+        const rightBorder = bounds.rightEdge && right === bounds.right && rawRight <= xp.end ? border : 'none';
+        const screenLeft = this.screenX(x, fragmentW);
+        const physicalLeftBorder = this.isRtl ? rightBorder : leftBorder;
+        const physicalRightBorder = this.isRtl ? leftBorder : rightBorder;
+        const fragmentKey = [
+          screenLeft, y, fragmentW, fragmentH,
+          topBorder, physicalRightBorder, bottomBorder, physicalLeftBorder,
+        ].join('|');
+        if (seenFragments.has(fragmentKey)) continue;
+        seenFragments.add(fragmentKey);
+        // Paint every fragment as a subpath in one SVG fill operation. With a
+        // single non-zero fill, overlapping selection areas form a visual union
+        // instead of stacking translucent backgrounds and becoming darker.
+        fillSubpaths.push(
+          `M${screenLeft} ${y}h${fragmentW}v${fragmentH}h${-fragmentW}Z`,
+        );
+        const box = this.hostDocument.createElement('div');
+        box.setAttribute('data-xlsx-selection-fragment', area.kind);
+        box.style.cssText =
+          `position:absolute;left:${screenLeft}px;top:${y}px;width:${fragmentW}px;height:${fragmentH}px;` +
+          `box-sizing:border-box;border-top:${topBorder};border-right:${physicalRightBorder};` +
+          `border-bottom:${bottomBorder};border-left:${physicalLeftBorder};` +
+          'background:transparent;pointer-events:none;';
+        borderFragments.push(box);
+      }
+    }
+
+    if (fillSubpaths.length > 0) {
+      const svgNamespace = 'http://www.w3.org/2000/svg';
+      const svg = this.hostDocument.createElementNS(svgNamespace, 'svg');
+      svg.setAttribute('data-xlsx-selection-fill', '');
+      svg.style.cssText =
+        'position:absolute;inset:0;width:100%;height:100%;overflow:hidden;pointer-events:none;';
+      const path = this.hostDocument.createElementNS(svgNamespace, 'path');
+      path.setAttribute('d', fillSubpaths.join(''));
+      path.setAttribute('fill', background);
+      svg.appendChild(path);
+      this.overlayHost.appendSelection(svg as unknown as HTMLElement);
+    }
+    for (const fragment of borderFragments) this.overlayHost.appendSelection(fragment);
 
     // List data-validation dropdown arrow (ECMA-376 §18.3.1.33). Excel shows an
     // in-cell dropdown button only while the cell is *selected* and only for
@@ -2639,17 +3073,13 @@ class XlsxViewerEngine implements ZoomableViewer {
     if (headerHit) {
       if (headerHit.kind === 'corner') {
         // Select all — no drag extension needed
-        this.selectionMode = 'all';
-        this.anchorCell = { row: 1, col: 1 };
-        this.activeCell = { row: 1, col: 1 };
+        this.selectionController.select({ row: 1, col: 1 }, 'all');
         this.selectionController.endDrag();
       } else if (headerHit.kind === 'row') {
         if (shiftKey && this.anchorCell && this.selectionMode === 'rows') {
           this.selectionController.extend({ row: headerHit.row, col: 1 });
         } else {
-          this.selectionMode = 'rows';
-          this.anchorCell = { row: headerHit.row, col: 1 };
-          this.activeCell = { row: headerHit.row, col: 1 };
+          this.selectionController.select({ row: headerHit.row, col: 1 }, 'rows');
           if (allowDrag) {
             this.beginSelectionDrag(pointerId);
             this.scrollHost.setPointerCapture(pointerId);
@@ -2659,9 +3089,7 @@ class XlsxViewerEngine implements ZoomableViewer {
         if (shiftKey && this.anchorCell && this.selectionMode === 'cols') {
           this.selectionController.extend({ row: 1, col: headerHit.col });
         } else {
-          this.selectionMode = 'cols';
-          this.anchorCell = { row: 1, col: headerHit.col };
-          this.activeCell = { row: 1, col: headerHit.col };
+          this.selectionController.select({ row: 1, col: headerHit.col }, 'cols');
           if (allowDrag) {
             this.beginSelectionDrag(pointerId);
             this.scrollHost.setPointerCapture(pointerId);
@@ -2670,7 +3098,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       }
       this.updateSelectionOverlay();
       void this.renderCurrentSheet();
-      this.opts.onSelectionChange?.(this.selection);
+      this.emitSelectionChange();
       return;
     }
 
@@ -2680,9 +3108,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     if (shiftKey && this.anchorCell && this.selectionMode === 'cells') {
       this.selectionController.extend(cell);
     } else {
-      this.selectionMode = 'cells';
-      this.anchorCell = cell;
-      this.activeCell = cell;
+      this.selectionController.select(cell, 'cells');
     }
     if (allowDrag) {
       this.beginSelectionDrag(pointerId);
@@ -2692,7 +3118,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     if (this.wb) {
       this.renderCurrentSheet().catch((error) => this._reportRenderError(error));
     }
-    this.opts.onSelectionChange?.(this.selection);
+    this.emitSelectionChange();
   }
 
   /** Browser-visible input box, excluding classic native scrollbar gutters. */
@@ -2832,7 +3258,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       this.updateFindOverlay();
       this.scheduleRender();
       this.emitViewportChange();
-      if (extended) this.opts.onSelectionChange?.(this.selection);
+      if (extended) this.emitSelectionChange();
     }
 
     if (!moved) {
@@ -2858,6 +3284,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const TAP_SLOP = 8;
 
     this.surface.on('pointerdown', (e: PointerEvent) => {
+      this.scrollHost.focus?.({ preventScroll: true });
       if (e.button !== 0) return;
       if (this.isSelecting && e.pointerId !== this.selectionPointerId) return;
 
@@ -2998,7 +3425,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       // header-highlight bands the renderer draws) into one frame. The overlay
       // rect and the selection-change callback stay synchronous.
       this.scheduleRender();
-      this.opts.onSelectionChange?.(this.selection);
+      this.emitSelectionChange();
     });
 
     this.surface.on('pointerup', (e: PointerEvent) => {
@@ -3115,12 +3542,17 @@ class XlsxViewerEngine implements ZoomableViewer {
 
     this.keydownHandler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-        this.copySelection();
+        if (e.defaultPrevented || e.isComposing) return;
+        const target = e.target as HTMLElement | null;
+        const tag = target?.tagName;
+        if (target?.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        void this.copySelection();
       } else if (e.key === 'Escape' && this.validationPanel.style.display !== 'none') {
         this.hideValidationPanel();
       }
     };
-    this.surface.onDocumentKeydown(this.keydownHandler);
+    this.surface.on('keydown', this.keydownHandler);
   }
 
   private buildTabs(): void {
@@ -3741,6 +4173,10 @@ class XlsxViewerEngine implements ZoomableViewer {
     if (typeof releaseProjection === 'function') {
       releaseProjection.call(this.wb, this.projectionId);
     }
+    this.currentWorksheet = null;
+    this.selectionController.reset();
+    this.lastNotifiedSelectionState = null;
+    this.finishSelectionNotificationChain();
     this.acquisition.destroy();
     // Remove the whole UI subtree so the container is empty again. This also
     // detaches every listener bound to elements within it (scrollHost pointer/
@@ -3787,6 +4223,7 @@ type XlsxSheetViewerSnapshot = Readonly<{
   sheetCount: number;
   sheetNames: string[];
   viewport: XlsxViewportOffset;
+  selectionState: XlsxSelectionState | null;
   selection: CellRange | null;
   scale: number;
   hiddenSheetMode: HiddenSheetMode;
@@ -3850,6 +4287,7 @@ export class XlsxSheetViewer implements ZoomableViewer {
       sheetCount: 0,
       sheetNames: [],
       viewport: { x: 0, y: 0 },
+      selectionState: null,
       selection: null,
       scale: this.engine.getScale(),
       hiddenSheetMode: this.engine.hiddenSheetMode,
@@ -3942,15 +4380,38 @@ export class XlsxSheetViewer implements ZoomableViewer {
     return this.destroyed ? null : this.engine.getCellAt(clientX, clientY);
   }
 
+  get selectionState(): XlsxSelectionState | null {
+    const value = this.destroyed ? this.snapshot.selectionState : this.engine.selectionState;
+    return value ? structuredClone(value) : null;
+  }
+
+  setSelection(selection: XlsxSelectionInput): void {
+    this.assertOpen();
+    this.engine.setSelection(selection);
+    this.captureSnapshot();
+  }
+
+  getSelectionContext(options?: XlsxSelectionContextOptions): XlsxSelectionContext | null {
+    this.assertOpen();
+    return this.engine.getSelectionContext(options);
+  }
+
+  /** @deprecated Use `selectionState`. Scheduled for removal in 0.77.0. */
   get selection(): CellRange | null {
     const value = this.destroyed ? this.snapshot.selection : this.engine.selection;
     return value ? structuredClone(value) : null;
   }
 
+  /** @deprecated Use `setSelection`. Scheduled for removal in 0.77.0. */
   select(ref: string): void {
     this.assertOpen();
     this.engine.select(ref);
     this.captureSnapshot();
+  }
+
+  async copySelection(): Promise<XlsxCopyResult> {
+    this.assertOpen();
+    return await this.engine.copySelection();
   }
 
   setSelectionColor(color: string): void {
@@ -4021,11 +4482,13 @@ export class XlsxSheetViewer implements ZoomableViewer {
 
   private captureSnapshot(): void {
     const selection = this.engine.selection;
+    const selectionState = this.engine.selectionState;
     this.snapshot = {
       sheetIndex: this.engine.sheetIndex,
       sheetCount: this.engine.sheetCount,
       sheetNames: [...this.engine.sheetNames],
       viewport: { ...this.engine.getViewportOffset() },
+      selectionState: selectionState ? structuredClone(selectionState) : null,
       selection: selection ? structuredClone(selection) : null,
       scale: this.engine.getScale(),
       hiddenSheetMode: this.engine.hiddenSheetMode,

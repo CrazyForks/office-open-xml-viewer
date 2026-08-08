@@ -116,6 +116,23 @@ docx.nextPage();
 const container = document.getElementById('xlsx-container') as HTMLElement;
 const xlsx = new XlsxViewer(container);
 await xlsx.load('/workbook.xlsx');
+xlsx.setSelection('B2:D5'); // A1 strings describe geometry; the normalized upper-left is ActiveCell
+
+// Excel keeps Selection and ActiveCell separate. Use structured state when the
+// active cell or Shift-extension anchor is not the area's upper-left cell.
+xlsx.setSelection({
+  areas: [{ kind: 'cells', top: 2, left: 2, bottom: 5, right: 4 }],
+  activeAreaIndex: 0,
+  activeCell: { row: 3, col: 3 },
+  extensionAnchor: { row: 2, col: 2 },
+});
+
+// Read-only, serializable context for an AI/MCP request. Populated cells are
+// bounded and detached; formulas and Viewer-formatted display text are retained.
+const context = xlsx.getSelectionContext({
+  maxCells: 1_000,
+  maxTextCharacters: 1_048_576,
+});
 
 // XLSX active-sheet surface only — caller provides the <canvas>
 const sheetCanvas = document.getElementById('xlsx-canvas') as HTMLCanvasElement;
@@ -572,11 +589,11 @@ file without uploading it.
 | | Cell comments / notes (classic `xl/commentsN.xml` + Office-365 threaded comments — red triangle indicator + author / text via the worksheet model, shown in an Excel-style hover popup) | ✅ |
 | | Data validation (rules via the worksheet model; `list`-type dropdown arrow on the selected cell whose click opens a panel showing the allowed values — read-only) | ✅ |
 | | Markdown export (`XlsxWorkbook.toMarkdown()` — each sheet as a `## SheetName` pipe table; also `@silurus/ooxml-markdown` + the `ooxml-md` CLI) | ✅ |
-| **Interaction** | Cell selection (single / range / row / column / all) | ✅ |
+| **Interaction** | Cell selection (single / range / row / column / all / multiple areas; `setSelection('B2:D5')` or canonical structured state) | ✅ |
 | | Excel-style row / column header highlight on selection | ✅ |
 | | Shift+click to extend, Ctrl+C to copy as TSV | ✅ |
 | | Text selection inside cells (transparent overlay) | ✅ |
-| | `onSelectionChange` callback, `getCellAt(x, y)` API | ✅ |
+| | `onSelectionStateChange`, bounded `getSelectionContext()` / `copySelection()`, `getCellAt(x, y)` | ✅ |
 | | Zoom slider (Excel-style, right of the tab bar, 10–400% with 100% centered; `showZoomSlider` option) | ✅ |
 | | Ctrl/⌘ + mouse-wheel and trackpad-pinch zoom (in addition to the slider) | ✅ |
 | | Runtime fit / zoom API (`fitWidth` / `fitPage` / `getScale` / `setScale`, in addition to the slider) | ✅ |

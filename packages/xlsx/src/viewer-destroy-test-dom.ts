@@ -303,6 +303,7 @@ export interface FakeDocument {
     };
   };
   createElement(tag: string): FakeEl;
+  createElementNS(namespace: string, tag: string): FakeEl;
   addEventListener(type: string, fn: (e: unknown) => void, opts?: unknown): void;
   removeEventListener(type: string, fn: (e: unknown) => void, opts?: unknown): void;
   dispatchEvent(type: string, event?: unknown): void;
@@ -326,6 +327,7 @@ export function makeDocument(devicePixelRatio = 1): FakeDocument {
     head: null as unknown as FakeEl,
     defaultView: { devicePixelRatio, ResizeObserver },
     createElement: (t: string) => makeEl(t, doc),
+    createElementNS: (_namespace: string, t: string) => makeEl(t, doc),
     addEventListener(type: string, fn: (e: unknown) => void) {
       const arr = docListeners.get(type) ?? [];
       arr.push(fn);

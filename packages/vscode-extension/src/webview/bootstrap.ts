@@ -18,7 +18,7 @@ declare function acquireVsCodeApi(): {
   setState(state: unknown): void;
 };
 
-import { XlsxViewer, type CellRange } from '@silurus/ooxml-xlsx';
+import { XlsxViewer, type XlsxSelectionState } from '@silurus/ooxml-xlsx';
 import { DocxScrollViewer } from '@silurus/ooxml-docx';
 import { PptxScrollViewer } from '@silurus/ooxml-pptx';
 import { svgExtents, type ZoomableViewer } from '@silurus/ooxml-core';
@@ -175,7 +175,7 @@ async function initXlsx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
       loadFailed = true;
       showError(`Error: ${err.message}`);
     },
-    onSelectionChange(sel: CellRange | null) {
+    onSelectionStateChange(sel: XlsxSelectionState | null) {
       if (!sel) return;
       vscodeApi.postMessage({ type: 'selection', fileType: 'xlsx', selection: sel });
     },
@@ -188,7 +188,7 @@ async function initXlsx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
 
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-      const sel = viewer.selection;
+      const sel = viewer.selectionState;
       if (!sel) return;
       vscodeApi.postMessage({ type: 'copy-request', fileType: 'xlsx', selection: sel });
     }

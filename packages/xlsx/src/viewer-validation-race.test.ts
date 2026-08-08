@@ -11,7 +11,7 @@ afterEach(() => {
 
 interface ValidationTestSeam {
   wb: XlsxWorkbook;
-  activeCell: { row: number; col: number };
+  selectionController: { select(cell: { row: number; col: number }): void };
   currentSheet: number;
   openValidationPanel(
     cell: { row: number; col: number },
@@ -64,7 +64,7 @@ function mountPendingValidationViewer() {
 describe('XlsxViewer validation-list request lifecycle', () => {
   it('a second click on the same pending arrow cancels instead of reopening', async () => {
     const { viewer, seam, pending } = mountPendingValidationViewer();
-    seam.activeCell = { row: 1, col: 1 };
+    seam.selectionController.select({ row: 1, col: 1 });
 
     seam.toggleValidationPanel();
     expect(seam.validationPanelKey).toBe('1:1');
@@ -80,9 +80,9 @@ describe('XlsxViewer validation-list request lifecycle', () => {
 
   it('only the latest cell request may install the panel', async () => {
     const { viewer, seam, pending } = mountPendingValidationViewer();
-    seam.activeCell = { row: 1, col: 1 };
+    seam.selectionController.select({ row: 1, col: 1 });
     seam.toggleValidationPanel();
-    seam.activeCell = { row: 1, col: 2 };
+    seam.selectionController.select({ row: 1, col: 2 });
     seam.toggleValidationPanel();
 
     pending[1]?.({ kind: 'values', values: ['B'] });
@@ -99,7 +99,7 @@ describe('XlsxViewer validation-list request lifecycle', () => {
 
   it('hide cancels a pending resolution', async () => {
     const { viewer, seam, pending } = mountPendingValidationViewer();
-    seam.activeCell = { row: 1, col: 1 };
+    seam.selectionController.select({ row: 1, col: 1 });
     seam.toggleValidationPanel();
     seam.hideValidationPanel();
     pending[0]?.({ kind: 'values', values: ['A'] });
@@ -121,7 +121,7 @@ describe('XlsxViewer validation-list request lifecycle', () => {
     const seam = viewer as unknown as ValidationTestSeam;
     seam.wb = workbook;
     seam.currentSheet = 0;
-    seam.activeCell = { row: 1, col: 1 };
+    seam.selectionController.select({ row: 1, col: 1 });
     seam.validationPanelKey = '1:1';
 
     const opening = seam.openValidationPanel({ row: 1, col: 1 }, 'A1:A2');
