@@ -71,7 +71,31 @@ pnpm add @silurus/ooxml
 > new DocxViewer(canvas, { wasmUrl: 'https://cdn.example.com/docx_parser_bg.wasm' });
 > ```
 
-> **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked Size* sums every entry bundle **and** the standalone MathJax + STIX Two Math asset (`mathjax-stix2.js`, ~3 MB) that ships in the tarball, so the reported figure is much larger than any single app build. What actually lands in your app is smaller on two counts: import only the format you need (e.g. `@silurus/ooxml/pptx`), and the math engine is a **separate entry** (`@silurus/ooxml/math`). Its main-thread chunk is a ~1 KB loader that references the ~3 MB engine asset as a **sibling file** (not an inline data URL): the engine is fetched **lazily, only when a document actually contains equations** — and only if you imported `@silurus/ooxml/math` and passed it to a viewer in the first place (see [Rendering equations](#rendering-equations)). Never import the `math` entry and the loader chunk never enters your graph at all.
+> **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked
+> Size* sums every entry bundle **and** the standalone MathJax + STIX Two Math
+> asset, so the reported figure is much larger than any single app build. For
+> v0.76.2, the complete npm package is approximately 11.2 MB unpacked (3.7 MB
+> as the downloaded tarball), while a format-specific application graph is
+> approximately:
+>
+> | Imported entry | Reachable assets | gzip | Includes |
+> |---|---:|---:|---|
+> | `@silurus/ooxml/docx` | 3.9 MB | 1.2 MB | DOCX renderer, parser WASM, and lazy worker |
+> | `@silurus/ooxml/xlsx` | 2.5 MB | 0.81 MB | XLSX renderer, parser WASM, and lazy worker |
+> | `@silurus/ooxml/pptx` | 2.5 MB | 0.77 MB | PPTX renderer, parser WASM, and lazy worker |
+> | `@silurus/ooxml/math` | 3.1 MB | 1.1 MB | Optional MathJax + STIX Two Math engine |
+>
+> These are production-artifact estimates, not initial-load figures: each row
+> sums all assets reachable from that entry, including parser WASM and worker
+> chunks loaded on demand. Exact output varies by bundler and compression. Import
+> only the format you need (for example, `@silurus/ooxml/pptx`) so the other
+> formats can be tree-shaken. The math engine is a **separate entry** whose
+> main-thread chunk is a ~1 KB loader referencing the ~3 MB engine as a
+> **sibling file**, not an inline data URL. The engine is fetched lazily, only
+> when a document contains equations, and only if you imported
+> `@silurus/ooxml/math` and passed it to a viewer (see
+> [Rendering equations](#rendering-equations)). Never import the `math` entry
+> and the loader chunk never enters your graph at all.
 
 ---
 
