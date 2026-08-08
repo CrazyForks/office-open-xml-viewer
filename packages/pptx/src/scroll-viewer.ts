@@ -427,7 +427,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._wrapper.appendChild(this._scrollHost);
     this._container.appendChild(this._wrapper);
 
-    if (opts.enableTextSelection && opts.onSelectionContextChange) {
+    if (opts.enableTextSelection && (opts.onSelectionContextChange || opts.enableElementSelection)) {
       this._selectionChangeListener = () => this._emitSelectionContextChange();
       this._wrapper.ownerDocument.addEventListener('selectionchange', this._selectionChangeListener);
     }
@@ -501,6 +501,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     // re-load then keeps the current deck rendered rather than going blank. (The
     // borrowed path returned above can never reach here, so this only ever frees
     // an engine we created.)
+    let selectionInvalidated = false;
     try {
       const pres = await this._presentationOwner.replace(() => PptxPresentation.load(source, {
         useGoogleFonts: this._opts.useGoogleFonts,
@@ -524,7 +525,8 @@ export class PptxScrollViewer implements ZoomableViewer {
       if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
       // A successful reload replaces the selection surface. Retire hit tests
       // issued against the old engine and notify that its element focus ended.
-      this._invalidateElementSelection();
+      this._invalidateElementSelection(false);
+      selectionInvalidated = true;
       this._find.invalidate();
       this._findActive = false;
       // Lay out + mount the first window now that the engine exists (mirrors the
@@ -537,10 +539,11 @@ export class PptxScrollViewer implements ZoomableViewer {
       const e = err instanceof Error ? err : new Error(String(err));
       if (this._opts.onError) {
         this._opts.onError(e);
-        return;
-      }
-      throw e;
+      } else throw e;
     }
+    // Notify only after the replacement has committed and relayout completed;
+    // consumer callback failures are not presentation/render failures.
+    if (selectionInvalidated && !this._destroyed) this._emitSelectionContextChange();
   }
 
   get slideCount(): number {
@@ -2115,7 +2118,10 @@ export class PptxScrollViewer implements ZoomableViewer {
 
   private _emitSelectionContextChange(): void {
     const context = this.getSelectionContext();
-    if (context?.kind === 'text') this._elementSelectionContext = null;
+    if (context?.kind === 'text') {
+      this._elementHitGeneration++;
+      this._elementSelectionContext = null;
+    }
     const key = JSON.stringify(context);
     if (key === this._selectionContextKey) return;
     this._selectionContextKey = key;
@@ -2127,9 +2133,10 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._emitSelectionContextChange();
   }
 
-  private _invalidateElementSelection(): void {
+  private _invalidateElementSelection(notify = true): void {
     this._elementHitGeneration++;
-    this._setElementSelectionContext(null);
+    this._elementSelectionContext = null;
+    if (notify) this._emitSelectionContextChange();
   }
 
   private async _onElementClick(event: MouseEvent): Promise<void> {
@@ -2137,19 +2144,28 @@ export class PptxScrollViewer implements ZoomableViewer {
     if (this._opts.enableTextSelection && readPptxTextSelectionContext(
       this._wrapper,
       this._wrapper.ownerDocument.getSelection(),
-    )) return;
+    )) {
+      this._emitSelectionContextChange();
+      return;
+    }
     const target = event.target as Node | null;
     const entry = [...this._slots].find(([, slot]) => target !== null && slot.wrapper.contains(target));
     if (!entry) {
-      this._setElementSelectionContext(null);
+      this._invalidateElementSelection();
       return;
     }
     const [slideIndex, slot] = entry;
     const rect = slot.canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
+    if (rect.width <= 0 || rect.height <= 0) {
+      this._invalidateElementSelection();
+      return;
+    }
     const localX = event.clientX - rect.left;
     const localY = event.clientY - rect.top;
-    if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) return;
+    if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) {
+      this._invalidateElementSelection();
+      return;
+    }
     const generation = ++this._elementHitGeneration;
     const point = {
       x: localX / rect.width * this._pres.slideWidth,

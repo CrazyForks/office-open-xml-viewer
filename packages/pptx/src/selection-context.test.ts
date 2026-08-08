@@ -11,8 +11,10 @@ describe('PPTX text selection context', () => {
       contains: (node: Node) => node === start || node === end,
     } as unknown as HTMLElement;
     const runs = [
-      { dataset: { runIndex: '7', shapeId: '42' }, parentElement: layer },
-      { dataset: { runIndex: '8', shapeId: '42' }, parentElement: layer },
+      { dataset: { runIndex: '7', shapeId: '42' }, parentElement: layer,
+        childNodes: [{ nodeType: 3, data: 'shape ', childNodes: [] }] },
+      { dataset: { runIndex: '8', shapeId: '42' }, parentElement: layer,
+        childNodes: [{ nodeType: 3, data: 'text', childNodes: [] }] },
     ] as unknown as HTMLElement[];
     const root = {
       contains: (node: Node) => node === start || node === end,
@@ -24,6 +26,7 @@ describe('PPTX text selection context', () => {
       startContainer: start,
       endContainer: end,
       intersectsNode: () => true,
+      comparePoint: () => 0,
     } as unknown as Range;
     const selection = {
       isCollapsed: false,

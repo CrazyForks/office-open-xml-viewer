@@ -246,7 +246,7 @@ export class PptxViewer implements ZoomableViewer {
     const overlays = new CanvasOverlayHost(this.wrapper, opts.enableTextSelection === true);
     this.textLayer = overlays.textLayer;
     this.highlightLayer = overlays.highlightLayer;
-    if (this.textLayer && opts.onSelectionContextChange) {
+    if (this.textLayer && (opts.onSelectionContextChange || opts.enableElementSelection)) {
       this.selectionChangeListener = () => this._emitSelectionContextChange();
       this.wrapper.ownerDocument.addEventListener('selectionchange', this.selectionChangeListener);
     }
@@ -288,6 +288,7 @@ export class PptxViewer implements ZoomableViewer {
     // FAILED re-load keeps the current engine + its rendered slide intact rather
     // than dropping to an empty viewer. The 2× memory window is bounded to the
     // load itself (the old engine is freed the moment the new model arrives).
+    let selectionInvalidated = false;
     try {
       const engine = await this.presentationOwner.replace(() => PptxPresentation.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
@@ -310,7 +311,8 @@ export class PptxViewer implements ZoomableViewer {
       // The loaded presentation is a new selection surface. Invalidate both a
       // retained element focus and every hit-test promise issued against the
       // previous engine before rendering the replacement deck.
-      this._invalidateElementSelection();
+      this._invalidateElementSelection(false);
+      selectionInvalidated = true;
       // Discard the stale slide's media handle before swapping engines so its RAF
       // loop / object URLs don't outlive the replaced presentation.
       this.currentSlide = this._initialSlide();
@@ -322,19 +324,24 @@ export class PptxViewer implements ZoomableViewer {
       const e = err instanceof Error ? err : new Error(String(err));
       if (this.opts.onError) {
         this.opts.onError(e);
-        return;
-      }
-      throw e;
+      } else throw e;
     }
+    // Consumer selection callbacks are outside the engine/render error path and
+    // cannot prevent the replacement deck from being committed and rendered.
+    if (selectionInvalidated && !this.destroyed) this._emitSelectionContextChange();
   }
 
   /** Navigate to a specific slide (0-indexed). */
   async goToSlide(index: number): Promise<void> {
     if (!this.engine || this.slideCount === 0) return;
     const next = Math.max(0, Math.min(index, this.slideCount - 1));
-    if (next !== this.currentSlide) this._invalidateElementSelection();
+    const changed = next !== this.currentSlide;
+    if (changed) this._invalidateElementSelection(false);
     this.currentSlide = next;
     await this.renderCurrentSlide();
+    // Navigation and rendering complete before application notification; a
+    // consumer callback failure cannot strand the Viewer on the prior slide.
+    if (changed && !this.destroyed) this._emitSelectionContextChange();
   }
 
   async nextSlide(): Promise<void> {
@@ -375,14 +382,19 @@ export class PptxViewer implements ZoomableViewer {
    */
   async setHiddenSlideMode(mode: HiddenSlideMode): Promise<void> {
     this._hiddenMode = mode;
+    let next = this.currentSlide;
     if (mode === 'skip' && this.engine) {
-      this.currentSlide = resolveVisibleIndex(
+      next = resolveVisibleIndex(
         this.currentSlide,
         (i) => this.engine!.isHidden(i),
         this.slideCount,
       );
     }
+    const changed = next !== this.currentSlide;
+    if (changed) this._invalidateElementSelection(false);
+    this.currentSlide = next;
     await this.renderCurrentSlide();
+    if (changed && !this.destroyed) this._emitSelectionContextChange();
   }
 
   /** The current hidden-slide mode. */
@@ -772,7 +784,10 @@ export class PptxViewer implements ZoomableViewer {
     const context = this.getSelectionContext();
     // Native text selection becomes the sole current focus. Do not resurrect a
     // previously clicked element when that browser selection later collapses.
-    if (context?.kind === 'text') this.elementSelectionContext = null;
+    if (context?.kind === 'text') {
+      this.elementHitGeneration++;
+      this.elementSelectionContext = null;
+    }
     const key = JSON.stringify(context);
     if (key === this.selectionContextKey) return;
     this.selectionContextKey = key;
@@ -784,9 +799,10 @@ export class PptxViewer implements ZoomableViewer {
     this._emitSelectionContextChange();
   }
 
-  private _invalidateElementSelection(): void {
+  private _invalidateElementSelection(notify = true): void {
     this.elementHitGeneration++;
-    this._setElementSelectionContext(null);
+    this.elementSelectionContext = null;
+    if (notify) this._emitSelectionContextChange();
   }
 
   private async _onElementClick(event: MouseEvent): Promise<void> {
@@ -794,12 +810,24 @@ export class PptxViewer implements ZoomableViewer {
     if (this.textLayer && readPptxTextSelectionContext(
       this.wrapper,
       this.wrapper.ownerDocument.getSelection(),
-    )) return;
+    )) {
+      // selectionchange is task-delivered and may not have run yet. Establish
+      // text precedence synchronously so an older pending element hit cannot
+      // survive a select/click/collapse sequence in the same task.
+      this._emitSelectionContextChange();
+      return;
+    }
     const rect = this.canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
+    if (rect.width <= 0 || rect.height <= 0) {
+      this._invalidateElementSelection();
+      return;
+    }
     const localX = event.clientX - rect.left;
     const localY = event.clientY - rect.top;
-    if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) return;
+    if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) {
+      this._invalidateElementSelection();
+      return;
+    }
     const generation = ++this.elementHitGeneration;
     const slideIndex = this.currentSlide;
     const point = {

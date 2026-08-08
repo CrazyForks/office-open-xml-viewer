@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PptxPresentation } from './presentation.js';
 import { PptxViewer } from './viewer.js';
 import type { PptxElementSelectionContext } from './element-selection.js';
+import type { PptxSelectionContext } from './element-selection.js';
 import { FakePptxEngine, installDom, makeEl, type FakeEl } from './scroll-viewer-test-dom.js';
 
 afterEach(() => {
@@ -32,17 +33,20 @@ async function mount(mode: 'main' | 'worker' = 'main', slideCount = 1) {
   canvas.clientHeight = 720;
   const engine = new FakePptxEngine(slideCount, SLIDE_WIDTH, SLIDE_HEIGHT, mode);
   const onSelectionContextChange = vi.fn();
+  const onError = vi.fn();
   vi.spyOn(PptxPresentation, 'load').mockResolvedValue(engine.asPres());
   const viewer = new PptxViewer(canvas as unknown as HTMLCanvasElement, {
     mode,
     enableElementSelection: true,
     onSelectionContextChange,
+    onError,
   });
   await viewer.load('deck.pptx');
   return {
     canvas,
     engine,
     onSelectionContextChange,
+    onError,
     viewer,
     wrapper: canvas.parentElement as FakeEl,
   };
@@ -136,10 +140,89 @@ describe('PptxViewer selection context', () => {
 
     const replacement = new FakePptxEngine(1, SLIDE_WIDTH, SLIDE_HEIGHT);
     vi.mocked(PptxPresentation.load).mockResolvedValueOnce(replacement.asPres());
-    await mounted.viewer.load('replacement.pptx');
+    const callbackFailure = new Error('consumer callback failed');
+    mounted.onSelectionContextChange.mockImplementationOnce(() => { throw callbackFailure; });
+    await expect(mounted.viewer.load('replacement.pptx')).rejects.toThrow(callbackFailure);
     expect(mounted.viewer.getSelectionContext()).toBeNull();
     expect(mounted.onSelectionContextChange).toHaveBeenLastCalledWith(null);
+    expect(mounted.onError).not.toHaveBeenCalled();
+    expect(replacement.renderCalls).toHaveLength(1);
     mounted.viewer.destroy();
+  });
+
+  it('completes slide navigation before surfacing a selection callback failure', async () => {
+    const mounted = await mount('main', 2);
+    mounted.engine.elementContext = elementContext('old-slide');
+    mounted.wrapper.dispatch('click', {
+      button: 0, clientX: 100, clientY: 100, defaultPrevented: false,
+    });
+    await Promise.resolve();
+    const callbackFailure = new Error('navigation callback failed');
+    mounted.onSelectionContextChange.mockImplementationOnce(() => { throw callbackFailure; });
+
+    await expect(mounted.viewer.goToSlide(1)).rejects.toThrow(callbackFailure);
+    expect(mounted.viewer.slideIndex).toBe(1);
+    expect(mounted.engine.renderCalls.at(-1)?.slide).toBe(1);
+    expect(mounted.onError).not.toHaveBeenCalled();
+    mounted.viewer.destroy();
+  });
+
+  it('invalidates focus and pending hits when skip mode moves off a hidden slide', async () => {
+    const mounted = await mount('main', 3);
+    Object.assign(mounted.engine, { isHidden: (index: number) => index === 1 });
+    await mounted.viewer.goToSlide(1);
+    let resolveHit: (value: PptxElementSelectionContext | null) => void = () => undefined;
+    mounted.engine.getElementContextAt = vi.fn(() =>
+      new Promise<PptxElementSelectionContext | null>((resolve) => { resolveHit = resolve; }));
+    mounted.wrapper.dispatch('click', {
+      button: 0, clientX: 100, clientY: 100, defaultPrevented: false,
+    });
+
+    await mounted.viewer.setHiddenSlideMode('skip');
+    expect(mounted.viewer.slideIndex).not.toBe(1);
+    resolveHit(elementContext('stale-hidden-slide'));
+    await Promise.resolve();
+    expect(mounted.viewer.getSelectionContext()).toBeNull();
+    mounted.viewer.destroy();
+  });
+
+  it('keeps text as sole focus without a callback and retires a pending element hit', async () => {
+    const dom = installDom();
+    const canvas = makeEl('canvas');
+    canvas.clientWidth = 960;
+    canvas.clientHeight = 720;
+    const engine = new FakePptxEngine(1, SLIDE_WIDTH, SLIDE_HEIGHT);
+    vi.spyOn(PptxPresentation, 'load').mockResolvedValue(engine.asPres());
+    const viewer = new PptxViewer(canvas as unknown as HTMLCanvasElement, {
+      enableTextSelection: true,
+      enableElementSelection: true,
+    });
+    await viewer.load('deck.pptx');
+    expect(dom.listenerCount('selectionchange')).toBe(1);
+
+    let resolveHit: (value: PptxElementSelectionContext | null) => void = () => undefined;
+    engine.getElementContextAt = vi.fn(() =>
+      new Promise<PptxElementSelectionContext | null>((resolve) => { resolveHit = resolve; }));
+    (canvas.parentElement as FakeEl).dispatch('click', {
+      button: 0, clientX: 100, clientY: 100, defaultPrevented: false,
+    });
+
+    const originalGetter = viewer.getSelectionContext;
+    const text = {
+      format: 'pptx', kind: 'text', text: 'selected', slideIndexes: [0], shapeIds: [], runs: [],
+      truncated: false, truncationReasons: [], textCharacters: 8,
+      maxTextCharacters: 65_536, maxRunLocators: 1_024,
+    } satisfies PptxSelectionContext;
+    viewer.getSelectionContext = () => text;
+    dom.dispatchDocument('selectionchange');
+    viewer.getSelectionContext = originalGetter;
+    dom.dispatchDocument('selectionchange');
+    resolveHit(elementContext('stale-before-text'));
+    await Promise.resolve();
+
+    expect(viewer.getSelectionContext()).toBeNull();
+    viewer.destroy();
+    expect(dom.listenerCount('selectionchange')).toBe(0);
   });
 
   it('ignores prevented clicks and closes the query/listener surface on destroy', async () => {

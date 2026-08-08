@@ -43,6 +43,7 @@ export interface FakeEl {
    *  captures `canvas.nextSibling` so it can re-`insertBefore` at the original
    *  slot). Computed from the parent's child order, like the real DOM. */
   readonly nextSibling: FakeEl | null;
+  readonly ownerDocument: Document;
   // canvas-only
   width: number;
   height: number;
@@ -101,6 +102,7 @@ export function makeEl(tag: string): FakeEl {
     // (Object.defineProperty), mirroring innerHTML/width/height.
     parentNode: null,
     nextSibling: null,
+    ownerDocument: null as unknown as Document,
     _listeners: new Map(),
     _deviceResizes: [],
     _uid: _uidSeq++,
@@ -259,6 +261,13 @@ export function makeEl(tag: string): FakeEl {
     enumerable: true,
     configurable: true,
   });
+  Object.defineProperty(el, 'ownerDocument', {
+    get() {
+      return globalThis.document;
+    },
+    enumerable: true,
+    configurable: true,
+  });
   return el;
 }
 
@@ -273,9 +282,25 @@ export function makeContainer(clientWidth = 800, clientHeight = 600): FakeEl {
 /** Install a recording document + window + ResizeObserver into globals.
  *  Returns the last-constructed ResizeObserver callback so a test can fire a
  *  synthetic resize. Call `vi.unstubAllGlobals()` in afterEach. */
-export function installDom(): { resizeCb: () => (() => void) | undefined } {
+export function installDom(): {
+  resizeCb: () => (() => void) | undefined;
+  dispatchDocument(type: string): void;
+  listenerCount(type: string): number;
+  setSelection(selection: Selection | null): void;
+} {
   let lastResizeCb: (() => void) | undefined;
-  vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+  let currentSelection: Selection | null = null;
+  const listeners = new Map<string, Array<() => void>>();
+  vi.stubGlobal('document', {
+    createElement: (t: string) => makeEl(t),
+    getSelection: () => currentSelection,
+    addEventListener: (type: string, listener: () => void) => {
+      listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+    },
+    removeEventListener: (type: string, listener: () => void) => {
+      listeners.set(type, (listeners.get(type) ?? []).filter((entry) => entry !== listener));
+    },
+  });
   vi.stubGlobal('window', { devicePixelRatio: 1 });
   vi.stubGlobal(
     'ResizeObserver',
@@ -287,7 +312,14 @@ export function installDom(): { resizeCb: () => (() => void) | undefined } {
       disconnect(): void {}
     },
   );
-  return { resizeCb: () => lastResizeCb };
+  return {
+    resizeCb: () => lastResizeCb,
+    dispatchDocument: (type) => {
+      for (const listener of listeners.get(type) ?? []) listener();
+    },
+    listenerCount: (type) => listeners.get(type)?.length ?? 0,
+    setSelection: (selection) => { currentSelection = selection; },
+  };
 }
 
 export interface RenderCall {

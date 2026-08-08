@@ -37,6 +37,59 @@ function safeUtf16Prefix(value: string, maxCodeUnits: number): string {
   return value.slice(0, end);
 }
 
+function* descendantTextNodes(root: Node): Iterable<Text> {
+  let node: Node | null = root.firstChild ?? root.childNodes[0] ?? null;
+  while (node) {
+    if (node.nodeType === 3) yield node as Text;
+    if (node.firstChild) {
+      node = node.firstChild;
+      continue;
+    }
+    while (node && node !== root && !node.nextSibling) node = node.parentNode;
+    if (!node || node === root) break;
+    node = node.nextSibling;
+  }
+}
+
+/** Append only the selected slice of one tagged run, never the full Selection. */
+function appendSelectedRunText(
+  chunks: string[],
+  length: number,
+  run: HTMLElement,
+  ranges: readonly Range[],
+  retainThrough: number,
+): number {
+  for (const range of ranges) {
+    let intersects = false;
+    try { intersects = range.intersectsNode(run); } catch { /* different DOM root */ }
+    if (!intersects) continue;
+    for (const node of descendantTextNodes(run)) {
+      const value = node.data;
+      let start: number | null;
+      let end: number | null;
+      if (range.startContainer === node) start = range.startOffset;
+      else {
+        try { start = range.comparePoint(node, 0) === 0 ? 0 : null; } catch { start = null; }
+      }
+      if (range.endContainer === node) end = range.endOffset;
+      else {
+        try { end = range.comparePoint(node, value.length) === 0 ? value.length : null; } catch { end = null; }
+      }
+      if (start === null || end === null || end <= start) continue;
+      const available = retainThrough - length;
+      if (available <= 0) return length;
+      const chunk = value.slice(
+        Math.max(0, start),
+        Math.min(value.length, end, Math.max(0, start) + available),
+      );
+      chunks.push(chunk);
+      length += chunk.length;
+      if (length >= retainThrough) return length;
+    }
+  }
+  return length;
+}
+
 /**
  * Read a browser-native text selection only when every range endpoint belongs
  * to this Viewer. This prevents a cross-DOM selection from leaking adjacent
@@ -65,8 +118,6 @@ export function readBoundedNativeTextSelection<TLocator>(
         !isOnSelectionSurface(range.endContainer)) return null;
     ranges.push(range);
   }
-  const rawText = selection.toString();
-  if (rawText.length === 0) return null;
   const maxChars = boundedSelectionLimit(
     options.maxChars, MAX_NATIVE_TEXT_SELECTION_CHARS, 'maxTextCharacters',
   );
@@ -75,23 +126,38 @@ export function readBoundedNativeTextSelection<TLocator>(
   );
   const locators: TLocator[] = [];
   let locatorOverflow = false;
+  // Keep at most two look-ahead code units: one proves overflow and the second
+  // lets safeUtf16Prefix observe a surrogate pair at the public boundary.
+  const retainThrough = maxChars + 2;
+  const textChunks: string[] = [];
+  let retainedTextLength = 0;
   for (const candidate of root.querySelectorAll<HTMLElement>('[data-ooxml-selection-run]')) {
-    if (!ranges.some((range) => {
+    const selected = ranges.some((range) => {
       try { return range.intersectsNode(candidate); } catch { return false; }
-    })) continue;
+    });
+    if (!selected) continue;
     const locator = locatorForRun(candidate);
     if (locator === null) continue;
-    if (locators.length >= maxLocators) { locatorOverflow = true; break; }
-    locators.push(structuredClone(locator));
+    if (locators.length >= maxLocators) locatorOverflow = true;
+    else locators.push(structuredClone(locator));
+    if (retainedTextLength < retainThrough) {
+      retainedTextLength = appendSelectedRunText(
+        textChunks, retainedTextLength, candidate, ranges, retainThrough,
+      );
+    }
+    if (locatorOverflow && retainedTextLength >= retainThrough) break;
   }
   if (locators.length === 0 && !locatorOverflow) return null;
-  const text = safeUtf16Prefix(rawText, maxChars);
+  const retainedText = textChunks.join('');
+  if (retainedText.length === 0) return null;
+  const text = safeUtf16Prefix(retainedText, maxChars);
+  const textOverflow = retainedText.length > maxChars;
   return {
     text,
     locators,
-    truncated: rawText.length > maxChars || locatorOverflow,
+    truncated: textOverflow || locatorOverflow,
     truncationReasons: [
-      ...(rawText.length > maxChars ? ['text' as const] : []),
+      ...(textOverflow ? ['text' as const] : []),
       ...(locatorOverflow ? ['runs' as const] : []),
     ],
     textCharacters: text.length,

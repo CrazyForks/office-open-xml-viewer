@@ -38,8 +38,10 @@ is the state authority.
   rectangular array.
 - Every context reports `truncated` and `truncationReasons`.
 - A native range is accepted only when all endpoints belong to a tagged Viewer
-  text-selection surface. Browser chrome or adjacent page content is not folded
-  into the context.
+  text-selection surface. Text is assembled incrementally from the selected
+  slices of tagged runs only; the implementation never materializes an
+  unbounded `Selection.toString()`. Browser chrome, inter-surface DOM text, and
+  adjacent page content are not folded into the context.
 - Returned objects contain no live parser/renderer objects, DOM events, archive
   paths, binary media, or mutation methods.
 - Calling a Viewer context getter after `destroy()` throws, matching the XLSX

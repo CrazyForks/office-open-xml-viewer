@@ -11,8 +11,10 @@ describe('DOCX selection context', () => {
       contains: (node: Node) => node === start || node === end,
     } as unknown as HTMLElement;
     const runs = [
-      { dataset: { runIndex: '4', paragraphId: 'p1' }, parentElement: layer },
-      { dataset: { runIndex: '5', paragraphId: 'p1' }, parentElement: layer },
+      { dataset: { runIndex: '4', paragraphId: 'p1' }, parentElement: layer,
+        childNodes: [{ nodeType: 3, data: 'selected', childNodes: [] }] },
+      { dataset: { runIndex: '5', paragraphId: 'p1' }, parentElement: layer,
+        childNodes: [{ nodeType: 3, data: ' text', childNodes: [] }] },
     ] as unknown as HTMLElement[];
     const root = {
       contains: (node: Node) => node === start || node === end,
@@ -24,6 +26,7 @@ describe('DOCX selection context', () => {
       startContainer: start,
       endContainer: end,
       intersectsNode: () => true,
+      comparePoint: () => 0,
     } as unknown as Range;
     const selection = {
       isCollapsed: false,

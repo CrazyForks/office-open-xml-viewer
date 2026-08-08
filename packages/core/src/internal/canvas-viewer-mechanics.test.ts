@@ -14,21 +14,28 @@ describe('readBoundedNativeTextSelection', () => {
     const insideStart = {} as Node;
     const insideEnd = {} as Node;
     const outside = {} as Node;
+    const textNodes = [
+      { nodeType: 3, data: 'selected ', childNodes: [] },
+      { nodeType: 3, data: 'text', childNodes: [] },
+    ] as unknown as Text[];
     const runs = [
-      { dataset: { run: '0' } },
-      { dataset: { run: '1' } },
+      { dataset: { run: '0' }, childNodes: [textNodes[0]] },
+      { dataset: { run: '1' }, childNodes: [textNodes[1]] },
     ] as unknown as HTMLElement[];
     const range = {
       startContainer: insideStart,
       endContainer: endInside ? insideEnd : outside,
       intersectsNode: (node: Node) => node === runs[0] || node === runs[1],
+      comparePoint: () => 0,
     } as unknown as Range;
     const surface = {
       contains: (node: Node) =>
-        node === insideStart || endOnSelectionSurface && node === insideEnd,
+        node === insideStart || endOnSelectionSurface && node === insideEnd ||
+        textNodes.includes(node as Text),
     } as unknown as HTMLElement;
     const root = {
-      contains: (node: Node) => node === insideStart || node === insideEnd,
+      contains: (node: Node) =>
+        node === insideStart || node === insideEnd || textNodes.includes(node as Text),
       matches: () => false,
       querySelectorAll: (selector: string) =>
         selector === '[data-ooxml-selection-surface]' ? [surface] : runs,
@@ -39,7 +46,7 @@ describe('readBoundedNativeTextSelection', () => {
       getRangeAt: () => range,
       toString: () => 'selected text',
     } as unknown as Selection;
-    return { root, selection };
+    return { root, runs, selection, textNodes };
   }
 
   it('returns bounded text and detached run locators', () => {
@@ -71,8 +78,9 @@ describe('readBoundedNativeTextSelection', () => {
   });
 
   it('preserves Unicode boundaries and validates public resource limits', () => {
-    const { root, selection } = fixture();
-    Object.assign(selection, { toString: () => '\ud83d\ude00x' });
+    const { root, selection, textNodes } = fixture();
+    Object.assign(textNodes[0], { data: '\ud83d\ude00x' });
+    Object.assign(textNodes[1], { data: '' });
     expect(readBoundedNativeTextSelection(
       root, selection, (run) => ({ run: Number(run.dataset.run) }), { maxChars: 1 },
     )?.text).toBe('');
@@ -82,6 +90,37 @@ describe('readBoundedNativeTextSelection', () => {
     expect(() => readBoundedNativeTextSelection(
       root, selection, () => ({ run: 0 }), { maxChars: Number.NaN },
     )).toThrow(/maxTextCharacters/);
+  });
+
+  it('never materializes Selection text or includes untagged content between surfaces', () => {
+    const { root, selection, textNodes } = fixture();
+    Object.assign(textNodes[0], { data: 'public-a ' });
+    Object.assign(textNodes[1], { data: 'public-b' });
+    Object.assign(selection, {
+      toString: () => { throw new Error('must not materialize unbounded or untagged text'); },
+    });
+
+    expect(readBoundedNativeTextSelection(
+      root, selection, (run) => ({ run: Number(run.dataset.run) }), { maxChars: 8 },
+    )).toMatchObject({ text: 'public-a', truncated: true, truncationReasons: ['text'] });
+  });
+
+  it('extracts only the selected offsets from a tagged run', () => {
+    const { root, runs, selection, textNodes } = fixture();
+    Object.assign(textNodes[0], { data: 'before selected after' });
+    Object.assign(textNodes[1], { data: '' });
+    const range = selection.getRangeAt(0);
+    Object.assign(range, {
+      startContainer: textNodes[0],
+      startOffset: 7,
+      endContainer: textNodes[0],
+      endOffset: 15,
+      intersectsNode: (node: Node) => node === runs[0],
+    });
+
+    expect(readBoundedNativeTextSelection(
+      root, selection, (run) => ({ run: Number(run.dataset.run) }),
+    )?.text).toBe('selected');
   });
 });
 

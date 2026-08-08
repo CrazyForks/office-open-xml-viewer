@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PptxPresentation } from './presentation.js';
 import { PptxScrollViewer } from './scroll-viewer.js';
 import type { PptxElementSelectionContext } from './element-selection.js';
+import type { PptxSelectionContext } from './element-selection.js';
 import {
   FakePptxEngine,
   installDom,
@@ -65,6 +66,19 @@ describe('PptxScrollViewer selection context', () => {
     expect(viewer.getSelectionContext()).toBeNull();
     expect(onSelectionContextChange).toHaveBeenLastCalledWith(null);
 
+    let resolvePending: (value: PptxElementSelectionContext | null) => void = () => undefined;
+    engine.getElementContextAt = vi.fn(() =>
+      new Promise<PptxElementSelectionContext | null>((resolve) => { resolvePending = resolve; }));
+    internals._scrollHost.dispatch('click', {
+      target: slot.canvas, button: 0, clientX: 480, clientY: 360, defaultPrevented: false,
+    });
+    internals._scrollHost.dispatch('click', {
+      target: internals._scrollHost, button: 0, clientX: 0, clientY: 0, defaultPrevented: false,
+    });
+    resolvePending(context());
+    await Promise.resolve();
+    expect(viewer.getSelectionContext()).toBeNull();
+
     viewer.destroy();
     expect(() => viewer.getSelectionContext()).toThrow('PptxScrollViewer is destroyed');
   });
@@ -101,5 +115,47 @@ describe('PptxScrollViewer selection context', () => {
     expect(viewer.getSelectionContext()).toBeNull();
     expect(onSelectionContextChange).toHaveBeenLastCalledWith(null);
     viewer.destroy();
+  });
+
+  it('maintains callback-free text precedence and invalidates pending hits', async () => {
+    const dom = installDom();
+    const container = makeContainer(960, 720);
+    const engine = new FakePptxEngine(1, 9_144_000, 6_858_000);
+    const viewer = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableTextSelection: true,
+      enableElementSelection: true,
+    });
+    expect(dom.listenerCount('selectionchange')).toBe(1);
+    const internals = viewer as unknown as {
+      _scrollHost: FakeEl;
+      _slots: Map<number, { wrapper: FakeEl; canvas: FakeEl }>;
+    };
+    const slot = internals._slots.get(0) as { wrapper: FakeEl; canvas: FakeEl };
+    slot.canvas.clientWidth = 960;
+    slot.canvas.clientHeight = 720;
+    let resolveHit: (value: PptxElementSelectionContext | null) => void = () => undefined;
+    engine.getElementContextAt = vi.fn(() =>
+      new Promise<PptxElementSelectionContext | null>((resolve) => { resolveHit = resolve; }));
+    internals._scrollHost.dispatch('click', {
+      target: slot.canvas, button: 0, clientX: 480, clientY: 360, defaultPrevented: false,
+    });
+
+    const originalGetter = viewer.getSelectionContext;
+    const text = {
+      format: 'pptx', kind: 'text', text: 'selected', slideIndexes: [0], shapeIds: [], runs: [],
+      truncated: false, truncationReasons: [], textCharacters: 8,
+      maxTextCharacters: 65_536, maxRunLocators: 1_024,
+    } satisfies PptxSelectionContext;
+    viewer.getSelectionContext = () => text;
+    dom.dispatchDocument('selectionchange');
+    viewer.getSelectionContext = originalGetter;
+    dom.dispatchDocument('selectionchange');
+    resolveHit(context());
+    await Promise.resolve();
+
+    expect(viewer.getSelectionContext()).toBeNull();
+    viewer.destroy();
+    expect(dom.listenerCount('selectionchange')).toBe(0);
   });
 });
