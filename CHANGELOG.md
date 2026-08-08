@@ -5,6 +5,35 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.76.2 — 2026-08-08
+
+Patch. Improves Word-compatible text and table layout, extends spreadsheet
+selection beyond the visible viewport, and hardens packaging and public demos
+without changing the 0.76 public API.
+
+- **docx typography and tabs:** implement document-grid character pitch,
+  tab-stop, decimal-tab fallback, and right-indent adjustment through the
+  canonical retained layout pipeline; retain Normal-style typography and font
+  alternate-name metadata; and honor `balanceSingleByteDoubleByteWidth` for the
+  specification-defined single/double-byte ratio plus narrowly registered
+  Office behavior for ASCII/CJK grid deltas and authored space sequences.
+  Measurement, wrapping, intrinsic sizing, selection geometry, RTL placement,
+  and paint now consume the same retained width authority. (ECMA-376
+  §§17.3.1.1, 17.3.1.37, 17.6.5, 17.8.3.1 and 17.15.3.3; MS-OI29500
+  §§2.1.534 and 2.1.556; MS-OE376 §2.1.236; #1177, #1178)
+- **docx retained layout:** finalize bookmark metadata only after every page
+  story joins the retained graph, and preserve signed table-indent spill while
+  exact row height clips only the block axis. (§§17.4.50, 17.4.80 and
+  17.13.6.2; #1174, #1175)
+- **xlsx interaction:** show overflowing worksheet scrollbars by default, allow
+  pointer drag selections to auto-scroll beyond the visible viewport, preserve
+  RTL and row/column selection semantics, and bind deferred selection updates to
+  the initiating pointer. The multi-window public demo now follows the parent
+  light/dark theme. (#1170, #1172, #1173)
+- **VS Code packaging:** exclude stale source maps at the VSIX package boundary
+  so reused development output cannot unexpectedly double the published
+  extension size. (#1171)
+
 ## 0.76.1 — 2026-08-07
 
 Patch. Improves Word-compatible legacy layout, stabilizes public-site demos,

@@ -24,7 +24,8 @@ export interface DocxDocumentModel {
   minorFont?: string;
   /**
    * ECMA-376 §17.8.3.10 — font family classification from `word/fontTable.xml`.
-   * Maps font name to `<w:family @w:val>`: "roman" | "swiss" | "modern" |
+   * Maps each primary font name and §17.8.3.1 alternate name to
+   * `<w:family @w:val>`: "roman" | "swiss" | "modern" |
    * "script" | "decorative" | "auto". The renderer uses this as the primary
    * source for serif/sans-serif decisions (roman→serif, swiss→sans-serif,
    * modern→monospace), falling back to name-pattern matching only when the
@@ -32,9 +33,10 @@ export interface DocxDocumentModel {
    */
   fontFamilyClasses?: Record<string, string>;
   /**
-   * ECMA-376 §17.8.3.29 — per-font pitch from `word/fontTable.xml`
-   * (`<w:pitch>`, ST_Pitch §17.18.66): font name → "fixed" | "variable" |
-   * "default". Present only for fonts that declare `<w:pitch>`. The renderer
+   * ECMA-376 §17.8.3.14 — per-font pitch from `word/fontTable.xml`
+   * (`<w:pitch>`, ST_Pitch §17.18.66): primary font name and each §17.8.3.1
+   * alternate name → "fixed" | "variable" | "default". Present only for fonts
+   * that declare `<w:pitch>`. The renderer
    * pairs this with {@link fontFamilyClasses}: a `family="modern"` face is
    * treated as monospace ONLY when its pitch is "fixed"; "variable" /
    * "default" / absent fall through to name-pattern / CJK-sans classification
@@ -104,9 +106,10 @@ export interface DocSettings {
   /** §17.15.1.18 `w:characterSpacingControl@w:val` — East Asian punctuation /
    *  character-spacing control. */
   characterSpacingControl?: string;
-  /** §17.15.3.1 `w:compat/w:useFELayout` — Far East layout compatibility. */
+  /** ECMA-376 Part 4 §14.8.3.50 `w:compat/w:useFELayout` — Far East layout
+   * compatibility. */
   useFeLayout?: boolean;
-  /** §17.15.3.1 `w:compat/w:balanceSingleByteDoubleByteWidth` — balance
+  /** §17.15.3.3 `w:compat/w:balanceSingleByteDoubleByteWidth` — balance
    *  single-byte and double-byte widths for East Asian layout. */
   balanceSingleByteDoubleByteWidth?: boolean;
   /** §17.15.3.1 `w:compat/w:adjustLineHeightInTable` — apply the section
@@ -305,12 +308,9 @@ export interface SectionProps {
    *  "linesAndChars", auto line spacing multiplies against this pitch instead of
    *  the font's natural line height. */
   docGridLinePitch?: number | null;
-  /** ECMA-376 §17.6.5 w:docGrid/@w:charSpace (ST_DecimalNumber, signed). The
-   *  raw character-grid spacing in 1/4096ths of an em (NOT twips). When
-   *  docGridType is "linesAndChars" or "snapToChars", every full-width East-
-   *  Asian glyph occupies a fixed cell of width `fontSizePt + charSpace/4096` pt
-   *  (negative = tighter). Absent ⇒ East-Asian glyphs keep their natural em
-   *  advance. */
+  /** ECMA-376 §17.6.5 w:docGrid/@w:charSpace (ST_DecimalNumber, signed), in
+   *  1/4096ths of a point (not twips). `linesAndChars` adds the resulting pitch
+   *  to every character. Negative values tighten. */
   docGridCharSpace?: number | null;
   /** ECMA-376 §17.6.4 `<w:cols>` — newspaper-style multi-column layout. `null`
    *  (or absent) ⇒ single full-width column (unchanged behavior). When present,
@@ -485,6 +485,10 @@ export interface DocParagraph {
   /** ECMA-376 §17.3.1.21 `<w:overflowPunct>` — permit one trailing
    *  punctuation character beyond paragraph indents/margins. Omission is true. */
   overflowPunct?: boolean;
+  /** ECMA-376 §17.3.1.1 `<w:adjustRightInd>` — permit automatic right-indent
+   *  adjustment when a document grid is active. Absent means true after the
+   *  paragraph style hierarchy and specification default are resolved. */
+  adjustRightInd?: boolean;
   /** Paragraph borders (w:pBdr) */
   borders?: ParagraphBorders | null;
   /** Style ID of the applied paragraph style */

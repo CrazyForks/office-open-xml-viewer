@@ -59,7 +59,8 @@ pub struct Document {
     pub minor_font: Option<String>,
     /// ECMA-376 §17.8.3.10 — font family classification from `word/fontTable.xml`.
     /// Maps font name to `<w:family @w:val>` (one of: "roman", "swiss", "modern",
-    /// "script", "decorative", "auto"). Used by the renderer to select the
+    /// "script", "decorative", "auto"). Primary names and §17.8.3.1 alternate
+    /// names map to the same metadata. Used by the renderer to select the
     /// correct CSS generic family (roman→serif, swiss→sans-serif, modern→monospace)
     /// without relying on name-pattern heuristics. Empty when fontTable.xml
     /// is absent or malformed.
@@ -67,17 +68,18 @@ pub struct Document {
     /// sorted), making the parser output byte-stable for identical input.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub font_family_classes: BTreeMap<String, String>,
-    /// ECMA-376 §17.8.3.29 — per-font pitch from `word/fontTable.xml`
+    /// ECMA-376 §17.8.3.14 — per-font pitch from `word/fontTable.xml`
     /// (`<w:pitch w:val="…"/>`, ST_Pitch §17.18.66: "fixed" | "variable" |
-    /// "default"). Maps font name → pitch value; a font is present only when it
-    /// declares `<w:pitch>` (an omitted element is assumed "default" per
-    /// §17.8.3.29, which the renderer treats as non-fixed). The renderer uses this
+    /// "default"). Maps each primary font name and §17.8.3.1 alternate name to
+    /// the pitch value; a font is present only when it declares `<w:pitch>` (an
+    /// omitted element is assumed "default" per
+    /// §17.8.3.14, which the renderer treats as non-fixed). The renderer uses this
     /// to decide whether a `family="modern"` (§17.8.3.10) face is genuinely
     /// monospace: only "fixed" is. Empty when fontTable.xml is absent or declares
     /// no pitches. BTreeMap for deterministic (byte-stable) JSON key order.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub font_family_pitches: BTreeMap<String, String>,
-    /// ECMA-376 §17.8.3.1 font name → w:charset hexadecimal byte.
+    /// ECMA-376 §17.8.3.1 primary/alternate font name → w:charset hexadecimal byte.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub font_family_charsets: BTreeMap<String, String>,
     /// ECMA-376 §17.8.3.3-.6 — embedded fonts declared in `word/fontTable.xml`
@@ -114,6 +116,14 @@ pub struct Document {
     /// (the renderer then uses spec defaults: kinsoku ON).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings: Option<DocumentSettings>,
+    /// Parser-private document typography facts that layout cannot reconstruct
+    /// after the style graph has been consumed. The Normal-style font size is
+    /// the base character pitch used by ECMA-376 §17.6.5 `w:docGrid`.
+    #[serde(
+        rename = "__documentTypographySettings",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub document_typography_settings: Option<DocumentTypographySettingsWire>,
     #[serde(
         rename = "__pageLayoutSettings",
         skip_serializing_if = "Option::is_none"
@@ -137,6 +147,12 @@ pub struct Document {
     /// renderer paints a visible error placeholder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_error: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentTypographySettingsWire {
+    pub normal_style_font_size_pt: f64,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -214,11 +230,11 @@ pub struct DocumentSettings {
     /// punctuation compression / spacing control.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub character_spacing_control: Option<String>,
-    /// §17.15.3.1 `w:compat` / `w:useFELayout` — enable Far East layout
-    /// compatibility behavior.
+    /// ECMA-376 Part 4 §14.8.3.50 `w:compat` / `w:useFELayout` — enable Far
+    /// East layout compatibility behavior.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_fe_layout: Option<bool>,
-    /// §17.15.3.1 `w:compat` / `w:balanceSingleByteDoubleByteWidth` — balance
+    /// §17.15.3.3 `w:compat` / `w:balanceSingleByteDoubleByteWidth` — balance
     /// single-byte and double-byte character widths in East Asian layout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balance_single_byte_double_byte_width: Option<bool>,
@@ -472,12 +488,11 @@ pub struct SectionProps {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_grid_line_pitch: Option<f64>,
     /// ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` (ST_DecimalNumber, signed).
-    /// The per-character-grid spacing in 1/4096ths of an em (NOT twips). When
-    /// `doc_grid_type` is "linesAndChars" or "snapToChars", every full-width
-    /// East-Asian glyph occupies a fixed cell of width `fontSizePt +
-    /// charSpace/4096` pt; a positive value loosens the cell, a negative value
-    /// (the common case) tightens it. `None` when the attribute is absent (the
-    /// renderer then leaves East-Asian glyphs at their natural em advance).
+    /// The signed character-pitch adjustment in 1/4096ths of a point (NOT
+    /// twips). `linesAndChars` adds `charSpace/4096` pt to every character; a
+    /// positive value loosens and a negative value tightens. `snapToChars` has
+    /// distinct grid-unit allocation semantics (§17.6.5). `None` when the
+    /// attribute is absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_grid_char_space: Option<f64>,
     /// ECMA-376 §17.6.4 `<w:cols>` — newspaper-style multi-column layout for the
@@ -804,6 +819,12 @@ pub struct DocParagraph {
     /// ECMA-376 §17.3.1.21 `w:overflowPunct` — permit one punctuation
     /// character beyond paragraph extents. Omission defaults to true.
     pub overflow_punct: bool,
+    /// ECMA-376 §17.3.1.1 `w:adjustRightInd` — permit automatic right-indent
+    /// adjustment when a document grid is active. The style-hierarchy default
+    /// is true; true is omitted from JSON and the TypeScript model therefore
+    /// interprets an absent property as enabled.
+    #[serde(skip_serializing_if = "is_true")]
+    pub adjust_right_ind: bool,
     /// Paragraph borders (w:pBdr)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub borders: Option<ParagraphBorders>,

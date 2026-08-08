@@ -15,7 +15,7 @@ use ooxml_common::resource::ResourceUsage;
 // the in-module unit tests, which parse trusted, hand-written fixtures directly.
 #[cfg(test)]
 use roxmltree::Document as XmlDoc;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufReader;
 
 use crate::document_projector::{DocumentBodyPlan, DocumentBodyProjector};
@@ -1460,6 +1460,15 @@ fn finish_document(
 ) -> Result<Document, String> {
     let major_font = environment.theme.theme_font("major", "latin");
     let minor_font = environment.theme.theme_font("minor", "latin");
+    // ECMA-376 §17.6.5 defines the document-grid character pitch relative to
+    // the Normal style's resolved run size. Capture it before the style graph
+    // is consumed so layout never has to infer it from body content.
+    let normal_style_font_size_pt = environment
+        .style_map
+        .resolve_normal_paragraph_style()
+        .1
+        .font_size
+        .unwrap_or(DEFAULT_FONT_SIZE);
 
     // ECMA-376 §17.8.3.10: font family classification from fontTable.xml.
     // Resolve via relationship (Type ending in "/fontTable"); fall back to
@@ -1559,6 +1568,9 @@ fn finish_document(
         footnotes,
         endnotes,
         settings: environment.document_settings,
+        document_typography_settings: Some(crate::types::DocumentTypographySettingsWire {
+            normal_style_font_size_pt,
+        }),
         page_layout_settings: environment.page_layout_settings,
         note_layout_settings: environment.note_layout_settings,
         diagnostics,
@@ -2288,10 +2300,17 @@ fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
 /// back to name-pattern matching only when the font is absent or classified
 /// as `auto`.
 ///
-/// ECMA-376 §17.8.3.29 defines `<w:pitch w:val="…"/>`, whose ST_Pitch value
+/// ECMA-376 §17.8.3.14 defines `<w:pitch w:val="…"/>`, whose ST_Pitch value
 /// (§17.18.66) is `fixed` (Fixed Width), `variable` (Proportional Width), or
 /// `default` (no pitch information). An omitted `<w:pitch>` is assumed to be
 /// `default`, so only explicitly declared pitch values are added to the map.
+///
+/// ECMA-376 §17.8.3.1 defines `<w:altName>` as a comma-delimited list of names
+/// used to locate the same font when its primary name is unavailable. Each
+/// alternate therefore receives the primary entry's substitution metadata.
+/// Explicit `<w:font w:name>` entries are inserted first and win over an alias
+/// collision, so document-authored metadata is never replaced by another font's
+/// alternate name.
 fn parse_font_table(
     xml: &str,
 ) -> (
@@ -2305,9 +2324,11 @@ fn parse_font_table(
     let Ok(doc) = parse_guarded(xml) else {
         return (classes, pitches, charsets);
     };
-    for font in doc.root_element().descendants().filter(|n| {
+    let fonts = doc.root_element().descendants().filter(|n| {
         n.is_element() && n.tag_name().name() == "font" && is_w_ns(n.tag_name().namespace())
-    }) {
+    });
+    let mut records = Vec::new();
+    for font in fonts {
         let Some(name) = attr_ns(
             &font,
             wordprocessingml::TRANSITIONAL,
@@ -2331,9 +2352,6 @@ fn parse_font_table(
                     "val",
                 )
             });
-        if let Some(f) = family {
-            classes.insert(name.to_string(), f.to_string());
-        }
         let pitch = font
             .children()
             .find(|n| {
@@ -2349,9 +2367,6 @@ fn parse_font_table(
                     "val",
                 )
             });
-        if let Some(p) = pitch {
-            pitches.insert(name.to_string(), p.to_string());
-        }
         let charset = font
             .children()
             .find(|n| {
@@ -2367,8 +2382,76 @@ fn parse_font_table(
                     "val",
                 )
             });
+        let alternate_names = font
+            .children()
+            .find(|n| {
+                n.is_element()
+                    && n.tag_name().name() == "altName"
+                    && is_w_ns(n.tag_name().namespace())
+            })
+            .and_then(|n| {
+                attr_ns(
+                    &n,
+                    wordprocessingml::TRANSITIONAL,
+                    wordprocessingml::STRICT,
+                    "val",
+                )
+            })
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        records.push((
+            name.to_string(),
+            family.map(str::to_string),
+            pitch.map(str::to_string),
+            charset.map(|value| value.to_uppercase()),
+            alternate_names,
+        ));
+    }
+    let primary_names = records
+        .iter()
+        .map(|(name, _, _, _, _)| name.as_str())
+        .collect::<HashSet<_>>();
+    for (name, family, pitch, charset, _) in &records {
+        if let Some(value) = family {
+            classes.insert(name.clone(), value.clone());
+        }
+        if let Some(value) = pitch {
+            pitches.insert(name.clone(), value.clone());
+        }
         if let Some(value) = charset {
-            charsets.insert(name.to_string(), value.to_uppercase());
+            charsets.insert(name.clone(), value.clone());
+        }
+    }
+    for (_, family, pitch, charset, alternate_names) in &records {
+        for alternate_name in alternate_names {
+            // A primary font declaration owns its name as a whole. Protect it
+            // even when it omits an individual metadata field; otherwise an
+            // unrelated font's altName could partially reclassify it.
+            if primary_names.contains(alternate_name.as_str()) {
+                continue;
+            }
+            if let Some(value) = family {
+                classes
+                    .entry(alternate_name.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            if let Some(value) = pitch {
+                pitches
+                    .entry(alternate_name.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            if let Some(value) = charset {
+                charsets
+                    .entry(alternate_name.clone())
+                    .or_insert_with(|| value.clone());
+            }
         }
     }
     (classes, pitches, charsets)
@@ -2403,6 +2486,121 @@ mod font_table_tests {
         );
         assert!(!pitches.contains_key("No Pitch"));
         assert_eq!(charsets.get("Meiryo UI").map(String::as_str), Some("86"));
+    }
+
+    #[test]
+    fn maps_alternate_font_names_to_primary_metadata_without_overwriting_explicit_fonts() {
+        let xml = format!(
+            r#"<w:fonts xmlns:w="{W_NS}">
+                 <w:font w:name="ＭＳ 明朝">
+                   <w:altName w:val="MS Mincho,,,, Legacy Mincho"/>
+                   <w:family w:val="roman"/>
+                   <w:pitch w:val="fixed"/>
+                   <w:charset w:val="80"/>
+                 </w:font>
+                 <w:font w:name="Legacy Mincho">
+                   <w:family w:val="swiss"/>
+                   <w:pitch w:val="variable"/>
+                   <w:charset w:val="00"/>
+                 </w:font>
+               </w:fonts>"#,
+        );
+
+        let (classes, pitches, charsets) = parse_font_table(&xml);
+
+        assert_eq!(classes.get("MS Mincho").map(String::as_str), Some("roman"));
+        assert_eq!(pitches.get("MS Mincho").map(String::as_str), Some("fixed"));
+        assert_eq!(charsets.get("MS Mincho").map(String::as_str), Some("80"));
+        assert_eq!(
+            classes.get("Legacy Mincho").map(String::as_str),
+            Some("swiss")
+        );
+        assert_eq!(
+            pitches.get("Legacy Mincho").map(String::as_str),
+            Some("variable")
+        );
+        assert_eq!(
+            charsets.get("Legacy Mincho").map(String::as_str),
+            Some("00")
+        );
+    }
+
+    #[test]
+    fn alternate_name_never_fills_missing_metadata_on_an_explicit_font() {
+        let xml = format!(
+            r#"<w:fonts xmlns:w="{W_NS}">
+                 <w:font w:name="Primary">
+                   <w:altName w:val="Explicit Partial"/>
+                   <w:family w:val="roman"/>
+                   <w:pitch w:val="fixed"/>
+                   <w:charset w:val="80"/>
+                 </w:font>
+                 <w:font w:name="Explicit Partial">
+                   <w:pitch w:val="variable"/>
+                 </w:font>
+               </w:fonts>"#,
+        );
+
+        let (classes, pitches, charsets) = parse_font_table(&xml);
+
+        assert!(!classes.contains_key("Explicit Partial"));
+        assert_eq!(
+            pitches.get("Explicit Partial").map(String::as_str),
+            Some("variable")
+        );
+        assert!(!charsets.contains_key("Explicit Partial"));
+    }
+}
+
+#[cfg(test)]
+mod document_typography_settings_tests {
+    use super::*;
+    use crate::xml_util::W_NS;
+
+    fn document_with_styles(styles_xml: &str) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let document_xml = format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:p><w:r><w:t>x</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let rels_xml = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+        let mut bytes = Vec::new();
+        {
+            let mut archive = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+            let options = SimpleFileOptions::default();
+            archive.start_file("word/document.xml", options).unwrap();
+            archive.write_all(document_xml.as_bytes()).unwrap();
+            archive
+                .start_file("word/_rels/document.xml.rels", options)
+                .unwrap();
+            archive.write_all(rels_xml.as_bytes()).unwrap();
+            archive.start_file("word/styles.xml", options).unwrap();
+            archive.write_all(styles_xml.as_bytes()).unwrap();
+            archive.finish().unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn character_pitch_uses_normal_instead_of_the_default_paragraph_style() {
+        let styles_xml = format!(
+            r#"<w:styles xmlns:w="{W_NS}">
+                 <w:style w:type="paragraph" w:styleId="BuiltIn0">
+                   <w:name w:val="Normal"/>
+                   <w:rPr><w:sz w:val="18"/></w:rPr>
+                 </w:style>
+                 <w:style w:type="paragraph" w:default="1" w:styleId="DocumentDefault">
+                   <w:name w:val="Document Default"/>
+                   <w:rPr><w:sz w:val="40"/></w:rPr>
+                 </w:style>
+               </w:styles>"#
+        );
+
+        let document = parse_from_bytes(&document_with_styles(&styles_xml)).unwrap();
+        let typography = document.document_typography_settings.unwrap();
+
+        assert_eq!(typography.normal_style_font_size_pt, 9.0);
     }
 }
 
@@ -4043,11 +4241,11 @@ fn parse_section(
         }
         // charSpace is ST_DecimalNumber — a raw SIGNED integer in 1/4096ths of a
         // POINT (NOT twips, NOT an em fraction). The renderer divides by 4096 to
-        // obtain the per-EA-glyph cell delta = charSpace/4096 in FLAT POINTS,
-        // independent of font size (§17.6.5); see `gridCharDeltaPx` in
-        // renderer.ts. Keep the raw value here so the /4096 conversion lives in
-        // one place. parse::<f64> tolerates a leading '-' (the common,
-        // tightening case).
+        // obtain the flat-point character-pitch adjustment. For
+        // linesAndChars, §17.6.5 applies that pitch to every character;
+        // snapToChars has separate grid-unit allocation semantics. Keep the raw
+        // value here so the /4096 conversion lives in one place. parse::<f64>
+        // tolerates a leading '-' (the common, tightening case).
         if let Some(cs) = attr_w(dg, "charSpace") {
             if let Ok(v) = cs.parse::<f64>() {
                 props.doc_grid_char_space = Some(v);
@@ -4633,6 +4831,9 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         widow_control: base_para.widow_control.unwrap_or(true),
         // ECMA-376 §17.3.1.21: omission is explicitly equivalent to true.
         overflow_punct: base_para.overflow_punct.unwrap_or(true),
+        // ECMA-376 §17.3.1.1: omission resolves through the paragraph style
+        // hierarchy and ultimately defaults to true.
+        adjust_right_ind: base_para.adjust_right_ind.unwrap_or(true),
         borders: base_para.para_borders.clone(),
         // Fall back to the document's default paragraph style (w:default="1")
         // rather than the literal "Normal" — international templates often use
@@ -15426,7 +15627,8 @@ mod math_jc_tests {
         assert!(parse_document_settings(empty).is_none());
     }
 
-    // ECMA-376 §17.15.1.18 / §17.15.3.1 — East Asian compatibility settings
+    // ECMA-376 Part 1 §17.15.1.18 / §17.15.3.3 and Part 4 §14.8.3.50 — East
+    // Asian compatibility settings
     // must surface to the renderer instead of being discarded at parse time.
     #[test]
     fn settings_east_asian_compat_flags_surface() {
@@ -15447,6 +15649,13 @@ mod math_jc_tests {
         );
         assert_eq!(s.use_fe_layout, Some(true));
         assert_eq!(s.balance_single_byte_double_byte_width, Some(false));
+
+        let enabled_xml = format!(
+            r#"<w:settings xmlns:w="{w}"><w:compat><w:balanceSingleByteDoubleByteWidth/></w:compat></w:settings>"#,
+            w = W_NS
+        );
+        let enabled = parse_document_settings(&enabled_xml).expect("enabled balance setting");
+        assert_eq!(enabled.balance_single_byte_double_byte_width, Some(true));
     }
 
     #[test]
@@ -17459,6 +17668,24 @@ mod footnote_tests {
     fn snap_to_grid_absent_is_none() {
         let p = first_para(r#"<w:p><w:r><w:t>x</w:t></w:r></w:p>"#);
         assert_eq!(p.snap_to_grid, None);
+    }
+
+    /// ECMA-376 §17.3.1.1 — explicit false preserves the authored right indent
+    /// even when a document grid is active.
+    #[test]
+    fn adjust_right_ind_off_is_surfaced() {
+        let p = first_para(
+            r#"<w:p><w:pPr><w:adjustRightInd w:val="0"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert!(!p.adjust_right_ind);
+    }
+
+    /// ECMA-376 §17.3.1.1 — omission resolves through the style hierarchy and
+    /// ultimately defaults to true.
+    #[test]
+    fn adjust_right_ind_absent_defaults_true() {
+        let p = first_para(r#"<w:p><w:r><w:t>x</w:t></w:r></w:p>"#);
+        assert!(p.adjust_right_ind);
     }
 }
 

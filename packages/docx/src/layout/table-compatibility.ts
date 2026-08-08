@@ -223,10 +223,19 @@ export function wordExactRowVerticalClipBounds(
   cellFlowBounds: LayoutRect,
   containingFlowBounds: LayoutRect,
 ): LayoutRect {
+  // The exact trHeight constraint is block-axis-only. Keep the containing
+  // flow's inline spill area, but extend it to any signed §17.4.50 tblInd
+  // placement owned by this cell so a table shifted into the leading margin
+  // is not clipped back to the ordinary text band.
+  const xPt = Math.min(cellFlowBounds.xPt, containingFlowBounds.xPt);
+  const rightPt = Math.max(
+    cellFlowBounds.xPt + cellFlowBounds.widthPt,
+    containingFlowBounds.xPt + containingFlowBounds.widthPt,
+  );
   return Object.freeze({
-    xPt: containingFlowBounds.xPt,
+    xPt,
     yPt: cellFlowBounds.yPt,
-    widthPt: containingFlowBounds.widthPt,
+    widthPt: rightPt - xPt,
     heightPt: cellFlowBounds.heightPt,
   });
 }

@@ -237,6 +237,11 @@ pub struct ParaFmt {
     /// applied when the resolved paragraph is built so style/direct `false`
     /// remains distinguishable from omission during the cascade.
     pub overflow_punct: Option<bool>,
+    /// ECMA-376 §17.3.1.1 w:adjustRightInd — allow the consumer to adjust the
+    /// effective right indent when a document grid is active. Retained as an
+    /// Option through the style cascade because omission inherits and the final
+    /// specification default is true.
+    pub adjust_right_ind: Option<bool>,
     /// Paragraph border edges (w:pBdr)
     pub para_borders: Option<crate::types::ParagraphBorders>,
     pub(crate) paragraph_typography: Option<crate::types::ParagraphTypographyWire>,
@@ -415,6 +420,10 @@ pub struct TableStyleDef {
 #[derive(Default)]
 pub struct StyleMap {
     styles: HashMap<String, StyleDef>,
+    /// Style ID of the paragraph style whose primary name is `Normal`.
+    /// `w:styleId` is an arbitrary reference; Word's built-in-style identity is
+    /// defined by the reserved primary style name ([MS-OE376] §2.1.236).
+    normal_para_style_id: Option<String>,
     table_styles: HashMap<String, TableStyleDef>,
     defaults_para: ParaFmt,
     defaults_run: RunFmt,
@@ -494,6 +503,8 @@ impl StyleMap {
         // index them in the same StyleMap so cell resolution can look
         // them up by ID.
         let mut default_para_style_id: Option<String> = None;
+        let mut normal_name_para_style_id: Option<String> = None;
+        let mut normal_id_para_style_id: Option<String> = None;
         let mut default_table_style_id: Option<String> = None;
         let mut table_styles: HashMap<String, TableStyleDef> = HashMap::new();
         for style_node in children_w(root, "style") {
@@ -507,6 +518,18 @@ impl StyleMap {
 
             if style_type == "paragraph" && attr_w(style_node, "default").as_deref() == Some("1") {
                 default_para_style_id = Some(style_id.clone());
+            }
+            if style_type == "paragraph" {
+                let primary_name = child_w(style_node, "name")
+                    .and_then(|node| attr_w(node, "val"))
+                    .map(|name| name.trim().to_string());
+                if primary_name.as_deref() == Some("Normal") && normal_name_para_style_id.is_none()
+                {
+                    normal_name_para_style_id = Some(style_id.clone());
+                }
+                if style_id == "Normal" && normal_id_para_style_id.is_none() {
+                    normal_id_para_style_id = Some(style_id.clone());
+                }
             }
             // §17.7.4: track `<w:style w:type="table" w:default="1">` so
             // tables that omit `<w:tblStyle>` can inherit its tblCellMar etc.
@@ -547,6 +570,7 @@ impl StyleMap {
 
         StyleMap {
             styles,
+            normal_para_style_id: normal_name_para_style_id.or(normal_id_para_style_id),
             table_styles,
             defaults_para,
             defaults_run,
@@ -558,6 +582,7 @@ impl StyleMap {
     fn empty() -> Self {
         StyleMap {
             styles: HashMap::new(),
+            normal_para_style_id: None,
             table_styles: HashMap::new(),
             defaults_para: ParaFmt::default(),
             defaults_run: RunFmt::default(),
@@ -674,6 +699,22 @@ impl StyleMap {
         table_style_id: Option<&str>,
     ) -> (ParaFmt, RunFmt) {
         self.resolve_para_cond(style_id, table_style_id, None)
+    }
+
+    /// Resolve the paragraph style whose primary name is `Normal`.
+    ///
+    /// ECMA-376 §17.6.5 defines document-grid character pitch relative to the
+    /// font size of the Normal style, which is not necessarily the paragraph
+    /// style marked `w:default="1"`. For non-conforming documents that omit a
+    /// Normal paragraph style, preserve the ordinary default-style fallback.
+    /// A paragraph style whose ID is literally `Normal` is accepted only as a
+    /// compatibility fallback for producers that omit its required name.
+    pub fn resolve_normal_paragraph_style(&self) -> (ParaFmt, RunFmt) {
+        if let Some(style_id) = self.normal_para_style_id.as_deref() {
+            self.resolve_para(Some(style_id), None)
+        } else {
+            self.resolve_para(None, None)
+        }
     }
 
     /// Resolve only the named/default paragraph-style chain, without document
@@ -958,6 +999,9 @@ pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     }
     if src.overflow_punct.is_some() {
         dst.overflow_punct = src.overflow_punct;
+    }
+    if src.adjust_right_ind.is_some() {
+        dst.adjust_right_ind = src.adjust_right_ind;
     }
     if let Some(src_b) = &src.para_borders {
         // Each pBdr EDGE inherits INDEPENDENTLY across the style hierarchy — bottom
@@ -1388,6 +1432,12 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     // ECMA-376 §17.3.1.21 defines omission as true; retain Option here so an
     // explicit style/direct false participates correctly in the cascade.
     fmt.overflow_punct = bool_prop(ppr, "overflowPunct");
+
+    // adjustRightInd — ECMA-376 §17.3.1.1. The setting participates in the
+    // paragraph-style hierarchy and omission ultimately defaults to true.
+    // Geometry is intentionally resolved later because the adjustment depends
+    // on the active section document grid and paragraph placement width.
+    fmt.adjust_right_ind = bool_prop(ppr, "adjustRightInd");
 
     // bidi — right-to-left paragraph (ECMA-376 §17.3.1.6). On-off toggle:
     // present (or w:val="1"/"true") = RTL, w:val="0"/"false" = LTR. Carried to
@@ -2471,6 +2521,32 @@ mod tests {
         apply_para(&mut inherited, &parse("<w:overflowPunct/>"));
         assert_eq!(
             inherited.overflow_punct,
+            Some(true),
+            "a later style/direct on-value overrides inherited false"
+        );
+    }
+
+    #[test]
+    fn adjust_right_ind_participates_in_paragraph_style_cascade() {
+        let parse = |inner: &str| {
+            let xml = format!(
+                r#"<w:pPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{inner}</w:pPr>"#
+            );
+            let document = XmlDoc::parse(&xml).unwrap();
+            parse_para_fmt(document.root_element())
+        };
+
+        let mut inherited = parse(r#"<w:adjustRightInd w:val="0"/>"#);
+        apply_para(&mut inherited, &parse("<w:keepNext/>"));
+        assert_eq!(
+            inherited.adjust_right_ind,
+            Some(false),
+            "an omitted child property inherits the parent style value"
+        );
+
+        apply_para(&mut inherited, &parse("<w:adjustRightInd/>"));
+        assert_eq!(
+            inherited.adjust_right_ind,
             Some(true),
             "a later style/direct on-value overrides inherited false"
         );

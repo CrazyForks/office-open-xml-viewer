@@ -112,6 +112,7 @@ export function mountDemoInto(el: HTMLElement, kind: DemoKind, format: Format, u
 interface SheetWindowSession {
   readonly popup: Window;
   readonly viewer: Omit<XlsxSheetViewer, 'load'>;
+  readonly themeObserver: MutationObserver;
 }
 
 // Excel — parse once in the parent and project borrowed sheet viewers into
@@ -190,18 +191,35 @@ function mountSheetWindows(el: HTMLElement, url: string): void {
           popupDocument.title = `${name} · XLSX Sheet Viewer`;
           const popupStyle = popupDocument.createElement('style');
           popupStyle.textContent =
-            'html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#eef2f6;' +
+            ':root{color-scheme:light;--sheet-window-page:#eef2f6;--sheet-window-bar:#172333;' +
+            '--sheet-window-bar-dark:#05090e;--sheet-window-bar-border:#34445a;' +
+            '--sheet-window-bar-meta:#9fe2c4}' +
+            ':root[data-theme="dark"]{color-scheme:dark;--sheet-window-page:#030508;' +
+            '--sheet-window-bar:var(--sheet-window-bar-dark);--sheet-window-bar-border:#18232f;' +
+            '--sheet-window-bar-meta:#72d9a8}' +
+            'html,body{width:100%;height:100%;margin:0;overflow:hidden;background:var(--sheet-window-page);' +
             'font-family:Inter,ui-sans-serif,system-ui,sans-serif}' +
             '.sheet-window{height:100%;display:grid;grid-template-rows:48px minmax(0,1fr)}' +
             '.sheet-window__bar{display:flex;align-items:center;gap:12px;padding:0 16px;' +
-            'background:#172333;color:#fff;border-bottom:1px solid #34445a}' +
+            'background:var(--sheet-window-bar);color:#fff;border-bottom:1px solid var(--sheet-window-bar-border)}' +
             '.sheet-window__bar strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-            '.sheet-window__bar span{margin-left:auto;font:11px ui-monospace,monospace;color:#9fe2c4}' +
+            '.sheet-window__bar span{margin-left:auto;font:11px ui-monospace,monospace;color:var(--sheet-window-bar-meta)}' +
             '.sheet-window__viewport{position:relative;min-height:0;background:#fff}' +
             '.sheet-window__canvas{display:block;width:100%;height:100%;background:#fff}' +
             '.sheet-window__loading{position:absolute;inset:0;display:grid;place-items:center;' +
             'z-index:10;background:#fff;color:#59687a;font-size:13px}';
           popupDocument.head.appendChild(popupStyle);
+
+          const syncPopupTheme = () => {
+            popupDocument.documentElement.dataset.theme =
+              document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+          };
+          syncPopupTheme();
+          const themeObserver = new MutationObserver(syncPopupTheme);
+          themeObserver.observe(document.documentElement, {
+            attributes: true,
+            attributeFilter: ['data-theme'],
+          });
 
           const shell = popupDocument.createElement('main');
           shell.className = 'sheet-window';
@@ -230,13 +248,14 @@ function mountSheetWindows(el: HTMLElement, url: string): void {
               loading.textContent = err(error);
             },
           });
-          const session = { popup, viewer };
+          const session = { popup, viewer, themeObserver };
           sessions.set(index, session);
           closeAll.disabled = false;
           open.textContent = 'Rendering…';
           open.disabled = true;
 
           popup.addEventListener('pagehide', () => {
+            themeObserver.disconnect();
             viewer.destroy();
             if (sessions.get(index) === session) sessions.delete(index);
             open.textContent = 'Open in window \u2197\uFE0E';
@@ -269,7 +288,8 @@ function mountSheetWindows(el: HTMLElement, url: string): void {
       closeAll.addEventListener('click', () => {
         const openSessions = [...sessions.values()];
         sessions.clear();
-        openSessions.forEach(({ popup, viewer }) => {
+        openSessions.forEach(({ popup, viewer, themeObserver }) => {
+          themeObserver.disconnect();
           viewer.destroy();
           popup.close();
         });
@@ -283,7 +303,8 @@ function mountSheetWindows(el: HTMLElement, url: string): void {
       st.remove();
       launcher.append(summary, popupError, list);
       window.addEventListener('pagehide', () => {
-        sessions.forEach(({ popup, viewer }) => {
+        sessions.forEach(({ popup, viewer, themeObserver }) => {
+          themeObserver.disconnect();
           viewer.destroy();
           popup.close();
         });

@@ -58,7 +58,8 @@ function sameParagraphAnchor(
 }
 
 const sameParagraphContext: ParagraphLayoutContext = {
-  lineGrid: { active: false, pitchPt: null }, characterGrid: { active: false, deltaPt: 0 },
+  lineGrid: { active: false, pitchPt: null }, characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+  rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
   physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
   lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0, baseRtl: false,
   isJustified: false, stretchLastLine: false, tabStops: [], hasRuby: false,
@@ -587,7 +588,8 @@ describe('paragraph run resource projection', () => {
       },
     };
     const context: ParagraphLayoutContext = {
-      lineGrid: { active: false, pitchPt: null }, characterGrid: { active: false, deltaPt: 0 },
+      lineGrid: { active: false, pitchPt: null }, characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+      rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
       physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
       lineSpacing: null, spaceBeforePt: 3, spaceAfterPt: 4, baseRtl: false,
       isJustified: false, stretchLastLine: false, tabStops: [], hasRuby: false,

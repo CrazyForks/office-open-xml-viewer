@@ -32,6 +32,9 @@ importers:
       mathjax:
         specifier: ^3.2.2
         version: 3.2.2
+      pngjs:
+        specifier: ^7.0.0
+        version: 7.0.0
       rolldown:
         specifier: ^1.2.0
         version: 1.2.0

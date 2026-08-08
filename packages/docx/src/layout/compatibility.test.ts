@@ -37,6 +37,8 @@ import {
 import {
   WORD_AUTO_MULTIPLE_BASELINE_PIN,
   WORD_AUTHORED_CHARACTER_SPACING_PITCH_PRIORITY,
+  WORD_BALANCED_CONSECUTIVE_SPACE_CELL,
+  WORD_BALANCED_LINES_AND_CHARS_GRID_DELTA,
   WORD_CJK_BOTH_INTER_CHARACTER_EXPANSION,
   WORD_DEGENERATE_LINE_SPACING_SINGLE,
   WORD_DICTIONARY_SEA_ATOMIC_CHUNK,
@@ -46,6 +48,8 @@ import {
   WORD_FIT_TEXT_INTER_CHARACTER_EXPANSION,
   WORD_FULL_WIDTH_CHARACTER_SPACING_SCOPE,
   WORD_GRID_AT_LEAST_TALL_LINE_UNSNAPPED,
+  WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT,
+  WORD_HANGING_TAB_SAME_POSITION_PRECEDENCE,
   WORD_JAPANESE_PUNCTUATION_COMPRESSION_CELL,
   WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION,
   WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT,
@@ -58,15 +62,23 @@ import {
   WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS,
   WORD_OVERLONG_TOKEN_EMERGENCY_BREAK,
   WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE,
+  WORD_RTL_DECIMAL_TAB_PHYSICAL_ALIGNMENT,
+  WORD_SNAP_TO_CHARS_EAST_ASIAN_CELL_FIT,
+  WORD_SOURCE_RUN_SPACE_SEQUENCE,
   WORD_TAB_STOP_PAGE_EDGE_CLAMP,
+  WORD_TABLE_CELL_IGNORES_GRID_RIGHT_INDENT_ADJUSTMENT,
   WORD_THAI_DISTRIBUTE_CLUSTER_POLICY,
   WORD_UNIFORM_RUN_POSITION_LEADING,
   wordAutoMultipleCenterBoxPx,
+  wordBalancedConsecutiveSpaceCellApplies,
+  wordBalancedLinesAndCharsGridDeltaFactor,
+  wordBalancedSpaceCellAdjustmentApplies,
   wordDegenerateLineSpacingIsSingle,
   wordEastAsianGridLineCells,
   wordFarEastSingleLinePx,
   wordFirstJustifiedContentSegment,
   wordGridAtLeastLineHeightPx,
+  wordGridRightIndentAdjustmentPt,
   wordUseFeLayoutParagraphMarkGridAdvancePx,
   wordUseFeLayoutInheritedGridHeightPx,
   wordCandidateFitWidthPx,
@@ -76,6 +88,9 @@ import {
   wordMsMinchoEmptyEastAsianMarkSingleLinePx,
   wordNumberingSuffixAcceptsCoincidentListTab,
   wordRubyUniformLineHeightPx,
+  wordSnapToCharsEastAsianCellCount,
+  wordSourceRunSpaceContinuesSequence,
+  wordContainerAllowsGridRightIndentAdjustment,
   wordUniformRunPositionPaintPt,
   wordVisibleLineMetricPx,
 } from './line-compatibility.js';
@@ -104,6 +119,7 @@ import {
   WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE,
   WORD_CONTINUOUS_SECTION_PAGE_NUMBER_RESTART,
   WORD_DEFAULT_LINE_NUMBER_DISTANCE,
+  WORD_SECTION_MARK_BLANK_PAGE_SUPPRESSION,
   WORD_DEFAULT_LINE_NUMBER_DISTANCE_PT,
   WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION,
   wordBookFoldGutterEdge,
@@ -290,6 +306,7 @@ describe('layout compatibility inventory', () => {
       WORD_DEFAULT_LINE_NUMBER_DISTANCE,
       WORD_CONTINUOUS_SECTION_PAGE_NUMBER_RESTART,
       WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION,
+      WORD_SECTION_MARK_BLANK_PAGE_SUPPRESSION,
       WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE,
       WORD_EXACT_ROW_HEIGHT_BOTTOM_PADDING,
       WORD_TABLE_BORDER_LAYER_CASCADE,
@@ -299,6 +316,11 @@ describe('layout compatibility inventory', () => {
       WORD_OVER_PAGE_CANT_SPLIT_CLIP,
       WORD_POSITIONED_TABLE_ADJACENCY_EXCLUSION,
       WORD_EAST_ASIAN_GRID_LINE_ALLOCATION,
+      WORD_SNAP_TO_CHARS_EAST_ASIAN_CELL_FIT,
+      WORD_TABLE_CELL_IGNORES_GRID_RIGHT_INDENT_ADJUSTMENT,
+      WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT,
+      WORD_HANGING_TAB_SAME_POSITION_PRECEDENCE,
+      WORD_RTL_DECIMAL_TAB_PHYSICAL_ALIGNMENT,
       WORD_GRID_AT_LEAST_TALL_LINE_UNSNAPPED,
       WORD_DEGENERATE_LINE_SPACING_SINGLE,
       WORD_AUTO_MULTIPLE_BASELINE_PIN,
@@ -403,9 +425,14 @@ describe('layout compatibility inventory', () => {
       punctuationAdvancePt: 8,
       punctuationInkEndPt: 1,
       ideographicCellAdvancePt: 10,
+    })).toBe(8);
+    expect(wordJapanesePunctuationRetainedExtentPt({
+      punctuationAdvancePt: 10,
+      punctuationInkEndPt: 1,
+      ideographicCellAdvancePt: 10,
     })).toBe(5);
     expect(wordJapanesePunctuationRetainedExtentPt({
-      punctuationAdvancePt: 8,
+      punctuationAdvancePt: 10,
       punctuationInkEndPt: 6,
       ideographicCellAdvancePt: 10,
     })).toBe(6);
@@ -417,6 +444,76 @@ describe('layout compatibility inventory', () => {
       platform: 'macOS 26.5.2',
     });
     expect(WORD_AUTHORED_CHARACTER_SPACING_PITCH_PRIORITY.description)
+      .not.toMatch(/sample|private|\.docx|\.pdf/i);
+    expect(WORD_SOURCE_RUN_SPACE_SEQUENCE.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'source-run-space-sequence-wrap-matrix',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(wordSourceRunSpaceContinuesSequence('deadline ', ' ')).toBe(true);
+    expect(wordSourceRunSpaceContinuesSequence('deadline', ' ')).toBe(false);
+    expect(WORD_BALANCED_CONSECUTIVE_SPACE_CELL.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'single-double-byte-width-space-grid-matrix',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(WORD_BALANCED_CONSECUTIVE_SPACE_CELL.description)
+      .not.toMatch(/sample|private|\.docx|\.pdf/i);
+    expect(wordBalancedConsecutiveSpaceCellApplies(1)).toBe(false);
+    expect(wordBalancedConsecutiveSpaceCellApplies(2)).toBe(true);
+    expect(wordBalancedConsecutiveSpaceCellApplies(8)).toBe(true);
+    expect(wordBalancedSpaceCellAdjustmentApplies(undefined)).toBe(true);
+    expect(wordBalancedSpaceCellAdjustmentApplies('linesAndChars')).toBe(true);
+    expect(wordBalancedSpaceCellAdjustmentApplies('snapToChars')).toBe(false);
+    expect(WORD_BALANCED_LINES_AND_CHARS_GRID_DELTA.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'single-double-byte-width-grid-observation-matrix',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(wordBalancedLinesAndCharsGridDeltaFactor('A', 'ascii')).toBe(0.5);
+    expect(wordBalancedLinesAndCharsGridDeltaFactor(' ', 'ascii')).toBe(0.5);
+    expect(wordBalancedLinesAndCharsGridDeltaFactor('\u3000', 'eastAsia')).toBe(0.5);
+    expect(wordBalancedLinesAndCharsGridDeltaFactor('日', 'eastAsia')).toBe(1);
+    expect(wordBalancedLinesAndCharsGridDeltaFactor('Ａ', 'eastAsia')).toBe(1);
+    expect(WORD_TABLE_CELL_IGNORES_GRID_RIGHT_INDENT_ADJUSTMENT.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'table-cell-adjust-right-indent-width-position-matrix',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(wordContainerAllowsGridRightIndentAdjustment(false)).toBe(true);
+    expect(wordContainerAllowsGridRightIndentAdjustment(true)).toBe(false);
+    expect(WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'grid-right-indent-character-pitch-boundary-matrix',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(wordGridRightIndentAdjustmentPt(81, 9)).toBe(0);
+    expect(wordGridRightIndentAdjustmentPt(85.9, 9)).toBeCloseTo(4.9, 9);
+    expect(wordGridRightIndentAdjustmentPt(80.999, 9)).toBeCloseTo(8.999, 9);
+    expect(wordGridRightIndentAdjustmentPt(81.001, 9)).toBeCloseTo(0.001, 9);
+    expect(wordGridRightIndentAdjustmentPt(0, 9)).toBe(0);
+    expect(wordGridRightIndentAdjustmentPt(85.9, 0)).toBe(0);
+    expect(WORD_SNAP_TO_CHARS_EAST_ASIAN_CELL_FIT.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'snap-to-chars-east-asian-cell-fit-matrix',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(wordSnapToCharsEastAsianCellCount(8, 10)).toBe(1);
+    expect(wordSnapToCharsEastAsianCellCount(10, 10)).toBe(1);
+    expect(wordSnapToCharsEastAsianCellCount(10.01, 10)).toBe(2);
+    expect(WORD_SNAP_TO_CHARS_EAST_ASIAN_CELL_FIT.description)
       .not.toMatch(/sample|private|\.docx|\.pdf/i);
     expect(wordDocumentCharacterCompressionApplies(undefined)).toBe(true);
     expect(wordDocumentCharacterCompressionApplies(0)).toBe(true);
@@ -492,6 +589,10 @@ describe('layout compatibility inventory', () => {
       { xPt: 20, yPt: 30, widthPt: 40, heightPt: 50 },
       { xPt: 5, yPt: 10, widthPt: 100, heightPt: 200 },
     )).toEqual({ xPt: 5, yPt: 30, widthPt: 100, heightPt: 50 });
+    expect(wordExactRowVerticalClipBounds(
+      { xPt: -5, yPt: 30, widthPt: 40, heightPt: 50 },
+      { xPt: 5, yPt: 10, widthPt: 100, heightPt: 200 },
+    )).toEqual({ xPt: -5, yPt: 30, widthPt: 110, heightPt: 50 });
     expect(wordClipsOverPageCantSplitRow({
       compatibility: 'word',
       availableHeightPt: 99.99995,
@@ -515,6 +616,8 @@ describe('layout compatibility inventory', () => {
       pageBottomIsUnreserved: true,
       physicalRegionBottomIsActive: true,
       hasFollowingInk: true,
+      followsNextPageSectionBoundary: false,
+      markExtentPt: 12,
       markBelowBaselinePt: 3,
     };
     expect(wordTrailingEmptyMarkAdmissionAllowancePt(trailingMark)).toBe(3);
@@ -522,6 +625,18 @@ describe('layout compatibility inventory', () => {
       ...trailingMark,
       hasFollowingInk: false,
     })).toBe(0);
+    expect(wordTrailingEmptyMarkAdmissionAllowancePt({
+      ...trailingMark,
+      hasFollowingInk: false,
+      followsNextPageSectionBoundary: true,
+    })).toBe(12);
+    expect(WORD_SECTION_MARK_BLANK_PAGE_SUPPRESSION.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'next-page-section-mark-bottom-edge-admission',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
     expect(wordFinalParagraphAdmissionExtentPt({
       advancePt: 30,
       retainedSpaceAfterPt: 10,

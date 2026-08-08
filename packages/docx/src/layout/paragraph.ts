@@ -1,7 +1,12 @@
 import { autoContrastColor, canvasFontString, createCanvasFontRoute } from '@silurus/ooxml-core';
-import type { ParagraphLayoutContext } from '../layout-context.js';
+import {
+  effectiveParagraphTabStops,
+  paragraphGridRightAdjustmentPt,
+  type ParagraphLayoutContext,
+} from '../layout-context.js';
 import {
   measureParagraph,
+  paragraphCharacterGrid,
   type MeasuredParagraph,
   type ParagraphMeasurementEnvironment,
   type ParagraphPlacement as MeasurementPlacement,
@@ -14,8 +19,13 @@ import type {
   LayoutMathSeg,
   LayoutTabSeg,
   LayoutTextSeg,
+  DocGridCtx,
 } from '../line-layout.js';
-import { effectiveCharacterSpacingPt } from '../line-layout.js';
+import {
+  effectiveCharacterSpacingPt,
+  segLetterSpacingPx,
+  widthBalanceSpaceAdjustmentForTextPt,
+} from '../line-layout.js';
 import { calcEffectiveFontPx, EAST_ASIAN_RE, shapeRunToDocRun } from './text.js';
 import type { DocParagraph, DocRun, ShapeRun } from '../types.js';
 import {
@@ -96,7 +106,10 @@ import {
   wordPreservesLowerLayerSameParagraphComposition,
   wordTextBoxVisibleAnchorExtentPt,
 } from './anchor-compatibility.js';
-import { wordRunVerticalAlignRaisePt } from './line-compatibility.js';
+import {
+  wordRunVerticalAlignRaisePt,
+  wordSnapToCharsEastAsianCellCount,
+} from './line-compatibility.js';
 import { wordFramePositionExtendsLineBox } from './body-pagination-compatibility.js';
 import {
   resolveFloatPlacement,
@@ -1682,7 +1695,7 @@ function textPlanSegment(
   segment: LayoutTextSeg,
   paragraph: ParagraphLayoutSource,
   sourceOffset: number,
-  characterGridDeltaPt: number,
+  characterGrid: DocGridCtx | undefined,
   sourceRun?: import('./text.js').ParagraphLayoutRun & Readonly<{
     anchorOccurrenceId?: string;
   }>,
@@ -1701,9 +1714,7 @@ function textPlanSegment(
   }
   const projected = textPlacement(segment, paragraph, sourceOffset, 0, 0, 0, 0);
   if (projected.kind !== 'text') throw new Error('Visible text segment projected as anchor host');
-  const pitchPt = segment.fitTextPerGapPx
-    ?? effectiveCharacterSpacingPt(segment)
-      + (segment.snapToCharacterGrid === false ? 0 : characterGridDeltaPt);
+  const pitchPt = segLetterSpacingPx(segment, characterGrid, 1);
   const scaleX = segment.charScale ?? 1;
   const baselineOffsetPt = retainedBaselineOffsetPt(segment);
   const retainedGeometry = retainedGeometryPlan(segment, sourceOffset, projected.color);
@@ -1724,7 +1735,7 @@ function textPlanSegment(
       'Visible text acquisition requires complete authoritative grapheme clusters from TextLayoutService',
     );
   }
-  const clusters = (shapedClusters ?? []).map((cluster, index) => {
+  let clusters = (shapedClusters ?? []).map((cluster, index) => {
     const prefix = segment.text.slice(0, cluster.range.start);
     const text = segment.text.slice(cluster.range.start, cluster.range.end);
     const precedingScalars = [...prefix].length;
@@ -1744,6 +1755,10 @@ function textPlanSegment(
           && compression.end <= cluster.range.end)
         .reduce((sum, compression) => sum + compression.adjustmentPt, 0)
       ?? 0;
+    const precedingWidthBalanceAdjustment =
+      widthBalanceSpaceAdjustmentForTextPt(segment, prefix, characterGrid) * scaleX;
+    const clusterWidthBalanceAdjustment =
+      widthBalanceSpaceAdjustmentForTextPt(segment, text, characterGrid) * scaleX;
     return {
       range: {
         start: sourceOffset + cluster.range.start,
@@ -1753,16 +1768,53 @@ function textPlanSegment(
         xPt:
           cluster.offsetPt * scaleX
           + precedingScalars * pitchPt
+          + precedingWidthBalanceAdjustment
           + precedingPunctuationCompression,
         yPt: baselineOffsetPt,
       },
       advancePt:
         cluster.advancePt * scaleX
         + scalarCount * pitchPt
+        + clusterWidthBalanceAdjustment
         + trailingFitPad
         + clusterPunctuationCompression,
     };
   });
+  const snapLeadingPadPt = segment.snapGridLeadingPadPx ?? 0;
+  if (segment.snapGridClass === 'eastAsia' && segment.snapGridCellPitchPx) {
+    const cellPitchPt = segment.snapGridCellPitchPx;
+    let precedingCells = 0;
+    clusters = clusters.map((cluster) => {
+      const text = segment.text.slice(
+        cluster.range.start - sourceOffset,
+        cluster.range.end - sourceOffset,
+      );
+      const cells = wordSnapToCharsEastAsianCellCount(
+        cluster.advancePt,
+        cellPitchPt,
+      );
+      const allocatedAdvancePt = cells * cellPitchPt;
+      const placed = {
+        ...cluster,
+        offset: {
+          xPt: precedingCells * cellPitchPt
+            + (allocatedAdvancePt - cluster.advancePt) / 2,
+          yPt: cluster.offset.yPt,
+        },
+        advancePt: allocatedAdvancePt,
+      };
+      precedingCells += cells;
+      return placed;
+    });
+  } else if (snapLeadingPadPt !== 0) {
+    clusters = clusters.map((cluster) => ({
+      ...cluster,
+      offset: {
+        xPt: cluster.offset.xPt + snapLeadingPadPt,
+        yPt: cluster.offset.yPt,
+      },
+    }));
+  }
   const {
     origin: _origin, bounds: _bounds, advancePt: _advancePt,
     paintOps, clusters: _clusters, ...style
@@ -1787,7 +1839,7 @@ function textPlanSegment(
     : 1;
   const hasInternalPunctuationCompression = segment.punctuationCompressions
     ?.some((compression) => compression.end < segment.text.length) ?? false;
-  const basePaintOps = segment.verticalRun
+  const unpaddedPaintOps = segment.verticalRun
     ? (() => {
         if (!verticalGlyphMeasurement) {
           throw new Error('Vertical glyph planning capability is required for vertical text');
@@ -1880,6 +1932,29 @@ function textPlanSegment(
             }));
           })()
         : paintOps;
+  const basePaintOps = segment.snapGridClass === 'eastAsia'
+    ? (() => {
+        const template = unpaddedPaintOps[0];
+        if (!template) return unpaddedPaintOps;
+        return clusters.map((cluster) => ({
+          ...template,
+          text: segment.text.slice(
+            cluster.range.start - sourceOffset,
+            cluster.range.end - sourceOffset,
+          ),
+          range: cluster.range,
+          offset: cluster.offset,
+        }));
+      })()
+    : snapLeadingPadPt === 0
+      ? unpaddedPaintOps
+      : unpaddedPaintOps.map((operation) => ({
+          ...operation,
+          offset: {
+            xPt: operation.offset.xPt + snapLeadingPadPt,
+            yPt: operation.offset.yPt,
+          },
+        }));
   return {
     ...style,
     kind: 'text', measuredWidthPt: segment.measuredWidth,
@@ -1916,7 +1991,7 @@ function textPlanSegment(
     breakBefore: segment.breakBefore !== false && !segment.joinPrev,
     rtl: segment.rtl,
     digitsAsAN: segment.digitsAsAN,
-    fixedPitch: segment.fitTextRegionIndex !== undefined,
+    fixedPitch: segment.fitTextRegionIndex !== undefined || segment.snapGridClass !== undefined,
     ...(retainedGeometry ? { retainedGeometry } : {}),
     ...(segment.textLayoutService ? { textLayoutService: segment.textLayoutService } : {}),
     ...(segment.textShapeRequest ? { textShapeRequest: segment.textShapeRequest } : {}),
@@ -2162,7 +2237,7 @@ function planMeasuredLines(
       } else {
         segments.push(textPlanSegment(
           segment as LayoutTextSeg, paragraph, segmentOffset,
-          context.characterGrid.active ? context.characterGrid.deltaPt : 0,
+          paragraphCharacterGrid(context),
           sourceRun,
           verticalGlyphMeasurement,
         ));
@@ -2201,6 +2276,36 @@ function planMeasuredLines(
       },
     });
   });
+}
+
+/** Retain §17.18.84 bar-tab rules for every laid-out line. A bar is measured
+ * from the paragraph's logical leading page margin, but never participates in
+ * tab advancement. Its zero-width rule is painted as a device hairline. */
+export function attachBarTabRules(
+  lines: readonly LineLayout[],
+  columnXPt: number,
+  columnWidthPt: number,
+  baseRtl: boolean,
+  tabStops: readonly import('../types.js').TabStop[],
+): readonly LineLayout[] {
+  const bars = tabStops.filter((stop) => stop.alignment === 'bar');
+  if (bars.length === 0) return lines;
+  return lines.map((line) => ({
+    ...line,
+    barTabRules: bars.map((bar) => {
+      const xPt = baseRtl
+        ? columnXPt + columnWidthPt - bar.pos
+        : columnXPt + bar.pos;
+      return {
+        from: { xPt, yPt: line.bounds.yPt },
+        to: { xPt, yPt: line.bounds.yPt + line.bounds.heightPt },
+        color: '#000000',
+        widthPt: 0,
+        authoredStyle: 'single',
+        style: 'solid' as const,
+      };
+    }),
+  }));
 }
 
 function offsetRange(range: import('./types.js').TextRange, delta: number) {
@@ -3147,6 +3252,10 @@ function textBoxParagraphContext(
     run.type === 'text' && EAST_ASIAN_RE.test(run.text));
   return {
     ...inherited,
+    rightIndentGrid: {
+      ...inherited.rightIndentGrid,
+      paragraphAllowsAdjustment: paragraph.adjustRightInd !== false,
+    },
     physicalIndentLeftPt: baseRtl ? paragraph.indentRight : paragraph.indentLeft,
     physicalIndentRightPt: baseRtl ? paragraph.indentLeft : paragraph.indentRight,
     firstIndentPt: paragraph.indentFirst,
@@ -3156,7 +3265,7 @@ function textBoxParagraphContext(
     baseRtl,
     isJustified: jcIsFullyJustified(paragraph.alignment),
     stretchLastLine: jcStretchesLastLine(paragraph.alignment),
-    tabStops: [...paragraph.tabStops],
+    tabStops: effectiveParagraphTabStops(paragraph),
     hasRuby,
     hasEastAsianText,
   };
@@ -3814,7 +3923,10 @@ export function paragraphAcquisitionCacheKey(
       context.lineGrid.active,
       context.lineGrid.pitchPt,
       context.characterGrid.active,
+      context.characterGrid.kind,
       context.characterGrid.deltaPt,
+      context.rightIndentGrid.pitchPt,
+      context.rightIndentGrid.paragraphAllowsAdjustment,
       context.physicalIndentLeftPt,
       context.physicalIndentRightPt,
       context.firstIndentPt,
@@ -3865,6 +3977,7 @@ export function paragraphAcquisitionCacheKey(
       environment.verticalPageFrame ?? null,
       environment.documentHasEastAsianText,
       environment.useFeLayout ?? null,
+      environment.balanceSingleByteDoubleByteWidth ?? null,
       environment.characterSpacingControl ?? null,
       environment.resolvedLocalFonts
         ? cache.objectIdentity(environment.resolvedLocalFonts)
@@ -4332,8 +4445,14 @@ export function paragraphLayoutFromMeasurement(
     ? { ...options.context, firstIndentPt: 0 }
     : options.context;
   const paragraphXPt = options.placement.paragraphXPt + planningContext.physicalIndentLeftPt;
+  const rightGridAdjustmentPt = paragraphGridRightAdjustmentPt(
+    planningContext,
+    options.placement.availableWidthPt,
+  );
   const availableWidthPt = options.placement.availableWidthPt
-    - planningContext.physicalIndentLeftPt - planningContext.physicalIndentRightPt;
+    - planningContext.physicalIndentLeftPt
+    - planningContext.physicalIndentRightPt
+    - rightGridAdjustmentPt;
   const occurrences = logicalOccurrenceMap(paragraph, measured);
   const numberingPlan = options.continuesFromPrevious
     ? undefined
@@ -4347,6 +4466,13 @@ export function paragraphLayoutFromMeasurement(
   if (options.sourceRangeStart !== undefined) {
     lines = rebaseMeasuredLineRanges(lines, options.sourceRangeStart);
   }
+  lines = attachBarTabRules(
+    lines,
+    options.placement.paragraphXPt,
+    options.placement.availableWidthPt,
+    planningContext.baseRtl,
+    planningContext.tabStops,
+  );
   if (
     numberingPlan
     && measured.markOnly

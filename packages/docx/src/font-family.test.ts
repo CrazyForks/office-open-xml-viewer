@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { normalizeFontFamily, normalizeFontFamilyUncached } from './line-layout.js';
 
-describe('normalizeFontFamily — modern family respects w:pitch (§17.8.3.29)', () => {
+describe('normalizeFontFamily — modern family respects w:pitch (§17.8.3.14)', () => {
   it('keeps a variable-pitch modern face on the Meiryo/CJK-sans path', () => {
     const chain = normalizeFontFamilyUncached(
       'Meiryo UI',

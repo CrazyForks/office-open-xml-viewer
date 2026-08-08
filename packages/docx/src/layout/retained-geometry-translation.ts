@@ -168,6 +168,11 @@ export function translateLine(
     bounds: translateRect(line.bounds, delta),
     baselinePt: line.baselinePt + delta.yPt,
     placements: line.placements.map((placement) => translatePlacement(placement, delta, drawingTranslations)),
+    ...(line.barTabRules ? { barTabRules: line.barTabRules.map((rule) => ({
+      ...rule,
+      from: translatePoint(rule.from, delta),
+      to: translatePoint(rule.to, delta),
+    })) } : {}),
   };
 }
 
