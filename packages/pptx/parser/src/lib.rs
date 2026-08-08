@@ -1551,6 +1551,7 @@ fn parse_slide(
         .ok_or("missing spTree")?;
 
     let mut elements = Vec::new();
+    let mut element_sources = Vec::new();
 
     // ── showMasterSp resolution (ECMA-376 §19.3.1.38 sld / §19.3.1.39
     // sldLayout, AG_ChildSlide, default true) ─────────────────────────────
@@ -1578,6 +1579,7 @@ fn parse_slide(
     // override path. `elements` is still empty here, so ordering (master
     // decorations first) is unchanged either way.
     if show_master_sp {
+        let start = elements.len();
         if eff.is_some() {
             if let Some(mxml) = master_xml {
                 note_layout_master_parse();
@@ -1596,6 +1598,9 @@ fn parse_slide(
         } else {
             elements.extend(master_decorative.iter().cloned());
         }
+        element_sources.extend((start..elements.len()).map(|_| SlideElementSource {
+            origin: SlideElementOrigin::Master,
+        }));
     }
 
     // ── Layout non-placeholder shapes (rendered BEFORE slide shapes) ──────
@@ -1608,6 +1613,7 @@ fn parse_slide(
             if let Some(lsp_tree) = child(lroot, "cSld").and_then(|n| child(n, "spTree")) {
                 let empty_lph = LayoutPlaceholders::default();
                 for node in lsp_tree.children().filter(|n| n.is_element()) {
+                    let start = elements.len();
                     parse_sp_tree_node(
                         node,
                         &empty_lph,
@@ -1621,6 +1627,9 @@ fn parse_slide(
                         None, // no inherited group fill at top level
                         ooxml_common::depth::DepthGuard::root(),
                     );
+                    element_sources.extend((start..elements.len()).map(|_| SlideElementSource {
+                        origin: SlideElementOrigin::Layout,
+                    }));
                 }
             }
         }
@@ -1628,6 +1637,7 @@ fn parse_slide(
 
     // ── Slide shapes ─────────────────────────────────────────────────────
     for node in sp_tree.children().filter(|n| n.is_element()) {
+        let start = elements.len();
         parse_sp_tree_node(
             node,
             &lph,
@@ -1641,7 +1651,12 @@ fn parse_slide(
             None,
             ooxml_common::depth::DepthGuard::root(),
         );
+        element_sources.extend((start..elements.len()).map(|_| SlideElementSource {
+            origin: SlideElementOrigin::Slide,
+        }));
     }
+
+    debug_assert_eq!(elements.len(), element_sources.len());
 
     // ── Notes slide & comments (Phase 2 surfacing only — no rendering) ────
     let notes = load_notes_slide(zip, slide_dir, rels);
@@ -1654,6 +1669,7 @@ fn parse_slide(
         part_name: None,
         background,
         elements,
+        element_sources,
         notes,
         comments,
         hidden,
@@ -1673,6 +1689,7 @@ fn broken_slide(index: usize, part: &str, detail: &str) -> Slide {
         part_name: Some(part.to_string()),
         background: None,
         elements: Vec::new(),
+        element_sources: Vec::new(),
         notes: None,
         comments: Vec::new(),
         hidden: false,
@@ -1877,6 +1894,7 @@ pub(crate) fn degraded_container_presentation(parse_error: String) -> Presentati
             part_name: None,
             background: None,
             elements: Vec::new(),
+            element_sources: Vec::new(),
             notes: None,
             comments: Vec::new(),
             hidden: false,
@@ -6306,7 +6324,10 @@ mod tests {
     /// decorative picture (image1.png at a non-centred position) plus a
     /// solid-fill rectangle. `layout_show_master_sp` controls the layout's
     /// `showMasterSp` attribute so the test can exercise the suppression path.
-    fn build_master_sp_pptx(layout_show_master_sp: Option<bool>) -> Vec<u8> {
+    fn build_master_sp_pptx(
+        layout_show_master_sp: Option<bool>,
+        include_layout_and_slide_shapes: bool,
+    ) -> Vec<u8> {
         use zip::write::SimpleFileOptions;
 
         // 1×1 transparent PNG (smallest valid PNG).
@@ -6322,6 +6343,16 @@ mod tests {
             Some(true) => r#" showMasterSp="1""#.to_string(),
             Some(false) => r#" showMasterSp="0""#.to_string(),
             None => String::new(),
+        };
+        let layout_shape = if include_layout_and_slide_shapes {
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="20" name="LayoutBand"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="300000"/><a:ext cx="1000000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:sp>"#
+        } else {
+            ""
+        };
+        let slide_shape = if include_layout_and_slide_shapes {
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="30" name="SlideShape"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="500000"/><a:ext cx="1000000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:sp>"#
+        } else {
+            ""
         };
 
         let presentation_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -6396,6 +6427,7 @@ mod tests {
   <p:cSld><p:spTree>
     <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
     <p:grpSpPr/>
+    {layout_shape}
   </p:spTree></p:cSld>
 </p:sldLayout>"#
         );
@@ -6405,15 +6437,18 @@ mod tests {
   <Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
 </Relationships>"#;
 
-        let slide_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        let slide_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
   xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
   xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
   <p:cSld><p:spTree>
     <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
     <p:grpSpPr/>
+    {slide_shape}
   </p:spTree></p:cSld>
-</p:sld>"#;
+</p:sld>"#
+        );
 
         let slide_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -6456,7 +6491,7 @@ mod tests {
     /// and the slide has no elements.
     #[test]
     fn master_sptree_pic_appears_on_slide() {
-        let data = build_master_sp_pptx(None);
+        let data = build_master_sp_pptx(None, false);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
 
@@ -6481,13 +6516,43 @@ mod tests {
             .iter()
             .any(|e| matches!(e, SlideElement::Shape(_)));
         assert!(has_band, "master decorative shape should be rendered");
+        assert_eq!(slide.element_sources.len(), slide.elements.len());
+        assert!(
+            slide
+                .element_sources
+                .iter()
+                .all(|source| { source.origin == SlideElementOrigin::Master }),
+            "every inherited master decoration must retain master provenance"
+        );
+    }
+
+    #[test]
+    fn element_sources_distinguish_composite_paint_origins() {
+        let data = build_master_sp_pptx(None, true);
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
+        let slide = &pres.slides[0];
+
+        assert_eq!(slide.element_sources.len(), slide.elements.len());
+        assert_eq!(
+            slide
+                .element_sources
+                .iter()
+                .map(|source| source.origin)
+                .collect::<Vec<_>>(),
+            vec![
+                SlideElementOrigin::Master,
+                SlideElementOrigin::Master,
+                SlideElementOrigin::Layout,
+                SlideElementOrigin::Slide,
+            ],
+        );
     }
 
     /// §19.3.1.39: a layout with showMasterSp="0" suppresses the master's
     /// decorative shapes for slides using that layout.
     #[test]
     fn master_sptree_hidden_when_layout_show_master_sp_false() {
-        let data = build_master_sp_pptx(Some(false));
+        let data = build_master_sp_pptx(Some(false), false);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
 
@@ -6510,7 +6575,7 @@ mod tests {
     /// guards against an inverted boolean parse.
     #[test]
     fn master_sptree_shown_when_layout_show_master_sp_true() {
-        let data = build_master_sp_pptx(Some(true));
+        let data = build_master_sp_pptx(Some(true), false);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
         assert!(
@@ -8694,7 +8759,7 @@ mod tests {
             retained_ptr,
             "prepared bytes move; they are not cloned"
         );
-        const FIXED_SLIDE_3: &str = r#"{"index":2,"slideNumber":3,"partName":"ppt/slides/slide3.xml","background":null,"elements":[{"type":"shape","x":0,"y":0,"width":1000000,"height":1000000,"rotation":0.0,"flipH":false,"flipV":false,"geometry":"rect","fill":null,"stroke":null,"textBody":{"verticalAnchor":"t","paragraphs":[{"alignment":"l","marL":0,"marR":0,"indent":0,"spaceBefore":null,"spaceAfter":null,"spaceLine":null,"lvl":0,"bullet":{"type":"inherit"},"defFontSize":null,"defColor":null,"defBold":null,"defItalic":null,"defFontFamily":null,"tabStops":[],"eaLnBrk":true,"runs":[{"type":"text","text":"slide 3","bold":null,"italic":null,"underline":false,"strikethrough":false,"fontSize":null,"color":null,"fontFamily":null,"fieldType":null}]}],"defaultFontSize":null,"defaultBold":null,"defaultItalic":null,"lIns":91440,"rIns":91440,"tIns":45720,"bIns":45720,"wrap":"square","vert":"horz","autoFit":"none"},"defaultTextColor":null,"custGeom":null,"adj":null,"adj2":null,"adj3":null,"adj4":null,"adj5":null,"adj6":null,"adj7":null,"adj8":null,"shadow":null,"id":"2","name":"T"}]}"#;
+        const FIXED_SLIDE_3: &str = r#"{"index":2,"slideNumber":3,"partName":"ppt/slides/slide3.xml","background":null,"elements":[{"type":"shape","x":0,"y":0,"width":1000000,"height":1000000,"rotation":0.0,"flipH":false,"flipV":false,"geometry":"rect","fill":null,"stroke":null,"textBody":{"verticalAnchor":"t","paragraphs":[{"alignment":"l","marL":0,"marR":0,"indent":0,"spaceBefore":null,"spaceAfter":null,"spaceLine":null,"lvl":0,"bullet":{"type":"inherit"},"defFontSize":null,"defColor":null,"defBold":null,"defItalic":null,"defFontFamily":null,"tabStops":[],"eaLnBrk":true,"runs":[{"type":"text","text":"slide 3","bold":null,"italic":null,"underline":false,"strikethrough":false,"fontSize":null,"color":null,"fontFamily":null,"fieldType":null}]}],"defaultFontSize":null,"defaultBold":null,"defaultItalic":null,"lIns":91440,"rIns":91440,"tIns":45720,"bIns":45720,"wrap":"square","vert":"horz","autoFit":"none"},"defaultTextColor":null,"custGeom":null,"adj":null,"adj2":null,"adj3":null,"adj4":null,"adj5":null,"adj6":null,"adj7":null,"adj8":null,"shadow":null,"id":"2","name":"T"}],"elementSources":[{"origin":"slide"}]}"#;
         assert_eq!(bytes, FIXED_SLIDE_3.as_bytes());
         let legacy: serde_json::Value =
             serde_json::from_str(&parse_pptx_native(&legacy_data).unwrap()).unwrap();

@@ -2,6 +2,11 @@ import { vi } from 'vitest';
 import type { PptxPresentation, RenderSlideOptions, RenderSlideToBitmapOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
+import type {
+  PptxElementContextOptions,
+  PptxElementSelectionContext,
+  PptxSlidePoint,
+} from './element-selection';
 import { PptxScrollViewer, type PptxScrollViewerOptions } from './scroll-viewer';
 
 /** Test-only adapter for mechanics cases that need a preloaded engine. Public
@@ -28,6 +33,7 @@ export interface FakeEl {
   tagName: string;
   textContent: string;
   innerHTML: string;
+  dataset: Record<string, string>;
   style: Record<string, string> & { cssText: string };
   children: FakeEl[];
   parentElement: FakeEl | null;
@@ -62,6 +68,7 @@ export interface FakeEl {
   appendChild(c: FakeEl): FakeEl;
   removeChild(c: FakeEl): FakeEl;
   remove(): void;
+  contains(other: FakeEl | null): boolean;
   insertBefore(n: FakeEl, ref: FakeEl | null): FakeEl;
   addEventListener(type: string, fn: (e: unknown) => void, opts?: unknown): void;
   removeEventListener(type: string, fn: (e: unknown) => void): void;
@@ -80,6 +87,7 @@ export function makeEl(tag: string): FakeEl {
     tagName: tag.toUpperCase(),
     textContent: '',
     innerHTML: '',
+    dataset: {},
     width: 0,
     height: 0,
     scrollTop: 0,
@@ -130,6 +138,9 @@ export function makeEl(tag: string): FakeEl {
     },
     remove() {
       this.parentElement?.removeChild(this);
+    },
+    contains(other: FakeEl | null) {
+      return other === this || this.children.some((child) => child.contains(other));
     },
     insertBefore(n: FakeEl, ref: FakeEl | null) {
       // Real-DOM pre-insert validity: a non-null reference that is not a child
@@ -317,6 +328,12 @@ export class FakePptxEngine {
    *  worker path now ships runs back beside the bitmap, so the stub mirrors that
    *  by replaying `feedTextRuns` to `renderSlideToBitmap`'s `onTextRun` too. */
   feedTextRuns?: PptxTextRunInfo[];
+  elementContext: PptxElementSelectionContext | null = null;
+  elementContextCalls: Array<{
+    slideIndex: number;
+    point: PptxSlidePoint;
+    options: PptxElementContextOptions;
+  }> = [];
   constructor(
     private _slideCount: number,
     public readonly slideWidth: number, // EMU, deck-wide (uniform)
@@ -423,6 +440,18 @@ export class FakePptxEngine {
    *  `PptxPresentation.collectSlideRuns`). Returns the fed runs regardless of mode. */
   collectSlideRuns(_slide: number, _width?: number): Promise<PptxTextRunInfo[]> {
     return Promise.resolve([...(this.feedTextRuns ?? [])]);
+  }
+  getElementContextAt(
+    slideIndex: number,
+    point: PptxSlidePoint,
+    options: PptxElementContextOptions = {},
+  ): Promise<PptxElementSelectionContext | null> {
+    this.elementContextCalls.push({ slideIndex, point, options });
+    return Promise.resolve(this.elementContext ? {
+      ...structuredClone(this.elementContext),
+      slideIndex,
+      point: { ...point },
+    } : null);
   }
   /** The per-call `width` (px) recorded for every renderSlide call, in call order.
    *  T3 asserts each mounted slide received its OWN px width. */

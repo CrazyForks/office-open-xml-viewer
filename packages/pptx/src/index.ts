@@ -8,6 +8,19 @@ export {
 } from './presentation';
 export { renderSlide, type RenderOptions, type PptxTextRunInfo, type TextRunCallback } from './renderer';
 export { buildPptxTextLayer } from './text-layer';
+export {
+  readPptxTextSelectionContext,
+  type PptxSelectionRunLocator,
+  type PptxTextSelectionContext,
+} from './selection-context';
+export {
+  type PptxElementContextOptions,
+  type PptxElementSelectionContext,
+  type PptxSelectionContext,
+  type PptxSelectionContextOptions,
+  type PptxSlidePoint,
+} from './element-selection';
+export type { TextSelectionContextOptions } from '@silurus/ooxml-core';
 // IX2 find-in-document: the highlight overlay builder + the pptx match-location
 // shape. `FindMatch` / `FindMatchesOptions` come from core (shared across formats).
 export {
@@ -50,6 +63,8 @@ export {
 export type {
   Presentation,
   Slide,
+  SlideElementOrigin,
+  SlideElementSource,
   // Reachable via Slide.comments — exported so consumers reading legacy slide
   // comments have a name for the element type.
   PptxComment,

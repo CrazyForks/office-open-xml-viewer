@@ -10,6 +10,18 @@ import type { PptxTextRunInfo } from './renderer';
 import { buildPptxTextLayer } from './text-layer';
 import { PptxFindController, type PptxMatchLocation } from './find';
 import { buildPptxHighlightLayer } from './find-highlight-layer';
+import {
+  readPptxTextSelectionContext,
+} from './selection-context';
+import type {
+  PptxElementSelectionContext,
+  PptxSelectionContext,
+  PptxSelectionContextOptions,
+} from './element-selection';
+import {
+  limitPptxElementSelectionContext,
+  MAX_ELEMENT_TEXT_CHARACTERS,
+} from './element-selection';
 
 /**
  * Debounce window (ms) after the last `setScale` in a zoom burst before the
@@ -87,6 +99,12 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    *  shipped back beside the slide bitmap, so the overlay is populated identically
    *  to main mode (no more empty overlay / one-time warning). */
   enableTextSelection?: boolean;
+  /** Enable read-only click focus for slide elements. Default false. */
+  enableElementSelection?: boolean;
+  /** Straight-line hit tolerance in CSS pixels. Default 6. */
+  elementHitTolerance?: number;
+  /** Emits bounded, detached text or element context for read-only AI/MCP use. */
+  onSelectionContextChange?: (context: PptxSelectionContext | null) => void;
   /** CSS backgrounds for ordinary and active in-document search matches. */
   findHighlightColors?: FindHighlightColors;
   /**
@@ -265,6 +283,12 @@ export class PptxScrollViewer implements ZoomableViewer {
   private _lastRange: VisibleRange | null = null;
   private _lastTopIndex = -1;
   private _scrollListener: (() => void) | null = null;
+  private _selectionChangeListener: (() => void) | null = null;
+  private _selectionContextKey = 'null';
+  private _elementClickListener: ((event: MouseEvent) => void) | null = null;
+  private _elementSelectionContext: PptxElementSelectionContext | null = null;
+  private _elementHitGeneration = 0;
+  private readonly _elementHitTolerance: number;
   /** Set by `destroy()`. Async render callbacks (main + worker) check it before
    *  reporting an error so a rejection that lands after teardown is swallowed
    *  rather than surfaced to a `onError` on a dead viewer. */
@@ -366,6 +390,11 @@ export class PptxScrollViewer implements ZoomableViewer {
     }
     this._container = container;
     this._opts = opts;
+    const elementHitTolerance = opts.elementHitTolerance ?? 6;
+    if (!Number.isFinite(elementHitTolerance) || elementHitTolerance < 0) {
+      throw new RangeError('elementHitTolerance must be a finite non-negative number.');
+    }
+    this._elementHitTolerance = elementHitTolerance;
     // `??` (not `||`): a caller's explicit `false` must disable the shadow, not
     // fall through to the default.
     this._pageShadow = opts.pageShadow ?? DEFAULT_PAGE_SHADOW;
@@ -397,6 +426,15 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._scrollHost.appendChild(this._spacer);
     this._wrapper.appendChild(this._scrollHost);
     this._container.appendChild(this._wrapper);
+
+    if (opts.enableTextSelection && opts.onSelectionContextChange) {
+      this._selectionChangeListener = () => this._emitSelectionContextChange();
+      this._wrapper.ownerDocument.addEventListener('selectionchange', this._selectionChangeListener);
+    }
+    if (opts.enableElementSelection) {
+      this._elementClickListener = (event) => { void this._onElementClick(event); };
+      this._scrollHost.addEventListener('click', this._elementClickListener);
+    }
 
     this._scrollListener = () => this._onScroll();
     this._scrollHost.addEventListener('scroll', this._scrollListener);
@@ -845,6 +883,7 @@ export class PptxScrollViewer implements ZoomableViewer {
   }
 
   private _positionSlot(slot: SlideSlot, i: number, r: VisibleRange): void {
+    slot.wrapper.dataset.slideIndex = String(i);
     slot.wrapper.style.top = `${r.offsets[i]}px`;
     const wpx = this._slideWidthPx();
     slot.wrapper.style.width = `${wpx}px`;
@@ -959,7 +998,7 @@ export class PptxScrollViewer implements ZoomableViewer {
           // overlay 2× too large (overflowing the wrapper + inflating the scroll
           // area). Pass the CSS px directly — the uniform slide width/height at the
           // current scale (rounded).
-          buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), this._hyperlinkHandler());
+          buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), this._hyperlinkHandler(), i);
         }
         if (wantRuns) this._refreshFindRuns(i, runs);
         this._redrawSlotHighlights(i, slot);
@@ -1030,6 +1069,7 @@ export class PptxScrollViewer implements ZoomableViewer {
             Math.round(widthPx),
             Math.round(this._slideHeightPx()),
             this._hyperlinkHandler(),
+            i,
           );
         }
         if (wantRuns) this._refreshFindRuns(i, runs);
@@ -1184,6 +1224,7 @@ export class PptxScrollViewer implements ZoomableViewer {
             Math.round(widthPx),
             Math.round(this._slideHeightPx()),
             this._hyperlinkHandler(),
+            i,
           );
         }
       }
@@ -1636,7 +1677,7 @@ export class PptxScrollViewer implements ZoomableViewer {
           if (wantOverlay) {
             // buildPptxTextLayer takes NUMBERS: pass the CSS box (uniform slide
             // width/height at the current scale), NOT the retina backing store.
-            buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), this._hyperlinkHandler());
+            buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), this._hyperlinkHandler(), i);
           }
         }
         if (wantRuns) this._refreshFindRuns(i, runs);
@@ -1719,6 +1760,7 @@ export class PptxScrollViewer implements ZoomableViewer {
               Math.round(widthPx),
               Math.round(this._slideHeightPx()),
               this._hyperlinkHandler(),
+              i,
             );
           }
         }
@@ -2050,6 +2092,75 @@ export class PptxScrollViewer implements ZoomableViewer {
     return await this._pres.getResourceMetrics();
   }
 
+  /** Return the current mounted browser text selection with PPTX source locators. */
+  getSelectionContext(options: PptxSelectionContextOptions = {}): PptxSelectionContext | null {
+    if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
+    const text = this._opts.enableTextSelection
+      ? readPptxTextSelectionContext(
+          this._wrapper,
+          this._wrapper.ownerDocument.getSelection(),
+          options,
+        )
+      : null;
+    return text ?? (this._elementSelectionContext
+      ? limitPptxElementSelectionContext(
+          this._elementSelectionContext,
+          options.maxTextCharacters,
+        )
+      : null);
+  }
+
+  private _emitSelectionContextChange(): void {
+    const context = this.getSelectionContext();
+    if (context?.kind === 'text') this._elementSelectionContext = null;
+    const key = JSON.stringify(context);
+    if (key === this._selectionContextKey) return;
+    this._selectionContextKey = key;
+    this._opts.onSelectionContextChange?.(context ? structuredClone(context) : null);
+  }
+
+  private _setElementSelectionContext(context: PptxElementSelectionContext | null): void {
+    this._elementSelectionContext = context ? structuredClone(context) : null;
+    this._emitSelectionContextChange();
+  }
+
+  private async _onElementClick(event: MouseEvent): Promise<void> {
+    if (this._destroyed || event.defaultPrevented || event.button !== 0 || !this._pres) return;
+    if (this._opts.enableTextSelection && readPptxTextSelectionContext(
+      this._wrapper,
+      this._wrapper.ownerDocument.getSelection(),
+    )) return;
+    const target = event.target as Node | null;
+    const entry = [...this._slots].find(([, slot]) => target !== null && slot.wrapper.contains(target));
+    if (!entry) {
+      this._setElementSelectionContext(null);
+      return;
+    }
+    const [slideIndex, slot] = entry;
+    const rect = slot.canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const localX = event.clientX - rect.left;
+    const localY = event.clientY - rect.top;
+    if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) return;
+    const generation = ++this._elementHitGeneration;
+    const point = {
+      x: localX / rect.width * this._pres.slideWidth,
+      y: localY / rect.height * this._pres.slideHeight,
+    };
+    let context: PptxElementSelectionContext | null;
+    try {
+      context = await this._pres.getElementContextAt(slideIndex, point, {
+        tolerance: this._elementHitTolerance / rect.width * this._pres.slideWidth,
+        maxTextCharacters: MAX_ELEMENT_TEXT_CHARACTERS,
+      });
+    } catch (error) {
+      if (!this._destroyed && generation === this._elementHitGeneration) this._reportRenderError(error);
+      return;
+    }
+    if (this._destroyed || generation !== this._elementHitGeneration) return;
+    this._setElementSelectionContext(context);
+  }
+
   /**
    * Tear down the viewer: remove the DOM subtree and (only for a self-loaded
    * engine) destroy the engine. A borrowed engine is left intact — the caller
@@ -2060,6 +2171,16 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._destroyed = true;
     this._find.invalidate();
     this._findActive = false;
+    if (this._selectionChangeListener) {
+      this._wrapper.ownerDocument.removeEventListener('selectionchange', this._selectionChangeListener);
+      this._selectionChangeListener = null;
+    }
+    this._elementHitGeneration++;
+    if (this._elementClickListener) {
+      this._scrollHost.removeEventListener('click', this._elementClickListener);
+      this._elementClickListener = null;
+    }
+    this._elementSelectionContext = null;
     if (this._scrollListener) {
       this._scrollHost.removeEventListener('scroll', this._scrollListener);
       this._scrollListener = null;

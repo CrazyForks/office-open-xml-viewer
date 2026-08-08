@@ -1,12 +1,89 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CanvasViewerErrorRouter,
+  readBoundedNativeTextSelection,
   resolveCanvasViewerMode,
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
 } from './canvas-viewer-mechanics.js';
 
 afterEach(() => vi.restoreAllMocks());
+
+describe('readBoundedNativeTextSelection', () => {
+  function fixture(endInside = true, endOnSelectionSurface = endInside) {
+    const insideStart = {} as Node;
+    const insideEnd = {} as Node;
+    const outside = {} as Node;
+    const runs = [
+      { dataset: { run: '0' } },
+      { dataset: { run: '1' } },
+    ] as unknown as HTMLElement[];
+    const range = {
+      startContainer: insideStart,
+      endContainer: endInside ? insideEnd : outside,
+      intersectsNode: (node: Node) => node === runs[0] || node === runs[1],
+    } as unknown as Range;
+    const surface = {
+      contains: (node: Node) =>
+        node === insideStart || endOnSelectionSurface && node === insideEnd,
+    } as unknown as HTMLElement;
+    const root = {
+      contains: (node: Node) => node === insideStart || node === insideEnd,
+      matches: () => false,
+      querySelectorAll: (selector: string) =>
+        selector === '[data-ooxml-selection-surface]' ? [surface] : runs,
+    } as unknown as HTMLElement;
+    const selection = {
+      isCollapsed: false,
+      rangeCount: 1,
+      getRangeAt: () => range,
+      toString: () => 'selected text',
+    } as unknown as Selection;
+    return { root, selection };
+  }
+
+  it('returns bounded text and detached run locators', () => {
+    const { root, selection } = fixture();
+    expect(readBoundedNativeTextSelection(
+      root,
+      selection,
+      (run) => ({ run: Number(run.dataset.run) }),
+      { maxChars: 8, maxLocators: 1 },
+    )).toEqual({
+      text: 'selected',
+      locators: [{ run: 0 }],
+      truncated: true,
+      truncationReasons: ['text', 'runs'],
+      textCharacters: 8,
+      maxTextCharacters: 8,
+      maxLocators: 1,
+    });
+  });
+
+  it('rejects a range crossing outside the Viewer root', () => {
+    const { root, selection } = fixture(false);
+    expect(readBoundedNativeTextSelection(root, selection, () => ({ run: 0 }))).toBeNull();
+  });
+
+  it('rejects Viewer chrome text outside the tagged selection surface', () => {
+    const { root, selection } = fixture(true, false);
+    expect(readBoundedNativeTextSelection(root, selection, () => ({ run: 0 }))).toBeNull();
+  });
+
+  it('preserves Unicode boundaries and validates public resource limits', () => {
+    const { root, selection } = fixture();
+    Object.assign(selection, { toString: () => '\ud83d\ude00x' });
+    expect(readBoundedNativeTextSelection(
+      root, selection, (run) => ({ run: Number(run.dataset.run) }), { maxChars: 1 },
+    )?.text).toBe('');
+    expect(readBoundedNativeTextSelection(
+      root, selection, (run) => ({ run: Number(run.dataset.run) }), { maxChars: 2 },
+    )?.text).toBe('\ud83d\ude00');
+    expect(() => readBoundedNativeTextSelection(
+      root, selection, () => ({ run: 0 }), { maxChars: Number.NaN },
+    )).toThrow(/maxTextCharacters/);
+  });
+});
 
 describe('resolveCanvasViewerMode', () => {
   it('uses the borrowed engine mode and rejects only an explicit conflict', () => {

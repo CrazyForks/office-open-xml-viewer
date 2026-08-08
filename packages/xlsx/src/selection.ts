@@ -59,6 +59,8 @@ export interface XlsxSelectionContextCell {
  */
 export interface XlsxSelectionContext {
   readonly format: 'xlsx';
+  /** Discriminant shared with DOCX/PPTX selection-context snapshots. */
+  readonly kind: 'range';
   readonly sheetIndex: number;
   readonly sheetName: string;
   readonly selection: XlsxSelectionState;

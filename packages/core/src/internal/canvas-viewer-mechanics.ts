@@ -6,6 +6,100 @@
 
 export type CanvasRestoreMode = 'display' | 'style-and-bitmap';
 
+export const MAX_NATIVE_TEXT_SELECTION_CHARS = 65_536;
+export const MAX_NATIVE_TEXT_SELECTION_LOCATORS = 1_024;
+
+export interface BoundedNativeTextSelection<TLocator> {
+  readonly text: string;
+  readonly locators: readonly TLocator[];
+  readonly truncated: boolean;
+  readonly truncationReasons: readonly ('text' | 'runs')[];
+  readonly textCharacters: number;
+  readonly maxTextCharacters: number;
+  readonly maxLocators: number;
+}
+
+function boundedSelectionLimit(value: number | undefined, maximum: number, name: string): number {
+  const requested = value ?? maximum;
+  if (!Number.isFinite(requested) || requested < 0) {
+    throw new RangeError(`${name} must be a finite non-negative number.`);
+  }
+  return Math.min(maximum, Math.floor(requested));
+}
+
+function safeUtf16Prefix(value: string, maxCodeUnits: number): string {
+  let end = Math.min(value.length, maxCodeUnits);
+  if (end > 0 && end < value.length) {
+    const previous = value.charCodeAt(end - 1);
+    const next = value.charCodeAt(end);
+    if (previous >= 0xD800 && previous <= 0xDBFF && next >= 0xDC00 && next <= 0xDFFF) end--;
+  }
+  return value.slice(0, end);
+}
+
+/**
+ * Read a browser-native text selection only when every range endpoint belongs
+ * to this Viewer. This prevents a cross-DOM selection from leaking adjacent
+ * page content into an AI/MCP context. Locators come only from tagged run spans
+ * intersected by the native ranges and are detached by the caller's mapper.
+ */
+export function readBoundedNativeTextSelection<TLocator>(
+  root: HTMLElement,
+  selection: Selection | null,
+  locatorForRun: (run: HTMLElement) => TLocator | null,
+  options: Readonly<{ maxChars?: number; maxLocators?: number }> = {},
+): BoundedNativeTextSelection<TLocator> | null {
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+  const selectionSurfaces = [
+    ...(root.matches?.('[data-ooxml-selection-surface]') ? [root] : []),
+    ...root.querySelectorAll<HTMLElement>('[data-ooxml-selection-surface]'),
+  ];
+  if (selectionSurfaces.length === 0) return null;
+  const isOnSelectionSurface = (node: Node) =>
+    selectionSurfaces.some((surface) => surface.contains(node));
+  const ranges: Range[] = [];
+  for (let index = 0; index < selection.rangeCount; index++) {
+    const range = selection.getRangeAt(index);
+    if (!root.contains(range.startContainer) || !root.contains(range.endContainer) ||
+        !isOnSelectionSurface(range.startContainer) ||
+        !isOnSelectionSurface(range.endContainer)) return null;
+    ranges.push(range);
+  }
+  const rawText = selection.toString();
+  if (rawText.length === 0) return null;
+  const maxChars = boundedSelectionLimit(
+    options.maxChars, MAX_NATIVE_TEXT_SELECTION_CHARS, 'maxTextCharacters',
+  );
+  const maxLocators = boundedSelectionLimit(
+    options.maxLocators, MAX_NATIVE_TEXT_SELECTION_LOCATORS, 'maxRunLocators',
+  );
+  const locators: TLocator[] = [];
+  let locatorOverflow = false;
+  for (const candidate of root.querySelectorAll<HTMLElement>('[data-ooxml-selection-run]')) {
+    if (!ranges.some((range) => {
+      try { return range.intersectsNode(candidate); } catch { return false; }
+    })) continue;
+    const locator = locatorForRun(candidate);
+    if (locator === null) continue;
+    if (locators.length >= maxLocators) { locatorOverflow = true; break; }
+    locators.push(structuredClone(locator));
+  }
+  if (locators.length === 0 && !locatorOverflow) return null;
+  const text = safeUtf16Prefix(rawText, maxChars);
+  return {
+    text,
+    locators,
+    truncated: rawText.length > maxChars || locatorOverflow,
+    truncationReasons: [
+      ...(rawText.length > maxChars ? ['text' as const] : []),
+      ...(locatorOverflow ? ['runs' as const] : []),
+    ],
+    textCharacters: text.length,
+    maxTextCharacters: maxChars,
+    maxLocators,
+  };
+}
+
 export interface CallerCanvasMountOptions {
   readonly wrapperCssText: string;
   readonly forceDisplayBlock?: boolean;

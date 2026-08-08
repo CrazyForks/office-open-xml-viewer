@@ -32,6 +32,18 @@ import {
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
+import {
+  readPptxTextSelectionContext,
+} from './selection-context';
+import type {
+  PptxElementSelectionContext,
+  PptxSelectionContext,
+  PptxSelectionContextOptions,
+} from './element-selection';
+import {
+  limitPptxElementSelectionContext,
+  MAX_ELEMENT_TEXT_CHARACTERS,
+} from './element-selection';
 
 const borrowedPresentationOption = Symbol('PptxViewer.borrowedPresentation');
 type InternalPptxViewerOptions = PptxViewerOptions & {
@@ -85,6 +97,12 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
    * browser's native text selection works on slide content.
    */
   enableTextSelection?: boolean;
+  /** Enable read-only click focus for slide elements. Default false. */
+  enableElementSelection?: boolean;
+  /** Straight-line hit tolerance in CSS pixels. Default 6. */
+  elementHitTolerance?: number;
+  /** Emits bounded, detached text or element context for read-only AI/MCP use. */
+  onSelectionContextChange?: (context: PptxSelectionContext | null) => void;
   /** CSS backgrounds for ordinary and active in-document search matches. */
   findHighlightColors?: FindHighlightColors;
   /**
@@ -169,6 +187,12 @@ export class PptxViewer implements ZoomableViewer {
   private readonly renderDispatcher: StaticCanvasRenderDispatcher;
   private readonly errorRouter: CanvasViewerErrorRouter;
   private destroyed = false;
+  private selectionChangeListener: (() => void) | null = null;
+  private selectionContextKey = 'null';
+  private elementClickListener: ((event: MouseEvent) => void) | null = null;
+  private elementSelectionContext: PptxElementSelectionContext | null = null;
+  private elementHitGeneration = 0;
+  private readonly elementHitTolerance: number;
   /**
    * Create a Viewer that borrows an already-loaded presentation.
    *
@@ -202,6 +226,11 @@ export class PptxViewer implements ZoomableViewer {
       (typeof window !== 'undefined' ? window : null);
     if (!hostWindow) throw new Error('PptxViewer requires a canvas with an active Window');
     this.hostWindow = hostWindow;
+    const elementHitTolerance = opts.elementHitTolerance ?? 6;
+    if (!Number.isFinite(elementHitTolerance) || elementHitTolerance < 0) {
+      throw new RangeError('elementHitTolerance must be a finite non-negative number.');
+    }
+    this.elementHitTolerance = elementHitTolerance;
     this._hiddenMode = opts.hiddenSlideMode ?? 'show';
 
     this.canvasMount = new CallerCanvasMount(canvas, {
@@ -217,6 +246,14 @@ export class PptxViewer implements ZoomableViewer {
     const overlays = new CanvasOverlayHost(this.wrapper, opts.enableTextSelection === true);
     this.textLayer = overlays.textLayer;
     this.highlightLayer = overlays.highlightLayer;
+    if (this.textLayer && opts.onSelectionContextChange) {
+      this.selectionChangeListener = () => this._emitSelectionContextChange();
+      this.wrapper.ownerDocument.addEventListener('selectionchange', this.selectionChangeListener);
+    }
+    if (opts.enableElementSelection) {
+      this.elementClickListener = (event) => { void this._onElementClick(event); };
+      this.wrapper.addEventListener('click', this.elementClickListener);
+    }
 
     this._find = new PptxFindController(
       () => this.slideCount,
@@ -290,7 +327,9 @@ export class PptxViewer implements ZoomableViewer {
   /** Navigate to a specific slide (0-indexed). */
   async goToSlide(index: number): Promise<void> {
     if (!this.engine || this.slideCount === 0) return;
-    this.currentSlide = Math.max(0, Math.min(index, this.slideCount - 1));
+    const next = Math.max(0, Math.min(index, this.slideCount - 1));
+    if (next !== this.currentSlide) this._setElementSelectionContext(null);
+    this.currentSlide = next;
     await this.renderCurrentSlide();
   }
 
@@ -637,7 +676,9 @@ export class PptxViewer implements ZoomableViewer {
   }
 
   private _buildTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
-    buildPptxTextLayer(layer, runs, cssWidth, cssHeight, this._hyperlinkHandler());
+    buildPptxTextLayer(
+      layer, runs, cssWidth, cssHeight, this._hyperlinkHandler(), this.currentSlide,
+    );
   }
 
   /**
@@ -705,6 +746,73 @@ export class PptxViewer implements ZoomableViewer {
     return await this.engine.getResourceMetrics();
   }
 
+  /** Return the current browser text selection with PPTX source locators. */
+  getSelectionContext(options: PptxSelectionContextOptions = {}): PptxSelectionContext | null {
+    if (this.destroyed) throw new Error('PptxViewer is destroyed');
+    const text = this.textLayer
+      ? readPptxTextSelectionContext(
+          this.wrapper,
+          this.wrapper.ownerDocument.getSelection(),
+          options,
+        )
+      : null;
+    return text ?? (this.elementSelectionContext
+      ? limitPptxElementSelectionContext(
+          this.elementSelectionContext,
+          options.maxTextCharacters,
+        )
+      : null);
+  }
+
+  private _emitSelectionContextChange(): void {
+    const context = this.getSelectionContext();
+    // Native text selection becomes the sole current focus. Do not resurrect a
+    // previously clicked element when that browser selection later collapses.
+    if (context?.kind === 'text') this.elementSelectionContext = null;
+    const key = JSON.stringify(context);
+    if (key === this.selectionContextKey) return;
+    this.selectionContextKey = key;
+    this.opts.onSelectionContextChange?.(context ? structuredClone(context) : null);
+  }
+
+  private _setElementSelectionContext(context: PptxElementSelectionContext | null): void {
+    this.elementSelectionContext = context ? structuredClone(context) : null;
+    this._emitSelectionContextChange();
+  }
+
+  private async _onElementClick(event: MouseEvent): Promise<void> {
+    if (this.destroyed || event.defaultPrevented || event.button !== 0 || !this.engine) return;
+    if (this.textLayer && readPptxTextSelectionContext(
+      this.wrapper,
+      this.wrapper.ownerDocument.getSelection(),
+    )) return;
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const localX = event.clientX - rect.left;
+    const localY = event.clientY - rect.top;
+    if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) return;
+    const generation = ++this.elementHitGeneration;
+    const slideIndex = this.currentSlide;
+    const point = {
+      x: localX / rect.width * this.engine.slideWidth,
+      y: localY / rect.height * this.engine.slideHeight,
+    };
+    let context: PptxElementSelectionContext | null;
+    try {
+      context = await this.engine.getElementContextAt(slideIndex, point, {
+        tolerance: this.elementHitTolerance / rect.width * this.engine.slideWidth,
+        maxTextCharacters: MAX_ELEMENT_TEXT_CHARACTERS,
+      });
+    } catch (error) {
+      if (!this.destroyed && generation === this.elementHitGeneration) this._reportRenderError(error);
+      return;
+    }
+    if (this.destroyed || generation !== this.elementHitGeneration || slideIndex !== this.currentSlide) return;
+    // Keep consumer callback exceptions outside the engine-error path. They are
+    // application failures, not presentation/render failures.
+    this._setElementSelectionContext(context);
+  }
+
   /**
    * Clean up the viewer and terminate the background worker.
    *
@@ -731,6 +839,16 @@ export class PptxViewer implements ZoomableViewer {
     // findNext()/findPrev() after teardown returns null instead of a match
     // pointing into a dead viewer.
     this._find.invalidate();
+    if (this.selectionChangeListener) {
+      this.wrapper.ownerDocument.removeEventListener('selectionchange', this.selectionChangeListener);
+      this.selectionChangeListener = null;
+    }
+    this.elementHitGeneration++;
+    if (this.elementClickListener) {
+      this.wrapper.removeEventListener('click', this.elementClickListener);
+      this.elementClickListener = null;
+    }
+    this.elementSelectionContext = null;
     this.canvasMount.restore();
   }
 }
