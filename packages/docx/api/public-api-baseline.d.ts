@@ -344,6 +344,7 @@ export interface DocParagraph {
     markVanish?: boolean;
     widowControl?: boolean;
     overflowPunct?: boolean;
+    adjustRightInd?: boolean;
     borders?: ParagraphBorders | null;
     styleId?: string | null;
     defaultFontSize?: number;
