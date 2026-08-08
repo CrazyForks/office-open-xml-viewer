@@ -106,9 +106,10 @@ export interface DocSettings {
   /** §17.15.1.18 `w:characterSpacingControl@w:val` — East Asian punctuation /
    *  character-spacing control. */
   characterSpacingControl?: string;
-  /** §17.15.3.1 `w:compat/w:useFELayout` — Far East layout compatibility. */
+  /** ECMA-376 Part 4 §14.8.3.50 `w:compat/w:useFELayout` — Far East layout
+   * compatibility. */
   useFeLayout?: boolean;
-  /** §17.15.3.1 `w:compat/w:balanceSingleByteDoubleByteWidth` — balance
+  /** §17.15.3.3 `w:compat/w:balanceSingleByteDoubleByteWidth` — balance
    *  single-byte and double-byte widths for East Asian layout. */
   balanceSingleByteDoubleByteWidth?: boolean;
   /** §17.15.3.1 `w:compat/w:adjustLineHeightInTable` — apply the section

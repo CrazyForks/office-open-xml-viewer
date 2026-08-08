@@ -196,6 +196,41 @@ describe('table intrinsic content widths', () => {
     )).toEqual({ minWidthPt: 7, maxWidthPt: 12 });
   });
 
+  it('uses the balanced space cells and SBCS grid delta for intrinsic width', () => {
+    const source = paragraph([textRun('AB  ')]);
+    const context = measuringContext((text) => [...text].reduce(
+      (sum, character) => sum + (character === ' ' ? 3 : character === '一' ? 10 : 5),
+      0,
+    ));
+
+    expect(measureParagraphIntrinsicWidths(
+      source,
+      intrinsicContext({
+        characterGrid: {
+          active: true,
+          kind: 'linesAndChars',
+          pitchPt: 3,
+          deltaPt: -2,
+        },
+      }),
+      200,
+      { context, fontFamilyClasses: {} },
+      {
+        pageIndex: 0,
+        totalPages: 1,
+        pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: true,
+        balanceSingleByteDoubleByteWidth: true,
+        layoutServices: createLayoutServices(model([]), { measureContext: context }),
+      },
+    )).toEqual({
+      // The breakable trailing-space sequence is excluded from the minimum;
+      // the unbroken maximum retains both balanced half-width cells.
+      minWidthPt: 8,
+      maxWidthPt: 16,
+    });
+  });
+
   it('uses per-grapheme whole-cell allocation for snapToChars intrinsic widths', () => {
     const source = paragraph([textRun('漢字')]);
 

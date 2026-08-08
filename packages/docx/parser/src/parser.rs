@@ -15627,7 +15627,8 @@ mod math_jc_tests {
         assert!(parse_document_settings(empty).is_none());
     }
 
-    // ECMA-376 §17.15.1.18 / §17.15.3.1 — East Asian compatibility settings
+    // ECMA-376 Part 1 §17.15.1.18 / §17.15.3.3 and Part 4 §14.8.3.50 — East
+    // Asian compatibility settings
     // must surface to the renderer instead of being discarded at parse time.
     #[test]
     fn settings_east_asian_compat_flags_surface() {
@@ -15648,6 +15649,13 @@ mod math_jc_tests {
         );
         assert_eq!(s.use_fe_layout, Some(true));
         assert_eq!(s.balance_single_byte_double_byte_width, Some(false));
+
+        let enabled_xml = format!(
+            r#"<w:settings xmlns:w="{w}"><w:compat><w:balanceSingleByteDoubleByteWidth/></w:compat></w:settings>"#,
+            w = W_NS
+        );
+        let enabled = parse_document_settings(&enabled_xml).expect("enabled balance setting");
+        assert_eq!(enabled.balance_single_byte_double_byte_width, Some(true));
     }
 
     #[test]

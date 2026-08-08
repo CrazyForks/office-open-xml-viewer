@@ -319,6 +319,66 @@ export const WORD_CONSECUTIVE_SPACE_NATURAL_ADVANCE = defineCompatibilityRule({
   description: 'When visible text follows two or more authored consecutive spaces, Word preserves the sequence at natural advance instead of using it as Knuth-Plass inter-word shrink capacity. The result is invariant across linesAndChars with negative/zero charSpace and a line-only grid; source-run boundaries remain governed separately by the source-space-sequence rule.',
 });
 
+export const WORD_BALANCED_CONSECUTIVE_SPACE_CELL = defineCompatibilityRule({
+  id: 'word-balanced-consecutive-space-cell',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'single-double-byte-width-space-grid-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'With ECMA-376 §17.15.3.3 balanceSingleByteDoubleByteWidth enabled, Word retains one ordinary inter-word U+0020 at its proportional natural advance, while a sequence of two or more authored U+0020 spaces advances each space by half of the selected East-Asian ideographic cell. The observed matrix covers one, two, four, and eight spaces; same-run and source-run boundaries; proportional and fixed-pitch faces; linesAndChars with negative/zero charSpace; and a line-only grid.',
+});
+
+/** Compatibility projection governed by
+ * {@link WORD_BALANCED_CONSECUTIVE_SPACE_CELL}. */
+export function wordBalancedConsecutiveSpaceCellApplies(spaceCount: number): boolean {
+  return Number.isInteger(spaceCount) && spaceCount >= 2;
+}
+
+/** Evidence-bounded grid scope governed by
+ * {@link WORD_BALANCED_CONSECUTIVE_SPACE_CELL}. `snapToChars` has a separate
+ * Microsoft-documented block/cell allocator and is outside this observation. */
+export function wordBalancedSpaceCellAdjustmentApplies(
+  gridType: string | null | undefined,
+): boolean {
+  return gridType !== 'snapToChars';
+}
+
+export const WORD_BALANCED_LINES_AND_CHARS_GRID_DELTA = defineCompatibilityRule({
+  id: 'word-balanced-lines-and-chars-grid-delta',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'single-double-byte-width-grid-observation-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'With balanceSingleByteDoubleByteWidth enabled on linesAndChars, Word applies half of the authored charSpace delta to ASCII SBCS text and to U+0020/U+3000 space characters, while applying the full delta to CJK ideographs and full-width ASCII forms. The Word-output evidence covers ASCII digits, letters, punctuation, spaces, CJK, full-width ASCII, mixed text, proportional/fixed-pitch faces, negative/zero/positive charSpace, and line-only controls. Non-ASCII high-ANSI and complex-script text are outside the observed matrix and retain the preexisting grid behavior.',
+});
+
+/** Compatibility projection governed by
+ * {@link WORD_BALANCED_LINES_AND_CHARS_GRID_DELTA}. Script-slot acquisition
+ * has already separated ordinary East-Asian and ASCII SBCS text; the explicit
+ * space branch retains Word's observed U+3000 exception without reclassifying
+ * other East-Asian glyphs. Non-ASCII high-ANSI/complex text stays outside the
+ * observed projection. */
+export function wordBalancedLinesAndCharsGridDeltaFactor(
+  text: string,
+  script: 'ascii' | 'highAnsi' | 'eastAsia' | 'complexScript',
+): 0.5 | 1 | undefined {
+  if (script === 'complexScript') return undefined;
+  const spaceOnly = text.length > 0 && [...text].every(
+    (character) => character === ' ' || character === '\u3000',
+  );
+  if (spaceOnly) return 0.5;
+  if (script === 'eastAsia') return 1;
+  return [...text].every((character) => (character.codePointAt(0) ?? 0x80) <= 0x7f)
+    ? 0.5
+    : undefined;
+}
+
 export const WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT = defineCompatibilityRule({
   id: 'word-ms-mincho-empty-east-asian-mark-height',
   evidence: {

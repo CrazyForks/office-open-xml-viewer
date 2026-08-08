@@ -21,7 +21,11 @@ import type {
   LayoutTextSeg,
   DocGridCtx,
 } from '../line-layout.js';
-import { effectiveCharacterSpacingPt, segLetterSpacingPx } from '../line-layout.js';
+import {
+  effectiveCharacterSpacingPt,
+  segLetterSpacingPx,
+  widthBalanceSpaceAdjustmentForTextPt,
+} from '../line-layout.js';
 import { calcEffectiveFontPx, EAST_ASIAN_RE, shapeRunToDocRun } from './text.js';
 import type { DocParagraph, DocRun, ShapeRun } from '../types.js';
 import {
@@ -1751,6 +1755,10 @@ function textPlanSegment(
           && compression.end <= cluster.range.end)
         .reduce((sum, compression) => sum + compression.adjustmentPt, 0)
       ?? 0;
+    const precedingWidthBalanceAdjustment =
+      widthBalanceSpaceAdjustmentForTextPt(segment, prefix, characterGrid) * scaleX;
+    const clusterWidthBalanceAdjustment =
+      widthBalanceSpaceAdjustmentForTextPt(segment, text, characterGrid) * scaleX;
     return {
       range: {
         start: sourceOffset + cluster.range.start,
@@ -1760,12 +1768,14 @@ function textPlanSegment(
         xPt:
           cluster.offsetPt * scaleX
           + precedingScalars * pitchPt
+          + precedingWidthBalanceAdjustment
           + precedingPunctuationCompression,
         yPt: baselineOffsetPt,
       },
       advancePt:
         cluster.advancePt * scaleX
         + scalarCount * pitchPt
+        + clusterWidthBalanceAdjustment
         + trailingFitPad
         + clusterPunctuationCompression,
     };
@@ -3967,6 +3977,7 @@ export function paragraphAcquisitionCacheKey(
       environment.verticalPageFrame ?? null,
       environment.documentHasEastAsianText,
       environment.useFeLayout ?? null,
+      environment.balanceSingleByteDoubleByteWidth ?? null,
       environment.characterSpacingControl ?? null,
       environment.resolvedLocalFonts
         ? cache.objectIdentity(environment.resolvedLocalFonts)

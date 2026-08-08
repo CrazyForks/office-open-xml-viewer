@@ -83,6 +83,8 @@ export function paragraphMeasurementEnvironment(
     verticalPageFrame: state.verticalCJK === true,
     documentHasEastAsianText: state.docEastAsian,
     useFeLayout: state.layoutSettings.compat.useFeLayout,
+    balanceSingleByteDoubleByteWidth:
+      state.layoutSettings.compat.balanceSingleByteDoubleByteWidth,
     characterSpacingControl: state.layoutSettings.characterSpacingControl,
     resolvedLocalFonts: state.resolvedLocalFonts,
     layoutServices: state.layoutServices,
@@ -96,11 +98,14 @@ export function segmentEnvironmentOf(
   state: BodyMeasurementContext,
 ): LineLayoutEnvironment {
   if (!state.verticalAllRotated
-    && state.layoutSettings.characterSpacingControl === undefined) return state;
+    && state.layoutSettings.characterSpacingControl === undefined
+    && !state.layoutSettings.compat.balanceSingleByteDoubleByteWidth) return state;
   return {
     ...state,
     ...(state.verticalAllRotated ? { verticalCJK: false } : {}),
     characterSpacingControl: state.layoutSettings.characterSpacingControl,
+    balanceSingleByteDoubleByteWidth:
+      state.layoutSettings.compat.balanceSingleByteDoubleByteWidth,
   };
 }
 
