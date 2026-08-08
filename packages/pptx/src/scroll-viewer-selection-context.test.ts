@@ -86,16 +86,19 @@ describe('PptxScrollViewer selection context', () => {
   it('clears element focus when a successful reload replaces the deck', async () => {
     installDom();
     const container = makeContainer(960, 720);
-    const first = new FakePptxEngine(1, 9_144_000, 6_858_000);
+    const first = new FakePptxEngine(1, 9_144_000, 6_858_000, 'worker');
     first.elementContext = context();
-    const replacement = new FakePptxEngine(1, 9_144_000, 6_858_000);
+    const replacement = new FakePptxEngine(1, 9_144_000, 6_858_000, 'worker');
     vi.spyOn(PptxPresentation, 'load')
       .mockResolvedValueOnce(first.asPres())
       .mockResolvedValueOnce(replacement.asPres());
     const onSelectionContextChange = vi.fn();
+    const onError = vi.fn();
     const viewer = new PptxScrollViewer(container as unknown as HTMLElement, {
       enableElementSelection: true,
+      mode: 'worker',
       onSelectionContextChange,
+      onError,
     });
     await viewer.load('first.pptx');
     const internals = viewer as unknown as {
@@ -111,9 +114,25 @@ describe('PptxScrollViewer selection context', () => {
     await Promise.resolve();
     expect(viewer.getSelectionContext()).toMatchObject({ shapeId: '9' });
 
+    let rejectPending: (error: Error) => void = () => undefined;
+    first.getElementContextAt = vi.fn(() =>
+      new Promise<PptxElementSelectionContext | null>((_resolve, reject) => {
+        rejectPending = reject;
+      }));
+    const originalDestroy = first.destroy.bind(first);
+    first.destroy = () => {
+      rejectPending(new Error('worker bridge closed'));
+      originalDestroy();
+    };
+    internals._scrollHost.dispatch('click', {
+      target: slot.canvas, button: 0, clientX: 480, clientY: 360, defaultPrevented: false,
+    });
+
     await viewer.load('replacement.pptx');
+    await Promise.resolve();
     expect(viewer.getSelectionContext()).toBeNull();
     expect(onSelectionContextChange).toHaveBeenLastCalledWith(null);
+    expect(onError).not.toHaveBeenCalled();
     viewer.destroy();
   });
 

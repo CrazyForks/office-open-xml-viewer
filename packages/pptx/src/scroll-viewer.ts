@@ -514,6 +514,10 @@ export class PptxScrollViewer implements ZoomableViewer {
         math: this._opts.math,
         mode: this._mode,
       }), (ownedPresentation) => {
+        // Invalidate before TerminalResourceOwner installs the candidate and
+        // destroys the prior worker, whose pending hit requests reject on close.
+        this._invalidateElementSelection(false);
+        selectionInvalidated = true;
         this._find.invalidate();
         this._findActive = false;
         if (ownedPresentation) {
@@ -525,8 +529,6 @@ export class PptxScrollViewer implements ZoomableViewer {
       if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
       // A successful reload replaces the selection surface. Retire hit tests
       // issued against the old engine and notify that its element focus ended.
-      this._invalidateElementSelection(false);
-      selectionInvalidated = true;
       this._find.invalidate();
       this._findActive = false;
       // Lay out + mount the first window now that the engine exists (mirrors the

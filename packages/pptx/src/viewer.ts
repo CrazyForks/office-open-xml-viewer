@@ -301,6 +301,11 @@ export class PptxViewer implements ZoomableViewer {
         math: this.opts.math,
         mode: this._mode,
       }), () => {
+        // Retire old-engine hit promises before install() destroys that engine:
+        // a worker bridge may reject them synchronously during destroy, and its
+        // microtask must already observe the new selection generation.
+        this._invalidateElementSelection(false);
+        selectionInvalidated = true;
         this.renderDispatcher.begin();
         this._find.invalidate();
         this.handle?.destroy();
@@ -311,8 +316,6 @@ export class PptxViewer implements ZoomableViewer {
       // The loaded presentation is a new selection surface. Invalidate both a
       // retained element focus and every hit-test promise issued against the
       // previous engine before rendering the replacement deck.
-      this._invalidateElementSelection(false);
-      selectionInvalidated = true;
       // Discard the stale slide's media handle before swapping engines so its RAF
       // loop / object URLs don't outlive the replaced presentation.
       this.currentSlide = this._initialSlide();

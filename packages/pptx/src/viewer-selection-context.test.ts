@@ -225,6 +225,30 @@ describe('PptxViewer selection context', () => {
     expect(dom.listenerCount('selectionchange')).toBe(0);
   });
 
+  it('invalidates an old worker hit before reload destroys its bridge', async () => {
+    const mounted = await mount('worker');
+    let rejectHit: (error: Error) => void = () => undefined;
+    mounted.engine.getElementContextAt = vi.fn(() =>
+      new Promise<PptxElementSelectionContext | null>((_resolve, reject) => { rejectHit = reject; }));
+    const originalDestroy = mounted.engine.destroy.bind(mounted.engine);
+    mounted.engine.destroy = () => {
+      rejectHit(new Error('worker bridge closed'));
+      originalDestroy();
+    };
+    mounted.wrapper.dispatch('click', {
+      button: 0, clientX: 100, clientY: 100, defaultPrevented: false,
+    });
+
+    const replacement = new FakePptxEngine(1, SLIDE_WIDTH, SLIDE_HEIGHT, 'worker');
+    vi.mocked(PptxPresentation.load).mockResolvedValueOnce(replacement.asPres());
+    await mounted.viewer.load('replacement.pptx');
+    await Promise.resolve();
+
+    expect(mounted.onError).not.toHaveBeenCalled();
+    expect(mounted.viewer.getSelectionContext()).toBeNull();
+    mounted.viewer.destroy();
+  });
+
   it('ignores prevented clicks and closes the query/listener surface on destroy', async () => {
     const mounted = await mount();
     mounted.engine.elementContext = elementContext('7');
