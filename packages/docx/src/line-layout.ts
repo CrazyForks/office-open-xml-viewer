@@ -11,8 +11,8 @@
 // paginates, or
 // registers floats — those stay in renderer.ts, which imports this module. The
 // split is one-directional at runtime: renderer.ts → line-layout.ts. Which
-// behaviours here are ECMA-376-mandated vs Word-mimicking
-// is documented inline (as before the move) — see packages/docx/CLAUDE.md.
+// Compatibility projections are owned by the reviewed modules under
+// `layout/*-compatibility.ts`; this kernel consumes their narrow decisions.
 
 import type {
   DocParagraph, DocRun, DocxTextRun, FieldRun,
@@ -1044,9 +1044,8 @@ export function eaGlyphCount(text: string): number {
 
 /** Total character-grid delta gained by a segment. `linesAndChars` applies its
  *  authored pitch to every character. The non-`linesAndChars` branch preserves
- *  the renderer's pre-existing East-Asian-only fallback; it does not implement
- *  the Latin-block grid-unit allocation and centering required for
- *  `snapToChars` by ECMA-376 §17.6.5 and [MS-OI29500] §2.1.534. */
+ *  the renderer's pre-existing East-Asian-only fallback; full snap-to-character
+ *  grid-unit allocation is handled by the block allocator below. */
 export function gridSegDeltaPx(
   text: string,
   grid: DocGridCtx | undefined,
@@ -1067,7 +1066,7 @@ export function segmentCharacterGridDeltaPx(
 ): number {
   if (seg.snapToCharacterGrid === false) return 0;
   // snapToChars allocates full cells/blocks in layoutLines. It is not a
-  // per-glyph letter-spacing delta (§17.6.5; [MS-OI29500] §2.1.534).
+  // per-glyph letter-spacing delta.
   if (grid?.type === 'snapToChars') return 0;
   const total = gridSegDeltaPx(seg.text, grid, scale);
   return total === 0 ? 0 : gridCharDeltaPx(grid, scale);
@@ -2323,10 +2322,9 @@ export interface BidiTabItem {
   isTab: boolean;
   /** Content width in px (ignored for tabs). Set by the LTR layout pass. */
   width: number;
-  /** Logical advance from this item's start to the ST_TabJc decimal alignment
-   * point: the first separator, or [MS-OI29500] §2.1.556's implicit separator
-   * after the first numerical value. The bidi resolver converts the complete
-   * cell's logical prefix to a physical reading-frame offset. */
+  /** Logical advance from this item's start to the resolved decimal alignment
+   * point. The bidi resolver converts the complete cell's logical prefix to a
+   * physical reading-frame offset. */
   decimalOffset?: number;
 }
 
@@ -2460,9 +2458,9 @@ export function layoutBidiTabStops(
     let target: number; // pen value after the tab (its trailing/left edge)
     if (role !== 'leading') {
       // end aligns the full following cell, center half of it, and decimal the
-      // reading-frame distance through the first halfwidth period. With no
-      // period Word aligns the physical right edge of an embedded LTR numeric
-      // cell; that is the reading-leading edge in this mirrored frame.
+      // reading-frame distance through the first halfwidth period. The
+      // registered no-separator fallback uses the numeric cell's physical
+      // right edge, which is the reading-leading edge in this mirrored frame.
       target = stop.pos - following.alignment;
     } else {
       // start/leading (or bar/clear/left): following content's LEADING (right)
@@ -3374,8 +3372,8 @@ export function buildSegments(
 
   // UAX #14 LB7 keeps a trailing SP with the preceding text. Script/font
   // shaping may split that SP into a new segment, so recover the relationship
-  // when both segments came from the same authored run. The compatibility
-  // projection separately owns Word's behavior at a real source-run boundary.
+  // when both segments came from the same authored run. A real source-run
+  // boundary is delegated to wordSourceRunSpaceContinuesSequence below.
   for (let i = 1; i < segs.length; i++) {
     const cur = segs[i];
     if (!('text' in cur) || cur.joinPrev || !cur.text.startsWith(' ')) continue;
@@ -4445,11 +4443,8 @@ export function layoutLines(
     return segAdvance(q);
   };
 
-  /** [MS-OI29500] §2.1.556 / ST_TabJc: use the first explicit decimal
-   * separator; when it is absent, Word defines an implicit separator after the
-   * last digit of the first numerical value. The returned source boundary is
-   * independent of run/style seams so both LTR and mirrored bidi tab paths use
-   * the same decision. */
+  /** Resolve the registered decimal alignment point independently of run/style
+   * seams so both LTR and mirrored bidi tab paths consume one source boundary. */
   const decimalAlignmentPoint = (
     segments: readonly LayoutSeg[],
   ): Readonly<{ segmentIndex: number; charOffset: number }> | null => {

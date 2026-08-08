@@ -114,9 +114,9 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
     segment.fitTextTrailingPadPx ?? null,
     segment.fitTextRegionIndex ?? null,
     segment.snapToCharacterGrid !== false,
-    // [MS-OI29500] §2.1.534 assigns snapToChars cells by contiguous script
-    // block. A shaping-compatible Latin→East-Asian seam is therefore still a
-    // semantic grid boundary and must survive this intrinsic-only merge.
+    // The snap-to-character-grid allocator consumes contiguous script blocks.
+    // A shaping-compatible Latin→East-Asian seam is therefore still a semantic
+    // grid boundary and must survive this intrinsic-only merge.
     segment.script,
     segment.tateChuYoko ?? false,
     // A tate-chu-yoko run is one authored one-em cell (§17.3.2.10). Two

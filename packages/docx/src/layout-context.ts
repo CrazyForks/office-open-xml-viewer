@@ -391,10 +391,8 @@ export function effectiveParagraphTabStops(
   return effective.sort((left, right) => left.pos - right.pos);
 }
 
-/** Outside the table-cell compatibility exception, Word's §17.3.1.1
- * right-indent adjustment aligns the column's physical right text edge down to
- * the active §17.6.5 character pitch. Word boundary output confirms that a
- * line-only grid does not activate this character-axis rule. */
+/** Resolve the registered §17.3.1.1 character-pitch alignment after container
+ * eligibility and grid-kind scoping have been projected into the context. */
 export function paragraphGridRightAdjustmentPt(
   context: Pick<ParagraphLayoutContext, 'rightIndentGrid'>,
   availableWidthPt: number,

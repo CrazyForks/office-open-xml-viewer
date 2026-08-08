@@ -34,6 +34,15 @@ export const WORD_SNAP_TO_CHARS_EAST_ASIAN_CELL_FIT = defineCompatibilityRule({
   description: 'For snapToChars, Word centers each East-Asian grapheme independently in the smallest whole number of character-pitch units that contains its natural advance. A grapheme that fits uses the one-unit placement described by [MS-OI29500] §2.1.534; an undersized authored pitch expands only that grapheme to additional units.',
 });
 
+export const WORD_SNAP_TO_CHARS_SCRIPT_BLOCK_ALLOCATION = defineCompatibilityRule({
+  id: 'word-snap-to-chars-script-block-allocation',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OI29500] §2.1.534',
+  },
+  description: 'Allocate snapToChars Latin text in contiguous blocks centered across the required grid units, complex-script blocks from their leading edge, and East-Asian graphemes independently by character cell.',
+});
+
 /** Word compatibility projection governed by
  * {@link WORD_SNAP_TO_CHARS_EAST_ASIAN_CELL_FIT}. */
 export function wordSnapToCharsEastAsianCellCount(
@@ -108,6 +117,15 @@ export const WORD_RTL_DECIMAL_TAB_PHYSICAL_ALIGNMENT = defineCompatibilityRule({
     platform: 'macOS 26.5.2',
   },
   description: 'For LTR numeric cells embedded in a bidi paragraph, Word aligns the physical left edge of the first halfwidth period to the decimal stop across source-run boundaries. When no period exists, it aligns the numeric cell\'s physical right edge to the stop.',
+});
+
+export const WORD_DECIMAL_TAB_SEPARATOR_RESOLUTION = defineCompatibilityRule({
+  id: 'word-decimal-tab-separator-resolution',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OI29500] §2.1.556',
+  },
+  description: 'Use the first explicit halfwidth period as the decimal-tab alignment point; when absent, use the implicit separator after the final digit of the first Unicode decimal-number sequence.',
 });
 
 export const WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM = defineCompatibilityRule({
