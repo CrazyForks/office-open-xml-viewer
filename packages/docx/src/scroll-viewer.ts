@@ -12,6 +12,11 @@ import { buildDocxTextLayer } from './text-layer';
 import { DocxFindController, type DocxMatchLocation } from './find';
 import { buildDocxHighlightLayer } from './find-highlight-layer';
 import type { RenderPageOptions } from './types';
+import {
+  readDocxSelectionContext,
+  type DocxSelectionContext,
+  type DocxSelectionContextOptions,
+} from './selection-context';
 
 /**
  * Debounce window (ms) after the last `setScale` in a zoom burst before the
@@ -83,6 +88,8 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    *  shipped back beside the page bitmap, so the overlay is populated identically
    *  to main mode (no more empty overlay / one-time warning). */
   enableTextSelection?: boolean;
+  /** Emits bounded, detached text context suitable for read-only AI/MCP use. */
+  onSelectionContextChange?: (context: DocxSelectionContext | null) => void;
   /** CSS backgrounds for ordinary and active in-document search matches. */
   findHighlightColors?: FindHighlightColors;
   /** Minimum zoom scale (px-per-pt multiplier floor). Default 0.1. */
@@ -223,6 +230,8 @@ export class DocxScrollViewer implements ZoomableViewer {
   private _lastRange: VisibleRange | null = null;
   private _lastTopIndex = -1;
   private _scrollListener: (() => void) | null = null;
+  private _selectionChangeListener: (() => void) | null = null;
+  private _selectionContextKey = 'null';
   /** Set by `destroy()`. Async render callbacks (main + worker) check it before
    *  reporting an error so a rejection that lands after teardown is swallowed
    *  rather than surfaced to a `onError` on a dead viewer. */
@@ -357,6 +366,11 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._scrollHost.appendChild(this._spacer);
     this._wrapper.appendChild(this._scrollHost);
     this._container.appendChild(this._wrapper);
+
+    if (opts.enableTextSelection && opts.onSelectionContextChange) {
+      this._selectionChangeListener = () => this._emitSelectionContextChange();
+      this._wrapper.ownerDocument.addEventListener('selectionchange', this._selectionChangeListener);
+    }
 
     this._scrollListener = () => this._onScroll();
     this._scrollHost.addEventListener('scroll', this._scrollListener);
@@ -868,6 +882,7 @@ export class DocxScrollViewer implements ZoomableViewer {
             height,
             this._hyperlinkHandler(),
             (font) => this._measureForFont(font),
+            i,
           );
         }
         if (wantRuns) this._refreshFindRuns(i, runs);
@@ -1044,6 +1059,7 @@ export class DocxScrollViewer implements ZoomableViewer {
             height,
             this._hyperlinkHandler(),
             (font) => this._measureForFont(font),
+            i,
           );
         }
       }
@@ -1481,6 +1497,7 @@ export class DocxScrollViewer implements ZoomableViewer {
               height,
               this._hyperlinkHandler(),
               (font) => this._measureForFont(font),
+              i,
             );
           }
         }
@@ -1758,6 +1775,25 @@ export class DocxScrollViewer implements ZoomableViewer {
     return await this._doc.getResourceMetrics();
   }
 
+  /** Return the current mounted browser text selection with DOCX source locators. */
+  getSelectionContext(options: DocxSelectionContextOptions = {}): DocxSelectionContext | null {
+    if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
+    if (!this._opts.enableTextSelection) return null;
+    return readDocxSelectionContext(
+      this._wrapper,
+      this._wrapper.ownerDocument.getSelection(),
+      options,
+    );
+  }
+
+  private _emitSelectionContextChange(): void {
+    const context = this.getSelectionContext();
+    const key = JSON.stringify(context);
+    if (key === this._selectionContextKey) return;
+    this._selectionContextKey = key;
+    this._opts.onSelectionContextChange?.(context ? structuredClone(context) : null);
+  }
+
   /**
    * Tear down the viewer: remove the DOM subtree and (only for a self-loaded
    * engine) destroy the engine. A borrowed engine is left intact — the caller
@@ -1768,6 +1804,10 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._destroyed = true;
     this._find.invalidate();
     this._findActive = false;
+    if (this._selectionChangeListener) {
+      this._wrapper.ownerDocument.removeEventListener('selectionchange', this._selectionChangeListener);
+      this._selectionChangeListener = null;
+    }
     if (this._scrollListener) {
       this._scrollHost.removeEventListener('scroll', this._scrollListener);
       this._scrollListener = null;

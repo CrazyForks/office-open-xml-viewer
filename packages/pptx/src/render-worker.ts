@@ -32,6 +32,7 @@ import type {
   RenderWorkerRequest,
   RenderWorkerResponse,
 } from './worker-protocol';
+import { hitTestPptxSlideContext } from './element-selection';
 
 const host = new WasmParserHost<PptxArchive>(init, {
   freeArchive: (archive) => archive.free(),
@@ -248,6 +249,13 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
         return runs;
       });
       post({ kind: 'runsCollected', id: request.id, runs });
+      return;
+    }
+
+    if (request.kind === 'hitTestElement') {
+      const context = await requireSlides().withSlide(request.slideIndex, (slide) =>
+        hitTestPptxSlideContext(request.slideIndex, slide, request.point, request.options));
+      post({ kind: 'elementHit', id: request.id, context });
       return;
     }
 

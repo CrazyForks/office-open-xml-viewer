@@ -25,7 +25,7 @@ export interface BlipBullet {
     sizePts?: number;
 }
 export function buildPptxHighlightLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], matches: PptxHighlightMatch[], cssWidth: number, cssHeight: number, measureForFont: (font: string) => (s: string) => number, colors?: PptxHighlightColors): void;
-export function buildPptxTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number, onHyperlinkClick?: (target: HyperlinkTarget) => void): void;
+export function buildPptxTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number, onHyperlinkClick?: (target: HyperlinkTarget) => void, slideIndex?: number): void;
 export type Bullet = Bullet__emitterCollision1 | BlipBullet;
 type Bullet__emitterCollision1 = {
     type: 'none';
@@ -696,6 +696,41 @@ export interface PptxComment {
     date?: string;
     text: string;
 }
+export interface PptxElementContextOptions {
+    readonly tolerance?: number;
+    readonly maxTextCharacters?: number;
+}
+export interface PptxElementSelectionContext {
+    readonly format: 'pptx';
+    readonly kind: 'element';
+    readonly slideIndex: number;
+    readonly elementIndex: number;
+    readonly origin: SlideElementOrigin | 'unknown';
+    readonly elementType: SlideElement['type'];
+    readonly point: PptxSlidePoint;
+    readonly bounds: Readonly<{
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        rotation: number;
+        flipH: boolean;
+        flipV: boolean;
+    }>;
+    readonly shapeId?: string;
+    readonly name?: string;
+    readonly geometry?: string;
+    readonly text?: string;
+    readonly mimeType?: string;
+    readonly mediaKind?: 'audio' | 'video';
+    readonly rowCount?: number;
+    readonly columnCount?: number;
+    readonly seriesCount?: number;
+    readonly truncated: boolean;
+    readonly truncationReasons: readonly 'text'[];
+    readonly textCharacters: number;
+    readonly maxTextCharacters: number;
+}
 export type PptxHighlightColors = FindHighlightColors;
 export interface PptxHighlightMatch {
     slices: MatchRunSlice[];
@@ -717,6 +752,7 @@ export class PptxPresentation {
     renderSlide(canvas: HTMLCanvasElement | OffscreenCanvas, slideIndex: number, opts?: RenderSlideOptions): Promise<void>;
     renderSlideToBitmap(slideIndex: number, opts?: RenderSlideToBitmapOptions): Promise<ImageBitmap>;
     collectSlideRuns(slideIndex: number, width?: number): Promise<PptxTextRunInfo[]>;
+    getElementContextAt(slideIndex: number, point: PptxSlidePoint, options?: PptxElementContextOptions): Promise<PptxElementSelectionContext | null>;
     getMedia(mediaPath: string): Promise<Blob>;
     getImage(imagePath: string, mimeType: string): Promise<Blob>;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
@@ -747,6 +783,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     clearFind(): void;
     get topVisibleSlide(): number;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
+    getSelectionContext(options?: PptxSelectionContextOptions): PptxSelectionContext | null;
     destroy(): void;
     private __privatePresence;
 }
@@ -759,6 +796,9 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
     paddingRight?: number;
     overscan?: number;
     enableTextSelection?: boolean;
+    enableElementSelection?: boolean;
+    elementHitTolerance?: number;
+    onSelectionContextChange?: (context: PptxSelectionContext | null) => void;
     findHighlightColors?: FindHighlightColors;
     enableMediaPlayback?: boolean;
     mediaOverscan?: number;
@@ -773,6 +813,17 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
     onError?: (err: Error) => void;
     onHyperlinkClick?: (target: HyperlinkTarget) => void;
     enableHyperlinks?: boolean;
+}
+export type PptxSelectionContext = PptxTextSelectionContext | PptxElementSelectionContext;
+export type PptxSelectionContextOptions = TextSelectionContextOptions;
+export interface PptxSelectionRunLocator {
+    readonly slideIndex: number;
+    readonly runIndex: number;
+    readonly shapeId?: string;
+}
+export interface PptxSlidePoint {
+    readonly x: number;
+    readonly y: number;
 }
 export interface PptxTextRunInfo {
     shapeId?: string;
@@ -790,6 +841,19 @@ export interface PptxTextRunInfo {
     rotation: number;
     textBodyRotation?: number;
     hyperlink?: HyperlinkTarget;
+}
+export interface PptxTextSelectionContext {
+    readonly format: 'pptx';
+    readonly kind: 'text';
+    readonly text: string;
+    readonly slideIndexes: readonly number[];
+    readonly shapeIds: readonly string[];
+    readonly runs: readonly PptxSelectionRunLocator[];
+    readonly truncated: boolean;
+    readonly truncationReasons: readonly ('text' | 'runs')[];
+    readonly textCharacters: number;
+    readonly maxTextCharacters: number;
+    readonly maxRunLocators: number;
 }
 export class PptxViewer implements ZoomableViewer {
     static fromPresentation(canvas: HTMLCanvasElement, presentation: PptxPresentation, opts?: Omit<PptxViewerOptions, keyof LoadOptions>): Omit<PptxViewer, 'load'>;
@@ -816,6 +880,7 @@ export class PptxViewer implements ZoomableViewer {
     findPrev(): Promise<FindMatch<PptxMatchLocation> | null>;
     clearFind(): void;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
+    getSelectionContext(options?: PptxSelectionContextOptions): PptxSelectionContext | null;
     destroy(): void;
     private __privatePresence;
 }
@@ -827,6 +892,9 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
     onScaleChange?: (scale: number) => void;
     enableMediaPlayback?: boolean;
     enableTextSelection?: boolean;
+    enableElementSelection?: boolean;
+    elementHitTolerance?: number;
+    onSelectionContextChange?: (context: PptxSelectionContext | null) => void;
     findHighlightColors?: FindHighlightColors;
     hiddenSlideMode?: HiddenSlideMode;
     hiddenSlideDim?: Partial<DimOptions>;
@@ -848,6 +916,7 @@ export interface PresentationHandle {
     pause(mediaPath?: string): void;
     destroy(): void;
 }
+export function readPptxTextSelectionContext(root: HTMLElement, selection: Selection | null, options?: TextSelectionContextOptions): PptxTextSelectionContext | null;
 export interface Reflection {
     blur: number;
     dist: number;
@@ -960,12 +1029,17 @@ export interface Slide {
     partName?: string;
     background: Fill | null;
     elements: SlideElement[];
+    elementSources?: SlideElementSource[];
     notes?: string;
     comments?: PptxComment[];
     hidden?: boolean;
     parseError?: string;
 }
 export type SlideElement = ShapeElement | PictureElement | TableElement | ChartElement | MediaElement;
+export type SlideElementOrigin = 'master' | 'layout' | 'slide';
+export interface SlideElementSource {
+    origin: SlideElementOrigin;
+}
 type SlideRenderOptions = RenderOptions & {
     math?: MathRenderer;
     dim?: DimOptions;
@@ -1105,6 +1179,10 @@ export interface TextRunData {
     shadow?: Shadow;
     outline?: TextOutline;
     highlight?: string;
+}
+export interface TextSelectionContextOptions {
+    readonly maxTextCharacters?: number;
+    readonly maxRunLocators?: number;
 }
 export interface TileInfo {
     tx: number;

@@ -16,6 +16,11 @@ import {
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import { invalidateDocxRenderTarget } from './paint/canvas-document';
+import {
+  readDocxSelectionContext,
+  type DocxSelectionContext,
+  type DocxSelectionContextOptions,
+} from './selection-context';
 
 const borrowedDocumentOption = Symbol('DocxViewer.borrowedDocument');
 type InternalDocxViewerOptions = DocxViewerOptions & {
@@ -29,6 +34,8 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
    * browser's native text selection works on document content.
    */
   enableTextSelection?: boolean;
+  /** Emits bounded, detached text context suitable for read-only AI/MCP use. */
+  onSelectionContextChange?: (context: DocxSelectionContext | null) => void;
   /** CSS backgrounds for ordinary and active in-document search matches. */
   findHighlightColors?: FindHighlightColors;
   /** Called when a page finishes rendering. */
@@ -109,6 +116,8 @@ export class DocxViewer implements ZoomableViewer {
   private readonly _renderDispatcher: StaticCanvasRenderDispatcher;
   private readonly _errorRouter: CanvasViewerErrorRouter;
   private _destroyed = false;
+  private _selectionChangeListener: (() => void) | null = null;
+  private _selectionContextKey = 'null';
   /**
    * Create a Viewer that borrows an already-loaded document.
    *
@@ -153,6 +162,10 @@ export class DocxViewer implements ZoomableViewer {
     const overlays = new CanvasOverlayHost(this._wrapper, opts.enableTextSelection === true);
     this._textLayer = overlays.textLayer;
     this._highlightLayer = overlays.highlightLayer;
+    if (this._textLayer && opts.onSelectionContextChange) {
+      this._selectionChangeListener = () => this._emitSelectionContextChange();
+      this._wrapper.ownerDocument.addEventListener('selectionchange', this._selectionChangeListener);
+    }
 
     this._find = new DocxFindController(
       () => this.pageCount,
@@ -426,6 +439,25 @@ export class DocxViewer implements ZoomableViewer {
     return await this._doc.getResourceMetrics();
   }
 
+  /** Return the current browser text selection with DOCX source locators. */
+  getSelectionContext(options: DocxSelectionContextOptions = {}): DocxSelectionContext | null {
+    if (this._destroyed) throw new Error('DocxViewer is destroyed');
+    if (!this._textLayer) return null;
+    return readDocxSelectionContext(
+      this._wrapper,
+      this._wrapper.ownerDocument.getSelection(),
+      options,
+    );
+  }
+
+  private _emitSelectionContextChange(): void {
+    const context = this.getSelectionContext();
+    const key = JSON.stringify(context);
+    if (key === this._selectionContextKey) return;
+    this._selectionContextKey = key;
+    this._opts.onSelectionContextChange?.(context ? structuredClone(context) : null);
+  }
+
   /**
    * Terminate the parser worker and release resources.
    *
@@ -450,6 +482,10 @@ export class DocxViewer implements ZoomableViewer {
     // findNext()/findPrev() after teardown returns null instead of a match
     // pointing into a dead viewer.
     this._find.invalidate();
+    if (this._selectionChangeListener) {
+      this._wrapper.ownerDocument.removeEventListener('selectionchange', this._selectionChangeListener);
+      this._selectionChangeListener = null;
+    }
     this._canvasMount.restore();
   }
 
@@ -601,6 +637,7 @@ export class DocxViewer implements ZoomableViewer {
       // §17.3.2.10 縦中横 (#836) — the same measurer the highlight overlay uses,
       // so a tate-chu-yoko selection span is clamped to its drawn one-em cell.
       (font) => this._measureForFont(font),
+      this._currentPage,
     );
   }
 

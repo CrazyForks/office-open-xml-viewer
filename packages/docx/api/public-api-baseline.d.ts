@@ -41,7 +41,7 @@ export interface BorderSpec {
     style: string;
 }
 export function buildDocxHighlightLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[], matches: DocxHighlightMatch[], cssWidth: number, cssHeight: number, measureForFont: (font: string) => (s: string) => number, colors?: DocxHighlightColors): void;
-export function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[], cssWidth: number, cssHeight: number, onHyperlinkClick?: (target: HyperlinkTarget) => void, measureForFont?: (font: string) => (s: string) => number): void;
+export function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[], cssWidth: number, cssHeight: number, onHyperlinkClick?: (target: HyperlinkTarget) => void, measureForFont?: (font: string) => (s: string) => number, pageIndex?: number): void;
 export interface CellBorders {
     top: BorderSpec | null;
     bottom: BorderSpec | null;
@@ -512,6 +512,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     clearFind(): void;
     get topVisiblePage(): number;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
+    getSelectionContext(options?: DocxSelectionContextOptions): DocxSelectionContext | null;
     destroy(): void;
     private __privatePresence;
 }
@@ -524,6 +525,7 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
     paddingRight?: number;
     overscan?: number;
     enableTextSelection?: boolean;
+    onSelectionContextChange?: (context: DocxSelectionContext | null) => void;
     findHighlightColors?: FindHighlightColors;
     zoomMin?: number;
     zoomMax?: number;
@@ -536,6 +538,25 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
     onHyperlinkClick?: (target: HyperlinkTarget) => void;
     enableHyperlinks?: boolean;
     onError?: (err: Error) => void;
+}
+export interface DocxSelectionContext {
+    readonly format: 'docx';
+    readonly kind: 'text';
+    readonly text: string;
+    readonly pageIndexes: readonly number[];
+    readonly paragraphIds: readonly string[];
+    readonly runs: readonly DocxSelectionRunLocator[];
+    readonly truncated: boolean;
+    readonly truncationReasons: readonly ('text' | 'runs')[];
+    readonly textCharacters: number;
+    readonly maxTextCharacters: number;
+    readonly maxRunLocators: number;
+}
+export type DocxSelectionContextOptions = TextSelectionContextOptions;
+export interface DocxSelectionRunLocator {
+    readonly pageIndex: number;
+    readonly runIndex: number;
+    readonly paragraphId?: string;
 }
 export interface DocxTextRun {
     text: string;
@@ -618,12 +639,14 @@ export class DocxViewer implements ZoomableViewer {
     findPrev(): Promise<FindMatch<DocxMatchLocation> | null>;
     clearFind(): void;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
+    getSelectionContext(options?: DocxSelectionContextOptions): DocxSelectionContext | null;
     destroy(): void;
     private __privatePresence;
 }
 export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
     container?: HTMLElement;
     enableTextSelection?: boolean;
+    onSelectionContextChange?: (context: DocxSelectionContext | null) => void;
     findHighlightColors?: FindHighlightColors;
     onPageChange?: (index: number, total: number) => void;
     zoomMin?: number;
@@ -1079,6 +1102,7 @@ export interface PTabRun {
     leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'middleDot';
     fontSize: number;
 }
+export function readDocxSelectionContext(root: HTMLElement, selection: Selection | null, options?: DocxSelectionContextOptions): DocxSelectionContext | null;
 export interface RenderPageOptions {
     width?: number;
     dpr?: number;
@@ -1304,6 +1328,10 @@ export interface TextPath {
     fontFamily?: string | null;
     bold?: boolean;
     italic?: boolean;
+}
+export interface TextSelectionContextOptions {
+    readonly maxTextCharacters?: number;
+    readonly maxRunLocators?: number;
 }
 interface TileInfo {
     tx: number;

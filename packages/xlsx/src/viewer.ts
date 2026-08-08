@@ -2041,6 +2041,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     if (textTruncated) truncationReasons.push('text');
     return {
       format: 'xlsx',
+      kind: 'range',
       sheetIndex: this.currentSheet,
       sheetName: worksheet.name,
       selection,

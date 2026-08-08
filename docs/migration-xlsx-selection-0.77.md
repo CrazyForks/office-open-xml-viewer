@@ -88,7 +88,8 @@ const context = viewer.getSelectionContext({
 sendToAssistant(context);
 ```
 
-The context contains canonical selection geometry, sheet identity, formulas,
+The context is discriminated as `{ format: 'xlsx', kind: 'range' }` and contains
+canonical selection geometry, sheet identity, formulas,
 scalar values, and Viewer-formatted display text. It returns populated cells
 only, is detached from workbook internals, and reports whether cells or text
 caused truncation. `maxCells` is hard-capped at 10,000; cumulative returned text

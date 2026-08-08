@@ -3,6 +3,13 @@ export type { WireRenderPageOptions } from './worker-protocol';
 export { DocxViewer, type DocxViewerOptions } from './viewer';
 export { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
 export { buildDocxTextLayer } from './text-layer';
+export {
+  readDocxSelectionContext,
+  type DocxSelectionContext,
+  type DocxSelectionContextOptions,
+  type DocxSelectionRunLocator,
+} from './selection-context';
+export type { TextSelectionContextOptions } from '@silurus/ooxml-core';
 // IX2 find-in-document: the highlight overlay builder + the docx match-location
 // shape. `FindMatch` / `FindMatchesOptions` come from core (shared across formats).
 export {

@@ -1263,6 +1263,7 @@ export type XlsxSelectionArea = Readonly<{
 }>;
 export interface XlsxSelectionContext {
     readonly format: 'xlsx';
+    readonly kind: 'range';
     readonly sheetIndex: number;
     readonly sheetName: string;
     readonly selection: XlsxSelectionState;

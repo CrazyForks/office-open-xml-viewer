@@ -307,6 +307,54 @@ slides outside the mounted window. Set `findHighlightColors: { match, active }`
 on any viewer to override the two overlay backgrounds with CSS colors; use an
 alpha color when the canvas text should remain visible through the highlight.
 
+**Selection context for AI/MCP.** Every Viewer exposes one read-only query,
+`getSelectionContext()`, for handing the user's current focus to an external
+assistant. The result is a detached, JSON-serializable snapshot discriminated by
+`format` and `kind`; it never exposes a mutable document model or sends data over
+the network. Text, run locators, and populated XLSX cells have hard resource
+limits. Check `truncated` / `truncationReasons` before building a prompt.
+
+```typescript
+const docx = new DocxViewer(docxCanvas, {
+  enableTextSelection: true,
+  onSelectionContextChange(context) {
+    // context.kind === 'text': selected text + page/paragraph/run locators
+    updateAskAiButton(context);
+  },
+});
+
+const pptx = new PptxViewer(pptxCanvas, {
+  enableTextSelection: true,
+  enableElementSelection: true,
+  onSelectionContextChange(context) {
+    // Text selection wins while it exists; otherwise a slide-element click
+    // yields kind === 'element' with compact bounds, provenance and content.
+    updateAskAiButton(context);
+  },
+});
+
+const spreadsheet = new XlsxViewer(container, {
+  onSelectionStateChange() {
+    updateAskAiButton(spreadsheet.getSelectionContext({ maxCells: 1_000 }));
+  },
+});
+const spreadsheetContext = spreadsheet.getSelectionContext({ maxCells: 1_000 });
+// format === 'xlsx', kind === 'range': selection state, displayed values,
+// formulas and populated cells only.
+```
+
+DOCX/PPTX callbacks are notifications for native text selection or PPTX element
+focus; callers may instead query on demand. XLSX already has
+`onSelectionStateChange`, so use that notification and call the same getter.
+`PptxPresentation.getElementContextAt()` provides the identical compact element
+query for custom/headless slide surfaces in both main and worker modes. PPTX
+element provenance is limited to `master | layout | slide`; editor tree indexes,
+archive paths, save/round-trip handles, and mutation APIs are deliberately absent.
+When switching on `kind`, retain a default branch so a future read-only focus kind
+can be added without changing the transport envelope.
+See the [selection-context guide](docs/selection-context.md) for the complete
+contract, resource bounds, PPTX hit-testing semantics, and extension policy.
+
 **Hyperlinks.** For DOCX/PPTX the link hit regions live on the text-selection
 overlay, so hyperlink interaction requires `enableTextSelection: true`; when that
 overlay is enabled, links are interactive by default. XLSX hit-tests cells
@@ -536,6 +584,7 @@ file without uploading it.
 | | Markdown export (`DocxDocument.toMarkdown()` — headings, lists, tables, footnotes / comments; also `@silurus/ooxml-markdown` + the `ooxml-md` CLI) | ✅ |
 | | Mail merge fields | ❌ Not planned |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
+| | Bounded read-only selection context (`getSelectionContext()`, page/paragraph/run locators, AI/MCP callback) | ✅ |
 | | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — full-text search, all hits highlighted, each match tagged with its page) | ✅ |
 | | Runtime zoom (`getScale` / `setScale` / `fitWidth` / `fitPage`) | ✅ |
 | | Clickable hyperlinks (overlay hit-test, `onHyperlinkClick`; internal bookmark / anchor navigation) | ✅ |
@@ -697,6 +746,7 @@ file without uploading it.
 | | Font scheme (`+mj-lt`, `+mn-lt`) | ✅ |
 | | lumMod / lumOff / alpha transforms | ✅ |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
+| | Bounded text/element selection context (`getSelectionContext()`, click focus, master/layout/slide provenance, main + worker) | ✅ |
 | | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — matches tagged with slide) | ✅ |
 | | Runtime zoom (`getScale` / `setScale` / `fitWidth` / `fitPage`) | ✅ |
 | | Clickable hyperlinks (`onHyperlinkClick`; internal slide-jump navigation) | ✅ |

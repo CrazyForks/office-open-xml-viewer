@@ -56,6 +56,12 @@ import type {
 } from './worker-protocol';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
+import {
+  hitTestPptxSlideContext,
+  type PptxElementContextOptions,
+  type PptxElementSelectionContext,
+  type PptxSlidePoint,
+} from './element-selection';
 
 /** Options for {@link PptxPresentation.load}. */
 export type LoadOptions = CoreLoadOptions & {
@@ -585,6 +591,36 @@ export class PptxPresentation {
       const off = new OffscreenCanvas(1, 1);
       await this.renderSlide(off, slideIndex, { width, onTextRun: (r) => runs.push(r) });
       return runs;
+    } catch (error) {
+      this._rethrowWithResourceFailure(error);
+    }
+  }
+
+  /**
+   * Return a compact, detached snapshot of the topmost element whose transformed
+   * frame contains a point in slide EMU coordinates. Straight lines use the
+   * explicit tolerance. Works in both render modes and exposes no archive paths,
+   * mutable element model, or editor tree position.
+   */
+  async getElementContextAt(
+    slideIndex: number,
+    point: PptxSlidePoint,
+    options: PptxElementContextOptions = {},
+  ): Promise<PptxElementSelectionContext | null> {
+    this._assertResourceHealthy();
+    if (!Number.isInteger(slideIndex) || slideIndex < 0 || slideIndex >= this.slideCount) {
+      throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
+    }
+    try {
+      if (this._mode === 'worker') {
+        const response = await this._bridge.request(
+          (id) => ({ kind: 'hitTestElement', id, slideIndex, point, options }) satisfies RenderWorkerRequest,
+        );
+        return (response as Extract<RenderWorkerResponse, { kind: 'elementHit' }>).context;
+      }
+      if (!this._slides) throw new Error('Presentation not loaded');
+      return await this._slides.withSlide(slideIndex, (slide) =>
+        hitTestPptxSlideContext(slideIndex, slide, point, options));
     } catch (error) {
       this._rethrowWithResourceFailure(error);
     }

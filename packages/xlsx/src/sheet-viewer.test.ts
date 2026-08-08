@@ -478,6 +478,7 @@ describe('XlsxSheetViewer canvas mount', () => {
 
     expect(context).toMatchObject({
       format: 'xlsx',
+      kind: 'range',
       sheetName: 'Analysis',
       coordinateCountUpperBound: 4,
       truncated: true,
