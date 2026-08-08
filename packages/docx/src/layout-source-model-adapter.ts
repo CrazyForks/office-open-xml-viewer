@@ -8,6 +8,7 @@ import { docxLocalMetricRequests } from './local-font-metrics.js';
 import {
   normalizeInternalDocumentModel,
   normalizeOwnedInternalDocumentModel,
+  documentTypographySettingsInput,
   tableSourceAcquisitionInput,
   type InternalShapeRun,
   type NormalizedDocumentInput,
@@ -428,7 +429,10 @@ function buildLayoutSourceModelAdapter(
   // Resolve document-wide facts before destructively consuming the private
   // graph. These projections retain only compact manifests; paragraph source
   // records themselves are acquired and installed in one traversal below.
-  const documentLayoutSettings = resolveDocumentLayoutSettings(privateDocument);
+  const documentLayoutSettings = resolveDocumentLayoutSettings(
+    privateDocument,
+    documentTypographySettingsInput(privateDocument),
+  );
   const resources = projectDocumentSnapshotResources(
     privateDocument,
     privateProjections,

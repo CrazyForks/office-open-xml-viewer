@@ -144,7 +144,8 @@ function columnState(
 describe('table intrinsic content widths', () => {
   const intrinsicContext = (overrides: Partial<ParagraphLayoutContext> = {}): ParagraphLayoutContext => ({
     lineGrid: { active: false, pitchPt: null },
-    characterGrid: { active: false, deltaPt: 0 },
+    characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+    rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
     physicalIndentLeftPt: 0,
     physicalIndentRightPt: 0,
     firstIndentPt: 0,
@@ -167,7 +168,7 @@ describe('table intrinsic content widths', () => {
 
     expect(measureParagraphIntrinsicWidths(
       source,
-      intrinsicContext({ characterGrid: { active: true, deltaPt: 2 } }),
+      intrinsicContext({ characterGrid: { active: true, kind: 'linesAndChars', pitchPt: 12, deltaPt: 2 } }),
       200,
       { context: measuringContext(), fontFamilyClasses: {} },
       {
@@ -185,7 +186,7 @@ describe('table intrinsic content widths', () => {
 
     expect(measureParagraphIntrinsicWidths(
       source,
-      intrinsicContext({ characterGrid: { active: true, deltaPt: 2 } }),
+      intrinsicContext({ characterGrid: { active: true, kind: 'linesAndChars', pitchPt: 12, deltaPt: 2 } }),
       200,
       { context: measuringContext(), fontFamilyClasses: {} },
       {
@@ -193,6 +194,50 @@ describe('table intrinsic content widths', () => {
         documentHasEastAsianText: true,
       },
     )).toEqual({ minWidthPt: 7, maxWidthPt: 12 });
+  });
+
+  it('uses per-grapheme whole-cell allocation for snapToChars intrinsic widths', () => {
+    const source = paragraph([textRun('漢字')]);
+
+    expect(measureParagraphIntrinsicWidths(
+      source,
+      intrinsicContext({
+        characterGrid: {
+          active: true,
+          kind: 'snapToChars',
+          pitchPt: 4,
+          deltaPt: -6,
+        },
+      }),
+      200,
+      { context: measuringContext(), fontFamilyClasses: {} },
+      {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: true,
+      },
+    )).toEqual({ minWidthPt: 8, maxWidthPt: 16 });
+  });
+
+  it('keeps Latin and East-Asian snapToChars allocation blocks distinct', () => {
+    const source = paragraph([textRun('A漢')]);
+
+    expect(measureParagraphIntrinsicWidths(
+      source,
+      intrinsicContext({
+        characterGrid: {
+          active: true,
+          kind: 'snapToChars',
+          pitchPt: 4,
+          deltaPt: -6,
+        },
+      }),
+      200,
+      { context: measuringContext(), fontFamilyClasses: {} },
+      {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: true,
+      },
+    )).toEqual({ minWidthPt: 8, maxWidthPt: 16 });
   });
 
   it('keeps adjacent tate-chu-yoko runs as separate one-em cells', () => {

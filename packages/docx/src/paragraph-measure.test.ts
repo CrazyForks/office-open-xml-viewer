@@ -83,7 +83,8 @@ const layoutContext = (
   overrides: Partial<ParagraphLayoutContext> = {},
 ): ParagraphLayoutContext => ({
   lineGrid: { active: false, pitchPt: null },
-  characterGrid: { active: false, deltaPt: 0 },
+  characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+  rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
   physicalIndentLeftPt: 0,
   physicalIndentRightPt: 0,
   firstIndentPt: 0,
@@ -118,6 +119,44 @@ const measuredTextSequence = (
   .join(''));
 
 describe('measureParagraph', () => {
+  it('uses the same character-grid right-edge adjustment for line partitioning', () => {
+    const source = paragraph({
+      runs: [{ type: 'text', ...textRun('あ'.repeat(20)) }],
+      spaceBefore: 0,
+      spaceAfter: 0,
+    });
+    const grid = layoutContext({
+      characterGrid: { active: true, kind: 'linesAndChars', pitchPt: 10, deltaPt: 0 },
+      rightIndentGrid: { pitchPt: 9, paragraphAllowsAdjustment: true },
+      spaceBeforePt: 0,
+      spaceAfterPt: 0,
+      hasEastAsianText: true,
+    });
+    const optedOut = {
+      ...grid,
+      rightIndentGrid: { pitchPt: 9, paragraphAllowsAdjustment: false },
+    };
+
+    const adjusted = measureParagraph(
+      source,
+      grid,
+      placement({ availableWidthPt: 100 }),
+      measurer,
+      environment({ documentHasEastAsianText: true }),
+    );
+    const exact = measureParagraph(
+      source,
+      optedOut,
+      placement({ availableWidthPt: 100 }),
+      measurer,
+      environment({ documentHasEastAsianText: true }),
+    );
+
+    expect(adjusted.lines).toHaveLength(2);
+    expect(exact.lines).toHaveLength(1);
+    expect(adjusted.placement.availableWidthPt).toBe(100);
+  });
+
   it('chooses the globally widest gap from one oracle containing every float', () => {
     const float = (id: string, xLeft: number, xRight: number): FloatRect => ({
       kind: 'shape', mode: 'square', imageKey: id,

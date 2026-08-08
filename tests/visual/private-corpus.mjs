@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { PNG } from 'pngjs';
 
 const SCHEMA_VERSION = 1;
 
@@ -54,8 +55,7 @@ function baselineRevision(snapshot = false) {
       ['ls-files', '--others', '--exclude-standard'],
       { cwd: root, encoding: 'utf8' },
     ).trim().split('\n').filter(Boolean).filter((path) =>
-      path !== 'node_modules'
-      && !path.startsWith('node_modules/')
+      !/(^|\/)node_modules(?:\/|$)/.test(path)
       && !/^packages\/(docx|xlsx|pptx)\/public\/private(?:\/|$)/.test(path));
     const changed = [...new Set([...tracked, ...untracked])];
     if (changed.length > 0) {
@@ -165,7 +165,18 @@ export function captureOrComparePrivateItem({ stem, itemKind, itemIndex, actual,
   if (snapshot) return null;
   const baselinePath = `tests/visual/baseline/private-corpus/${stem}/${key}`;
   if (!existsSync(baselinePath)) return `missing previous-renderer baseline: ${baselinePath}`;
-  return actual.equals(readFileSync(baselinePath))
+  return pngPixelsEqual(actual, readFileSync(baselinePath))
     ? null
     : `${stem} ${key} differs from the previous renderer`;
+}
+
+/** PNG byte streams may differ in encoder metadata/compression while decoding
+ * to the same canvas. Self-VRT compares the actual rendered RGBA pixels; width
+ * or height changes remain regressions. */
+export function pngPixelsEqual(leftBuffer, rightBuffer) {
+  const left = PNG.sync.read(leftBuffer);
+  const right = PNG.sync.read(rightBuffer);
+  return left.width === right.width
+    && left.height === right.height
+    && left.data.equals(right.data);
 }

@@ -77,6 +77,7 @@ import type {
   TextLayoutService,
   TextShapeRequest,
   TextShapeSpan,
+  FontScriptSlot,
 } from './layout/text.js';
 import {
   calcEffectiveFontPx,
@@ -98,6 +99,8 @@ import {
   wordDocumentCharacterCompressionApplies,
   wordJapanesePunctuationRetainedExtentPt,
   wordMsMinchoEmptyEastAsianMarkSingleLinePx,
+  wordSnapToCharsEastAsianCellCount,
+  wordSourceRunSpaceContinuesSequence,
   wordUniformRunPositionPaintPt,
   wordUseFeLayoutParagraphMarkGridAdvancePx,
 } from './layout/line-compatibility.js';
@@ -118,6 +121,14 @@ interface LayoutSegSource {
 
 export interface LayoutTextSeg extends LayoutSegSource {
   text: string;
+  /** §17.3.2.26 script slot selected by the authoritative shaping service. */
+  script?: FontScriptSlot;
+  /** Internal §17.6.5 snapToChars allocation retained from measure to paint. */
+  snapGridClass?: 'eastAsia' | 'latin' | 'complexScript';
+  snapGridNaturalWidthPx?: number;
+  snapGridLeadingPadPx?: number;
+  snapGridTrailingPadPx?: number;
+  snapGridCellPitchPx?: number;
   /** Zero-advance anchor-character placeholder: contributes run metrics to the
    * line box but paints no glyph. */
   metricOnly?: true;
@@ -590,12 +601,11 @@ export interface DocGridCtx {
   type: string | null | undefined;
   /** Grid pitch in pt (already converted from twips in the parser). */
   linePitchPt: number | null | undefined;
-  /** ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` divided by 4096 — the per-EA-
-   *  glyph character-grid delta = charSpace/4096 in FLAT POINTS (independent of
-   *  font size), added to the measured glyph advance (≈1em for full-width EA
-   *  glyphs). Negative tightens. `null`/`undefined` when the section declares no
-   *  charSpace; the character grid is then inactive even if `type` is
-   *  linesAndChars/snapToChars. See {@link gridCharDeltaPx}. */
+  /** Full §17.6.5 character pitch in pt (Normal-style size + charSpace delta). */
+  characterPitchPt?: number | null;
+  /** ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` divided by 4096. This is a
+   *  flat-point character-pitch delta, independent of font size. `linesAndChars`
+   *  adds it to every character. */
   charSpacePt?: number | null;
 }
 
@@ -731,7 +741,7 @@ export function serifTail(cjk: ReturnType<typeof classifyCjkFont>): string {
  *  1. `fontFamilyClasses` map (from `word/fontTable.xml` §17.8.3.10):
  *     - "roman"      → serif
  *     - "swiss"      → sans-serif
- *     - "modern"     → monospace only for `pitch="fixed"` (§17.8.3.29), else
+ *     - "modern"     → monospace only for `pitch="fixed"` (§17.8.3.14), else
  *                      fall through to step 2
  *     - "script"/"decorative" → sans-serif fallback
  *     - "auto" / absent       → fall through to step 2
@@ -755,7 +765,7 @@ export const fontFamilyNormalizeCache = new WeakMap<Record<string, string>, Map<
 
 /** Companion to {@link fontFamilyNormalizeCache}: maps a `fontFamilyClasses`
  *  object (stable per-document identity) to the sibling per-font PITCH map
- *  (ECMA-376 §17.8.3.29 `<w:pitch>`: font name → "fixed" | "variable" |
+ *  (ECMA-376 §17.8.3.14 `<w:pitch>`: font name → "fixed" | "variable" |
  *  "default"). `normalizeFontFamily` reads it to decide whether a
  *  `family="modern"` (§17.8.3.10) face is genuinely monospace: only "fixed"
  *  (§17.18.66 Fixed Width) is. Keyed on the classes object so the pitch threads
@@ -766,7 +776,7 @@ export const fontFamilyPitchesByClasses = new WeakMap<
   Record<string, string>
 >();
 
-/** Bind the §17.8.3.29 pitch map to the §17.8.3.10 classes object and return the
+/** Bind the §17.8.3.14 pitch map to the §17.8.3.10 classes object and return the
  *  classes object (defaulting to `{}`). Call at each renderer site that
  *  materializes a document's `fontFamilyClasses` for threading, so the classifier
  *  can read a `modern` face's pitch without a second map plumbed through. */
@@ -856,14 +866,14 @@ export function normalizeFontFamilyUncached(
         return `${head}, ${sansTail(cjk)}`;
       case 'modern': {
         // §17.8.3.10 `modern` is the "modern/monospace" typeface family, but the
-        // family value classifies the DESIGN, not the pitch — §17.8.3.29
+        // family value classifies the DESIGN, not the pitch — §17.8.3.14
         // `<w:pitch>` states the actual pitch. Treat the face as monospace ONLY
         // when pitch is "fixed" (§17.18.66 Fixed Width). A "variable"
         // (proportional) modern face — e.g. Meiryo UI (`family="modern"`,
         // `pitch="variable"`), a condensed ~0.84em CJK sans — must NOT map to
         // Courier/monospace: that measures its CJK at a full 1.0em and over-wraps
         // table cells onto a spurious extra page (issue #855). "default" and an
-        // omitted `<w:pitch>` (assumed "default" per §17.8.3.29) are likewise not
+        // omitted `<w:pitch>` (assumed "default" per §17.8.3.14) are likewise not
         // a fixed-width guarantee, so they fall through to the name-pattern /
         // CJK-sans path below. Genuine monospace faces (Courier, Consolas, 等幅)
         // are still caught there by name.
@@ -1016,10 +1026,7 @@ function emptyIntendedSingleForScriptPx(
  *  rounding: CJK symbols/punctuation, Hiragana, Katakana, CJK Unified +
  *  Extension A, compatibility ideographs, Hangul, and fullwidth forms. Content
  *  test only — not a font-name heuristic (cf. packages/docx/CLAUDE.md). */
-/** Per-EA-glyph character-grid delta in px for a paragraph's grid, or 0 when the
- *  CHARACTER grid is inactive. Active only for docGrid type ∈ {linesAndChars,
- *  snapToChars} with a declared charSpace (ECMA-376 §17.6.5). The line grid
- *  ("lines") and a missing charSpace leave EA glyphs at natural advance. */
+/** Per-character character-grid delta in px, before applying the grid's scope. */
 export function gridCharDeltaPx(grid: DocGridCtx | undefined, scale: number): number {
   if (!grid || grid.charSpacePt == null) return 0;
   if (grid.type !== 'linesAndChars' && grid.type !== 'snapToChars') return 0;
@@ -1035,25 +1042,35 @@ export function eaGlyphCount(text: string): number {
   return n;
 }
 
-/** The total character-grid delta (px) a segment's advance gains under an active
- *  character grid. Applied ONLY to a PURE East-Asian segment (every code point
- *  is EA): then `len × deltaPx` cells the whole run, and a uniform per-cp
- *  letter-spacing of `deltaPx` reproduces it exactly on both draw paths. A mixed
- *  or pure-Latin segment returns 0 — Latin is never snapped (§17.6.5), and
- *  skipping mixed segments avoids the per-cp-vs-whole-string and justification
- *  drift that would break measure==draw. `deltaPx===0` (grid inactive) ⇒ 0. */
-export function gridSegDeltaPx(text: string, deltaPx: number): number {
+/** Total character-grid delta gained by a segment. `linesAndChars` applies its
+ *  authored pitch to every character. The non-`linesAndChars` branch preserves
+ *  the renderer's pre-existing East-Asian-only fallback; it does not implement
+ *  the Latin-block grid-unit allocation and centering required for
+ *  `snapToChars` by ECMA-376 §17.6.5 and [MS-OI29500] §2.1.534. */
+export function gridSegDeltaPx(
+  text: string,
+  grid: DocGridCtx | undefined,
+  scale: number,
+): number {
+  const deltaPx = gridCharDeltaPx(grid, scale);
   if (deltaPx === 0 || text.length === 0) return 0;
   const cps = [...text];
+  if (grid?.type === 'linesAndChars') return cps.length * deltaPx;
   return eaGlyphCount(text) === cps.length ? cps.length * deltaPx : 0;
 }
 
 /** Resolve the per-glyph character-grid delta for one text segment. */
 export function segmentCharacterGridDeltaPx(
   seg: LayoutTextSeg,
-  gridDeltaPx: number,
+  grid: DocGridCtx | undefined,
+  scale: number,
 ): number {
-  return seg.snapToCharacterGrid === false ? 0 : gridDeltaPx;
+  if (seg.snapToCharacterGrid === false) return 0;
+  // snapToChars allocates full cells/blocks in layoutLines. It is not a
+  // per-glyph letter-spacing delta (§17.6.5; [MS-OI29500] §2.1.534).
+  if (grid?.type === 'snapToChars') return 0;
+  const total = gridSegDeltaPx(seg.text, grid, scale);
+  return total === 0 ? 0 : gridCharDeltaPx(grid, scale);
 }
 
 /** ECMA-376 §17.3.2.35 `<w:spacing>` — the per-GLYPH character-spacing pitch in
@@ -1254,17 +1271,17 @@ export function charScaleFactor(seg: LayoutTextSeg): number {
 function textAdvanceWidth(
   naturalWidthPx: number,
   text: string,
-  gridDeltaPx: number,
+  characterGridDeltaPx: number,
   charScale: number,
   charSpacingPx: number,
 ): number {
   return naturalWidthPx * charScale
-    + gridSegDeltaPx(text, gridDeltaPx)
+    + [...text].length * characterGridDeltaPx
     + [...text].length * charSpacingPx;
 }
 
 /** Total per-code-point letter-spacing (px) a segment draws with: the docGrid
- *  cell delta (East-Asian-only, {@link gridSegDeltaPx}'s per-cp value) PLUS the
+ *  cell delta (already scoped by {@link segmentCharacterGridDeltaPx}) PLUS the
  *  §17.3.2.35 character-spacing pitch (all code points). Because Canvas
  *  `ctx.letterSpacing` inserts the SAME advance after every glyph, the two are
  *  additive only when the grid delta applies to every glyph — i.e. a pure-EA
@@ -1275,13 +1292,11 @@ function textAdvanceWidth(
  *  so measure==paint holds. */
 export function segLetterSpacingPx(
   seg: LayoutTextSeg,
-  gridDeltaPx: number,
+  grid: DocGridCtx | undefined,
   scale: number,
 ): number {
   if (seg.fitTextPerGapPx !== undefined) return seg.fitTextPerGapPx;
-  const segmentDelta = segmentCharacterGridDeltaPx(seg, gridDeltaPx);
-  const grid = gridSegDeltaPx(seg.text, segmentDelta) === 0 ? 0 : segmentDelta;
-  return grid + charSpacingDeltaPx(seg, scale);
+  return segmentCharacterGridDeltaPx(seg, grid, scale) + charSpacingDeltaPx(seg, scale);
 }
 
 /** A text segment's laid-out advance including the §17.3.2.43 horizontal scale
@@ -1291,7 +1306,7 @@ export function segLetterSpacingPx(
 export function segAdvanceWidth(
   seg: LayoutTextSeg,
   naturalWidthPx: number,
-  gridDeltaPx: number,
+  grid: DocGridCtx | undefined,
   scale: number,
 ): number {
   if (seg.fitTextPerGapPx !== undefined) {
@@ -1311,7 +1326,7 @@ export function segAdvanceWidth(
   // logical-horizontal advance IS the vertical column advance after the page
   // rotation — see vertical-text.ts and renderer's page transform.)
   if (seg.tateChuYoko) return seg.fontSize * scale;
-  const segmentDelta = segmentCharacterGridDeltaPx(seg, gridDeltaPx);
+  const segmentDelta = segmentCharacterGridDeltaPx(seg, grid, scale);
   return textAdvanceWidth(
     naturalWidthPx,
     seg.text,
@@ -1319,6 +1334,38 @@ export function segAdvanceWidth(
     charScaleFactor(seg),
     charSpacingDeltaPx(seg, scale),
   ) + punctuationCompressionTotalPt(seg) * scale;
+}
+
+export type SnapToCharsClass = 'eastAsia' | 'latin' | 'complexScript';
+
+/** Normative §17.6.5 script class. Source/run/style boundaries are deliberately
+ * absent: ascii and hAnsi form one contiguous Latin block, complex-script text
+ * forms its own block, and each East-Asian character owns one cell. */
+export function snapToCharsClass(
+  seg: LayoutTextSeg,
+  grid: DocGridCtx | undefined,
+): SnapToCharsClass | null {
+  if (grid?.type !== 'snapToChars'
+    || !grid.characterPitchPt
+    || grid.characterPitchPt <= 0
+    || seg.snapToCharacterGrid === false
+    || seg.metricOnly
+    || seg.fitTextRegionIndex !== undefined
+    || seg.tateChuYoko) return null;
+  if (seg.script === 'eastAsia') return 'eastAsia';
+  if (seg.script === 'complexScript') return 'complexScript';
+  return 'latin';
+}
+
+export function snapToCharsAllocatedWidthPx(
+  naturalWidthPx: number,
+  kind: SnapToCharsClass,
+  pitchPx: number,
+  eastAsianCellCount = 1,
+): number {
+  if (!(pitchPx > 0) || !Number.isFinite(naturalWidthPx)) return naturalWidthPx;
+  if (kind === 'eastAsia') return Math.max(1, eastAsianCellCount) * pitchPx;
+  return Math.max(1, Math.ceil(Math.max(0, naturalWidthPx) / pitchPx - 1e-9)) * pitchPx;
 }
 
 export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
@@ -1898,7 +1945,9 @@ export function hasCJKBreakOpportunity(text: string): boolean {
 
 // ECMA-376 §17.15.1.18 / §17.18.7 distinguishes punctuation-only compression
 // from punctuation-plus-Japanese-kana compression. This is the reviewed
-// supported subset: full-width closing forms plus full-width ! and ?.
+// supported subset: full-width dividing punctuation and closing forms verified
+// by the registered Word fixture. U+3017, full-width !, and full-width ? remain
+// full-cell in that same matrix and are deliberately excluded.
 // JLReq classifies middle dot, colon, and semicolon together (cl-05); their
 // whitespace belongs on both sides and must be resolved from the adjacent
 // character classes, so they cannot use this trailing-side-only projection.
@@ -1907,8 +1956,7 @@ export function hasCJKBreakOpportunity(text: string): boolean {
 // implementation-note evidence for the full-width punctuation scope is
 // registered in layout/line-compatibility.ts.
 const COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION = new Set([
-  '、', '。', '，', '．', '」', '』', '】', '〗', '）', '］', '｝',
-  '！', '？',
+  '、', '。', '，', '．', '」', '』', '】', '）', '］', '｝',
 ]);
 
 /** Full-width Japanese kana characters for
@@ -2145,13 +2193,10 @@ export function splitByComplexScript(text: string): { text: string; cs: boolean 
  * ASCII digits to the ascii face), and a single fillText anchors to the cumulative
  * whole-string advance, so the visible spacing is unchanged.
  *
- * NOTE: this split decides the FONT slot only. Whether a resulting segment is
- * snapped to the §17.6.5 character grid is decided SEPARATELY by the grid's own
- * `EAST_ASIAN_RE` purity test (see `gridSegDeltaPx`/`eaGlyphCount`), not by the
- * `ea` flag here. The two CJK predicates classify slightly different code-point
- * sets; correctness of the grid total relies on `eaGlyphCount` being additive
- * over this partition (covered by docgrid-char.test.ts's mixed-token case). Keep
- * them independent — do not "unify" the predicates without re-checking that test.
+ * NOTE: this split decides the FONT slot only. `linesAndChars` applies its pitch
+ * to both partitions. The pre-existing non-`linesAndChars` fallback uses the
+ * grid's own `EAST_ASIAN_RE` purity test (see `gridSegDeltaPx`/`eaGlyphCount`),
+ * not the `ea` font-slot flag here.
  */
 export function splitByEastAsia(text: string): { text: string; ea: boolean }[] {
   const out: { text: string; ea: boolean }[] = [];
@@ -2278,6 +2323,11 @@ export interface BidiTabItem {
   isTab: boolean;
   /** Content width in px (ignored for tabs). Set by the LTR layout pass. */
   width: number;
+  /** Logical advance from this item's start to the ST_TabJc decimal alignment
+   * point: the first separator, or [MS-OI29500] §2.1.556's implicit separator
+   * after the first numerical value. The bidi resolver converts the complete
+   * cell's logical prefix to a physical reading-frame offset. */
+  decimalOffset?: number;
 }
 
 /** Per-segment result of {@link layoutBidiTabStops}. */
@@ -2295,9 +2345,10 @@ export interface BidiTabResult {
  * coordinates, so the role mapping itself is direction-independent. */
 function tabAlignmentRole(
   alignment: TabStop['alignment'],
-): 'leading' | 'center' | 'trailing' {
+): 'leading' | 'center' | 'trailing' | 'decimal' {
   if (alignment === 'center') return 'center';
-  if (alignment === 'right' || alignment === 'end' || alignment === 'decimal') {
+  if (alignment === 'decimal') return 'decimal';
+  if (alignment === 'right' || alignment === 'end') {
     return 'trailing';
   }
   return 'leading';
@@ -2361,13 +2412,29 @@ export function layoutBidiTabStops(
 
   // Width of the content run immediately FOLLOWING index `i` in reading order
   // (up to the next tab / line end) — the trailing/centered stop needs it.
-  const followW = (from: number): number => {
-    let w = 0;
+  const followAlignmentWidth = (
+    from: number,
+    role: ReturnType<typeof tabAlignmentRole>,
+  ): Readonly<{ total: number; alignment: number }> => {
+    let total = 0;
+    let decimal: number | undefined;
     for (let j = from; j < n; j++) {
       if (items[j].isTab) break;
-      w += width[j];
+      if (decimal === undefined && items[j].decimalOffset !== undefined) {
+        decimal = total + items[j].decimalOffset!;
+      }
+      total += width[j];
     }
-    return w;
+    return {
+      total,
+      alignment: role === 'center'
+        ? total / 2
+        : role === 'trailing'
+          ? total
+          : role === 'decimal'
+            ? decimal === undefined ? 0 : total - decimal
+            : 0,
+    };
   };
 
   // Reading-frame walk. `pen` = distance from the right TEXT MARGIN; content and
@@ -2387,15 +2454,16 @@ export function layoutBidiTabStops(
     }
     // The tab's leading (right) edge sits at the pen; its trailing (left) edge
     // is the stop-aligned target, giving the gap it fills.
-    const fw = followW(i + 1);
-    let target: number; // pen value after the tab (its trailing/left edge)
     const role = tabAlignmentRole(stop.alignment);
-    if (role === 'trailing') {
-      // end/trailing: following content's TRAILING (left) edge on the stop, i.e.
-      // its right edge sits fw to the RIGHT (smaller margin) of the stop.
-      target = stop.pos - fw;
-    } else if (role === 'center') {
-      target = stop.pos - fw / 2;
+    const following = followAlignmentWidth(i + 1, role);
+    const fw = following.total;
+    let target: number; // pen value after the tab (its trailing/left edge)
+    if (role !== 'leading') {
+      // end aligns the full following cell, center half of it, and decimal the
+      // reading-frame distance through the first halfwidth period. With no
+      // period Word aligns the physical right edge of an embedded LTR numeric
+      // cell; that is the reading-leading edge in this mirrored frame.
+      target = stop.pos - following.alignment;
     } else {
       // start/leading (or bar/clear/left): following content's LEADING (right)
       // edge on the stop.
@@ -2727,7 +2795,8 @@ export function buildSegments(
         ? { spans: [authoritativeSpan] }
         : environment.layoutServices?.text.shape(textShapeRequest);
       const punctuationCompressions =
-        compressCharacterWhitespace && documentCharacterCompressionApplies
+        compressCharacterWhitespace
+          && documentCharacterCompressionApplies
         ? (() => {
             const boundaries = [0, ...graphemeClusterOffsets(text), text.length];
             const compressions: Array<{ end: number; adjustmentPt: number }> = [];
@@ -2769,7 +2838,12 @@ export function buildSegments(
                   const punctuationRoute = measured.spans[0]?.fontRoute.fingerprint;
                   const ideographicCell = environment.layoutServices?.text.shape({
                     ...textShapeRequest,
-                    text: '\u3000',
+                    // U+3000 is semantically an ideographic space, but several
+                    // proportional East Asian faces expose it to Canvas with
+                    // the same narrow advance as their punctuation. The grid's
+                    // full-width character cell is represented by an
+                    // ideograph, not by that platform-specific space metric.
+                    text: '\u4e00',
                     fontHint: 'eastAsia',
                     measure: true,
                     clusterGeometry: false,
@@ -2882,6 +2956,8 @@ export function buildSegments(
         && (r.fontHint === 'eastAsia' || Boolean(resolvedEaFloorFamily?.trim()));
       segs.push({
         text,
+        script: resolvedSpan?.script ?? authoritativeSpan?.script
+          ?? (cs ? 'complexScript' : EAST_ASIAN_RE.test(text) ? 'eastAsia' : 'ascii'),
         ...(useFeEastAsianMetric
           ? { metricEastAsian: true as const }
           : {}),
@@ -3296,6 +3372,24 @@ export function buildSegments(
     cur.joinPrev = true;
   }
 
+  // UAX #14 LB7 keeps a trailing SP with the preceding text. Script/font
+  // shaping may split that SP into a new segment, so recover the relationship
+  // when both segments came from the same authored run. The compatibility
+  // projection separately owns Word's behavior at a real source-run boundary.
+  for (let i = 1; i < segs.length; i++) {
+    const cur = segs[i];
+    if (!('text' in cur) || cur.joinPrev || !cur.text.startsWith(' ')) continue;
+    const prev = segs[i - 1];
+    if (!('text' in prev)) continue;
+    const trailingSpaceFromSameRun = cur.sourceRunIndex === prev.sourceRunIndex;
+    const compatibleSourceBoundary = wordSourceRunSpaceContinuesSequence(
+      prev.text,
+      cur.text,
+    );
+    if (!trailingSpaceFromSameRun && !compatibleSourceBoundary) continue;
+    cur.joinPrev = true;
+  }
+
   // ── UAX #14 no-break pairs (LB14/LB23/LB23a/LB24/LB25/LB28/LB30) ──
   // buildSegments intentionally splits at run / font-script boundaries, but
   // those formatting seams are not line-break opportunities. Mark the following
@@ -3361,7 +3455,7 @@ export function layoutLines(
   fontFamilyClasses?: Record<string, string>,
   tabOriginPx?: number,
   kinsoku?: KinsokuRules,
-  gridDeltaPx?: number,
+  characterGrid?: DocGridCtx,
   defaultTabPt?: number,
   marginRightPx?: number,
   baseRtl?: boolean,
@@ -3387,10 +3481,10 @@ export function layoutLines(
   // ECMA-376 §17.15.1.58–.60 Japanese line-breaking rules. Default kinsoku is
   // ON; the CJK overflow path retracts the break to a kinsoku-legal position.
   kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
-  // ECMA-376 §17.6.5 docGrid CHARACTER grid: per-EA-glyph cell delta in px (0
-  // when inactive). Folded into every text advance so line breaking packs the
-  // grid's char count per line; the draw paths add the SAME delta.
-  gridDeltaPx = 0,
+  // ECMA-376 §17.6.5 docGrid CHARACTER grid. The grid kind and pitch travel
+  // together so measure, line breaking, and retained paint cannot disagree on
+  // whether the delta applies to all characters or East Asian characters only.
+  characterGrid: DocGridCtx | undefined = undefined,
   // ECMA-376 §17.15.1.25 — automatic tab-stop interval (pt). The automatic-stop
   // grid (`nextTabStop`) multiplies this by `scale`; defaults to the spec absent
   // value (720 twips = 36pt) for callers without document settings.
@@ -3445,7 +3539,7 @@ export function layoutLines(
       fontFamilyClasses,
       tabOriginPx,
       kinsoku,
-      gridDeltaPx,
+      characterGrid,
       defaultTabPt,
       marginRightPx,
       baseRtl,
@@ -3477,15 +3571,26 @@ export function layoutLines(
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[] = [];
   let currentWidth = 0;
-  // Sum of trailing-space widths of every text token on the current line.
-  // Used for two things:
-  //   1. Knuth-Plass-style shrink tolerance: every line may consume up to
-  //      SPACE_SHRINK_RATIO of its accumulated trailing-space width.
-  //   2. Trailing-space collapse at line end — the last token's trailing
-  //      space disappears when no further word is added, so when deciding
-  //      whether a candidate word fits we treat it as if it would become the
-  //      final word (its own trailing spaces collapsible).
+  const snapPitchPx = characterGrid?.type === 'snapToChars'
+    && characterGrid.characterPitchPt != null
+    && characterGrid.characterPitchPt > 0
+      ? characterGrid.characterPitchPt * scale
+      : null;
+  type SnapBlockState = {
+    kind: 'latin' | 'complexScript';
+    first: LayoutTextSeg;
+    last: LayoutTextSeg;
+    naturalWidthPx: number;
+    allocatedWidthPx: number;
+  };
+  let snapBlock: SnapBlockState | null = null;
+  // Sum of ordinary ONE-space inter-word separators on the current line.
+  // A consecutive authored SP sequence is preserved as explicit spacing and
+  // contributes no Knuth-Plass shrink budget. Track the pending suffix across
+  // segmentation/source-run boundaries so formatting cannot change the result.
   let lineTotalTrailingW = 0;
+  let pendingTrailingSpaceCount = 0;
+  let pendingTrailingSpaceContribution = 0;
   // Incremental Canvas-vs-Word bias of the text already committed to this line.
   // Candidate checks add only the prospective text, avoiding a hot-loop rescan.
   let lineBiasBudget = 0;
@@ -3541,6 +3646,7 @@ export function layoutLines(
   // receive MIN_LINE_GAP separately so the compatibility policy cannot erase a
   // through opening explicitly permitted by §20.4.2.18.
   const startLine = (minWidth: number = 0): void => {
+    snapBlock = null;
     lineBiasBudget = 0;
     lineMeasurementRoutes.clear();
     lineXOffset = 0;
@@ -3624,6 +3730,24 @@ export function layoutLines(
       isTab: 'isTab' in s,
       width: s.measuredWidth,
     }));
+    for (let tabIndex = 0; tabIndex < currentLine.length; tabIndex += 1) {
+      if (!('isTab' in currentLine[tabIndex]!)) continue;
+      let cellEnd = tabIndex + 1;
+      while (cellEnd < currentLine.length && !('isTab' in currentLine[cellEnd]!)) {
+        cellEnd += 1;
+      }
+      const cell = currentLine.slice(tabIndex + 1, cellEnd);
+      const point = decimalAlignmentPoint(cell);
+      if (!point) continue;
+      const itemIndex = tabIndex + 1 + point.segmentIndex;
+      const segment = currentLine[itemIndex]!;
+      if ('text' in segment) {
+        items[itemIndex]!.decimalOffset = strAdvance(
+          segment,
+          segment.text.slice(0, point.charOffset),
+        );
+      }
+    }
     // Margin-anchored frame (§17.3.1.37 — stops measure from the TEXT MARGIN):
     // pen 0 = right text margin. Content starts after the leading indent — the
     // line window's RIGHT edge is paraX-relative `lineXOffset + lineMaxWidth`
@@ -3749,6 +3873,8 @@ export function layoutLines(
     currentLine = [];
     currentWidth = 0;
     lineTotalTrailingW = 0;
+    pendingTrailingSpaceCount = 0;
+    pendingTrailingSpaceContribution = 0;
     lineBiasBudget = 0;
     lineMeasurementRoutes.clear();
     lineHeight = 0;
@@ -3801,6 +3927,23 @@ export function layoutLines(
     return count;
   };
 
+  const prospectiveSnapAdvance = (s: LayoutTextSeg, naturalWidth: number): number => {
+    const kind = snapToCharsClass(s, characterGrid);
+    if (!kind || snapPitchPx == null) return naturalWidth;
+    if (kind === 'eastAsia') {
+      const cells = eastAsianSnapCellCount(s);
+      return snapToCharsAllocatedWidthPx(naturalWidth, kind, snapPitchPx, cells);
+    }
+    if (snapBlock?.kind === kind) {
+      return snapToCharsAllocatedWidthPx(
+        snapBlock.naturalWidthPx + naturalWidth,
+        kind,
+        snapPitchPx,
+      ) - snapBlock.allocatedWidthPx;
+    }
+    return snapToCharsAllocatedWidthPx(naturalWidth, kind, snapPitchPx);
+  };
+
   const addToLine = (
     s: LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg,
     w: number,
@@ -3809,10 +3952,117 @@ export function layoutLines(
     desc: number,
     trailingSpaceW: number = 0,
   ) => {
-    currentLine.push(s);
-    currentWidth += w;
-    lineTotalTrailingW += trailingSpaceW;
+    let committedWidth = w;
     if ('text' in s) {
+      const kind = snapToCharsClass(s, characterGrid);
+      const naturalWidth = s.snapGridNaturalWidthPx ?? w;
+      if (kind && snapPitchPx != null) {
+        s.snapGridClass = kind;
+        s.snapGridNaturalWidthPx = naturalWidth;
+        s.snapGridCellPitchPx = snapPitchPx;
+        if (kind === 'eastAsia') {
+          const cellCount = eastAsianSnapCellCount(s);
+          committedWidth = snapToCharsAllocatedWidthPx(
+            naturalWidth,
+            kind,
+            snapPitchPx,
+            cellCount,
+          );
+          s.snapGridLeadingPadPx = 0;
+          s.snapGridTrailingPadPx = committedWidth - naturalWidth;
+          s.measuredWidth = committedWidth;
+          snapBlock = null;
+        } else if (snapBlock?.kind === kind) {
+          const previousLeading = snapBlock.first.snapGridLeadingPadPx ?? 0;
+          const previousTrailing = snapBlock.last.snapGridTrailingPadPx ?? 0;
+          const combinedNatural = snapBlock.naturalWidthPx + naturalWidth;
+          const combinedAllocated = snapToCharsAllocatedWidthPx(
+            combinedNatural,
+            kind,
+            snapPitchPx,
+          );
+          const slack = combinedAllocated - combinedNatural;
+          const leading = kind === 'latin' ? slack / 2 : 0;
+          const trailing = slack - leading;
+          snapBlock.first.measuredWidth -= previousLeading;
+          snapBlock.first.snapGridLeadingPadPx = leading;
+          snapBlock.first.measuredWidth += leading;
+          snapBlock.last.measuredWidth -= previousTrailing;
+          s.snapGridLeadingPadPx = 0;
+          s.snapGridTrailingPadPx = trailing;
+          s.measuredWidth = naturalWidth + trailing;
+          committedWidth = combinedAllocated - snapBlock.allocatedWidthPx;
+          snapBlock = {
+            kind,
+            first: snapBlock.first,
+            last: s,
+            naturalWidthPx: combinedNatural,
+            allocatedWidthPx: combinedAllocated,
+          };
+        } else {
+          const allocated = snapToCharsAllocatedWidthPx(naturalWidth, kind, snapPitchPx);
+          const slack = allocated - naturalWidth;
+          const leading = kind === 'latin' ? slack / 2 : 0;
+          const trailing = slack - leading;
+          s.snapGridLeadingPadPx = leading;
+          s.snapGridTrailingPadPx = trailing;
+          s.measuredWidth = allocated;
+          committedWidth = allocated;
+          snapBlock = {
+            kind,
+            first: s,
+            last: s,
+            naturalWidthPx: naturalWidth,
+            allocatedWidthPx: allocated,
+          };
+        }
+      } else {
+        s.snapGridClass = undefined;
+        s.snapGridLeadingPadPx = undefined;
+        s.snapGridTrailingPadPx = undefined;
+        s.snapGridCellPitchPx = undefined;
+        s.measuredWidth = w;
+        snapBlock = null;
+      }
+    } else {
+      snapBlock = null;
+    }
+    currentLine.push(s);
+    currentWidth += committedWidth;
+    if ('text' in s) {
+      const trailingSpaceCount = s.text.length - s.text.replace(/ +$/, '').length;
+      const spaceOnly = trailingSpaceCount > 0 && trailingSpaceCount === s.text.length;
+      if (spaceOnly && pendingTrailingSpaceCount > 0) {
+        // UAX #14 LB7 retains the entire SP sequence with the preceding text.
+        // A source/style split must not turn an explicit two-space sequence
+        // into two separately shrinkable one-space separators.
+        lineTotalTrailingW -= pendingTrailingSpaceContribution;
+        pendingTrailingSpaceCount += trailingSpaceCount;
+        pendingTrailingSpaceContribution = 0;
+      } else {
+        pendingTrailingSpaceCount = 0;
+        pendingTrailingSpaceContribution = 0;
+        const preceding = currentLine[currentLine.length - 2];
+        const followsVisibleText = preceding !== undefined
+          && 'text' in preceding
+          && /\S$/u.test(preceding.text);
+        if (spaceOnly && followsVisibleText) {
+          // Script/font shaping can isolate a normal separator into its own
+          // segment. It remains one shrinkable inter-word space until another
+          // adjacent SP extends the sequence.
+          pendingTrailingSpaceCount = trailingSpaceCount;
+          pendingTrailingSpaceContribution = trailingSpaceCount === 1
+            ? trailingSpaceW
+            : 0;
+          lineTotalTrailingW += pendingTrailingSpaceContribution;
+        } else if (trailingSpaceCount > 0 && !spaceOnly) {
+          pendingTrailingSpaceCount = trailingSpaceCount;
+          pendingTrailingSpaceContribution = trailingSpaceCount === 1
+            ? trailingSpaceW
+            : 0;
+          lineTotalTrailingW += pendingTrailingSpaceContribution;
+        }
+      }
       lineBiasBudget += biasBudgetContribution(s);
       noteMeasurementRoute(lineMeasurementRoutes, s);
     }
@@ -4050,14 +4300,26 @@ export function layoutLines(
   // via `ctx.fontKerning` inside `withSegKerning`, wrapping the measureText call.
   // The #1014 vo=Tr ink deficit (`verticalInkExtra`, defined above) is folded into
   // the natural width so measure == paint on an under-reporting vertical run.
+  const segNaturalAdvance = (s: LayoutTextSeg): number =>
+    segAdvanceWidth(s, measureText(s).width + verticalInkExtra(s, s.text), characterGrid, scale);
+  const standaloneSnapAdvance = (s: LayoutTextSeg, naturalWidth: number): number => {
+    const kind = snapToCharsClass(s, characterGrid);
+    if (!kind || snapPitchPx == null || s.text.length === 0) return naturalWidth;
+    return snapToCharsAllocatedWidthPx(
+      naturalWidth,
+      kind,
+      snapPitchPx,
+      kind === 'eastAsia' ? eastAsianSnapCellCount(s) : 1,
+    );
+  };
   const segAdvance = (s: LayoutTextSeg): number =>
-    segAdvanceWidth(s, measureText(s).width + verticalInkExtra(s, s.text), gridDeltaPx, scale);
+    standaloneSnapAdvance(s, segNaturalAdvance(s));
   // Grid advance of an arbitrary substring under a segment's font (for split
   // prefixes/tails). Selects the font (and the run's kerning state), then applies
   // the same width model as a whole segment BUT with the substring's own
   // text/length so char-spacing scales with the piece — the split-prefix vs
   // whole-segment advances must agree.
-  const strAdvance = (
+  const strNaturalAdvance = (
     s: LayoutTextSeg,
     text: string,
     retainTrailingPunctuationCompression = false,
@@ -4085,7 +4347,7 @@ export function layoutLines(
       return segAdvanceWidth(
         measuredSegment,
         shaped.advancePt + verticalInkExtra(s, text),
-        gridDeltaPx,
+        characterGrid,
         scale,
       );
     }
@@ -4096,8 +4358,81 @@ export function layoutLines(
     return segAdvanceWidth(
       measuredSegment,
       natural + verticalInkExtra(s, text),
-      gridDeltaPx,
+      characterGrid,
       scale,
+    );
+  };
+  const eastAsianSnapCellCount = (s: LayoutTextSeg): number => {
+    if (snapPitchPx == null) return 1;
+    if (s.textLayoutService && s.textShapeRequest && !s.shapedClusters) {
+      measureText(s, true);
+    }
+    const shapedClusters = s.shapedClusters?.length
+      ? s.shapedClusters
+      : null;
+    const boundaries = shapedClusters == null
+      ? [...new Set([
+          0,
+          ...graphemeClusterOffsets(s.text),
+          s.text.length,
+        ])].sort((a, b) => a - b)
+      : null;
+    const ranges = shapedClusters?.map((cluster) => ({
+      start: cluster.range.start,
+      end: cluster.range.end,
+      advancePx: cluster.advancePt,
+    })) ?? boundaries!.slice(0, -1).map((start, index) => ({
+      start,
+      end: boundaries![index + 1]!,
+      advancePx: undefined,
+    }));
+    let cells = 0;
+    for (const range of ranges) {
+      const { start, end } = range;
+      if (end <= start) continue;
+      const text = s.text.slice(start, end);
+      const measuredSegment = {
+        ...s,
+        text,
+        punctuationCompressions: slicedPunctuationCompressions(s, start, end),
+      };
+      let naturalAdvancePx: number;
+      if (range.advancePx != null) {
+        naturalAdvancePx = segAdvanceWidth(
+          measuredSegment,
+          range.advancePx + verticalInkExtra(s, text),
+          characterGrid,
+          scale,
+        );
+      } else {
+        setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
+        const previousKerning = setSegKerning(s);
+        const naturalWidthPx = ctx.measureText(text).width;
+        restoreKerning(previousKerning);
+        naturalAdvancePx = segAdvanceWidth(
+          measuredSegment,
+          naturalWidthPx + verticalInkExtra(s, text),
+          characterGrid,
+          scale,
+        );
+      }
+      cells += wordSnapToCharsEastAsianCellCount(naturalAdvancePx, snapPitchPx);
+    }
+    return Math.max(1, cells);
+  };
+  const strAdvance = (
+    s: LayoutTextSeg,
+    text: string,
+    retainTrailingPunctuationCompression = false,
+  ): number => {
+    const candidate = {
+      ...s,
+      text,
+      shapedClusters: text === s.text ? s.shapedClusters : undefined,
+    };
+    return standaloneSnapAdvance(
+      candidate,
+      strNaturalAdvance(s, text, retainTrailingPunctuationCompression),
     );
   };
 
@@ -4108,6 +4443,72 @@ export function layoutLines(
     if ('math' in q) return q.measuredWidth || 0;
     if ('lineBreak' in q) return 0;
     return segAdvance(q);
+  };
+
+  /** [MS-OI29500] §2.1.556 / ST_TabJc: use the first explicit decimal
+   * separator; when it is absent, Word defines an implicit separator after the
+   * last digit of the first numerical value. The returned source boundary is
+   * independent of run/style seams so both LTR and mirrored bidi tab paths use
+   * the same decision. */
+  const decimalAlignmentPoint = (
+    segments: readonly LayoutSeg[],
+  ): Readonly<{ segmentIndex: number; charOffset: number }> | null => {
+    for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
+      const segment = segments[segmentIndex]!;
+      if (!('text' in segment)) continue;
+      const separator = segment.text.indexOf('.');
+      if (separator >= 0) return { segmentIndex, charOffset: separator };
+    }
+
+    let lastDigit: Readonly<{ segmentIndex: number; charOffset: number }> | null = null;
+    let inFirstNumber = false;
+    for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
+      const segment = segments[segmentIndex]!;
+      if (!('text' in segment)) {
+        if (inFirstNumber) return lastDigit;
+        continue;
+      }
+      let charOffset = 0;
+      for (const scalar of segment.text) {
+        charOffset += scalar.length;
+        if (/\p{Decimal_Number}/u.test(scalar)) {
+          inFirstNumber = true;
+          lastDigit = { segmentIndex, charOffset };
+        } else if (inFirstNumber) {
+          return lastDigit;
+        }
+      }
+    }
+    return lastDigit;
+  };
+
+  const decimalAlignmentPrefixWidth = (segments: readonly LayoutSeg[]): number | undefined => {
+    const point = decimalAlignmentPoint(segments);
+    if (!point) return undefined;
+    let width = 0;
+    for (let index = 0; index < point.segmentIndex; index += 1) {
+      width += tabFollowWidth(segments[index]!);
+    }
+    const segment = segments[point.segmentIndex]!;
+    if (!('text' in segment)) return width;
+    return width + strAdvance(segment, segment.text.slice(0, point.charOffset));
+  };
+
+  const tabFollowingMetrics = (): Readonly<{
+    totalWidth: number;
+    decimalPrefixWidth?: number;
+  }> => {
+    const following: LayoutSeg[] = [];
+    let totalWidth = 0;
+    for (const q of queue) {
+      if ('isTab' in q || 'lineBreak' in q) break;
+      following.push(q);
+      totalWidth += tabFollowWidth(q);
+    }
+    const decimalPrefixWidth = decimalAlignmentPrefixWidth(following);
+    return decimalPrefixWidth === undefined
+      ? { totalWidth }
+      : { totalWidth, decimalPrefixWidth };
   };
 
   // A `<w:br/>` always starts a new line (§17.3.3.1) — when it is the LAST
@@ -4223,7 +4624,7 @@ export function layoutLines(
             } else {
               const m = measureText(q);
               // #1014 — fold the vo=Tr ink deficit into the committed advance too.
-              const w = segAdvanceWidth(q, m.width + verticalInkExtra(q, q.text), gridDeltaPx, scale);
+              const w = segAdvanceWidth(q, m.width + verticalInkExtra(q, q.text), characterGrid, scale);
               q.measuredWidth = w;
               const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? q.fontSize * scale * 0.8;
               const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? q.fontSize * scale * 0.2;
@@ -4255,14 +4656,14 @@ export function layoutLines(
       if (stop && alignmentRole !== 'leading') {
         const stopX = stopParaX;
         seg.leader = stop.leader;
-        let followW = 0;
-        for (const q of queue) {
-          if ('isTab' in q || 'lineBreak' in q) break;
-          followW += tabFollowWidth(q);
-        }
-        const frac = alignmentRole === 'center' ? 0.5 : 1;
-        let tabW = stopX - absFromParaX - followW * frac;
-        if (tabW <= 0) tabW = seg.fontSize * scale * 0.25;
+        const following = tabFollowingMetrics();
+        const alignmentWidth = alignmentRole === 'center'
+          ? following.totalWidth / 2
+          : alignmentRole === 'decimal'
+            ? following.decimalPrefixWidth ?? following.totalWidth
+            : following.totalWidth;
+        let tabW = stopX - absFromParaX - alignmentWidth;
+        if (tabW <= 0) tabW = 0;
         seg.measuredWidth = tabW;
         addToLine(seg, tabW, seg.fontSize, seg.fontSize * scale * 0.8, seg.fontSize * scale * 0.2);
         // Commit the trailing content onto this line without a wrap re-check.
@@ -4279,7 +4680,7 @@ export function layoutLines(
           } else {
             const m = measureText(q);
             // #1014 — fold the vo=Tr ink deficit into the committed advance too.
-            const w = segAdvanceWidth(q, m.width + verticalInkExtra(q, q.text), gridDeltaPx, scale);
+            const w = segAdvanceWidth(q, m.width + verticalInkExtra(q, q.text), characterGrid, scale);
             q.measuredWidth = w;
             const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? q.fontSize * scale * 0.8;
             const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? q.fontSize * scale * 0.2;
@@ -4369,14 +4770,21 @@ export function layoutLines(
 
     // ── Text segment ─────────────────────────────────────
     const s = seg as LayoutTextSeg;
-    const m = measureText(s);
+    const m = measureText(s, snapToCharsClass(s, characterGrid) === 'eastAsia');
     // Advance = natural width + character-grid delta (the SINGLE model shared
     // with the draw paths; 0 unless an active grid AND a pure-EA segment).
     // #1014 — plus the vo=Tr rotate-fallback ink deficit for a vertical run, so
     // this MAIN commit path (the segment's stored measuredWidth and the pen advance
     // to the next segment) matches the ink-sized cell `drawVerticalRun` paints
     // (measure == paint); 0 for horizontal / non-under-reporting runs.
-    const w = segAdvanceWidth(s, m.width + verticalInkExtra(s, s.text), gridDeltaPx, scale);
+    const w = segAdvanceWidth(
+      s,
+      m.width + verticalInkExtra(s, s.text),
+      characterGrid,
+      scale,
+    );
+    s.snapGridNaturalWidthPx = w;
+    const prospectiveWidth = prospectiveSnapAdvance(s, w);
     // Line-height tracks the un-scaled pt font so super/sub don't shrink the line.
     const h = s.fontSize;
     // Prefer font-metric ascent/descent (stable per font+size) so baselines and
@@ -4487,7 +4895,9 @@ export function layoutLines(
     // so the grid delta, w:w scale and w:spacing pitch on the retained glyphs all
     // cancel and trailingSpaceW is the bare trailing-space advance — keeping `w`
     // and `wForFit` on the one advance model (`strAdvance` == the model behind `w`).
-    const trailingSpaceW = s.text.endsWith(' ') ? w - strAdvance(s, trimmed) : 0;
+    const trailingSpaceW = snapToCharsClass(s, characterGrid)
+      ? 0
+      : s.text.endsWith(' ') ? w - strAdvance(s, trimmed) : 0;
     const prospectiveLineWillJustify = (next: LayoutSeg | undefined): boolean => {
       const closesLogicalLine = next === undefined || 'lineBreak' in next;
       return isJustified && (!closesLogicalLine || stretchLastLine);
@@ -4503,7 +4913,7 @@ export function layoutLines(
       wrapNarrowed: lineMaxWidth !== maxWidth || lineXOffset !== 0,
     });
     const wForFit = fitWidthFor(
-      w,
+      prospectiveWidth,
       trailingSpaceW,
       queue[0],
     );
@@ -4620,7 +5030,15 @@ export function layoutLines(
         advanceGroupBias(f);
         noteMeasurementRoute(groupMeasurementRoutes, f);
         const ft = f.text.replace(/ +$/, '');
-        groupTrail = f.text.endsWith(' ') ? fw - strAdvance(f, ft) : 0;
+        const followerTrail = f.text.endsWith(' ') ? fw - strAdvance(f, ft) : 0;
+        // UAX #14 LB7 makes a consecutive SP sequence one trailing suffix even
+        // when a source-formatting boundary split it into multiple segments.
+        // Accumulate space-only followers so the line-end fit allowance is
+        // invariant to that non-textual boundary. A follower containing visible
+        // text starts a new suffix and therefore replaces the previous value.
+        groupTrail = ft.length === 0 && groupTrail > 0
+          ? groupTrail + followerTrail
+          : followerTrail;
       }
       groupBiasBudget += biasBudgetContribution(
         pendingGroupBiasSeg,
@@ -4741,7 +5159,7 @@ export function layoutLines(
           ctx,
           s.text,
           available,
-          segmentCharacterGridDeltaPx(s, gridDeltaPx),
+          segmentCharacterGridDeltaPx(s, characterGrid, scale),
           charScaleFactor(s),
           charSpacingDeltaPx(s, scale),
           s.verticalRun === true,
@@ -4778,7 +5196,7 @@ export function layoutLines(
       const prefix = allChars.slice(0, split).join('');
       if (prefix.length > 0) {
         // Grid advance for the head piece — the same model as the line box / draw.
-        const pw = strAdvance(s, prefix);
+        const pw = strNaturalAdvance(s, prefix);
         const headSeg: LayoutTextSeg = {
           ...s,
           text: prefix,
@@ -4868,7 +5286,7 @@ export function layoutLines(
           : 0;
         const firstChar = forcedChars.slice(0, forcedSplit).join('');
         if (firstChar) {
-          const fw = strAdvance(s, firstChar);
+          const fw = strNaturalAdvance(s, firstChar);
           const headSeg: LayoutTextSeg = {
             ...s,
             text: firstChar,
@@ -4919,7 +5337,7 @@ export function layoutLines(
       const split = fitSeaWordPrefix(s.text, s.seaBreaks, 0, available, measureSub, monotone);
       if (split > 0) {
         const prefix = s.text.slice(0, split);
-        const pw = strAdvance(s, prefix);
+        const pw = strNaturalAdvance(s, prefix);
         addToLine({
           ...s,
           text: prefix,
@@ -5007,7 +5425,7 @@ export function layoutLines(
         let gsplit = fitSeaWordPrefix(firstWord, graphemes, 0, available, measureSub, monotone);
         if (gsplit <= 0) gsplit = graphemes.length > 0 ? graphemes[0] : firstWord.length;
         const prefix = s.text.slice(0, gsplit);
-        const pw = strAdvance(s, prefix);
+        const pw = strNaturalAdvance(s, prefix);
         addToLine({
           ...s,
           text: prefix,
@@ -5045,7 +5463,7 @@ export function layoutLines(
               ctx,
               s.text,
               available,
-              segmentCharacterGridDeltaPx(s, gridDeltaPx),
+              segmentCharacterGridDeltaPx(s, characterGrid, scale),
               charScaleFactor(s),
               charSpacingDeltaPx(s, scale),
               s.verticalRun === true,
@@ -5069,7 +5487,7 @@ export function layoutLines(
         addToLine(s, w, h, asc, desc);
       } else {
         const prefix = s.text.slice(0, split);
-        const pw = strAdvance(s, prefix);
+        const pw = strNaturalAdvance(s, prefix);
         addToLine({
           ...s,
           text: prefix,

@@ -522,6 +522,8 @@ export interface LineLayout {
   readonly baselinePt: number;
   readonly advancePt: number;
   readonly placements: readonly ParagraphPlacement[];
+  /** §17.18.84 bar-tab vertical rules acquired independently of tab advances. */
+  readonly barTabRules?: readonly BorderSegment[];
 }
 
 export type InlineResourceLayout = Readonly<{

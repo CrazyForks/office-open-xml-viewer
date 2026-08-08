@@ -130,7 +130,7 @@ describe('layout measurement environment', () => {
     } as unknown as Pick<BodyMeasurementContext, 'sectionLayout'>;
     const context = {
       lineGrid: { active: true, pitchPt: 12 },
-      characterGrid: { active: true, deltaPt: 2 },
+      characterGrid: { active: true, kind: 'linesAndChars', deltaPt: 2, pitchPt: 14 },
     } as ParagraphLayoutContext;
     const grid = gridForParagraphContext(state, context);
 
@@ -138,6 +138,7 @@ describe('layout measurement environment', () => {
       type: 'linesAndChars',
       linePitchPt: 12,
       charSpacePt: 2,
+      characterPitchPt: 14,
     });
     expect(snapParaLineToGrid(13, grid, 1)).toBe(24);
     expect(snapParaLineToGrid(8, grid, 1)).toBe(12);
@@ -150,7 +151,12 @@ describe('layout measurement environment', () => {
     expect(gridForParagraphContext(noGridState, {
       ...context,
       lineGrid: { active: false, pitchPt: null },
-      characterGrid: { active: false, deltaPt: 0 },
-    })).toEqual({ type: null, linePitchPt: null, charSpacePt: null });
+      characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+    })).toEqual({
+      type: null,
+      linePitchPt: null,
+      charSpacePt: null,
+      characterPitchPt: null,
+    });
   });
 });

@@ -7,7 +7,10 @@ import {
   type LayoutSeg,
   type LineLayoutEnvironment,
 } from '../line-layout.js';
-import type { ParagraphMeasurementEnvironment } from '../paragraph-measure.js';
+import {
+  paragraphCharacterGrid,
+  type ParagraphMeasurementEnvironment,
+} from '../paragraph-measure.js';
 import type { ParagraphLayoutContext, StoryContext } from '../layout-context.js';
 import type { BodyMeasurementContext } from './acquisition-context.js';
 import { writingModeFromTextDirection } from './coordinate-space.js';
@@ -120,11 +123,13 @@ export function gridForParagraphContext(
   state: Pick<BodyMeasurementContext, 'sectionLayout'>,
   context: ParagraphLayoutContext,
 ): DocGridCtx {
+  const characterGrid = paragraphCharacterGrid(context);
   return {
-    type: state.sectionLayout.grid.kind === 'none'
-      ? null
-      : state.sectionLayout.grid.kind,
+    type: characterGrid
+      ? characterGrid.type
+      : context.lineGrid.active ? state.sectionLayout.grid.kind : null,
     linePitchPt: context.lineGrid.active ? context.lineGrid.pitchPt : null,
-    charSpacePt: context.characterGrid.active ? context.characterGrid.deltaPt : null,
+    characterPitchPt: characterGrid?.characterPitchPt ?? null,
+    charSpacePt: characterGrid?.charSpacePt ?? null,
   };
 }
