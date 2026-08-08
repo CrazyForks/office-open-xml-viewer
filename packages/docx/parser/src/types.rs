@@ -230,11 +230,11 @@ pub struct DocumentSettings {
     /// punctuation compression / spacing control.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub character_spacing_control: Option<String>,
-    /// §17.15.3.1 `w:compat` / `w:useFELayout` — enable Far East layout
-    /// compatibility behavior.
+    /// ECMA-376 Part 4 §14.8.3.50 `w:compat` / `w:useFELayout` — enable Far
+    /// East layout compatibility behavior.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_fe_layout: Option<bool>,
-    /// §17.15.3.1 `w:compat` / `w:balanceSingleByteDoubleByteWidth` — balance
+    /// §17.15.3.3 `w:compat` / `w:balanceSingleByteDoubleByteWidth` — balance
     /// single-byte and double-byte character widths in East Asian layout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balance_single_byte_double_byte_width: Option<bool>,

@@ -37,6 +37,8 @@ import {
 import {
   WORD_AUTO_MULTIPLE_BASELINE_PIN,
   WORD_AUTHORED_CHARACTER_SPACING_PITCH_PRIORITY,
+  WORD_BALANCED_CONSECUTIVE_SPACE_CELL,
+  WORD_BALANCED_LINES_AND_CHARS_GRID_DELTA,
   WORD_CJK_BOTH_INTER_CHARACTER_EXPANSION,
   WORD_DEGENERATE_LINE_SPACING_SINGLE,
   WORD_DICTIONARY_SEA_ATOMIC_CHUNK,
@@ -68,6 +70,9 @@ import {
   WORD_THAI_DISTRIBUTE_CLUSTER_POLICY,
   WORD_UNIFORM_RUN_POSITION_LEADING,
   wordAutoMultipleCenterBoxPx,
+  wordBalancedConsecutiveSpaceCellApplies,
+  wordBalancedLinesAndCharsGridDeltaFactor,
+  wordBalancedSpaceCellAdjustmentApplies,
   wordDegenerateLineSpacingIsSingle,
   wordEastAsianGridLineCells,
   wordFarEastSingleLinePx,
@@ -449,6 +454,33 @@ describe('layout compatibility inventory', () => {
     });
     expect(wordSourceRunSpaceContinuesSequence('deadline ', ' ')).toBe(true);
     expect(wordSourceRunSpaceContinuesSequence('deadline', ' ')).toBe(false);
+    expect(WORD_BALANCED_CONSECUTIVE_SPACE_CELL.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'single-double-byte-width-space-grid-matrix',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(WORD_BALANCED_CONSECUTIVE_SPACE_CELL.description)
+      .not.toMatch(/sample|private|\.docx|\.pdf/i);
+    expect(wordBalancedConsecutiveSpaceCellApplies(1)).toBe(false);
+    expect(wordBalancedConsecutiveSpaceCellApplies(2)).toBe(true);
+    expect(wordBalancedConsecutiveSpaceCellApplies(8)).toBe(true);
+    expect(wordBalancedSpaceCellAdjustmentApplies(undefined)).toBe(true);
+    expect(wordBalancedSpaceCellAdjustmentApplies('linesAndChars')).toBe(true);
+    expect(wordBalancedSpaceCellAdjustmentApplies('snapToChars')).toBe(false);
+    expect(WORD_BALANCED_LINES_AND_CHARS_GRID_DELTA.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'single-double-byte-width-grid-observation-matrix',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(wordBalancedLinesAndCharsGridDeltaFactor('A', 'ascii')).toBe(0.5);
+    expect(wordBalancedLinesAndCharsGridDeltaFactor(' ', 'ascii')).toBe(0.5);
+    expect(wordBalancedLinesAndCharsGridDeltaFactor('\u3000', 'eastAsia')).toBe(0.5);
+    expect(wordBalancedLinesAndCharsGridDeltaFactor('日', 'eastAsia')).toBe(1);
+    expect(wordBalancedLinesAndCharsGridDeltaFactor('Ａ', 'eastAsia')).toBe(1);
     expect(WORD_TABLE_CELL_IGNORES_GRID_RIGHT_INDENT_ADJUSTMENT.evidence).toEqual({
       kind: 'office-observation',
       syntheticFixtureId: 'table-cell-adjust-right-indent-width-position-matrix',

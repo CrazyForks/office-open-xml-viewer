@@ -94,7 +94,10 @@ describe('layout measurement environment', () => {
       docEastAsian: true,
       layoutSettings: {
         characterSpacingControl: 'compressPunctuation',
-        compat: { useFeLayout: true },
+        compat: {
+          useFeLayout: true,
+          balanceSingleByteDoubleByteWidth: true,
+        },
       },
       resolvedLocalFonts: {},
       layoutServices: { text: {}, images: {}, math: {} },
@@ -111,6 +114,7 @@ describe('layout measurement environment', () => {
       pageWritingMode: 'vertical-rl',
       documentHasEastAsianText: true,
       useFeLayout: true,
+      balanceSingleByteDoubleByteWidth: true,
     });
     const segments = segmentEnvironmentOf(state);
     expect(segments).not.toBe(state);
@@ -120,6 +124,7 @@ describe('layout measurement environment', () => {
     expect(segmentEnvironmentOf(upright)).toMatchObject({
       verticalCJK: true,
       characterSpacingControl: 'compressPunctuation',
+      balanceSingleByteDoubleByteWidth: true,
     });
     expect(paragraphMeasurementEnvironment(upright).verticalCJK).toBe(true);
   });

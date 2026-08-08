@@ -114,6 +114,9 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
     segment.fitTextTrailingPadPx ?? null,
     segment.fitTextRegionIndex ?? null,
     segment.snapToCharacterGrid !== false,
+    segment.widthBalanceGridDeltaFactor ?? null,
+    segment.widthBalanceSpaceSequence ?? false,
+    segment.widthBalanceSpaceAdjustmentPt ?? null,
     // The snap-to-character-grid allocator consumes contiguous script blocks.
     // A shaping-compatible Latin→East-Asian seam is therefore still a semantic
     // grid boundary and must survive this intrinsic-only merge.

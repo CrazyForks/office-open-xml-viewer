@@ -303,6 +303,10 @@ describe('paragraph acquisition cache', () => {
       key({ environment: { ...base.environment, useFeLayout: true } }),
       key({ environment: {
         ...base.environment,
+        balanceSingleByteDoubleByteWidth: true,
+      } }),
+      key({ environment: {
+        ...base.environment,
         resolvedLocalFonts: {
           'test sans': {
             requestedFamily: 'Test Sans',

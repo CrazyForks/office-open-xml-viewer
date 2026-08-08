@@ -101,6 +101,9 @@ import {
   wordMsMinchoEmptyEastAsianMarkSingleLinePx,
   wordSnapToCharsEastAsianCellCount,
   wordSourceRunSpaceContinuesSequence,
+  wordBalancedConsecutiveSpaceCellApplies,
+  wordBalancedLinesAndCharsGridDeltaFactor,
+  wordBalancedSpaceCellAdjustmentApplies,
   wordUniformRunPositionPaintPt,
   wordUseFeLayoutParagraphMarkGridAdvancePx,
 } from './layout/line-compatibility.js';
@@ -129,6 +132,16 @@ export interface LayoutTextSeg extends LayoutSegSource {
   snapGridLeadingPadPx?: number;
   snapGridTrailingPadPx?: number;
   snapGridCellPitchPx?: number;
+  /** Registered Word projection of ECMA-376 §17.15.3.3 onto a `linesAndChars`
+   * grid: half of `charSpace` for SBCS and the observed space classes, full
+   * delta for DBCS. Present only when width balancing is enabled. */
+  widthBalanceGridDeltaFactor?: 0.5 | 1;
+  /** Word-observed projection for a two-or-more authored U+0020 sequence.
+   * The flag preserves sequence membership through source/split boundaries;
+   * the adjustment replaces each selected route's natural space with half of
+   * its East-Asian ideographic cell. */
+  widthBalanceSpaceSequence?: true;
+  widthBalanceSpaceAdjustmentPt?: number;
   /** Zero-advance anchor-character placeholder: contributes run metrics to the
    * line box but paints no glyph. */
   metricOnly?: true;
@@ -622,8 +635,10 @@ export interface LineLayoutEnvironment {
   readonly noteNumbers?: ReadonlyMap<string, number>;
   readonly noteReferenceNumber?: number;
   readonly verticalCJK?: boolean;
-  /** §17.15.3.1 w:useFELayout document compatibility switch. */
+  /** ECMA-376 Part 4 §14.8.3.50 w:useFELayout compatibility switch. */
   readonly useFeLayout?: boolean;
+  /** §17.15.3.3 w:balanceSingleByteDoubleByteWidth document compatibility switch. */
+  readonly balanceSingleByteDoubleByteWidth?: boolean;
   readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
   readonly layoutServices?: LayoutServices;
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
@@ -1068,6 +1083,9 @@ export function segmentCharacterGridDeltaPx(
   // snapToChars allocates full cells/blocks in layoutLines. It is not a
   // per-glyph letter-spacing delta.
   if (grid?.type === 'snapToChars') return 0;
+  if (grid?.type === 'linesAndChars' && seg.widthBalanceGridDeltaFactor !== undefined) {
+    return gridCharDeltaPx(grid, scale) * seg.widthBalanceGridDeltaFactor;
+  }
   const total = gridSegDeltaPx(seg.text, grid, scale);
   return total === 0 ? 0 : gridCharDeltaPx(grid, scale);
 }
@@ -1096,6 +1114,40 @@ export function punctuationCompressionTotalPt(seg: LayoutTextSeg): number {
     (sum, compression) => sum + compression.adjustmentPt,
     0,
   ) ?? 0;
+}
+
+/** §17.15.3.3 plus the registered Word space-sequence projection. A segment
+ * created by splitTextForLayout contains at most one trailing U+0020 sequence;
+ * slicing keeps the sequence flag, so prefixes/tails count only their retained
+ * authored spaces. */
+export function widthBalanceSpaceAdjustmentTotalPt(
+  seg: LayoutTextSeg,
+  characterGrid?: DocGridCtx,
+): number {
+  return widthBalanceSpaceAdjustmentForTextPt(seg, seg.text, characterGrid);
+}
+
+/** Retained-cluster projection of the same authored-space adjustment used by
+ * {@link widthBalanceSpaceAdjustmentTotalPt}. Keeping this calculation on the
+ * immutable segment fact makes line measurement, cluster hit geometry, RTL
+ * whitespace anchoring, and paint-plan slicing consume one width authority. */
+export function widthBalanceSpaceAdjustmentForTextPt(
+  seg: LayoutTextSeg,
+  text: string,
+  characterGrid?: DocGridCtx,
+): number {
+  // Both properties replace the ordinary inline advance with their own
+  // specification-defined region/cell width. Their interaction with Word's
+  // proportional-space projection is outside the observation matrix, so keep
+  // the preexisting override geometry intact in every retained consumer.
+  if (seg.fitTextPerGapPx !== undefined || seg.tateChuYoko) return 0;
+  if (!wordBalancedSpaceCellAdjustmentApplies(characterGrid?.type)) return 0;
+  if (!seg.widthBalanceSpaceSequence || seg.widthBalanceSpaceAdjustmentPt === undefined) {
+    return 0;
+  }
+  let count = 0;
+  for (const character of text) if (character === ' ') count += 1;
+  return count * seg.widthBalanceSpaceAdjustmentPt;
 }
 
 export function slicedPunctuationCompressions(
@@ -1332,7 +1384,9 @@ export function segAdvanceWidth(
     segmentDelta,
     charScaleFactor(seg),
     charSpacingDeltaPx(seg, scale),
-  ) + punctuationCompressionTotalPt(seg) * scale;
+  )
+    + widthBalanceSpaceAdjustmentTotalPt(seg, grid) * scale * charScaleFactor(seg)
+    + punctuationCompressionTotalPt(seg) * scale;
 }
 
 export type SnapToCharsClass = 'eastAsia' | 'latin' | 'complexScript';
@@ -2735,6 +2789,21 @@ export function buildSegments(
       compressCharacterWhitespace = false,
       mappedSymbolUnicode = false,
     ) => {
+      if (
+        environment.balanceSingleByteDoubleByteWidth
+        && !cs
+        && text.includes('\u3000')
+        && [...text].some((character) => character !== '\u3000')
+      ) {
+        // Word's width-balance grid treats U+3000 as a half-delta space while
+        // other East-Asian glyphs receive the full delta. Split only at that
+        // semantic boundary so Canvas can retain one uniform letterSpacing per
+        // segment (measure == paint); the space itself has no contextual shape.
+        for (const part of text.split(/(\u3000+)/u).filter(Boolean)) {
+          pushSeg(part, cs, fontFamily, undefined, compressCharacterWhitespace, mappedSymbolUnicode);
+        }
+        return;
+      }
       // ECMA-376 §17.15.1.18 / §17.18.7 — dispatch the exact
       // ST_CharacterSpacing value and split each eligible full-width character
       // so its selected face's tight ink bounds can define the removable
@@ -2952,10 +3021,23 @@ export function buildSegments(
         ?? eaFontFamily;
       const useFeEastAsianMetric = environment.useFeLayout
         && (r.fontHint === 'eastAsia' || Boolean(resolvedEaFloorFamily?.trim()));
+      const resolvedScript = resolvedSpan?.script ?? authoritativeSpan?.script
+        ?? (cs ? 'complexScript' : EAST_ASIAN_RE.test(text) ? 'eastAsia' : 'ascii');
+      const widthBalanceGridDeltaFactor = environment.balanceSingleByteDoubleByteWidth
+        ? wordBalancedLinesAndCharsGridDeltaFactor(text, resolvedScript)
+        : undefined;
       segs.push({
         text,
-        script: resolvedSpan?.script ?? authoritativeSpan?.script
-          ?? (cs ? 'complexScript' : EAST_ASIAN_RE.test(text) ? 'eastAsia' : 'ascii'),
+        script: resolvedScript,
+        ...(widthBalanceGridDeltaFactor !== undefined
+          ? {
+              // §17.15.3.3 defines the SBCS:DBCS width ratio as 1:2; the
+              // registered Word matrix defines how that setting projects onto
+              // linesAndChars charSpace. Production shaping has already split
+              // the segment at §17.3.2.26 script-slot boundaries.
+              widthBalanceGridDeltaFactor,
+            }
+          : {}),
         ...(useFeEastAsianMetric
           ? { metricEastAsian: true as const }
           : {}),
@@ -3335,6 +3417,87 @@ export function buildSegments(
     for (let index = emittedStart; index < segs.length; index += 1) {
       segs[index].sourceRunIndex = runIndex;
     }
+  }
+
+  if (environment.balanceSingleByteDoubleByteWidth) {
+    // ECMA-376 §17.15.3.3 normatively requests a 1:2 SBCS/DBCS width balance,
+    // but does not define how a proportional inter-word separator becomes a
+    // fixed-pitch half-width cell. The registered Word observation limits that
+    // projection to two-or-more explicitly authored U+0020 spaces. One normal
+    // separator remains at its natural proportional advance.
+    const metricCache = new Map<string, number>();
+    const adjustmentFor = (segment: LayoutTextSeg): number | undefined => {
+      const service = segment.textLayoutService;
+      const request = segment.textShapeRequest;
+      if (!service || !request) return undefined;
+      const effectiveFontSizePt = calcEffectiveFontPx(segment, 1);
+      const key = [
+        service.fingerprint,
+        segment.fontRoute?.fingerprint ?? 'implicit-latin',
+        segment.eaFloorRoute?.fingerprint ?? 'implicit-east-asia',
+        effectiveFontSizePt,
+        segment.bold ? 700 : 400,
+        segment.italic ? 'italic' : 'normal',
+        segment.kerning ?? 'auto',
+      ].join('|');
+      const cached = metricCache.get(key);
+      if (cached !== undefined) return cached;
+      const naturalSpace = service.shape({
+        ...request,
+        text: ' ',
+        fontSizePt: effectiveFontSizePt,
+        measure: true,
+        clusterGeometry: false,
+      }).advancePt;
+      const ideographicCell = service.shape({
+        ...request,
+        text: '\u4e00',
+        fontSizePt: effectiveFontSizePt,
+        fontHint: 'eastAsia',
+        measure: true,
+        clusterGeometry: false,
+      }).advancePt;
+      if (
+        !Number.isFinite(naturalSpace)
+        || !Number.isFinite(ideographicCell)
+        || naturalSpace < 0
+        || ideographicCell <= 0
+      ) return undefined;
+      const adjustmentPt = ideographicCell / 2 - naturalSpace;
+      metricCache.set(key, adjustmentPt);
+      return adjustmentPt;
+    };
+    let sequence: LayoutTextSeg[] = [];
+    let sequenceCount = 0;
+    const flushSequence = () => {
+      if (wordBalancedConsecutiveSpaceCellApplies(sequenceCount)) {
+        for (const segment of sequence) {
+          segment.widthBalanceSpaceSequence = true;
+          const adjustmentPt = adjustmentFor(segment);
+          if (adjustmentPt !== undefined) {
+            segment.widthBalanceSpaceAdjustmentPt = adjustmentPt;
+          }
+        }
+      }
+      sequence = [];
+      sequenceCount = 0;
+    };
+    for (const candidate of segs) {
+      if (!('text' in candidate) || candidate.script === 'complexScript') {
+        flushSequence();
+        continue;
+      }
+      const trailingSpaces = candidate.text.length - candidate.text.replace(/ +$/u, '').length;
+      const spaceOnly = trailingSpaces > 0 && trailingSpaces === candidate.text.length;
+      if (!spaceOnly) flushSequence();
+      if (trailingSpaces > 0) {
+        sequence.push(candidate);
+        sequenceCount += trailingSpaces;
+      } else {
+        flushSequence();
+      }
+    }
+    flushSequence();
   }
 
   // ── UAX#14 LB13 / ECMA-376 §17.15.1.59 (行頭禁則 — line-start-forbidden) ──────
