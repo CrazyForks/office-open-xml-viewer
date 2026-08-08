@@ -15654,8 +15654,7 @@ mod math_jc_tests {
             r#"<w:settings xmlns:w="{w}"><w:compat><w:balanceSingleByteDoubleByteWidth/></w:compat></w:settings>"#,
             w = W_NS
         );
-        let enabled = parse_document_settings(&enabled_xml)
-            .expect("enabled balance setting");
+        let enabled = parse_document_settings(&enabled_xml).expect("enabled balance setting");
         assert_eq!(enabled.balance_single_byte_double_byte_width, Some(true));
     }
 

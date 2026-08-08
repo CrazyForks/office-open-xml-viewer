@@ -136,7 +136,7 @@ export interface LayoutTextSeg extends LayoutSegSource {
    * grid: half of `charSpace` for SBCS and the observed space classes, full
    * delta for DBCS. Present only when width balancing is enabled. */
   widthBalanceGridDeltaFactor?: 0.5 | 1;
-  /** Word-observed projection for a two-or-more authored U+0020 sequence.
+  /** Registered compatibility projection for a two-or-more authored U+0020 sequence.
    * The flag preserves sequence membership through source/split boundaries;
    * the adjustment replaces each selected route's natural space with half of
    * its East-Asian ideographic cell. */
@@ -2795,7 +2795,7 @@ export function buildSegments(
         && text.includes('\u3000')
         && [...text].some((character) => character !== '\u3000')
       ) {
-        // Word's width-balance grid treats U+3000 as a half-delta space while
+        // The registered width-balance projection treats U+3000 as a half-delta space while
         // other East-Asian glyphs receive the full delta. Split only at that
         // semantic boundary so Canvas can retain one uniform letterSpacing per
         // segment (measure == paint); the space itself has no contextual shape.
