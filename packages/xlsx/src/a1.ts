@@ -20,9 +20,11 @@ export function parseA1(ref: string): { row: number; col: number } | null {
   return { row, col };
 }
 
-/** Parse a single A1 cell or a two-endpoint A1 range. The first endpoint is
- * retained as the selection anchor and the second as its active cell, matching
- * Excel's Shift-selection direction instead of normalizing the rectangle. */
+/**
+ * Parse a single A1 cell or retain the two literal endpoints of an A1 range.
+ * This is a syntax helper only: endpoint order does not define Excel's
+ * ActiveCell. Selection semantics live in `selection.ts`.
+ */
 export function parseA1Range(ref: string): {
   anchor: { row: number; col: number };
   active: { row: number; col: number };

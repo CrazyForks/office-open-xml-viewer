@@ -5,6 +5,13 @@ import BrandIcon from '../components/BrandIcon.astro';
 
 const rows = [
   {
+    id: 'xlsx-selection-endpoints',
+    api: 'select(), selection, onSelectionChange, CellRange, SelectionMode',
+    surface: '@silurus/ooxml/xlsx — removal scheduled for 0.77.0',
+    replacement: 'setSelection(), selectionState, onSelectionStateChange, XlsxSelectionState and XlsxSelectionArea',
+    note: 'The canonical model keeps selected areas, ActiveCell and the Shift-extension anchor independent. See docs/migration-xlsx-selection-0.77.md.',
+  },
+  {
     id: 'max-zip-entry-bytes',
     api: 'maxZipEntryBytes',
     surface: 'DOCX, XLSX, PPTX and Node load/session options',

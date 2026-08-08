@@ -39,41 +39,172 @@ function worksheet(name: string): Worksheet {
 }
 
 describe('XlsxSheetViewer canvas mount', () => {
-  it('selects an A1 range while preserving its anchor and active endpoints', () => {
+  it('selects an A1 range as geometry without inventing ActiveCell direction', () => {
     installDom();
     const parent = makeContainer();
     const canvas = makeEl('canvas');
     parent.appendChild(canvas);
     const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
 
-    viewer.select('B2:D5');
+    viewer.setSelection('D5:B2');
 
-    expect(viewer.selection).toEqual({
-      anchor: { row: 2, col: 2 },
-      active: { row: 5, col: 4 },
-      mode: 'cells',
+    expect(viewer.selectionState).toEqual({
+      areas: [{ kind: 'cells', top: 2, left: 2, bottom: 5, right: 4 }],
+      activeAreaIndex: 0,
+      activeCell: { row: 2, col: 2 },
+      extensionAnchor: { row: 2, col: 2 },
     });
     viewer.destroy();
   });
 
-  it('maps full-axis A1 ranges to bounded selection modes', () => {
+  it('keeps bounded cell rectangles distinct from row and column selections', () => {
     installDom();
     const parent = makeContainer();
     const canvas = makeEl('canvas');
     parent.appendChild(canvas);
     const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
 
-    viewer.select('A1:XFD1048576');
-    expect(viewer.selection?.mode).toBe('all');
-    viewer.select('A2:XFD4');
-    expect(viewer.selection?.mode).toBe('rows');
-    viewer.select('B1:D1048576');
-    expect(viewer.selection?.mode).toBe('cols');
+    viewer.setSelection('A2:XFD4');
+    expect(viewer.selectionState?.areas[0]).toEqual({
+      kind: 'cells', top: 2, left: 1, bottom: 4, right: 16_384,
+    });
+    viewer.setSelection('2:4');
+    expect(viewer.selectionState?.areas[0]).toEqual({ kind: 'rows', firstRow: 2, lastRow: 4 });
+    viewer.setSelection('B:D');
+    expect(viewer.selectionState?.areas[0]).toEqual({
+      kind: 'columns', firstColumn: 2, lastColumn: 4,
+    });
 
     viewer.destroy();
   });
 
-  it('does not materialize a programmatic clipboard range above the cell limit', () => {
+  it('represents ActiveCell, extension anchor, and multiple areas independently', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+
+    viewer.setSelection({
+      areas: [
+        { kind: 'cells', top: 1, left: 1, bottom: 4, right: 4 },
+        { kind: 'cells', top: 8, left: 2, bottom: 9, right: 3 },
+      ],
+      activeAreaIndex: 0,
+      activeCell: { row: 2, col: 2 },
+      extensionAnchor: { row: 4, col: 4 },
+    });
+
+    expect(viewer.selectionState?.activeCell).toEqual({ row: 2, col: 2 });
+    expect(viewer.selectionState?.extensionAnchor).toEqual({ row: 4, col: 4 });
+    expect(viewer.selectionState?.areas).toHaveLength(2);
+    viewer.destroy();
+  });
+
+  it('emits canonical state only for semantic changes and validates invariants', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const onSelectionStateChange = vi.fn();
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      onSelectionStateChange,
+    });
+
+    viewer.setSelection('B2:D5');
+    viewer.setSelection('D5:B2');
+    expect(onSelectionStateChange).toHaveBeenCalledOnce();
+    expect(() => viewer.setSelection({
+      areas: [{ kind: 'cells', top: 1, left: 1, bottom: 2, right: 2 }],
+      activeAreaIndex: 0,
+      activeCell: { row: 3, col: 1 },
+      extensionAnchor: { row: 1, col: 1 },
+    })).toThrow(/activeCell/);
+    viewer.destroy();
+  });
+
+  it('serializes reentrant selection callbacks in semantic order', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const activeCells: Array<{ row: number; col: number }> = [];
+    let viewer: XlsxSheetViewer;
+    viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      onSelectionStateChange(selection) {
+        if (!selection) return;
+        activeCells.push(selection.activeCell);
+        if (selection.activeCell.row === 2) viewer.setSelection('C3');
+      },
+    });
+
+    viewer.setSelection('B2');
+
+    expect(activeCells).toEqual([{ row: 2, col: 2 }, { row: 3, col: 3 }]);
+    expect(viewer.selectionState?.activeCell).toEqual({ row: 3, col: 3 });
+    viewer.destroy();
+  });
+
+  it('projects a logical selection into frozen-pane fragments without fake pane edges', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      canvasArea: FakeEl;
+      overlayHost: { selection: FakeEl };
+    } }).engine;
+    engine.currentWorksheet = { ...worksheet('Frozen'), freezeRows: 1, freezeCols: 1 };
+    engine.canvasArea.clientWidth = 640;
+    engine.canvasArea.clientHeight = 360;
+
+    viewer.setSelection('A1:C3');
+
+    const fragments = descendants(engine.overlayHost.selection).filter(
+      (element) => element.getAttribute('data-xlsx-selection-fragment') === 'cells',
+    );
+    expect(fragments).toHaveLength(4);
+    expect(fragments[0].style['border-right']).toBe('none');
+    expect(fragments[0].style['border-bottom']).toBe('none');
+    expect(fragments.every((fragment) => fragment.style['border-right'] === 'none')).toBe(true);
+    expect(fragments.some((fragment) => fragment.style['border-bottom'].includes('solid'))).toBe(true);
+    viewer.destroy();
+  });
+
+  it('bounds overlay work and geometry when legal freeze counts cover the sheet', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      canvasArea: FakeEl;
+      overlayHost: { selection: FakeEl };
+    } }).engine;
+    engine.currentWorksheet = {
+      ...worksheet('Fully frozen'),
+      freezeRows: 1_048_576,
+      freezeCols: 16_384,
+      rightToLeft: true,
+    };
+    engine.canvasArea.clientWidth = 640;
+    engine.canvasArea.clientHeight = 360;
+
+    viewer.setSelection('A1:XFD1048576');
+
+    const fragments = descendants(engine.overlayHost.selection).filter(
+      (element) => element.getAttribute('data-xlsx-selection-fragment') === 'cells',
+    );
+    expect(fragments).toHaveLength(1);
+    expect(Number.parseFloat(fragments[0].style.width)).toBeLessThanOrEqual(640);
+    expect(Number.parseFloat(fragments[0].style.height)).toBeLessThanOrEqual(360);
+    viewer.destroy();
+  });
+
+  it('does not materialize a programmatic clipboard range above the cell limit', async () => {
     const document = installDom();
     const parent = makeContainer();
     const canvas = makeEl('canvas');
@@ -84,7 +215,7 @@ describe('XlsxSheetViewer canvas mount', () => {
     const engine = (viewer as unknown as {
       engine: {
         currentWorksheet: Worksheet;
-        copySelection(): void;
+        copySelection(): Promise<unknown>;
       };
     }).engine;
     engine.currentWorksheet = {
@@ -99,13 +230,14 @@ describe('XlsxSheetViewer canvas mount', () => {
     } as unknown as Worksheet;
 
     viewer.select('B2:XFC1048575');
-    engine.copySelection();
+    const result = await engine.copySelection();
 
     expect(writeText).not.toHaveBeenCalled();
+    expect(result).toEqual({ status: 'too-large', limit: 'cells' });
     viewer.destroy();
   });
 
-  it('preserves clipboard copying for existing large selections', () => {
+  it('applies the clipboard cell limit to pointer-created selections too', async () => {
     const document = installDom();
     const parent = makeContainer();
     const canvas = makeEl('canvas');
@@ -120,16 +252,79 @@ describe('XlsxSheetViewer canvas mount', () => {
           select(cell: { row: number; col: number }): void;
           extend(cell: { row: number; col: number }): void;
         };
-        copySelection(): void;
+        copySelection(): Promise<unknown>;
       };
     }).engine;
     engine.currentWorksheet = worksheet('Large selection');
     engine.selectionController.select({ row: 1, col: 1 });
     engine.selectionController.extend({ row: 501, col: 500 });
 
-    engine.copySelection();
+    const result = await engine.copySelection();
 
-    expect(writeText).toHaveBeenCalledOnce();
+    expect(writeText).not.toHaveBeenCalled();
+    expect(result).toEqual({ status: 'too-large', limit: 'cells' });
+    viewer.destroy();
+  });
+
+  it('reports unsupported multi-area copy without flattening selection semantics', async () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: { currentWorksheet: Worksheet } }).engine;
+    engine.currentWorksheet = worksheet('Areas');
+    viewer.setSelection({
+      areas: [
+        { kind: 'cells', top: 1, left: 1, bottom: 1, right: 1 },
+        { kind: 'cells', top: 3, left: 3, bottom: 3, right: 3 },
+      ],
+      activeAreaIndex: 0,
+      activeCell: { row: 1, col: 1 },
+      extensionAnchor: { row: 1, col: 1 },
+    });
+
+    await expect(viewer.copySelection()).resolves.toEqual({ status: 'unsupported-multiple-areas' });
+    viewer.destroy();
+  });
+
+  it('extracts bounded, serializable selection context without workbook mutation APIs', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: { currentWorksheet: Worksheet } }).engine;
+    engine.currentWorksheet = {
+      ...worksheet('Analysis'),
+      rows: [
+        { index: 1, cells: [
+          { row: 1, col: 1, value: { type: 'text', text: 'Revenue' } },
+          { row: 1, col: 2, value: { type: 'number', number: 42 }, formula: 'SUM(B2:B4)' },
+        ] },
+        { index: 2, cells: [
+          { row: 2, col: 1, value: { type: 'bool', bool: true } },
+        ] },
+      ],
+    } as unknown as Worksheet;
+    viewer.setSelection('A1:B2');
+
+    const context = viewer.getSelectionContext({ maxCells: 2 });
+
+    expect(context).toMatchObject({
+      format: 'xlsx',
+      sheetName: 'Analysis',
+      coordinateCountUpperBound: 4,
+      truncated: true,
+      maxCells: 2,
+    });
+    expect(context?.cells).toEqual([
+      { address: { row: 1, col: 1 }, displayText: '', valueType: 'text', value: 'Revenue' },
+      {
+        address: { row: 1, col: 2 }, displayText: '', valueType: 'number', value: 42,
+        formula: 'SUM(B2:B4)',
+      },
+    ]);
     viewer.destroy();
   });
 

@@ -1,5 +1,7 @@
 import type { Worksheet } from '../types.js';
 import type { XlsxWorkbook } from '../workbook.js';
+import type { CellAddress, XlsxSelectionArea, XlsxSelectionState } from '../selection.js';
+import { normalizeSelectionState } from '../selection.js';
 import {
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
@@ -229,41 +231,32 @@ export class SheetRenderDispatcher {
   }
 }
 
-export interface SheetCellAddress {
-  readonly row: number;
-  readonly col: number;
-}
-
 export type SheetSelectionMode = 'cells' | 'rows' | 'cols' | 'all';
 
 /** Selection state and immutable snapshots for one sheet viewer instance. */
 export class SelectionController {
-  private anchorCell: SheetCellAddress | null = null;
-  private activeCell: SheetCellAddress | null = null;
-  private selectionMode: SheetSelectionMode = 'cells';
+  private state: XlsxSelectionState | null = null;
   private dragPointerId: number | null = null;
 
-  get anchor(): SheetCellAddress | null {
-    return this.anchorCell ? { ...this.anchorCell } : null;
+  get anchor(): CellAddress | null {
+    return this.state ? { ...this.state.extensionAnchor } : null;
   }
 
-  get active(): SheetCellAddress | null {
-    return this.activeCell ? { ...this.activeCell } : null;
+  get active(): CellAddress | null {
+    return this.state ? { ...this.state.activeCell } : null;
   }
 
-  get mode(): SheetSelectionMode { return this.selectionMode; }
+  get mode(): SheetSelectionMode {
+    const area = this.activeArea;
+    if (!area) return 'cells';
+    return area.kind === 'columns' ? 'cols' : area.kind === 'sheet' ? 'all' : area.kind;
+  }
   get dragging(): boolean { return this.dragPointerId !== null; }
   get draggingPointerId(): number | null { return this.dragPointerId; }
 
-  setAnchor(cell: SheetCellAddress | null): void {
-    this.anchorCell = cell ? { ...cell } : null;
+  get activeArea(): XlsxSelectionArea | null {
+    return this.state?.areas[this.state.activeAreaIndex] ?? null;
   }
-
-  setActive(cell: SheetCellAddress | null): void {
-    this.activeCell = cell ? { ...cell } : null;
-  }
-
-  setMode(mode: SheetSelectionMode): void { this.selectionMode = mode; }
 
   beginDrag(pointerId: number): void {
     this.dragPointerId = pointerId;
@@ -274,49 +267,73 @@ export class SelectionController {
   }
 
   reset(): void {
-    this.anchorCell = null;
-    this.activeCell = null;
-    this.selectionMode = 'cells';
+    this.state = null;
     this.dragPointerId = null;
   }
 
-  select(cell: SheetCellAddress, mode: SheetSelectionMode = 'cells'): void {
-    this.anchorCell = { ...cell };
-    this.activeCell = { ...cell };
-    this.selectionMode = mode;
+  setState(state: XlsxSelectionState | null): void {
+    this.state = state ? normalizeSelectionState(state) : null;
   }
 
-  extend(cell: SheetCellAddress): void {
-    if (!this.anchorCell) this.anchorCell = { ...cell };
-    this.activeCell = { ...cell };
+  select(cell: CellAddress, mode: SheetSelectionMode = 'cells'): void {
+    const area: XlsxSelectionArea = mode === 'rows'
+      ? { kind: 'rows', firstRow: cell.row, lastRow: cell.row }
+      : mode === 'cols'
+        ? { kind: 'columns', firstColumn: cell.col, lastColumn: cell.col }
+        : mode === 'all'
+          ? { kind: 'sheet' }
+          : { kind: 'cells', top: cell.row, left: cell.col, bottom: cell.row, right: cell.col };
+    this.state = normalizeSelectionState({
+      areas: [area], activeAreaIndex: 0, activeCell: cell, extensionAnchor: cell,
+    });
   }
 
-  snapshot(): Readonly<{
-    anchor: SheetCellAddress;
-    active: SheetCellAddress;
-    mode: SheetSelectionMode;
-  }> | null {
-    if (!this.anchorCell || !this.activeCell) return null;
-    return {
-      anchor: { ...this.anchorCell },
-      active: { ...this.activeCell },
-      mode: this.selectionMode,
-    };
+  extend(cell: CellAddress): void {
+    if (!this.state) { this.select(cell); return; }
+    const anchor = this.state.extensionAnchor;
+    const area = this.activeArea;
+    if (!area) return;
+    const extended: XlsxSelectionArea = area.kind === 'rows'
+      ? { kind: 'rows', firstRow: Math.min(anchor.row, cell.row), lastRow: Math.max(anchor.row, cell.row) }
+      : area.kind === 'columns'
+        ? { kind: 'columns', firstColumn: Math.min(anchor.col, cell.col), lastColumn: Math.max(anchor.col, cell.col) }
+        : area.kind === 'sheet'
+          ? area
+          : {
+              kind: 'cells',
+              top: Math.min(anchor.row, cell.row), left: Math.min(anchor.col, cell.col),
+              bottom: Math.max(anchor.row, cell.row), right: Math.max(anchor.col, cell.col),
+            };
+    const areas = [...this.state.areas];
+    areas[this.state.activeAreaIndex] = extended;
+    const activeCell = area.kind === 'rows'
+      ? { row: cell.row, col: this.state.activeCell.col }
+      : area.kind === 'columns'
+        ? { row: this.state.activeCell.row, col: cell.col }
+        : area.kind === 'sheet'
+          ? this.state.activeCell
+          : cell;
+    this.state = normalizeSelectionState({ ...this.state, areas, activeCell });
+  }
+
+  snapshot(): XlsxSelectionState | null {
+    return this.state ? structuredClone(this.state) : null;
   }
 
   headerHighlight(): {
     selectedRowRange: { start: number; end: number; strong: boolean } | null;
     selectedColRange: { start: number; end: number; strong: boolean } | null;
   } {
-    if (!this.anchorCell || !this.activeCell) {
+    const area = this.activeArea;
+    if (!area) {
       return { selectedRowRange: null, selectedColRange: null };
     }
-    const r1 = Math.min(this.anchorCell.row, this.activeCell.row);
-    const r2 = Math.max(this.anchorCell.row, this.activeCell.row);
-    const c1 = Math.min(this.anchorCell.col, this.activeCell.col);
-    const c2 = Math.max(this.anchorCell.col, this.activeCell.col);
+    const r1 = area.kind === 'cells' ? area.top : area.kind === 'rows' ? area.firstRow : 1;
+    const r2 = area.kind === 'cells' ? area.bottom : area.kind === 'rows' ? area.lastRow : Number.MAX_SAFE_INTEGER;
+    const c1 = area.kind === 'cells' ? area.left : area.kind === 'columns' ? area.firstColumn : 1;
+    const c2 = area.kind === 'cells' ? area.right : area.kind === 'columns' ? area.lastColumn : Number.MAX_SAFE_INTEGER;
     const all = Number.MAX_SAFE_INTEGER;
-    switch (this.selectionMode) {
+    switch (area.kind) {
       case 'cells':
         return {
           selectedRowRange: { start: r1, end: r2, strong: false },
@@ -327,12 +344,12 @@ export class SelectionController {
           selectedRowRange: { start: r1, end: r2, strong: true },
           selectedColRange: { start: 1, end: all, strong: false },
         };
-      case 'cols':
+      case 'columns':
         return {
           selectedRowRange: { start: 1, end: all, strong: false },
           selectedColRange: { start: c1, end: c2, strong: true },
         };
-      case 'all':
+      case 'sheet':
         return {
           selectedRowRange: { start: 1, end: all, strong: true },
           selectedColRange: { start: 1, end: all, strong: true },

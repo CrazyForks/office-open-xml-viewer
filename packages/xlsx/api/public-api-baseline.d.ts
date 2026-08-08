@@ -630,6 +630,8 @@ interface MathSvg {
     ascentEm: number;
     descentEm: number;
 }
+export const MAX_SELECTION_AREAS = 1024;
+export const MAX_SELECTION_CONTEXT_CELLS = 10000;
 export interface MergeCell {
     top: number;
     left: number;
@@ -1215,6 +1217,22 @@ export interface XlsxComment {
     author?: string;
     text: string;
 }
+export type XlsxCopyResult = Readonly<{
+    status: 'copied';
+    cellCount: number;
+    utf16CodeUnits: number;
+}> | Readonly<{
+    status: 'empty-selection';
+}> | Readonly<{
+    status: 'unsupported-multiple-areas';
+}> | Readonly<{
+    status: 'too-large';
+    limit: 'cells' | 'text';
+}> | Readonly<{
+    status: 'clipboard-unavailable';
+}> | Readonly<{
+    status: 'clipboard-denied';
+}>;
 export interface XlsxMatchLocation {
     sheet: number;
     sheetName: string;
@@ -1224,6 +1242,50 @@ export interface XlsxMatchLocation {
 }
 export interface XlsxScrollToCellOptions {
     readonly align?: 'nearest' | 'start' | 'center' | 'end';
+}
+export type XlsxSelectionArea = Readonly<{
+    kind: 'cells';
+    top: number;
+    left: number;
+    bottom: number;
+    right: number;
+}> | Readonly<{
+    kind: 'rows';
+    firstRow: number;
+    lastRow: number;
+}> | Readonly<{
+    kind: 'columns';
+    firstColumn: number;
+    lastColumn: number;
+}> | Readonly<{
+    kind: 'sheet';
+}>;
+export interface XlsxSelectionContext {
+    readonly format: 'xlsx';
+    readonly sheetIndex: number;
+    readonly sheetName: string;
+    readonly selection: XlsxSelectionState;
+    readonly coordinateCountUpperBound: number;
+    readonly cells: readonly XlsxSelectionContextCell[];
+    readonly truncated: boolean;
+    readonly maxCells: number;
+}
+export interface XlsxSelectionContextCell {
+    readonly address: CellAddress;
+    readonly displayText: string;
+    readonly valueType: 'empty' | 'text' | 'number' | 'bool' | 'error' | 'shared';
+    readonly value: string | number | boolean | null;
+    readonly formula?: string;
+}
+export interface XlsxSelectionContextOptions {
+    readonly maxCells?: number;
+}
+export type XlsxSelectionInput = string | XlsxSelectionState | null;
+export interface XlsxSelectionState {
+    readonly areas: readonly XlsxSelectionArea[];
+    readonly activeAreaIndex: number;
+    readonly activeCell: CellAddress;
+    readonly extensionAnchor: CellAddress;
 }
 export class XlsxSheetViewer implements ZoomableViewer {
     readonly canvasElement: HTMLCanvasElement;
@@ -1247,8 +1309,12 @@ export class XlsxSheetViewer implements ZoomableViewer {
     fitWidth(): void;
     fitPage(): void;
     getCellAt(clientX: number, clientY: number): CellAddress | null;
+    get selectionState(): XlsxSelectionState | null;
+    setSelection(selection: XlsxSelectionInput): void;
+    getSelectionContext(options?: XlsxSelectionContextOptions): XlsxSelectionContext | null;
     get selection(): CellRange | null;
     select(ref: string): void;
+    copySelection(): Promise<XlsxCopyResult>;
     setSelectionColor(color: string): void;
     setHiddenSheetMode(mode: HiddenSheetMode): Promise<void>;
     get hiddenSheetMode(): HiddenSheetMode;
@@ -1271,6 +1337,7 @@ export interface XlsxSheetViewerOptions extends LoadOptions__emitterCollision1 {
     onReady?: (sheetNames: string[]) => void;
     onSheetChange?: (index: number, total: number) => void;
     onError?: (err: Error) => void;
+    onSelectionStateChange?: (selection: XlsxSelectionState | null) => void;
     onSelectionChange?: (selection: CellRange | null) => void;
     onHyperlinkClick?: (target: HyperlinkTarget) => void;
     enableHyperlinks?: boolean;
@@ -1309,12 +1376,16 @@ class XlsxViewerEngine implements ZoomableViewer {
     relayout(): Promise<void>;
     scrollToCell(ref: string, options?: XlsxScrollToCellOptions): Promise<void>;
     getCellAt(clientX: number, clientY: number): CellAddress | null;
+    get selectionState(): XlsxSelectionState | null;
+    setSelection(input: XlsxSelectionInput): void;
+    getSelectionContext(options?: XlsxSelectionContextOptions): XlsxSelectionContext | null;
     get selection(): CellRange | null;
     select(ref: string): void;
     setSelectionColor(color: string): void;
     setHiddenSheetMode(mode: HiddenSheetMode): Promise<void>;
     get hiddenSheetMode(): HiddenSheetMode;
     get visibleSheetCount(): number;
+    copySelection(): Promise<XlsxCopyResult>;
     findText(query: string, opts?: FindMatchesOptions): Promise<FindMatch<XlsxMatchLocation>[]>;
     findNext(): Promise<FindMatch<XlsxMatchLocation> | null>;
     findPrev(): Promise<FindMatch<XlsxMatchLocation> | null>;
