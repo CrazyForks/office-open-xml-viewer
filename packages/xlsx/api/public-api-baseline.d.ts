@@ -630,8 +630,9 @@ interface MathSvg {
     ascentEm: number;
     descentEm: number;
 }
-export const MAX_SELECTION_AREAS = 1024;
+export const MAX_SELECTION_AREAS = 128;
 export const MAX_SELECTION_CONTEXT_CELLS = 10000;
+export const MAX_SELECTION_CONTEXT_TEXT_CHARACTERS: number;
 export interface MergeCell {
     top: number;
     left: number;
@@ -1268,7 +1269,10 @@ export interface XlsxSelectionContext {
     readonly coordinateCountUpperBound: number;
     readonly cells: readonly XlsxSelectionContextCell[];
     readonly truncated: boolean;
+    readonly truncationReasons: readonly ('cells' | 'text')[];
     readonly maxCells: number;
+    readonly textCharacters: number;
+    readonly maxTextCharacters: number;
 }
 export interface XlsxSelectionContextCell {
     readonly address: CellAddress;
@@ -1279,6 +1283,7 @@ export interface XlsxSelectionContextCell {
 }
 export interface XlsxSelectionContextOptions {
     readonly maxCells?: number;
+    readonly maxTextCharacters?: number;
 }
 export type XlsxSelectionInput = string | XlsxSelectionState | null;
 export interface XlsxSelectionState {

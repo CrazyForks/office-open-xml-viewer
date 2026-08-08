@@ -123,7 +123,7 @@ describe('XlsxSheetViewer canvas mount', () => {
     viewer.destroy();
   });
 
-  it('serializes reentrant selection callbacks in semantic order', () => {
+  it('serializes reentrant selection callbacks in semantic order', async () => {
     installDom();
     const parent = makeContainer();
     const canvas = makeEl('canvas');
@@ -139,9 +139,79 @@ describe('XlsxSheetViewer canvas mount', () => {
     });
 
     viewer.setSelection('B2');
+    await Promise.resolve();
 
     expect(activeCells).toEqual([{ row: 2, col: 2 }, { row: 3, col: 3 }]);
     expect(viewer.selectionState?.activeCell).toEqual({ row: 3, col: 3 });
+    viewer.destroy();
+  });
+
+  it('bounds reentrant callback cycles without synchronously hanging', async () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    let calls = 0;
+    let viewer: XlsxSheetViewer;
+    viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      onSelectionStateChange(selection) {
+        if (!selection) return;
+        calls++;
+        viewer.setSelection(selection.activeCell.row === 1 ? 'B2' : 'A1');
+      },
+    });
+
+    viewer.setSelection('A1');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(calls).toBe(2);
+    expect(viewer.selectionState?.activeCell).toEqual({ row: 1, col: 1 });
+    viewer.destroy();
+  });
+
+  it('delivers a reentrant state even when the initiating callback throws', async () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const activeRows: number[] = [];
+    let viewer: XlsxSheetViewer;
+    viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      onSelectionStateChange(selection) {
+        if (!selection) return;
+        activeRows.push(selection.activeCell.row);
+        if (selection.activeCell.row === 1) {
+          viewer.setSelection('A2');
+          throw new Error('consumer failure');
+        }
+      },
+    });
+
+    expect(() => viewer.setSelection('A1')).toThrow('consumer failure');
+    await Promise.resolve();
+    expect(activeRows).toEqual([1, 2]);
+    viewer.destroy();
+  });
+
+  it('preserves complete geometry in the deprecated projection for an interior anchor', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    viewer.setSelection({
+      areas: [{ kind: 'cells', top: 1, left: 1, bottom: 4, right: 4 }],
+      activeAreaIndex: 0,
+      activeCell: { row: 2, col: 2 },
+      extensionAnchor: { row: 2, col: 2 },
+    });
+
+    expect(viewer.selection).toEqual({
+      anchor: { row: 1, col: 1 },
+      active: { row: 4, col: 4 },
+      mode: 'cells',
+    });
     viewer.destroy();
   });
 
@@ -201,6 +271,39 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(fragments).toHaveLength(1);
     expect(Number.parseFloat(fragments[0].style.width)).toBeLessThanOrEqual(640);
     expect(Number.parseFloat(fragments[0].style.height)).toBeLessThanOrEqual(360);
+    viewer.destroy();
+  });
+
+  it('mirrors one-sided logical selection borders in RTL and suppresses duplicate fragments', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      canvasArea: FakeEl;
+      overlayHost: { selection: FakeEl };
+    } }).engine;
+    engine.currentWorksheet = { ...worksheet('RTL'), rightToLeft: true };
+    engine.canvasArea.clientWidth = 240;
+    engine.canvasArea.clientHeight = 120;
+    viewer.setSelection({
+      areas: [
+        { kind: 'cells', top: 1, left: 1, bottom: 1, right: 16_384 },
+        { kind: 'cells', top: 1, left: 1, bottom: 1, right: 16_384 },
+      ],
+      activeAreaIndex: 0,
+      activeCell: { row: 1, col: 1 },
+      extensionAnchor: { row: 1, col: 1 },
+    });
+
+    const fragments = descendants(engine.overlayHost.selection).filter(
+      (element) => element.getAttribute('data-xlsx-selection-fragment') === 'cells',
+    );
+    expect(fragments).toHaveLength(1);
+    expect(fragments[0].style['border-right']).toContain('solid');
+    expect(fragments[0].style['border-left']).toBe('none');
     viewer.destroy();
   });
 
@@ -328,7 +431,58 @@ describe('XlsxSheetViewer canvas mount', () => {
     viewer.destroy();
   });
 
-  it('creates chrome, styles, and document listeners in the canvas owner window', () => {
+  it('bounds cumulative selection-context text and rejects content access after destroy', async () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: { currentWorksheet: Worksheet } }).engine;
+    engine.currentWorksheet = {
+      ...worksheet('Sensitive'),
+      rows: [{ index: 1, cells: [{
+        row: 1, col: 1, value: { type: 'text', text: '0123456789' }, formula: 'ABCDEFGHIJ',
+      }] }],
+    } as unknown as Worksheet;
+    viewer.setSelection('A1');
+
+    const context = viewer.getSelectionContext({ maxTextCharacters: 5 });
+    expect(context).toMatchObject({
+      truncated: true,
+      truncationReasons: ['text'],
+      textCharacters: 5,
+      maxTextCharacters: 5,
+    });
+
+    viewer.destroy();
+    expect(() => viewer.getSelectionContext()).toThrow(/destroyed/);
+    await expect(viewer.copySelection()).rejects.toThrow(/destroyed/);
+  });
+
+  it('quotes tabs, newlines, and quotes in copied TSV', async () => {
+    const document = installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.assign(document.defaultView, { navigator: { clipboard: { writeText } } });
+    const engine = (viewer as unknown as { engine: { currentWorksheet: Worksheet } }).engine;
+    engine.currentWorksheet = {
+      ...worksheet('TSV'),
+      rows: [{ index: 1, cells: [
+        { row: 1, col: 1, value: { type: 'text', text: 'a\tb' } },
+        { row: 1, col: 2, value: { type: 'text', text: 'x\n"y"' } },
+      ] }],
+    } as unknown as Worksheet;
+    viewer.setSelection('A1:B1');
+
+    await expect(viewer.copySelection()).resolves.toMatchObject({ status: 'copied' });
+    expect(writeText).toHaveBeenCalledWith('"a\tb"\t"x\n""y"""');
+    viewer.destroy();
+  });
+
+  it('creates owner-window chrome and scopes copy shortcuts to its viewport', async () => {
     const openerDocument = installDom();
     const popupDocument = makeDocument(2);
     const parent = makeContainer(800, 600, popupDocument);
@@ -341,7 +495,9 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(mounted.every((element) => element.ownerDocument === popupDocument)).toBe(true);
     expect(popupDocument.head.querySelector('style[data-xlsx-viewer-styles]')).not.toBeNull();
     expect(openerDocument.head.querySelector('style[data-xlsx-viewer-styles]')).toBeNull();
-    expect(popupDocument.listenerCount('keydown')).toBe(1);
+    const viewportInput = mounted.find((element) => element.hasAttribute('data-xlsx-viewport-input')) as FakeEl;
+    expect(viewportInput._listeners.get('keydown')).toHaveLength(1);
+    expect(popupDocument.listenerCount('keydown')).toBe(0);
     expect(openerDocument.listenerCount('keydown')).toBe(0);
 
     const popupWrite = vi.fn(() => Promise.resolve());
@@ -351,7 +507,6 @@ describe('XlsxSheetViewer canvas mount', () => {
     const engine = (viewer as unknown as { engine: {
       currentWorksheet: Worksheet;
       selectionController: { select(cell: { row: number; col: number }): void };
-      copySelection(): void;
     } }).engine;
     engine.currentWorksheet = {
       ...worksheet('Popup'),
@@ -361,12 +516,19 @@ describe('XlsxSheetViewer canvas mount', () => {
       }],
     } as unknown as Worksheet;
     engine.selectionController.select({ row: 1, col: 1 });
-    engine.copySelection();
+    popupDocument.dispatchEvent('keydown', { key: 'c', ctrlKey: true });
+    expect(popupWrite).not.toHaveBeenCalled();
+    viewportInput.dispatch('keydown', {
+      key: 'c', ctrlKey: true, metaKey: false, defaultPrevented: false,
+      isComposing: false, target: viewportInput, preventDefault() {},
+    });
+    await Promise.resolve();
     expect(popupWrite).toHaveBeenCalledWith('popup');
     expect(openerWrite).not.toHaveBeenCalled();
 
     viewer.destroy();
     expect(popupDocument.listenerCount('keydown')).toBe(0);
+    expect(viewportInput._listeners.get('keydown')).toHaveLength(0);
   });
 
   it('uses the caller canvas with native scrollbars and without workbook footer chrome', () => {

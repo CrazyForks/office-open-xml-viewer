@@ -32,6 +32,7 @@ import type {
 } from './selection.js';
 import {
   MAX_SELECTION_CONTEXT_CELLS,
+  MAX_SELECTION_CONTEXT_TEXT_CHARACTERS,
   normalizeSelectionState,
   selectionCoordinateCountUpperBound,
   selectionStateFromReference,
@@ -320,9 +321,14 @@ function legacySelectionProjection(state: XlsxSelectionState | null): CellRange 
   switch (area.kind) {
     case 'cells':
       {
-        const anchor = state.extensionAnchor;
-        const anchorIsCorner = (anchor.row === area.top || anchor.row === area.bottom) &&
-          (anchor.col === area.left || anchor.col === area.right);
+        const extensionAnchor = state.extensionAnchor;
+        const anchorIsCorner = (extensionAnchor.row === area.top || extensionAnchor.row === area.bottom) &&
+          (extensionAnchor.col === area.left || extensionAnchor.col === area.right);
+        // The deprecated endpoint model cannot represent an interior extension
+        // anchor without shrinking the area. Preserve complete geometry instead.
+        const anchor = anchorIsCorner
+          ? extensionAnchor
+          : { row: area.top, col: area.left };
         const active = anchorIsCorner
           ? {
               row: anchor.row === area.top ? area.bottom : area.top,
@@ -336,23 +342,35 @@ function legacySelectionProjection(state: XlsxSelectionState | null): CellRange 
       };
       }
     case 'rows':
-      return {
-        anchor: { row: state.extensionAnchor.row, col: 1 },
-        active: {
-          row: state.extensionAnchor.row === area.lastRow ? area.firstRow : area.lastRow,
-          col: 1,
-        },
-        mode: 'rows',
-      };
+      {
+        const anchorRow = state.extensionAnchor.row === area.firstRow ||
+          state.extensionAnchor.row === area.lastRow
+          ? state.extensionAnchor.row
+          : area.firstRow;
+        return {
+          anchor: { row: anchorRow, col: 1 },
+          active: {
+            row: anchorRow === area.lastRow ? area.firstRow : area.lastRow,
+            col: 1,
+          },
+          mode: 'rows',
+        };
+      }
     case 'columns':
-      return {
-        anchor: { row: 1, col: state.extensionAnchor.col },
-        active: {
-          row: 1,
-          col: state.extensionAnchor.col === area.lastColumn ? area.firstColumn : area.lastColumn,
-        },
-        mode: 'cols',
-      };
+      {
+        const anchorColumn = state.extensionAnchor.col === area.firstColumn ||
+          state.extensionAnchor.col === area.lastColumn
+          ? state.extensionAnchor.col
+          : area.firstColumn;
+        return {
+          anchor: { row: 1, col: anchorColumn },
+          active: {
+            row: 1,
+            col: anchorColumn === area.lastColumn ? area.firstColumn : area.lastColumn,
+          },
+          mode: 'cols',
+        };
+      }
     case 'sheet':
       return { anchor: { row: 1, col: 1 }, active: { row: 1, col: 1 }, mode: 'all' };
   }
@@ -404,6 +422,22 @@ const MAX_CLIPBOARD_CELLS = 250_000;
 // contract, not a worksheet semantic limit; callers can handle `too-large`
 // without the viewer attempting an unbounded JavaScript string allocation.
 const MAX_CLIPBOARD_UTF16_CODE_UNITS = 8 * 1_024 * 1_024;
+const DEFAULT_SELECTION_CONTEXT_TEXT_CHARACTERS = 1 * 1_024 * 1_024;
+const MAX_SELECTION_CONTEXT_FIELD_CHARACTERS = 65_536;
+const MAX_REENTRANT_SELECTION_NOTIFICATIONS = 100;
+
+function encodeTsvFieldWithin(value: string, remaining: number): string | null {
+  let quoteCount = 0;
+  let needsQuotes = false;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code === 34) { quoteCount++; needsQuotes = true; }
+    else if (code === 9 || code === 10 || code === 13) needsQuotes = true;
+  }
+  const length = value.length + (needsQuotes ? quoteCount + 2 : 0);
+  if (length > remaining) return null;
+  return needsQuotes ? `"${value.replace(/"/g, '""')}"` : value;
+}
 
 /**
  * Pure hit predicate for drag-to-resize (issue #567): given a pointer
@@ -625,6 +659,9 @@ class XlsxViewerEngine implements ZoomableViewer {
   private lastNotifiedSelectionState: XlsxSelectionState | null = null;
   private emittingSelectionChange = false;
   private pendingSelectionChange = false;
+  private selectionNotificationScheduled = false;
+  private selectionNotificationSeen: Set<string> | null = null;
+  private selectionNotificationCount = 0;
   private selectionOverlay: HTMLDivElement;
   /** IX2 — find-highlight overlay (matched-cell boxes). */
   private findOverlay!: HTMLDivElement;
@@ -756,6 +793,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
     this.scrollHost = this.hostDocument.createElement('div');
     this.scrollHost.setAttribute('data-xlsx-viewport-input', mount.kind);
+    this.scrollHost.tabIndex = 0;
     this.scrollHost.style.cssText =
       `position:absolute;inset:0;` +
       `overflow:${this._nativeScrollbars ? 'auto' : 'clip'};` +
@@ -1876,6 +1914,7 @@ class XlsxViewerEngine implements ZoomableViewer {
    * it exposes no mutable workbook objects and does not touch the Clipboard API.
    */
   getSelectionContext(options: XlsxSelectionContextOptions = {}): XlsxSelectionContext | null {
+    this.assertOpen();
     const worksheet = this.currentWorksheet;
     const selection = this.selectionState;
     if (!worksheet || !selection) return null;
@@ -1884,6 +1923,39 @@ class XlsxViewerEngine implements ZoomableViewer {
       throw new RangeError('maxCells must be a finite non-negative number.');
     }
     const maxCells = Math.min(MAX_SELECTION_CONTEXT_CELLS, Math.floor(requestedMax));
+    const requestedTextMax = options.maxTextCharacters ?? DEFAULT_SELECTION_CONTEXT_TEXT_CHARACTERS;
+    if (!Number.isFinite(requestedTextMax) || requestedTextMax < 0) {
+      throw new RangeError('maxTextCharacters must be a finite non-negative number.');
+    }
+    const maxTextCharacters = Math.min(
+      MAX_SELECTION_CONTEXT_TEXT_CHARACTERS,
+      Math.floor(requestedTextMax),
+    );
+    let textCharacters = 0;
+    let textTruncated = false;
+    const boundedField = (input: string | readonly Readonly<{ text: string }>[]): string => {
+      const parts: readonly (string | Readonly<{ text: string }>)[] =
+        typeof input === 'string' ? [input] : input;
+      const chunks: string[] = [];
+      let fieldCharacters = 0;
+      for (let index = 0; index < parts.length; index++) {
+        const sourcePart = parts[index];
+        const part = typeof sourcePart === 'string' ? sourcePart : sourcePart.text;
+        const allowed = Math.max(0, Math.min(
+          MAX_SELECTION_CONTEXT_FIELD_CHARACTERS - fieldCharacters,
+          maxTextCharacters - textCharacters,
+        ));
+        const chunk = part.slice(0, allowed);
+        chunks.push(chunk);
+        fieldCharacters += chunk.length;
+        textCharacters += chunk.length;
+        if (chunk.length < part.length || index + 1 < parts.length && allowed === 0) {
+          textTruncated = true;
+          break;
+        }
+      }
+      return chunks.join('');
+    };
     const sheetSelected = selection.areas.some((area) => area.kind === 'sheet');
     const rowIntervals = mergeSelectionIntervals(selection.areas.flatMap((area) =>
       area.kind === 'rows' ? [{ first: area.firstRow, last: area.lastRow }] : []));
@@ -1901,7 +1973,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     let lastWorksheetRow = 0;
     let activeColumnIntervals: SelectionInterval[] = [];
     const cells: XlsxSelectionContextCell[] = [];
-    let truncated = false;
+    let cellsTruncated = false;
 
     cellScan: for (const row of worksheet.rows) {
       let cellIntervals: SelectionInterval[];
@@ -1933,26 +2005,31 @@ class XlsxViewerEngine implements ZoomableViewer {
         if (!wholeRow &&
             !intervalContains(columnIntervals, cell.col) &&
             !intervalContains(cellIntervals, cell.col)) continue;
-        if (cells.length >= maxCells) { truncated = true; break cellScan; }
+        if (cells.length >= maxCells) { cellsTruncated = true; break cellScan; }
         const raw = cell.value;
+        const displayText = boundedField(this.wb?.cellText(worksheet, cell) ?? '');
         const value = raw.type === 'text'
-          ? (raw.runs ? raw.runs.map((run) => run.text).join('') : raw.text)
+          ? boundedField(raw.runs ?? raw.text)
           : raw.type === 'number'
             ? raw.number
             : raw.type === 'bool'
               ? raw.bool
               : raw.type === 'error'
-                ? raw.error
+                ? boundedField(raw.error)
                 : null;
         cells.push({
           address: { row: cell.row, col: cell.col },
-          displayText: this.wb?.cellText(worksheet, cell) ?? '',
+          displayText,
           valueType: raw.type,
           value,
-          ...(cell.formula === undefined ? {} : { formula: cell.formula }),
+          ...(cell.formula === undefined ? {} : { formula: boundedField(cell.formula) }),
         });
+        if (textTruncated) break cellScan;
       }
     }
+    const truncationReasons: Array<'cells' | 'text'> = [];
+    if (cellsTruncated) truncationReasons.push('cells');
+    if (textTruncated) truncationReasons.push('text');
     return {
       format: 'xlsx',
       sheetIndex: this.currentSheet,
@@ -1960,8 +2037,11 @@ class XlsxViewerEngine implements ZoomableViewer {
       selection,
       coordinateCountUpperBound: selectionCoordinateCountUpperBound(selection),
       cells,
-      truncated,
+      truncated: truncationReasons.length > 0,
+      truncationReasons,
       maxCells,
+      textCharacters,
+      maxTextCharacters,
     };
   }
 
@@ -1996,24 +2076,58 @@ class XlsxViewerEngine implements ZoomableViewer {
   private emitSelectionChange(): void {
     if (this.emittingSelectionChange) {
       this.pendingSelectionChange = true;
+      this.scheduleSelectionNotification();
       return;
     }
-    do {
-      this.pendingSelectionChange = false;
-      const state = this.selectionState;
-      if (selectionStatesEqual(state, this.lastNotifiedSelectionState)) continue;
+    this.pendingSelectionChange = false;
+    const state = this.selectionState;
+    if (selectionStatesEqual(state, this.lastNotifiedSelectionState)) {
+      this.finishSelectionNotificationChain();
+      return;
+    }
+
+    this.selectionNotificationSeen ??= new Set();
+    const fingerprint = JSON.stringify(state);
+    if (this.selectionNotificationSeen.has(fingerprint) ||
+        this.selectionNotificationCount >= MAX_REENTRANT_SELECTION_NOTIFICATIONS) {
+      // A callback feedback cycle must not monopolize the main thread. The
+      // canonical state remains authoritative; only the repeated notification
+      // is suppressed for this reentrant chain.
       this.lastNotifiedSelectionState = state ? structuredClone(state) : null;
-      this.emittingSelectionChange = true;
-      try {
-        this.opts.onSelectionStateChange?.(state ? structuredClone(state) : null);
-        this.opts.onSelectionChange?.(legacySelectionProjection(state));
-      } finally {
-        this.emittingSelectionChange = false;
+      this.finishSelectionNotificationChain();
+      return;
+    }
+    this.selectionNotificationSeen.add(fingerprint);
+    this.selectionNotificationCount++;
+    this.lastNotifiedSelectionState = state ? structuredClone(state) : null;
+    this.emittingSelectionChange = true;
+    try {
+      this.opts.onSelectionStateChange?.(state ? structuredClone(state) : null);
+      this.opts.onSelectionChange?.(legacySelectionProjection(state));
+    } finally {
+      this.emittingSelectionChange = false;
+      if (this.pendingSelectionChange ||
+          !selectionStatesEqual(this.selectionState, this.lastNotifiedSelectionState)) {
+        this.scheduleSelectionNotification();
+      } else {
+        this.finishSelectionNotificationChain();
       }
-    } while (
-      this.pendingSelectionChange ||
-      !selectionStatesEqual(this.selectionState, this.lastNotifiedSelectionState)
-    );
+    }
+  }
+
+  private scheduleSelectionNotification(): void {
+    if (this.selectionNotificationScheduled || this._destroyed) return;
+    this.selectionNotificationScheduled = true;
+    queueMicrotask(() => {
+      this.selectionNotificationScheduled = false;
+      if (!this._destroyed) this.emitSelectionChange();
+    });
+  }
+
+  private finishSelectionNotificationChain(): void {
+    this.pendingSelectionChange = false;
+    this.selectionNotificationSeen = null;
+    this.selectionNotificationCount = 0;
   }
 
   /**
@@ -2200,6 +2314,7 @@ class XlsxViewerEngine implements ZoomableViewer {
    * whether pointer, keyboard, or API created the selection.
    */
   async copySelection(): Promise<XlsxCopyResult> {
+    this.assertOpen();
     const ws = this.currentWorksheet;
     const state = this.selectionState;
     if (!ws || !state) return { status: 'empty-selection' };
@@ -2231,6 +2346,10 @@ class XlsxViewerEngine implements ZoomableViewer {
     }
     const cellCount = rowCount * colCount;
 
+    let utf16CodeUnits = Math.max(0, rowCount - 1) + rowCount * Math.max(0, colCount - 1);
+    if (utf16CodeUnits > MAX_CLIPBOARD_UTF16_CODE_UNITS) {
+      return { status: 'too-large', limit: 'text' };
+    }
     const cellMap = new Map<number, Map<number, string>>();
     for (const row of ws.rows) {
       if (row.index < r1 || row.index > r2) continue;
@@ -2245,24 +2364,25 @@ class XlsxViewerEngine implements ZoomableViewer {
           else if (v.type === 'error') text = v.error;
         }
         if (text) {
+          const encoded = encodeTsvFieldWithin(
+            text,
+            MAX_CLIPBOARD_UTF16_CODE_UNITS - utf16CodeUnits,
+          );
+          if (encoded === null) return { status: 'too-large', limit: 'text' };
+          utf16CodeUnits += encoded.length;
           let values = cellMap.get(row.index);
           if (!values) { values = new Map(); cellMap.set(row.index, values); }
-          values.set(cell.col, text);
+          values.set(cell.col, encoded);
         }
       }
     }
 
     const lines: string[] = [];
-    let utf16CodeUnits = Math.max(0, rowCount - 1) + rowCount * Math.max(0, colCount - 1);
     for (let r = r1; r <= r2; r++) {
       const cols: string[] = [];
       const values = cellMap.get(r);
       for (let c = c1; c <= c2; c++) {
         const value = values?.get(c) ?? '';
-        utf16CodeUnits += value.length;
-        if (utf16CodeUnits > MAX_CLIPBOARD_UTF16_CODE_UNITS) {
-          return { status: 'too-large', limit: 'text' };
-        }
         cols.push(value);
       }
       lines.push(cols.join('\t'));
@@ -2315,6 +2435,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const { border, background } = selectionOverlayStyle(
       this.opts.selectionColor ?? DEFAULT_SELECTION_COLOR,
     );
+    const seenFragments = new Set<string>();
 
     for (const area of state.areas) {
       const bounds = area.kind === 'cells'
@@ -2358,12 +2479,20 @@ class XlsxViewerEngine implements ZoomableViewer {
         const leftBorder = bounds.leftEdge && left === bounds.left && rawLeft >= xp.start ? border : 'none';
         const rightBorder = bounds.rightEdge && right === bounds.right && rawRight <= xp.end ? border : 'none';
         const screenLeft = this.screenX(x, fragmentW);
+        const physicalLeftBorder = this.isRtl ? rightBorder : leftBorder;
+        const physicalRightBorder = this.isRtl ? leftBorder : rightBorder;
+        const fragmentKey = [
+          screenLeft, y, fragmentW, fragmentH,
+          topBorder, physicalRightBorder, bottomBorder, physicalLeftBorder,
+        ].join('|');
+        if (seenFragments.has(fragmentKey)) continue;
+        seenFragments.add(fragmentKey);
         const box = this.hostDocument.createElement('div');
         box.setAttribute('data-xlsx-selection-fragment', area.kind);
         box.style.cssText =
           `position:absolute;left:${screenLeft}px;top:${y}px;width:${fragmentW}px;height:${fragmentH}px;` +
-          `box-sizing:border-box;border-top:${topBorder};border-right:${rightBorder};` +
-          `border-bottom:${bottomBorder};border-left:${leftBorder};` +
+          `box-sizing:border-box;border-top:${topBorder};border-right:${physicalRightBorder};` +
+          `border-bottom:${bottomBorder};border-left:${physicalLeftBorder};` +
           `background:${background};pointer-events:none;`;
         this.overlayHost.appendSelection(box);
       }
@@ -3128,6 +3257,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const TAP_SLOP = 8;
 
     this.surface.on('pointerdown', (e: PointerEvent) => {
+      this.scrollHost.focus?.({ preventScroll: true });
       if (e.button !== 0) return;
       if (this.isSelecting && e.pointerId !== this.selectionPointerId) return;
 
@@ -3385,12 +3515,17 @@ class XlsxViewerEngine implements ZoomableViewer {
 
     this.keydownHandler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-        this.copySelection();
+        if (e.defaultPrevented || e.isComposing) return;
+        const target = e.target as HTMLElement | null;
+        const tag = target?.tagName;
+        if (target?.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        e.preventDefault();
+        void this.copySelection();
       } else if (e.key === 'Escape' && this.validationPanel.style.display !== 'none') {
         this.hideValidationPanel();
       }
     };
-    this.surface.onDocumentKeydown(this.keydownHandler);
+    this.surface.on('keydown', this.keydownHandler);
   }
 
   private buildTabs(): void {
@@ -4011,6 +4146,10 @@ class XlsxViewerEngine implements ZoomableViewer {
     if (typeof releaseProjection === 'function') {
       releaseProjection.call(this.wb, this.projectionId);
     }
+    this.currentWorksheet = null;
+    this.selectionController.reset();
+    this.lastNotifiedSelectionState = null;
+    this.finishSelectionNotificationChain();
     this.acquisition.destroy();
     // Remove the whole UI subtree so the container is empty again. This also
     // detaches every listener bound to elements within it (scrollHost pointer/

@@ -105,7 +105,10 @@ xlsx.setSelection({
 
 // Read-only, serializable context for an AI/MCP request. Populated cells are
 // bounded and detached; formulas and Viewer-formatted display text are retained.
-const context = xlsx.getSelectionContext({ maxCells: 1_000 });
+const context = xlsx.getSelectionContext({
+  maxCells: 1_000,
+  maxTextCharacters: 1_048_576,
+});
 
 // XLSX active-sheet surface only — caller provides the <canvas>
 const sheetCanvas = document.getElementById('xlsx-canvas') as HTMLCanvasElement;

@@ -35,13 +35,6 @@ export class CanvasSurface {
     return { x: clientX - rect.left, y: clientY - rect.top };
   }
 
-  onDocumentKeydown(listener: (event: KeyboardEvent) => void): () => void {
-    this.ownerDocument.addEventListener('keydown', listener);
-    const cleanup = () => this.ownerDocument.removeEventListener('keydown', listener);
-    this.cleanups.push(cleanup);
-    return cleanup;
-  }
-
   sizeCanvas(canvas: HTMLCanvasElement, cssWidth: number, cssHeight: number): number {
     const dpr = this.dpr;
     canvas.width = Math.round(cssWidth * dpr);

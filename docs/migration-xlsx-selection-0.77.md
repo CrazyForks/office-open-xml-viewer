@@ -12,9 +12,10 @@ to the canonical selection state before upgrading:
 
 The old API modeled a selection as `{ anchor, active, mode }`. That shape could
 not represent Excel correctly: the selected area, its ActiveCell, and the cell
-from which Shift/drag extends are independent. SpreadsheetML makes the same
-distinction with `sqref`, `activeCell`, and `activeCellId` (ECMA-376
-§18.3.1.78).
+from which Shift/drag extends are independent. SpreadsheetML stores selection
+geometry in `sqref`, the ActiveCell in `activeCell`, and the zero-based area
+containing it in `activeCellId` (ECMA-376 §18.3.1.78). `extensionAnchor` is
+Viewer interaction state; SpreadsheetML does not persist a Shift anchor.
 
 ## Simple contiguous selections
 
@@ -57,7 +58,7 @@ viewer.setSelection({
 `activeAreaIndex` is the zero-based counterpart of SpreadsheetML's
 `activeCellId`. `activeCell` and `extensionAnchor` must be inside that area.
 The viewer normalizes reversed bounds, rejects coordinates outside the XLSX
-grid, and limits one state to 1,024 areas.
+grid, and limits one state to 128 areas.
 
 ## Selection events
 
@@ -80,15 +81,20 @@ For read-only AI/MCP integrations, use `getSelectionContext()` instead of
 round-tripping through the system clipboard:
 
 ```ts
-const context = viewer.getSelectionContext({ maxCells: 1_000 });
+const context = viewer.getSelectionContext({
+  maxCells: 1_000,
+  maxTextCharacters: 1_048_576,
+});
 sendToAssistant(context);
 ```
 
 The context contains canonical selection geometry, sheet identity, formulas,
 scalar values, and Viewer-formatted display text. It returns populated cells
-only, is detached from workbook internals, and reports truncation. `maxCells`
-is hard-capped at 10,000 so an untrusted or accidental full-sheet selection
-cannot create an unbounded prompt or allocation.
+only, is detached from workbook internals, and reports whether cells or text
+caused truncation. `maxCells` is hard-capped at 10,000; cumulative returned text
+is hard-capped at 8 Mi UTF-16 code units and each field at 65,536. An untrusted
+or accidental full-sheet selection therefore cannot create an unbounded prompt
+or retained context snapshot.
 
 For an actual clipboard operation, `copySelection()` returns a discriminated
 result instead of hiding failures:
@@ -105,6 +111,8 @@ whether selection came from a pointer or the API. Whole-row, whole-column, and
 whole-sheet selections are narrowed to used cells for serialization. Multiple
 areas currently return `unsupported-multiple-areas` because flattening disjoint
 areas into one TSV has no lossless representation.
+Copy shortcuts are focus-scoped to the Viewer viewport; typing Ctrl/Cmd+C in an
+unrelated input or another Viewer never copies this workbook.
 
 ## Removal schedule
 

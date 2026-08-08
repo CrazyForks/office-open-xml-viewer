@@ -38,6 +38,8 @@ export type XlsxSelectionInput = string | XlsxSelectionState | null;
 export interface XlsxSelectionContextOptions {
   /** Maximum populated cells returned. Default 1,000; hard maximum 10,000. */
   readonly maxCells?: number;
+  /** Maximum returned UTF-16 code units across text, display text, and formulas. Default 1 Mi; hard maximum 8 Mi. */
+  readonly maxTextCharacters?: number;
 }
 
 export interface XlsxSelectionContextCell {
@@ -65,11 +67,15 @@ export interface XlsxSelectionContext {
   /** Populated cells only, in worksheet order. */
   readonly cells: readonly XlsxSelectionContextCell[];
   readonly truncated: boolean;
+  readonly truncationReasons: readonly ('cells' | 'text')[];
   readonly maxCells: number;
+  readonly textCharacters: number;
+  readonly maxTextCharacters: number;
 }
 
-export const MAX_SELECTION_AREAS = 1_024;
+export const MAX_SELECTION_AREAS = 128;
 export const MAX_SELECTION_CONTEXT_CELLS = 10_000;
+export const MAX_SELECTION_CONTEXT_TEXT_CHARACTERS = 8 * 1_024 * 1_024;
 
 export function selectionCoordinateCountUpperBound(state: XlsxSelectionState): number {
   return state.areas.reduce((sum, area) => sum + (
@@ -185,7 +191,7 @@ function columnNumber(letters: string): number | null {
 /** Parse one contiguous Excel-style reference. Multi-area state uses the structured form. */
 export function selectionStateFromReference(reference: string): XlsxSelectionState | null {
   const ref = reference.trim().toUpperCase();
-  const rowRange = /^(\d+):(\d+)$/.exec(ref);
+  const rowRange = /^\$?(\d+):\$?(\d+)$/.exec(ref);
   if (rowRange) {
     const first = Number(rowRange[1]);
     const last = Number(rowRange[2]);

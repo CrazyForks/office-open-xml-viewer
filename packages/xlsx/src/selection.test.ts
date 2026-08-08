@@ -20,6 +20,9 @@ describe('XLSX selection model', () => {
     expect(selectionStateFromReference('2:4')?.areas[0]).toEqual({
       kind: 'rows', firstRow: 2, lastRow: 4,
     });
+    expect(selectionStateFromReference('$2:$4')?.areas[0]).toEqual({
+      kind: 'rows', firstRow: 2, lastRow: 4,
+    });
     expect(selectionStateFromReference('B:D')?.areas[0]).toEqual({
       kind: 'columns', firstColumn: 2, lastColumn: 4,
     });
