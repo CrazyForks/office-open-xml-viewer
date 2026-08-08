@@ -227,6 +227,9 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
     );
   }
   for (const line of node.lines) {
+    for (const rule of line.barTabRules ?? []) {
+      paintStrokeSegment(rule, context, oneDevicePixelCssWidth(context));
+    }
     for (const placement of line.placements) {
       if (placement.kind === 'resource') {
         if (!context.resources) {

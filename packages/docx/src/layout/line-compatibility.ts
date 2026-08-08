@@ -1,5 +1,5 @@
 import { defineCompatibilityRule } from './compatibility.js';
-import type { LineSpacing } from '../types.js';
+import type { LineSpacing, TabStop } from '../types.js';
 
 export const WORD_EAST_ASIAN_GRID_LINE_ALLOCATION = defineCompatibilityRule({
   id: 'word-east-asian-grid-line-allocation',
@@ -8,6 +8,124 @@ export const WORD_EAST_ASIAN_GRID_LINE_ALLOCATION = defineCompatibilityRule({
     reference: 'packages/docx/src/layout/compatibility.test.ts#pins East Asian grid allocation and the untabled Far East metric factor',
   },
   description: 'For an East Asian single-spaced line on a document grid, preserve the measured whole-cell allocation from the intended face design height and use the established 1.3-times-em fallback only when that design height is unavailable.',
+});
+
+export const WORD_TABLE_CELL_IGNORES_GRID_RIGHT_INDENT_ADJUSTMENT = defineCompatibilityRule({
+  id: 'word-table-cell-ignores-grid-right-indent-adjustment',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'table-cell-adjust-right-indent-width-position-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'In the observed linesAndChars matrix, paragraphs inside fixed-width table cells retain the same line breaks for omitted (default true) and explicit-false w:adjustRightInd across four boundary widths and both left/right cell positions. Scope this Word-only exception to table-cell containers; ordinary body paragraphs retain the ECMA-376 §17.3.1.1 adjustment.',
+});
+
+export const WORD_SNAP_TO_CHARS_EAST_ASIAN_CELL_FIT = defineCompatibilityRule({
+  id: 'word-snap-to-chars-east-asian-cell-fit',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'snap-to-chars-east-asian-cell-fit-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'For snapToChars, Word centers each East-Asian grapheme independently in the smallest whole number of character-pitch units that contains its natural advance. A grapheme that fits uses the one-unit placement described by [MS-OI29500] §2.1.534; an undersized authored pitch expands only that grapheme to additional units.',
+});
+
+export const WORD_SNAP_TO_CHARS_SCRIPT_BLOCK_ALLOCATION = defineCompatibilityRule({
+  id: 'word-snap-to-chars-script-block-allocation',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OI29500] §2.1.534',
+  },
+  description: 'Allocate snapToChars Latin text in contiguous blocks centered across the required grid units, complex-script blocks from their leading edge, and East-Asian graphemes independently by character cell.',
+});
+
+/** Word compatibility projection governed by
+ * {@link WORD_SNAP_TO_CHARS_EAST_ASIAN_CELL_FIT}. */
+export function wordSnapToCharsEastAsianCellCount(
+  naturalAdvancePt: number,
+  pitchPt: number,
+): number {
+  if (!(pitchPt > 0) || !Number.isFinite(naturalAdvancePt)) return 1;
+  return Math.max(1, Math.ceil(Math.max(0, naturalAdvancePt) / pitchPt - 1e-9));
+}
+
+/** Compatibility projection governed by
+ * {@link WORD_TABLE_CELL_IGNORES_GRID_RIGHT_INDENT_ADJUSTMENT}. */
+export function wordContainerAllowsGridRightIndentAdjustment(
+  insideTableCell: boolean,
+): boolean {
+  return !insideTableCell;
+}
+
+export const WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT = defineCompatibilityRule({
+  id: 'word-grid-right-indent-pitch-alignment',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'grid-right-indent-character-pitch-boundary-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'For body paragraphs whose ECMA-376 §17.3.1.1 adjustment is enabled on a linesAndChars character grid, Word reduces the physical line width to the greatest whole character-pitch multiple not exceeding the available width. The observed matrix covers exact and non-exact widths, zero and negative charSpace, explicit opt-out, line-only control, both physical indent sides, and the separately registered table-cell exception.',
+});
+
+/** Word compatibility projection governed by
+ * {@link WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT}. */
+export function wordGridRightIndentAdjustmentPt(
+  availableWidthPt: number,
+  pitchPt: number,
+): number {
+  if (!(pitchPt > 0) || !Number.isFinite(availableWidthPt) || availableWidthPt <= 0) {
+    return 0;
+  }
+  const remainder = ((availableWidthPt % pitchPt) + pitchPt) % pitchPt;
+  const epsilon = 1e-9;
+  return remainder <= epsilon || pitchPt - remainder <= epsilon ? 0 : remainder;
+}
+
+export const WORD_HANGING_TAB_SAME_POSITION_PRECEDENCE = defineCompatibilityRule({
+  id: 'word-hanging-tab-same-position-precedence',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'hanging-indent-authored-tab-collision-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'When the implicit tab created by a hanging indent shares its coordinate with an authored center, end, or start stop, Word resolves one advancing stop at that coordinate using the authored alignment. An authored bar remains an independent drawing rule, so the implicit advancing stop survives beside it. If center/end alignment would place following text before the current pen, the tab contributes zero advance.',
+});
+
+/** Compatibility projection governed by
+ * {@link WORD_HANGING_TAB_SAME_POSITION_PRECEDENCE}. */
+export function wordAuthoredTabReplacesImplicitHangingStop(
+  alignment: TabStop['alignment'],
+): boolean {
+  return alignment !== 'bar' && alignment !== 'clear';
+}
+
+export const WORD_RTL_DECIMAL_TAB_PHYSICAL_ALIGNMENT = defineCompatibilityRule({
+  id: 'word-rtl-decimal-tab-physical-alignment',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'rtl-decimal-tab-run-boundary-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'For LTR numeric cells embedded in a bidi paragraph, Word aligns the physical left edge of the first halfwidth period to the decimal stop across source-run boundaries. When no period exists, it aligns the numeric cell\'s physical right edge to the stop.',
+});
+
+export const WORD_DECIMAL_TAB_SEPARATOR_RESOLUTION = defineCompatibilityRule({
+  id: 'word-decimal-tab-separator-resolution',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OI29500] §2.1.556',
+  },
+  description: 'Use the first explicit halfwidth period as the decimal-tab alignment point; when absent, use the implicit separator after the final digit of the first Unicode decimal-number sequence.',
 });
 
 export const WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM = defineCompatibilityRule({
@@ -162,7 +280,7 @@ export const WORD_JAPANESE_PUNCTUATION_COMPRESSION_CELL = defineCompatibilityRul
     version: '16.111.1',
     platform: 'macOS 26.5.2',
   },
-  description: 'In the observed Japanese compatibility fixture, compressed full-width punctuation retains at least half of the ideographic cell measured through the selected font route. Tight adjacent glyph ink can require a larger retained extent to prevent collision. This is an Office-observed compression amount, not a normative interpretation of ST_CharacterSpacing.',
+  description: 'In the observed Japanese compatibility matrix, 、。 ，． and the closing forms 」』】）］｝ on a full ideographic-cell advance retain at least half of that cell. U+3017 and full-width !/? remain full-cell. A fontTable w:pitch value classifies the authored face for font selection; it is not a switch for document-level characterSpacingControl. Punctuation that the selected face already exposes on a smaller proportional advance is retained as measured rather than compressed a second time. Tight adjacent glyph ink can require a larger retained extent to prevent collision. This is an Office-observed compression amount, not a normative interpretation of ST_CharacterSpacing.',
 });
 
 export const WORD_AUTHORED_CHARACTER_SPACING_PITCH_PRIORITY = defineCompatibilityRule({
@@ -175,6 +293,30 @@ export const WORD_AUTHORED_CHARACTER_SPACING_PITCH_PRIORITY = defineCompatibilit
     platform: 'macOS 26.5.2',
   },
   description: 'When a run authors a positive w:spacing character pitch, Word preserves that expanded pitch instead of additionally applying the document-level punctuation whitespace compression. Omitted, zero, or overlapping run spacing leaves characterSpacingControl active.',
+});
+
+export const WORD_SOURCE_RUN_SPACE_SEQUENCE = defineCompatibilityRule({
+  id: 'word-source-run-space-sequence',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'source-run-space-sequence-wrap-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'At a source-run boundary, Word keeps a space-only continuation attached when the preceding run already ends in a space. A single leading space in a distinct run without a preceding space remains a break opportunity. This isolates source-boundary compatibility from the ordinary UAX #14 LB7 handling within one authored run.',
+});
+
+export const WORD_CONSECUTIVE_SPACE_NATURAL_ADVANCE = defineCompatibilityRule({
+  id: 'word-consecutive-space-natural-advance',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'consecutive-space-wrap-grid-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'When visible text follows two or more authored consecutive spaces, Word preserves the sequence at natural advance instead of using it as Knuth-Plass inter-word shrink capacity. The result is invariant across linesAndChars with negative/zero charSpace and a line-only grid; source-run boundaries remain governed separately by the source-space-sequence rule.',
 });
 
 export const WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT = defineCompatibilityRule({
@@ -197,12 +339,14 @@ export function wordJapanesePunctuationRetainedExtentPt(input: Readonly<{
   ideographicCellAdvancePt: number;
 }>): number {
   const advancePt = Math.max(0, input.punctuationAdvancePt);
+  const cellAdvancePt = Math.max(0, input.ideographicCellAdvancePt);
+  if (advancePt < cellAdvancePt) return advancePt;
   return Math.min(
     advancePt,
     Math.max(
       0,
       input.punctuationInkEndPt,
-      input.ideographicCellAdvancePt / 2,
+      cellAdvancePt / 2,
     ),
   );
 }
@@ -213,6 +357,14 @@ export function wordDocumentCharacterCompressionApplies(
   authoredCharacterSpacingPt: number | undefined,
 ): boolean {
   return authoredCharacterSpacingPt === undefined || authoredCharacterSpacingPt <= 0;
+}
+
+/** Compatibility projection governed by {@link WORD_SOURCE_RUN_SPACE_SEQUENCE}. */
+export function wordSourceRunSpaceContinuesSequence(
+  previousText: string,
+  currentText: string,
+): boolean {
+  return previousText.endsWith(' ') && currentText.startsWith(' ');
 }
 
 const WORD_OVERFLOW_PUNCTUATION = {

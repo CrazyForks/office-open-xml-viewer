@@ -97,6 +97,7 @@ export interface LayoutSourceDocumentFacts {
   readonly characterSpacingControl?: string;
   readonly mathDefJc?: string;
   readonly documentHasEastAsianText: boolean;
+  readonly normalStyleFontSizePt: number;
   readonly compat: DocumentLayoutSettings['compat'];
 }
 
