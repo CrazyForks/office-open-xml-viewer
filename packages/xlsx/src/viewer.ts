@@ -426,6 +426,16 @@ const DEFAULT_SELECTION_CONTEXT_TEXT_CHARACTERS = 1 * 1_024 * 1_024;
 const MAX_SELECTION_CONTEXT_FIELD_CHARACTERS = 65_536;
 const MAX_REENTRANT_SELECTION_NOTIFICATIONS = 100;
 
+function safeUtf16Prefix(value: string, maxCodeUnits: number): string {
+  let end = Math.min(value.length, Math.max(0, maxCodeUnits));
+  if (end > 0 && end < value.length) {
+    const previous = value.charCodeAt(end - 1);
+    const next = value.charCodeAt(end);
+    if (previous >= 0xD800 && previous <= 0xDBFF && next >= 0xDC00 && next <= 0xDFFF) end--;
+  }
+  return value.slice(0, end);
+}
+
 function encodeTsvFieldWithin(value: string, remaining: number): string | null {
   let quoteCount = 0;
   let needsQuotes = false;
@@ -660,7 +670,6 @@ class XlsxViewerEngine implements ZoomableViewer {
   private emittingSelectionChange = false;
   private pendingSelectionChange = false;
   private selectionNotificationScheduled = false;
-  private selectionNotificationSeen: Set<string> | null = null;
   private selectionNotificationCount = 0;
   private selectionOverlay: HTMLDivElement;
   /** IX2 — find-highlight overlay (matched-cell boxes). */
@@ -1945,7 +1954,7 @@ class XlsxViewerEngine implements ZoomableViewer {
           MAX_SELECTION_CONTEXT_FIELD_CHARACTERS - fieldCharacters,
           maxTextCharacters - textCharacters,
         ));
-        const chunk = part.slice(0, allowed);
+        const chunk = safeUtf16Prefix(part, allowed);
         chunks.push(chunk);
         fieldCharacters += chunk.length;
         textCharacters += chunk.length;
@@ -2058,6 +2067,7 @@ class XlsxViewerEngine implements ZoomableViewer {
    * Retains the old no-op behavior for malformed references.
    */
   select(ref: string): void {
+    this.assertOpen();
     const state = selectionStateFromReference(ref);
     if (!state) return;
     this.commitSelection(state);
@@ -2086,18 +2096,14 @@ class XlsxViewerEngine implements ZoomableViewer {
       return;
     }
 
-    this.selectionNotificationSeen ??= new Set();
-    const fingerprint = JSON.stringify(state);
-    if (this.selectionNotificationSeen.has(fingerprint) ||
-        this.selectionNotificationCount >= MAX_REENTRANT_SELECTION_NOTIFICATIONS) {
+    if (this.selectionNotificationCount >= MAX_REENTRANT_SELECTION_NOTIFICATIONS) {
       // A callback feedback cycle must not monopolize the main thread. The
-      // canonical state remains authoritative; only the repeated notification
-      // is suppressed for this reentrant chain.
+      // canonical state remains authoritative; only notifications beyond the
+      // documented per-chain safety limit are suppressed.
       this.lastNotifiedSelectionState = state ? structuredClone(state) : null;
       this.finishSelectionNotificationChain();
       return;
     }
-    this.selectionNotificationSeen.add(fingerprint);
     this.selectionNotificationCount++;
     this.lastNotifiedSelectionState = state ? structuredClone(state) : null;
     this.emittingSelectionChange = true;
@@ -2126,7 +2132,6 @@ class XlsxViewerEngine implements ZoomableViewer {
 
   private finishSelectionNotificationChain(): void {
     this.pendingSelectionChange = false;
-    this.selectionNotificationSeen = null;
     this.selectionNotificationCount = 0;
   }
 
@@ -2436,6 +2441,8 @@ class XlsxViewerEngine implements ZoomableViewer {
       this.opts.selectionColor ?? DEFAULT_SELECTION_COLOR,
     );
     const seenFragments = new Set<string>();
+    const fillSubpaths: string[] = [];
+    const borderFragments: HTMLElement[] = [];
 
     for (const area of state.areas) {
       const bounds = area.kind === 'cells'
@@ -2487,16 +2494,36 @@ class XlsxViewerEngine implements ZoomableViewer {
         ].join('|');
         if (seenFragments.has(fragmentKey)) continue;
         seenFragments.add(fragmentKey);
+        // Paint every fragment as a subpath in one SVG fill operation. With a
+        // single non-zero fill, overlapping selection areas form a visual union
+        // instead of stacking translucent backgrounds and becoming darker.
+        fillSubpaths.push(
+          `M${screenLeft} ${y}h${fragmentW}v${fragmentH}h${-fragmentW}Z`,
+        );
         const box = this.hostDocument.createElement('div');
         box.setAttribute('data-xlsx-selection-fragment', area.kind);
         box.style.cssText =
           `position:absolute;left:${screenLeft}px;top:${y}px;width:${fragmentW}px;height:${fragmentH}px;` +
           `box-sizing:border-box;border-top:${topBorder};border-right:${physicalRightBorder};` +
           `border-bottom:${bottomBorder};border-left:${physicalLeftBorder};` +
-          `background:${background};pointer-events:none;`;
-        this.overlayHost.appendSelection(box);
+          'background:transparent;pointer-events:none;';
+        borderFragments.push(box);
       }
     }
+
+    if (fillSubpaths.length > 0) {
+      const svgNamespace = 'http://www.w3.org/2000/svg';
+      const svg = this.hostDocument.createElementNS(svgNamespace, 'svg');
+      svg.setAttribute('data-xlsx-selection-fill', '');
+      svg.style.cssText =
+        'position:absolute;inset:0;width:100%;height:100%;overflow:hidden;pointer-events:none;';
+      const path = this.hostDocument.createElementNS(svgNamespace, 'path');
+      path.setAttribute('d', fillSubpaths.join(''));
+      path.setAttribute('fill', background);
+      svg.appendChild(path);
+      this.overlayHost.appendSelection(svg as unknown as HTMLElement);
+    }
+    for (const fragment of borderFragments) this.overlayHost.appendSelection(fragment);
 
     // List data-validation dropdown arrow (ECMA-376 §18.3.1.33). Excel shows an
     // in-cell dropdown button only while the cell is *selected* and only for

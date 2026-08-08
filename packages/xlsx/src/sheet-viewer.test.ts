@@ -162,11 +162,35 @@ describe('XlsxSheetViewer canvas mount', () => {
     });
 
     viewer.setSelection('A1');
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(calls).toBe(2);
+    expect(calls).toBe(100);
     expect(viewer.selectionState?.activeCell).toEqual({ row: 1, col: 1 });
+    viewer.destroy();
+  });
+
+  it('delivers a repeated state when it is a distinct semantic transition', async () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const activeCells: string[] = [];
+    let viewer: XlsxSheetViewer;
+    viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      onSelectionStateChange(selection) {
+        if (!selection) return;
+        activeCells.push(`${selection.activeCell.row},${selection.activeCell.col}`);
+        if (activeCells.length === 1) viewer.setSelection('B2');
+        else if (activeCells.length === 2) viewer.setSelection('A1');
+        else if (activeCells.length === 3) viewer.setSelection('C3');
+      },
+    });
+
+    viewer.setSelection('A1');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(activeCells).toEqual(['1,1', '2,2', '1,1', '3,3']);
+    expect(viewer.selectionState?.activeCell).toEqual({ row: 3, col: 3 });
     viewer.destroy();
   });
 
@@ -304,6 +328,44 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(fragments).toHaveLength(1);
     expect(fragments[0].style['border-right']).toContain('solid');
     expect(fragments[0].style['border-left']).toBe('none');
+    viewer.destroy();
+  });
+
+  it('paints overlapping selection areas as one translucent fill', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      canvasArea: FakeEl;
+      overlayHost: { selection: FakeEl };
+    } }).engine;
+    engine.currentWorksheet = worksheet('Overlapping');
+    engine.canvasArea.clientWidth = 640;
+    engine.canvasArea.clientHeight = 360;
+
+    viewer.setSelection({
+      areas: [
+        { kind: 'cells', top: 1, left: 1, bottom: 2, right: 2 },
+        { kind: 'cells', top: 2, left: 2, bottom: 3, right: 3 },
+      ],
+      activeAreaIndex: 0,
+      activeCell: { row: 1, col: 1 },
+      extensionAnchor: { row: 1, col: 1 },
+    });
+
+    const overlayDescendants = descendants(engine.overlayHost.selection);
+    const fills = overlayDescendants.filter(
+      (element) => element.getAttribute('data-xlsx-selection-fill') !== null,
+    );
+    const fragments = overlayDescendants.filter(
+      (element) => element.getAttribute('data-xlsx-selection-fragment') === 'cells',
+    );
+    expect(fills).toHaveLength(1);
+    expect(fragments).toHaveLength(2);
+    expect(fragments.every((fragment) => fragment.style.background === 'transparent')).toBe(true);
     viewer.destroy();
   });
 
@@ -457,6 +519,26 @@ describe('XlsxSheetViewer canvas mount', () => {
     viewer.destroy();
     expect(() => viewer.getSelectionContext()).toThrow(/destroyed/);
     await expect(viewer.copySelection()).rejects.toThrow(/destroyed/);
+  });
+
+  it('does not split a surrogate pair at the selection-context text limit', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: { currentWorksheet: Worksheet } }).engine;
+    engine.currentWorksheet = {
+      ...worksheet('Unicode'),
+      rows: [{ index: 1, cells: [{
+        row: 1, col: 1, value: { type: 'text', text: '\ud83d\ude00x' },
+      }] }],
+    } as unknown as Worksheet;
+    viewer.setSelection('A1');
+
+    expect(viewer.getSelectionContext({ maxTextCharacters: 1 })?.cells[0].value).toBe('');
+    expect(viewer.getSelectionContext({ maxTextCharacters: 2 })?.cells[0].value).toBe('\ud83d\ude00');
+    viewer.destroy();
   });
 
   it('quotes tabs, newlines, and quotes in copied TSV', async () => {
