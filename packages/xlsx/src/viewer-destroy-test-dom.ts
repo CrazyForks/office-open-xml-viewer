@@ -236,6 +236,21 @@ export function makeEl(tag: string, ownerDocument: FakeDocument | null = null): 
       for (const fn of this._listeners.get(type) ?? []) fn(event);
     },
   };
+  // Mirror the DOM: clearing textContent removes all descendants. Overlay hosts
+  // rely on this when switching between cell and element selection frames.
+  let text = '';
+  Object.defineProperty(el, 'textContent', {
+    get() { return text; },
+    set(value: string) {
+      text = value;
+      if (value === '') {
+        for (const child of el.children) child.parentElement = null;
+        el.children.length = 0;
+      }
+    },
+    enumerable: true,
+    configurable: true,
+  });
   Object.defineProperty(el, 'parentNode', {
     get() {
       return el.parentElement;

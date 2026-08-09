@@ -492,6 +492,8 @@ export interface PaintResourceRegistry {
 export interface ResourcePlacement {
   readonly kind: 'resource';
   readonly range: TextRange;
+  /** Parsed run occurrence retained for element-context source locators. */
+  readonly sourceRunIndex?: number;
   readonly resourceKey: string;
   readonly resourceKind: InlineResourceKind;
   /** Keep a non-text graphic upright after the enclosing section-logical frame

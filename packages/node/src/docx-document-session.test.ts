@@ -42,7 +42,9 @@ describe('Node bounded DOCX document session', () => {
     const measure = factory.createCanvas(1, 1).getContext('2d');
     const expectedPages = layoutDocument(
       expected,
-      createLayoutServices(expected, { measureContext: measure }),
+      createLayoutServices(expected, {
+        measureContext: measure as unknown as CanvasRenderingContext2D,
+      }),
       { currentDateMs: 0 },
     ).pages.length;
 

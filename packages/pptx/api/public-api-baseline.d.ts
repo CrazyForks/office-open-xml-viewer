@@ -3,7 +3,7 @@
 // Do not edit by hand.
 
 // --- file: pptx.d.ts ---
-interface ArrowEnd {
+export interface ArrowEnd {
     type: string;
     w: string;
     len: string;
@@ -50,7 +50,7 @@ export interface Camera3d {
     zoom?: number;
     rot?: Rot3d;
 }
-interface ChartDataLabelOverride {
+export interface ChartDataLabelOverride {
     idx: number;
     text: string;
     position?: string;
@@ -64,7 +64,7 @@ interface ChartDataLabelOverride {
     showPercent?: boolean;
     deleted?: boolean;
 }
-interface ChartDataPointOverride {
+export interface ChartDataPointOverride {
     idx: number;
     color?: string;
     markerSymbol?: string;
@@ -84,7 +84,7 @@ export interface ChartElement {
     flipV: boolean;
     chart: ChartModel;
 }
-interface ChartErrBars {
+export interface ChartErrBars {
     dir: string;
     barType: string;
     plus: (number | null)[];
@@ -94,7 +94,7 @@ interface ChartErrBars {
     lineWidthEmu?: number;
     dash?: string;
 }
-interface ChartexBoxSeries {
+export interface ChartexBoxSeries {
     name: string;
     color?: string | null;
     valuesByCategory: number[][];
@@ -104,23 +104,23 @@ interface ChartexBoxSeries {
     showNonoutliers: boolean;
     quartileMethod: string;
 }
-interface ChartexBoxWhisker {
+export interface ChartexBoxWhisker {
     categories: string[];
     series: ChartexBoxSeries[];
 }
-interface ChartexSunburst {
+export interface ChartexSunburst {
     rows: ChartexSunburstRow[];
 }
-interface ChartexSunburstRow {
+export interface ChartexSunburstRow {
     path: string[];
     size: number;
 }
-interface ChartLabelBox {
+export interface ChartLabelBox {
     fill?: string;
     borderColor?: string;
     borderWidthEmu?: number;
 }
-interface ChartManualLayout {
+export interface ChartManualLayout {
     xMode: string;
     yMode: string;
     layoutTarget?: string;
@@ -233,6 +233,12 @@ export interface ChartModel {
     chartexSunburst?: ChartexSunburst | null;
     chartexAccents?: string[] | null;
 }
+export interface ChartRect {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+}
 export interface ChartSeries {
     name: string;
     color: string | null;
@@ -258,7 +264,7 @@ export interface ChartSeries {
     trendLines?: ChartTrendline[] | null;
     lineHidden?: boolean | null;
 }
-interface ChartSeriesDataLabels {
+export interface ChartSeriesDataLabels {
     showVal: boolean;
     showCatName: boolean;
     showSerName: boolean;
@@ -273,7 +279,7 @@ interface ChartSeriesDataLabels {
     leaderLineColor?: string;
     leaderLineWidthEmu?: number;
 }
-interface ChartTrendline {
+export interface ChartTrendline {
     trendlineType: string;
     order?: number | null;
     period?: number | null;
@@ -285,16 +291,16 @@ interface ChartTrendline {
     lineColor?: string | null;
     lineWidthEmu?: number | null;
 }
-type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | string;
+export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | string;
 export interface DimOptions {
     color: string;
     opacity: number;
 }
-interface Duotone {
+export interface Duotone {
     clr1: string;
     clr2: string;
 }
-interface EquationRun {
+export interface EquationRun {
     type: 'math';
     nodes: MathNode[];
     display: boolean;
@@ -355,7 +361,7 @@ export interface ImageFill {
     duotone?: Duotone;
 }
 export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
-interface LegendManualLayout {
+export interface LegendManualLayout {
     xMode: string;
     yMode: string;
     x: number;
@@ -385,27 +391,27 @@ interface LoadOptions__emitterCollision1 {
     workerTimeoutMs?: number;
     math?: MathRenderer;
 }
-interface MatchRunSlice {
+export interface MatchRunSlice {
     runIndex: number;
     start: number;
     end: number;
 }
-interface MathAccent {
+export interface MathAccent {
     kind: 'accent';
     char: string;
     base: MathNode[];
 }
-interface MathArray {
+export interface MathArray {
     kind: 'array';
     rows: MathNode[][][];
     align: 'eq' | 'center' | 'left';
 }
-interface MathBar {
+export interface MathBar {
     kind: 'bar';
     pos: 'top' | 'bot';
     base: MathNode[];
 }
-interface MathBorderBox {
+export interface MathBorderBox {
     kind: 'borderBox';
     hideTop?: boolean;
     hideBot?: boolean;
@@ -417,44 +423,44 @@ interface MathBorderBox {
     strikeTlbr?: boolean;
     base: MathNode[];
 }
-interface MathBox {
+export interface MathBox {
     kind: 'box';
     base: MathNode[];
 }
-interface MathDelimiter {
+export interface MathDelimiter {
     kind: 'delimiter';
     begChar: string;
     endChar: string;
     items: MathNode[][];
 }
-interface MathFraction {
+export interface MathFraction {
     kind: 'fraction';
     num: MathNode[];
     den: MathNode[];
     bar?: boolean;
 }
-interface MathFunc {
+export interface MathFunc {
     kind: 'func';
     name: MathNode[];
     arg: MathNode[];
 }
-interface MathGroup {
+export interface MathGroup {
     kind: 'group';
     items: MathNode[];
 }
-interface MathGroupChr {
+export interface MathGroupChr {
     kind: 'groupChr';
     char: string;
     pos: 'top' | 'bot';
     base: MathNode[];
 }
-interface MathLimit {
+export interface MathLimit {
     kind: 'limit';
     base: MathNode[];
     lower?: MathNode[];
     upper?: MathNode[];
 }
-interface MathNary {
+export interface MathNary {
     kind: 'nary';
     op: string;
     limLoc?: string;
@@ -462,8 +468,8 @@ interface MathNary {
     sup?: MathNode[];
     body: MathNode[];
 }
-type MathNode = MathRun | MathFraction | MathScript | MathNary | MathDelimiter | MathRadical | MathLimit | MathArray | MathGroupChr | MathBar | MathAccent | MathFunc | MathGroup | MathPhant | MathSPre | MathBox | MathBorderBox;
-interface MathPhant {
+export type MathNode = MathRun | MathFraction | MathScript | MathNary | MathDelimiter | MathRadical | MathLimit | MathArray | MathGroupChr | MathBar | MathAccent | MathFunc | MathGroup | MathPhant | MathSPre | MathBox | MathBorderBox;
+export interface MathPhant {
     kind: 'phant';
     show: boolean;
     zeroWid?: boolean;
@@ -471,34 +477,34 @@ interface MathPhant {
     zeroDesc?: boolean;
     base: MathNode[];
 }
-interface MathRadical {
+export interface MathRadical {
     kind: 'radical';
     index?: MathNode[];
     radicand: MathNode[];
 }
-interface MathRenderer {
+export interface MathRenderer {
     loadMathJax(): Promise<void>;
     mathMLToSvg(mathml: string): Promise<MathSvg>;
 }
-interface MathRun {
+export interface MathRun {
     kind: 'run';
     text: string;
     style: MathStyle;
 }
-interface MathScript {
+export interface MathScript {
     kind: 'sup' | 'sub' | 'subSup';
     base: MathNode[];
     sup?: MathNode[];
     sub?: MathNode[];
 }
-interface MathSPre {
+export interface MathSPre {
     kind: 'sPre';
     sub: MathNode[];
     sup: MathNode[];
     base: MathNode[];
 }
-type MathStyle = 'roman' | 'italic' | 'bold' | 'boldItalic';
-interface MathSvg {
+export type MathStyle = 'roman' | 'italic' | 'bold' | 'boldItalic';
+export interface MathSvg {
     svg: string;
     widthEm: number;
     ascentEm: number;
@@ -535,7 +541,6 @@ export class OoxmlError extends Error {
     constructor(code: OoxmlErrorCode, message: string);
 }
 export type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml';
-export type OoxmlErrorSource = 'container' | 'zip-part' | 'parser' | 'serializer' | 'layout' | 'renderer' | 'worker';
 export type OoxmlErrorStage = 'container' | 'decompression' | 'parsing' | 'serialization' | 'layout' | 'rendering' | 'worker';
 export type OoxmlFormat = 'docx' | 'xlsx' | 'pptx';
 export type OoxmlResourceLimit = number | null;
@@ -651,7 +656,7 @@ export type PathCmd = {
 } | {
     cmd: 'close';
 };
-interface PatternFill {
+export interface PatternFill {
     fillType: 'pattern';
     fg: string;
     bg: string;
@@ -696,11 +701,7 @@ export interface PptxComment {
     date?: string;
     text: string;
 }
-export interface PptxElementContextOptions {
-    readonly tolerance?: number;
-    readonly maxTextCharacters?: number;
-}
-export interface PptxElementSelectionContext {
+export interface PptxElementContext {
     readonly format: 'pptx';
     readonly kind: 'element';
     readonly slideIndex: number;
@@ -731,6 +732,10 @@ export interface PptxElementSelectionContext {
     readonly textCharacters: number;
     readonly maxTextCharacters: number;
 }
+export interface PptxElementContextOptions {
+    readonly tolerance?: number;
+    readonly maxTextCharacters?: number;
+}
 export type PptxHighlightColors = FindHighlightColors;
 export interface PptxHighlightMatch {
     slices: MatchRunSlice[];
@@ -752,12 +757,12 @@ export class PptxPresentation {
     renderSlide(canvas: HTMLCanvasElement | OffscreenCanvas, slideIndex: number, opts?: RenderSlideOptions): Promise<void>;
     renderSlideToBitmap(slideIndex: number, opts?: RenderSlideToBitmapOptions): Promise<ImageBitmap>;
     collectSlideRuns(slideIndex: number, width?: number): Promise<PptxTextRunInfo[]>;
-    getElementContextAt(slideIndex: number, point: PptxSlidePoint, options?: PptxElementContextOptions): Promise<PptxElementSelectionContext | null>;
+    getElementContextAt(slideIndex: number, point: PptxSlidePoint, options?: PptxElementContextOptions): Promise<PptxElementContext | null>;
     getMedia(mediaPath: string): Promise<Blob>;
     getImage(imagePath: string, mimeType: string): Promise<Blob>;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     toMarkdown(): Promise<string>;
-    presentSlide(canvas: HTMLCanvasElement, slideIndex: number, opts?: RenderSlideOptions): Promise<PresentationHandle>;
+    presentSlide(canvas: HTMLCanvasElement, slideIndex: number, opts?: PresentSlideOptions): Promise<PresentationHandle>;
     destroy(): void;
     private __privatePresence;
     private constructor();
@@ -787,7 +792,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     destroy(): void;
     private __privatePresence;
 }
-export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTextRun'>, LoadOptions {
+export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width' | 'dpr'>, LoadOptions {
     width?: number;
     gap?: number;
     paddingTop?: number;
@@ -799,6 +804,7 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
     enableElementSelection?: boolean;
     elementHitTolerance?: number;
     onSelectionContextChange?: (context: PptxSelectionContext | null) => void;
+    onContextMenu?: (event: ViewerContextMenuEvent<PptxSelectionContext>) => void;
     findHighlightColors?: FindHighlightColors;
     enableMediaPlayback?: boolean;
     mediaOverscan?: number;
@@ -814,18 +820,22 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
     onHyperlinkClick?: (target: HyperlinkTarget) => void;
     enableHyperlinks?: boolean;
 }
-export type PptxSelectionContext = PptxTextSelectionContext | PptxElementSelectionContext;
+export type PptxSelectionContext = PptxTextSelectionContext | PptxElementContext;
 export type PptxSelectionContextOptions = TextSelectionContextOptions;
 export interface PptxSelectionRunLocator {
     readonly slideIndex: number;
     readonly runIndex: number;
     readonly shapeId?: string;
+    readonly elementIndex?: number;
+    readonly origin?: SlideElementOrigin;
 }
 export interface PptxSlidePoint {
     readonly x: number;
     readonly y: number;
 }
 export interface PptxTextRunInfo {
+    elementIndex?: number;
+    origin?: SlideElementOrigin;
     shapeId?: string;
     text: string;
     inShapeX: number;
@@ -884,7 +894,7 @@ export class PptxViewer implements ZoomableViewer {
     destroy(): void;
     private __privatePresence;
 }
-export interface PptxViewerOptions extends RenderOptions, LoadOptions {
+export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr'>, LoadOptions {
     onSlideChange?: (index: number, total: number) => void;
     onError?: (err: Error) => void;
     zoomMin?: number;
@@ -895,6 +905,7 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
     enableElementSelection?: boolean;
     elementHitTolerance?: number;
     onSelectionContextChange?: (context: PptxSelectionContext | null) => void;
+    onContextMenu?: (event: ViewerContextMenuEvent<PptxSelectionContext>) => void;
     findHighlightColors?: FindHighlightColors;
     hiddenSlideMode?: HiddenSlideMode;
     hiddenSlideDim?: Partial<DimOptions>;
@@ -915,6 +926,9 @@ export interface PresentationHandle {
     play(mediaPath?: string): void;
     pause(mediaPath?: string): void;
     destroy(): void;
+}
+export interface PresentSlideOptions extends Omit<RenderSlideOptions, 'skipMediaControls'> {
+    onError?: (error: Error) => void;
 }
 export function readPptxTextSelectionContext(root: HTMLElement, selection: Selection | null, options?: TextSelectionContextOptions): PptxTextSelectionContext | null;
 export interface Reflection {
@@ -946,7 +960,6 @@ export interface RenderSlideOptions {
     onTextRun?: TextRunCallback;
     skipMediaControls?: boolean;
     dim?: DimOptions;
-    onError?: (error: Error) => void;
 }
 export interface RenderSlideToBitmapOptions {
     width?: number;
@@ -963,7 +976,7 @@ export interface Scene3d {
     camera: Camera3d;
     lightRig?: LightRig;
 }
-interface SecondaryValueAxis {
+export interface SecondaryValueAxis {
     min: number | null;
     max: number | null;
     title: string | null;
@@ -1040,7 +1053,7 @@ export type SlideElementOrigin = 'master' | 'layout' | 'slide';
 export interface SlideElementSource {
     origin: SlideElementOrigin;
 }
-type SlideRenderOptions = RenderOptions & {
+export type SlideRenderOptions = RenderOptions & {
     math?: MathRenderer;
     dim?: DimOptions;
 };
@@ -1076,7 +1089,7 @@ export interface Stroke {
         fillType: 'none';
     }>;
     dashStyle?: string;
-    lineCap?: CanvasLineCap;
+    lineCap?: 'butt' | 'round' | 'square';
     headEnd?: ArrowEnd;
     tailEnd?: ArrowEnd;
     cmpd?: string;
@@ -1143,7 +1156,7 @@ interface TextBody__emitterCollision1 {
     numCol?: number;
     spcCol?: number;
 }
-interface TextOutline {
+export interface TextOutline {
     width: number;
     color?: string;
 }
@@ -1192,7 +1205,11 @@ export interface TileInfo {
     flip: string;
     algn?: string;
 }
-interface ZoomableViewer {
+export interface ViewerContextMenuEvent<TContext> {
+    readonly originalEvent: MouseEvent;
+    getContext(): Promise<TContext | null>;
+}
+export interface ZoomableViewer {
     getScale(): number;
     setScale(scale: number): void | Promise<void>;
     zoomIn(): void | Promise<void>;

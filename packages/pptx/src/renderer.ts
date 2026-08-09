@@ -140,6 +140,10 @@ export interface RenderContext {
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
 export interface PptxTextRunInfo {
+  /** Paint-order element index in the rendered slide snapshot. */
+  elementIndex?: number;
+  /** Provenance of that rendered element. */
+  origin?: import('./types.js').SlideElementOrigin;
   /**
    * Source shape's DrawingML `cNvPr@id`. The identifier is stable and unique
    * within its slide. Absent for parser-synthesized shapes that have no cNvPr.
@@ -5285,12 +5289,12 @@ export function applyDimOverlay(
 }
 
 /**
- * Internal render options: the shared {@link RenderOptions} plus the opt-in
- * `math` engine. `math` is internal plumbing — the headless {@link
- * PptxPresentation} injects it once at load and threads it here on each draw,
- * so the public `RenderSlideOptions` deliberately does not expose it.
+ * Raw {@link renderSlide} options: shared paint controls plus the optional math
+ * engine and hidden-slide dim overlay. Viewer constructors normally inject the
+ * math engine once through their load options; direct render callers can pass
+ * the same public engine here.
  */
-type SlideRenderOptions = RenderOptions & { math?: MathRenderer; dim?: DimOptions };
+export type SlideRenderOptions = RenderOptions & { math?: MathRenderer; dim?: DimOptions };
 
 /**
  * Per-canvas monotonic render token for the {@link renderSlide} cancellation
@@ -5591,12 +5595,19 @@ async function renderSlideLeased(
     }
   }
 
-  for (const el of slide.elements) {
+  for (const [elementIndex, el] of slide.elements.entries()) {
     // A newer render of this canvas started while we awaited an image/equation —
     // stop so we don't paint this (now stale) slide over the newer one.
     if (superseded()) return canvas;
     if (el.type === 'shape') {
-      renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc, onTextRun, opts.fetchImage);
+      const elementTextRun: TextRunCallback | undefined = onTextRun
+        ? (run) => onTextRun({
+            ...run,
+            elementIndex,
+            origin: slide.elementSources?.[elementIndex]?.origin ?? 'slide',
+          })
+        : undefined;
+      renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc, elementTextRun, opts.fetchImage);
     } else if (el.type === 'picture') {
       await renderPicture(ctx, el, scale, superseded, opts.fetchImage);
     } else if (el.type === 'table') {

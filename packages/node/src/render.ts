@@ -19,16 +19,26 @@ import type { Presentation } from '@silurus/ooxml-pptx';
 
 let nodeCanvasRuntimeTail: Promise<void> = Promise.resolve();
 
+/** DOM-free text metrics required from a Node canvas implementation. */
+export interface NodeTextMetricsLike {
+  readonly width: number;
+}
+
+/** DOM-free structural seam for the Node canvas 2D context. */
+export interface NodeCanvasContext2D {
+  measureText(text: string): NodeTextMetricsLike;
+}
+
 /** A subset of the Node-canvas API that the renderers actually need. The
  *  `skia-canvas` `Canvas` (and `@napi-rs/canvas`'s `Canvas`) both satisfy
  *  this — they expose the same `getContext('2d')` shape as the browser. */
 export interface NodeCanvasLike {
   width: number;
   height: number;
-  getContext(kind: '2d'): CanvasRenderingContext2D;
+  getContext(kind: '2d'): NodeCanvasContext2D;
   /** Encode to PNG bytes. skia-canvas: `canvas.png` async getter or
    *  `toBuffer('png')`. @napi-rs/canvas: `toBuffer('image/png')`. */
-  toBuffer?(format?: string): Buffer | Promise<Buffer>;
+  toBuffer?(format?: string): Uint8Array | Promise<Uint8Array>;
 }
 
 export interface NodeImageLike {
@@ -40,7 +50,7 @@ export interface NodeCanvasFactory {
   /** Create a blank canvas of the given pixel size. */
   createCanvas(width: number, height: number): NodeCanvasLike;
   /** Decode a buffer (PNG/JPEG/etc.) into something the canvas can `drawImage`. */
-  loadImage(buffer: ArrayBuffer | Uint8Array | Buffer): Promise<NodeImageLike>;
+  loadImage(buffer: ArrayBuffer | Uint8Array): Promise<NodeImageLike>;
 }
 
 /**
@@ -120,7 +130,7 @@ export function installImageBitmapShim(factory: NodeCanvasFactory): () => void {
     if (source && typeof (source as CanvasLike).getContext === 'function') {
       return source as CanvasLike;
     }
-    let buf: ArrayBuffer | Uint8Array | Buffer;
+    let buf: ArrayBuffer | Uint8Array;
     if (source instanceof Uint8Array || source instanceof ArrayBuffer) {
       buf = source;
     } else if (typeof (source as Blob).arrayBuffer === 'function') {

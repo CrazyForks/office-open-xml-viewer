@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   hitTestPptxElement,
   hitTestPptxSlideContext,
-  limitPptxElementSelectionContext,
+  limitPptxElementContext,
 } from './element-selection.js';
 import type { ChartElement, ShapeElement, Slide, SlideElement } from './types.js';
 
@@ -93,7 +93,7 @@ describe('PPTX element selection context', () => {
       },
     })]), { x: 10, y: 10 }, { maxTextCharacters: 65_536 })!;
 
-    expect(limitPptxElementSelectionContext(full, 1)).toMatchObject({
+    expect(limitPptxElementContext(full, 1)).toMatchObject({
       text: '', textCharacters: 0, maxTextCharacters: 1,
       truncated: true, truncationReasons: ['text'],
     });

@@ -11,9 +11,9 @@ describe('PPTX text selection context', () => {
       contains: (node: Node) => node === start || node === end,
     } as unknown as HTMLElement;
     const runs = [
-      { dataset: { runIndex: '7', shapeId: '42' }, parentElement: layer,
+      { dataset: { runIndex: '7', shapeId: '42', elementIndex: '3', elementOrigin: 'slide' }, parentElement: layer,
         childNodes: [{ nodeType: 3, data: 'shape ', childNodes: [] }] },
-      { dataset: { runIndex: '8', shapeId: '42' }, parentElement: layer,
+      { dataset: { runIndex: '8', shapeId: '42', elementIndex: '3', elementOrigin: 'slide' }, parentElement: layer,
         childNodes: [{ nodeType: 3, data: 'text', childNodes: [] }] },
     ] as unknown as HTMLElement[];
     const root = {
@@ -42,8 +42,8 @@ describe('PPTX text selection context', () => {
       slideIndexes: [2],
       shapeIds: ['42'],
       runs: [
-        { slideIndex: 2, runIndex: 7, shapeId: '42' },
-        { slideIndex: 2, runIndex: 8, shapeId: '42' },
+        { slideIndex: 2, runIndex: 7, shapeId: '42', elementIndex: 3, origin: 'slide' },
+        { slideIndex: 2, runIndex: 8, shapeId: '42', elementIndex: 3, origin: 'slide' },
       ],
       truncated: false,
       truncationReasons: [],

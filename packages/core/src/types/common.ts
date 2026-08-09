@@ -188,7 +188,7 @@ export interface Stroke {
   /** OOXML prstDash value: "dash", "dot", "dashDot", "lgDash", "lgDashDot", etc. */
   dashStyle?: string;
   /** Canvas line cap normalized from DrawingML/VML (`flat` → `butt`). */
-  lineCap?: CanvasLineCap;
+  lineCap?: 'butt' | 'round' | 'square';
   /** Arrow head at the start of the line */
   headEnd?: ArrowEnd;
   /** Arrow head at the end of the line */

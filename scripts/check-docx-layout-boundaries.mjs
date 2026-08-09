@@ -303,7 +303,6 @@ const ACQUISITION_PAINT_PROPERTIES = new Set([
   'images',
   'restore',
   'save',
-  'showTrackChanges',
 ]);
 
 function fail(code, detail) {

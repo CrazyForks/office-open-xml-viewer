@@ -6,36 +6,54 @@ import { buildDocxTextLayer } from './text-layer';
 import { buildDocxHighlightLayer, type DocxHighlightMatch } from './find-highlight-layer';
 import { DocxFindController, type DocxMatchLocation } from './find';
 import { openExternalHyperlink, PT_TO_PX, nextZoomStep, prevZoomStep, clampScale, fitScale } from '@silurus/ooxml-core';
-import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
+import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
 import {
   CallerCanvasMount,
   CanvasOverlayHost,
   CanvasViewerErrorRouter,
+  renderCanvasElementOutline,
   resolveCanvasViewerMode,
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import { invalidateDocxRenderTarget } from './paint/canvas-document';
 import {
-  readDocxSelectionContext,
+  readDocxTextSelectionContext,
+  type DocxElementContext,
   type DocxSelectionContext,
   type DocxSelectionContextOptions,
 } from './selection-context';
+import {
+  limitDocxElementContext,
+  MAX_DOCX_ELEMENT_TEXT_CHARACTERS,
+} from './element-context';
 
 const borrowedDocumentOption = Symbol('DocxViewer.borrowedDocument');
 type InternalDocxViewerOptions = DocxViewerOptions & {
   [borrowedDocumentOption]?: DocxDocument;
 };
 
-export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
+export interface DocxViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>, LoadOptions {
   container?: HTMLElement;
   /**
    * When true, adds a transparent text overlay div over the canvas so the
    * browser's native text selection works on document content.
    */
   enableTextSelection?: boolean;
-  /** Emits bounded, detached text context suitable for read-only AI/MCP use. */
+  /**
+   * Enable read-only selection of rendered pictures, charts, and shapes. The
+   * selected object exposes element context and receives a non-editable outline.
+   * Default false; hit-testing runs only for clicks when enabled.
+   */
+  enableElementSelection?: boolean;
+  /** Emits bounded, detached text or element context suitable for read-only AI/MCP use. */
   onSelectionContextChange?: (context: DocxSelectionContext | null) => void;
+  /**
+   * Called synchronously for a browser `contextmenu` event. The original event
+   * can suppress the native menu; `getContext()` resolves the text or element
+   * context established at the event target.
+   */
+  onContextMenu?: (event: ViewerContextMenuEvent<DocxSelectionContext>) => void;
   /** CSS backgrounds for ordinary and active in-document search matches. */
   findHighlightColors?: FindHighlightColors;
   /** Called when a page finishes rendering. */
@@ -66,11 +84,11 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
    *  navigation must not leave the current view. */
   enableHyperlinks?: boolean;
   /**
-   * Receives load failures and asynchronous render failures handled by the
-   * Viewer. Supplying this callback changes load-failure delivery: `load()`
-   * invokes it and resolves; without it, the same load/parse failure rejects
-   * `load()`. Viewer-managed render failures invoke it, or fall back to
-   * `console.error` when omitted.
+   * Receives asynchronous Viewer-managed failures that cannot be observed by
+   * awaiting the method that started them. Failures from `load()`, including
+   * its initial render, always reject that Promise and are not also delivered
+   * here. Later event-driven render failures invoke this callback, or fall back
+   * to `console.error` when omitted.
    *
    * Stable cases can be narrowed with `OoxmlError`,
    * `OoxmlResourceLimitError`, or `OoxmlDecodedImageLimitError` re-exported by
@@ -106,6 +124,7 @@ export class DocxViewer implements ZoomableViewer {
    *  spans. Sits above the text layer so a highlight shows over a link's hit
    *  region without stealing its clicks (`pointer-events:none`). */
   private _highlightLayer: HTMLDivElement | null = null;
+  private _elementLayer: HTMLDivElement | null = null;
   /** IX2 — find state (per-page runs, matches, active cursor). */
   private _find: DocxFindController;
   /** A 2d context used only to measure text for highlight geometry (its own
@@ -118,6 +137,10 @@ export class DocxViewer implements ZoomableViewer {
   private _destroyed = false;
   private _selectionChangeListener: (() => void) | null = null;
   private _selectionContextKey = 'null';
+  private _elementContext: DocxElementContext | null = null;
+  private _elementHitGeneration = 0;
+  private _elementClickListener: ((event: MouseEvent) => void) | null = null;
+  private _contextMenuListener: ((event: MouseEvent) => void) | null = null;
   /**
    * Create a Viewer that borrows an already-loaded document.
    *
@@ -159,12 +182,27 @@ export class DocxViewer implements ZoomableViewer {
     this._wrapper = this._canvasMount.wrapper;
     this._renderDispatcher = new StaticCanvasRenderDispatcher(canvas, this._mode === 'worker');
     this._errorRouter = new CanvasViewerErrorRouter('DocxViewer', opts.onError);
-    const overlays = new CanvasOverlayHost(this._wrapper, opts.enableTextSelection === true);
+    const overlays = new CanvasOverlayHost(
+      this._wrapper,
+      opts.enableTextSelection === true,
+      opts.enableElementSelection === true,
+    );
     this._textLayer = overlays.textLayer;
     this._highlightLayer = overlays.highlightLayer;
-    if (this._textLayer && opts.onSelectionContextChange) {
+    this._elementLayer = overlays.elementLayer;
+    if (this._textLayer && (opts.onSelectionContextChange || opts.enableElementSelection)) {
       this._selectionChangeListener = () => this._emitSelectionContextChange();
       this._wrapper.ownerDocument.addEventListener('selectionchange', this._selectionChangeListener);
+    }
+    if (opts.enableElementSelection) {
+      this._elementClickListener = (event) => {
+        void this._onElementClick(event).catch((error) => this._reportRenderError(error));
+      };
+      this._wrapper.addEventListener('click', this._elementClickListener);
+    }
+    if (opts.onContextMenu) {
+      this._contextMenuListener = (event) => this._onContextMenu(event);
+      this._wrapper.addEventListener('contextmenu', this._contextMenuListener);
     }
 
     this._find = new DocxFindController(
@@ -176,15 +214,9 @@ export class DocxViewer implements ZoomableViewer {
   /**
    * Load a DOCX from URL or ArrayBuffer and render the first page.
    *
-   * Error contract (shared by all three viewers):
-   * - Parse/load failure (the underlying `DocxDocument.load()` call itself
-   *   rejects): if an `onError` callback was provided it is invoked and `load`
-   *   resolves normally; if not, the error is rethrown so it is never silently
-   *   swallowed.
-   * - Render failure (the first page fails to draw AFTER a successful
-   *   parse/load): routed to the shared `_reportRenderError` contract (`onError`
-   *   if provided, else `console.error` — never silent) and `load` still
-   *   RESOLVES, matching every subsequent navigation call.
+   * Parse, load, and initial-render failures always reject this Promise.
+   * `onError` is reserved for later Viewer-managed work that has no directly
+   * awaitable method result, so one failure is never delivered twice.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
     if (this._destroyed) throw new Error('DocxViewer is destroyed');
@@ -200,8 +232,10 @@ export class DocxViewer implements ZoomableViewer {
     // FAILED re-load keeps the current document + its rendered page intact rather
     // than dropping to an empty viewer. The 2× memory window is bounded to the
     // load itself (the old engine is freed the moment the new model arrives).
+    let elementInvalidated = false;
     try {
       const doc = await this._documentOwner.replace(() => DocxDocument.load(source, {
+        password: this._opts.password,
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
         resourceLimits: this._opts.resourceLimits,
@@ -215,6 +249,8 @@ export class DocxViewer implements ZoomableViewer {
         // Invalidate operations owned by the old document before its worker is
         // terminated, so their expected rejection cannot surface as a reload
         // failure for the winning document.
+        this._invalidateElementContext(false);
+        elementInvalidated = true;
         this._renderDispatcher.begin();
         this._find.invalidate();
       });
@@ -226,13 +262,9 @@ export class DocxViewer implements ZoomableViewer {
       await this._render();
     } catch (err) {
       if (this._destroyed) throw new Error('DocxViewer is destroyed');
-      const e = err instanceof Error ? err : new Error(String(err));
-      if (this._opts.onError) {
-        this._opts.onError(e);
-        return;
-      }
-      throw e;
+      throw err instanceof Error ? err : new Error(String(err));
     }
+    if (elementInvalidated && !this._destroyed) this._emitSelectionContextChange();
   }
 
   get pageCount(): number {
@@ -251,8 +283,11 @@ export class DocxViewer implements ZoomableViewer {
   async goToPage(index: number): Promise<void> {
     if (!this._doc) return;
     const clamped = Math.max(0, Math.min(index, this.pageCount - 1));
+    const changed = clamped !== this._currentPage;
+    if (changed) this._invalidateElementContext(false);
     this._currentPage = clamped;
     await this._render();
+    if (changed && !this._destroyed) this._emitSelectionContextChange();
   }
 
   async nextPage(): Promise<void> { await this.goToPage(this._currentPage + 1); }
@@ -439,23 +474,119 @@ export class DocxViewer implements ZoomableViewer {
     return await this._doc.getResourceMetrics();
   }
 
-  /** Return the current browser text selection with DOCX source locators. */
+  /** Return the current browser text selection or clicked drawing context. */
   getSelectionContext(options: DocxSelectionContextOptions = {}): DocxSelectionContext | null {
     if (this._destroyed) throw new Error('DocxViewer is destroyed');
-    if (!this._textLayer) return null;
-    return readDocxSelectionContext(
-      this._wrapper,
-      this._wrapper.ownerDocument.getSelection(),
-      options,
-    );
+    const text = this._textLayer
+      ? readDocxTextSelectionContext(
+          this._wrapper,
+          this._wrapper.ownerDocument?.getSelection?.() ?? null,
+          options,
+        )
+      : null;
+    return text ?? (this._elementContext
+      ? limitDocxElementContext(this._elementContext, options.maxTextCharacters)
+      : null);
   }
 
   private _emitSelectionContextChange(): void {
     const context = this.getSelectionContext();
+    if (context?.kind === 'text') {
+      this._elementHitGeneration++;
+      this._elementContext = null;
+      this._redrawElementOutline();
+    }
     const key = JSON.stringify(context);
     if (key === this._selectionContextKey) return;
     this._selectionContextKey = key;
     this._opts.onSelectionContextChange?.(context ? structuredClone(context) : null);
+  }
+
+  private _setElementContext(context: DocxElementContext | null): void {
+    this._elementContext = context ? structuredClone(context) : null;
+    this._redrawElementOutline();
+    this._emitSelectionContextChange();
+  }
+
+  private _invalidateElementContext(notify = true): void {
+    this._elementHitGeneration++;
+    this._elementContext = null;
+    this._redrawElementOutline();
+    if (notify) this._emitSelectionContextChange();
+  }
+
+  private _redrawElementOutline(): void {
+    const context = this._elementContext;
+    const doc = this._doc;
+    if (!context || !doc || context.pageIndex !== this._currentPage) {
+      renderCanvasElementOutline(this._elementLayer, null);
+      return;
+    }
+    const page = doc.pageSize(context.pageIndex);
+    renderCanvasElementOutline(this._elementLayer, {
+      x: context.bounds.xPt / page.widthPt,
+      y: context.bounds.yPt / page.heightPt,
+      width: context.bounds.widthPt / page.widthPt,
+      height: context.bounds.heightPt / page.heightPt,
+    });
+  }
+
+  private async _onElementClick(event: MouseEvent): Promise<void> {
+    if (this._destroyed || event.defaultPrevented || event.button !== 0) return;
+    await this._resolveContextAt(event);
+  }
+
+  private _onContextMenu(event: MouseEvent): void {
+    let context: Promise<DocxSelectionContext | null> | undefined;
+    this._opts.onContextMenu?.({
+      originalEvent: event,
+      getContext: () => context ??= this._resolveContextAt(event),
+    });
+  }
+
+  private async _resolveContextAt(event: MouseEvent): Promise<DocxSelectionContext | null> {
+    const doc = this._doc;
+    if (this._destroyed || !doc) return null;
+    if (this._textLayer && readDocxTextSelectionContext(
+      this._wrapper,
+      this._wrapper.ownerDocument?.getSelection?.() ?? null,
+    )) {
+      this._emitSelectionContextChange();
+      return this._destroyed ? null : this.getSelectionContext();
+    }
+    if (!this._opts.enableElementSelection) return this.getSelectionContext();
+    const rect = this._canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      this._invalidateElementContext();
+      return null;
+    }
+    const localX = event.clientX - rect.left;
+    const localY = event.clientY - rect.top;
+    if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) {
+      this._invalidateElementContext();
+      return null;
+    }
+    const generation = ++this._elementHitGeneration;
+    const pageIndex = this._currentPage;
+    const pageSize = doc.pageSize(pageIndex);
+    let context: DocxElementContext | null;
+    try {
+      context = await doc.getElementContextAt(pageIndex, {
+        xPt: localX / rect.width * pageSize.widthPt,
+        yPt: localY / rect.height * pageSize.heightPt,
+      }, {
+        currentDate: this._opts.currentDate,
+        maxTextCharacters: MAX_DOCX_ELEMENT_TEXT_CHARACTERS,
+      });
+    } catch (error) {
+      if (this._destroyed || generation !== this._elementHitGeneration ||
+        pageIndex !== this._currentPage || doc !== this._doc) return null;
+      throw error;
+    }
+    if (this._destroyed || generation !== this._elementHitGeneration ||
+      pageIndex !== this._currentPage || doc !== this._doc) return null;
+    this._setElementContext(context);
+    return this._destroyed ? null : this.getSelectionContext();
   }
 
   /**
@@ -486,20 +617,26 @@ export class DocxViewer implements ZoomableViewer {
       this._wrapper.ownerDocument.removeEventListener('selectionchange', this._selectionChangeListener);
       this._selectionChangeListener = null;
     }
+    this._elementHitGeneration++;
+    if (this._elementClickListener) {
+      this._wrapper.removeEventListener('click', this._elementClickListener);
+      this._elementClickListener = null;
+    }
+    if (this._contextMenuListener) {
+      this._wrapper.removeEventListener('contextmenu', this._contextMenuListener);
+      this._contextMenuListener = null;
+    }
+    this._elementContext = null;
     this._canvasMount.restore();
   }
 
   private async _render(): Promise<void> {
-    // PD14 render-error contract (shared with the scroll viewers): navigation
-    // (`nextPage`/`prevPage`/`goToPage`) is often called `void`-style, so an
-    // unguarded throw would surface as an unhandled promise rejection. Catch here
-    // and route to `onError` (or `console.error` — never silent) so a page render
-    // failure is handled the same way in `load()` and every navigation.
     const generation = this._renderDispatcher.begin();
     try {
       await this._renderPage(generation);
     } catch (err) {
-      if (this._renderDispatcher.isCurrent(generation)) this._reportRenderError(err);
+      if (!this._renderDispatcher.isCurrent(generation)) return;
+      throw err;
     }
   }
 
@@ -537,7 +674,6 @@ export class DocxViewer implements ZoomableViewer {
         width: renderWidth,
         dpr: this._opts.dpr,
         defaultTextColor: this._opts.defaultTextColor,
-        showTrackChanges: this._opts.showTrackChanges,
         currentDate: this._opts.currentDate,
         onTextRun,
       });
@@ -613,15 +749,12 @@ export class DocxViewer implements ZoomableViewer {
     // throwaway offscreen canvas in main mode) and returns just its run
     // geometry. The find controller only calls this for pages OTHER than the one
     // on screen (the visible page's runs are cached by _renderPage). Pass the
-    // same serializable options as the visible render — including the IX9
-    // zoom-aware `_renderWidth()`, so the harvested geometry matches what a
+    // same geometry-affecting options as the visible render — including the
+    // IX9 zoom-aware `_renderWidth()`, so the harvested geometry matches what a
     // navigation to that page would draw at the current scale (worker mode
     // postMessages these — no callbacks/engine).
     return this._doc.collectPageRuns(page, {
       width: this._renderWidth(),
-      dpr: this._opts.dpr,
-      defaultTextColor: this._opts.defaultTextColor,
-      showTrackChanges: this._opts.showTrackChanges,
       currentDate: this._opts.currentDate,
     });
   }
@@ -670,7 +803,9 @@ export class DocxViewer implements ZoomableViewer {
       // Internal anchor (IX-nav): map the bookmark name to its destination page
       // and navigate. `undefined` ⇒ no bookmark of that name ⇒ inert.
       const page = this._doc?.getBookmarkPage(target.ref);
-      if (page !== undefined) void this.goToPage(page);
+      if (page !== undefined) {
+        void this.goToPage(page).catch((error) => this._reportRenderError(error));
+      }
     };
   }
 }

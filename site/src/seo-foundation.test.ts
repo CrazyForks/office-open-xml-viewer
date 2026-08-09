@@ -54,7 +54,6 @@ describe('public-site SEO foundation', () => {
   it.each([
     ['./pages/try.astro', 'canonicalPath="/try/"'],
     ['./pages/errors.astro', 'canonicalPath="/errors/"'],
-    ['./pages/deprecations.astro', 'canonicalPath="/deprecations/"'],
     ['./pages/announcements/index.astro', 'canonicalPath="/announcements/"'],
     ['./pages/announcements/[slug].astro', 'canonicalPath={`/announcements/${announcement.slug}/`}'],
     ['./layouts/FormatPage.astro', 'canonicalPath={`/${format}/`}'],

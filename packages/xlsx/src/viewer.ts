@@ -3,8 +3,9 @@ import {
   releaseXlsxViewerProjection,
   retainXlsxViewerFonts,
 } from './workbook.js';
-import type { Hyperlink, ViewportRange, Worksheet, XlsxComment } from './types.js';
-import type { FindHighlightColors, HyperlinkTarget, LoadOptions, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
+import type { LoadOptions } from './workbook.js';
+import type { Cell, Hyperlink, Row, ViewportRange, Worksheet, XlsxComment } from './types.js';
+import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale, anchoredZoomOffset, openExternalHyperlink, nextZoomStep, prevZoomStep, fitScale } from '@silurus/ooxml-core';
 import {
   CallerCanvasMount,
@@ -27,12 +28,20 @@ import type {
   XlsxSelectionContext,
   XlsxSelectionContextCell,
   XlsxSelectionContextOptions,
+  XlsxElementContext,
   XlsxSelectionInput,
   XlsxSelectionState,
 } from './selection.js';
 import {
+  hitTestXlsxElementContext,
+  limitXlsxElementContext,
+  projectXlsxElementContext,
+  type XlsxElementHitViewport,
+} from './element-context.js';
+import {
   MAX_SELECTION_CONTEXT_CELLS,
   MAX_SELECTION_CONTEXT_TEXT_CHARACTERS,
+  areaContainsCell,
   normalizeSelectionState,
   selectionCoordinateCountUpperBound,
   selectionStateFromReference,
@@ -71,6 +80,7 @@ import {
   SelectionController,
   ViewportState,
   createSheetViewModel,
+  type SheetSelectionMode,
 } from './internal/sheet-viewer-runtime.js';
 import { CanvasSurface, SheetOverlayHost } from './internal/sheet-surface.js';
 import { withXlsxRenderCommitGuard } from './render-orchestrator.js';
@@ -126,6 +136,11 @@ const VIEWER_STYLE_ATTR = 'data-xlsx-viewer-styles';
  *  it must live in a stylesheet rather than on the elements. */
 const VIEWER_STYLE_CSS =
   `.xlsx-tab-strip::-webkit-scrollbar{display:none}` +
+  // The viewport must remain focusable so copy shortcuts belong to the active
+  // Viewer. Suppress the browser's click-focus ring, but retain an explicit
+  // inset indicator for keyboard navigation.
+  `[data-xlsx-viewport-input]:focus{outline:none}` +
+  `[data-xlsx-viewport-input]:focus-visible:not([data-xlsx-pointer-focus]){outline:2px solid #1a73e8;outline-offset:-2px}` +
   `.xlsx-tab-nav{background:transparent;transition:background 0.1s;}` +
   `.xlsx-tab-nav:hover{background:rgba(0,0,0,0.08);}` +
   // Excel-status-bar zoom slider: a thin uniform gray track (no colored
@@ -196,11 +211,11 @@ export interface XlsxSheetViewerOptions extends LoadOptions {
    */
   onSheetChange?: (index: number, total: number) => void;
   /**
-   * Receives load failures and asynchronous render failures handled by the
-   * Viewer. Supplying this callback changes load-failure delivery: `load()`
-   * invokes it and resolves; without it, the same load/parse failure rejects
-   * `load()`. Viewer-managed render failures invoke it, or fall back to
-   * `console.error` when omitted.
+   * Receives asynchronous Viewer-managed failures that cannot be observed by
+   * awaiting the method that started them. Failures from `load()`, including
+   * its initial render, always reject that Promise and are not also delivered
+   * here. Later event-driven render failures invoke this callback, or fall back
+   * to `console.error` when omitted.
    *
    * Stable cases can be narrowed with `OoxmlError`,
    * `OoxmlResourceLimitError`, or `OoxmlDecodedImageLimitError` re-exported by
@@ -212,11 +227,23 @@ export interface XlsxSheetViewerOptions extends LoadOptions {
   /** Called with the canonical selection state whenever it actually changes. */
   onSelectionStateChange?: (selection: XlsxSelectionState | null) => void;
   /**
-   * @deprecated Use `onSelectionStateChange`. Scheduled for removal in 0.77.0.
-   * This compatibility projection cannot represent multiple areas or an
-   * ActiveCell that is independent of the selected rectangle.
+   * Called with a bounded, detached read-only context after selection changes.
+   * Rapid changes are coalesced to one notification per animation frame. Use
+   * `onSelectionStateChange` instead when canonical UI geometry is required.
    */
-  onSelectionChange?: (selection: CellRange | null) => void;
+  onSelectionContextChange?: (context: XlsxSelectionContext | null) => void;
+  /**
+   * Called synchronously for a browser `contextmenu` event. The original event
+   * can suppress the native menu; `getContext()` resolves the range or element
+   * context established at the event target.
+   */
+  onContextMenu?: (event: ViewerContextMenuEvent<XlsxSelectionContext>) => void;
+  /**
+   * Enable read-only selection of rendered charts, pictures, and shapes. The
+   * selected object exposes element context and receives a non-editable outline.
+   * Default false; hit-testing runs only for pointer clicks when enabled.
+   */
+  enableElementSelection?: boolean;
   /**
    * IX1 (design decision — NOT user-confirmed, integrator may veto). Fires when a
    * cell carrying a hyperlink (ECMA-376 §18.3.1.47) is clicked. Default when
@@ -254,7 +281,6 @@ export interface XlsxSheetViewerOptions extends LoadOptions {
    * selection) is unchanged. Requires `Worker` + `OffscreenCanvas`. Equations
    * require `'main'` (the math engine cannot cross the worker boundary).
    */
-  mode?: 'main' | 'worker';
   /**
    * How hidden / veryHidden sheets (`<sheet state>`, ECMA-376 §18.2.19) are
    * presented:
@@ -294,19 +320,6 @@ export interface XlsxScrollToCellOptions {
   readonly align?: 'nearest' | 'start' | 'center' | 'end';
 }
 
-/** @deprecated Use `XlsxSelectionArea['kind']`. Scheduled for removal in 0.77.0. */
-export type SelectionMode = 'cells' | 'rows' | 'cols' | 'all';
-
-/**
- * @deprecated Use `XlsxSelectionState`. Scheduled for removal in 0.77.0.
- * This endpoint model conflates range geometry with ActiveCell semantics.
- */
-export interface CellRange {
-  anchor: CellAddress;
-  active: CellAddress;
-  mode: SelectionMode;
-}
-
 export type XlsxCopyResult =
   | Readonly<{ status: 'copied'; cellCount: number; utf16CodeUnits: number }>
   | Readonly<{ status: 'empty-selection' }>
@@ -314,67 +327,6 @@ export type XlsxCopyResult =
   | Readonly<{ status: 'too-large'; limit: 'cells' | 'text' }>
   | Readonly<{ status: 'clipboard-unavailable' }>
   | Readonly<{ status: 'clipboard-denied' }>;
-
-function legacySelectionProjection(state: XlsxSelectionState | null): CellRange | null {
-  if (!state) return null;
-  const area = state.areas[state.activeAreaIndex];
-  switch (area.kind) {
-    case 'cells':
-      {
-        const extensionAnchor = state.extensionAnchor;
-        const anchorIsCorner = (extensionAnchor.row === area.top || extensionAnchor.row === area.bottom) &&
-          (extensionAnchor.col === area.left || extensionAnchor.col === area.right);
-        // The deprecated endpoint model cannot represent an interior extension
-        // anchor without shrinking the area. Preserve complete geometry instead.
-        const anchor = anchorIsCorner
-          ? extensionAnchor
-          : { row: area.top, col: area.left };
-        const active = anchorIsCorner
-          ? {
-              row: anchor.row === area.top ? area.bottom : area.top,
-              col: anchor.col === area.left ? area.right : area.left,
-            }
-          : { row: area.bottom, col: area.right };
-      return {
-        anchor: { ...anchor },
-        active,
-        mode: 'cells',
-      };
-      }
-    case 'rows':
-      {
-        const anchorRow = state.extensionAnchor.row === area.firstRow ||
-          state.extensionAnchor.row === area.lastRow
-          ? state.extensionAnchor.row
-          : area.firstRow;
-        return {
-          anchor: { row: anchorRow, col: 1 },
-          active: {
-            row: anchorRow === area.lastRow ? area.firstRow : area.lastRow,
-            col: 1,
-          },
-          mode: 'rows',
-        };
-      }
-    case 'columns':
-      {
-        const anchorColumn = state.extensionAnchor.col === area.firstColumn ||
-          state.extensionAnchor.col === area.lastColumn
-          ? state.extensionAnchor.col
-          : area.firstColumn;
-        return {
-          anchor: { row: 1, col: anchorColumn },
-          active: {
-            row: 1,
-            col: anchorColumn === area.lastColumn ? area.firstColumn : area.lastColumn,
-          },
-          mode: 'cols',
-        };
-      }
-    case 'sheet':
-      return { anchor: { row: 1, col: 1 }, active: { row: 1, col: 1 }, mode: 'all' };
-  }
-}
 
 type SelectionInterval = Readonly<{ first: number; last: number }>;
 
@@ -405,6 +357,26 @@ function intervalContains(intervals: readonly SelectionInterval[], value: number
   return false;
 }
 
+function lowerBoundBy<T>(items: readonly T[], value: number, key: (item: T) => number): number {
+  let low = 0;
+  let high = items.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (key(items[middle]) < value) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function orderedBy<T>(items: readonly T[], key: (item: T) => number): readonly T[] {
+  for (let index = 1; index < items.length; index++) {
+    if (key(items[index - 1]) > key(items[index])) {
+      return [...items].sort((left, right) => key(left) - key(right));
+    }
+  }
+  return items;
+}
+
 /** Default cell-selection accent (Google blue), used when no `selectionColor`
  *  option is supplied. */
 const DEFAULT_SELECTION_COLOR = '#1a73e8';
@@ -423,6 +395,7 @@ const MAX_CLIPBOARD_CELLS = 250_000;
 // without the viewer attempting an unbounded JavaScript string allocation.
 const MAX_CLIPBOARD_UTF16_CODE_UNITS = 8 * 1_024 * 1_024;
 const DEFAULT_SELECTION_CONTEXT_TEXT_CHARACTERS = 1 * 1_024 * 1_024;
+const DEFAULT_SELECTION_CONTEXT_NOTIFICATION_TEXT_CHARACTERS = 65_536;
 const MAX_SELECTION_CONTEXT_FIELD_CHARACTERS = 65_536;
 const MAX_REENTRANT_SELECTION_NOTIFICATIONS = 100;
 
@@ -634,7 +607,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     return this.selectionController.active;
   }
 
-  private get selectionMode(): SelectionMode {
+  private get selectionMode(): SheetSelectionMode {
     return this.selectionController.mode;
   }
 
@@ -671,6 +644,15 @@ class XlsxViewerEngine implements ZoomableViewer {
   private pendingSelectionChange = false;
   private selectionNotificationScheduled = false;
   private selectionNotificationCount = 0;
+  private selectionContextNotificationFrame: number | null = null;
+  private selectionContextNotificationMicrotask = false;
+  // SpreadsheetML permits explicit row/cell references to appear out of
+  // coordinate order. Cache a canonical view once per immutable parsed model
+  // so range extraction can use binary search without silently skipping such
+  // cells on every subsequent context read.
+  private readonly selectionContextRows = new WeakMap<Worksheet, readonly Row[]>();
+  private readonly selectionContextCells = new WeakMap<Row, readonly Cell[]>();
+  private elementContext: XlsxElementContext | null = null;
   private selectionOverlay: HTMLDivElement;
   /** IX2 — find-highlight overlay (matched-cell boxes). */
   private findOverlay!: HTMLDivElement;
@@ -688,6 +670,9 @@ class XlsxViewerEngine implements ZoomableViewer {
   // slop (a genuine click, not a drag-select), a hyperlink on that cell is
   // dispatched. Touch/pen activate through the pendingTap path instead.
   private pendingClick: { x: number; y: number; pointerId: number; cell: CellAddress } | null = null;
+  private pendingElementClick:
+    | { x: number; y: number; pointerId: number; context: XlsxElementContext }
+    | null = null;
   // In-flight column/row resize drag (issue #567). `originScaled` is the fixed
   // LTR edge the resized band grows from (left edge for a column, top for a row)
   // in canvasArea CSS px; `mdw` is captured once so the live px→model-unit
@@ -897,6 +882,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       // scrollbar-thumb drag (overlay scrollbars) or a touch swipe, not a
       // cell click.
       this.pendingTap = null;
+      this.pendingElementClick = null;
       // A comment popup is anchored to a cell's on-screen rect, which moves
       // under the cursor while scrolling — hide it (Excel does the same).
       this.hideCommentPopup();
@@ -985,15 +971,9 @@ class XlsxViewerEngine implements ZoomableViewer {
   /**
    * Load an XLSX from URL or ArrayBuffer and render the first sheet.
    *
-   * Error contract (shared by all three viewers):
-   * - Parse/load failure (the underlying `XlsxWorkbook.load()` call itself
-   *   rejects): if an `onError` callback was provided it is invoked and `load`
-   *   resolves normally; if not, the error is rethrown so it is never silently
-   *   swallowed.
-   * - Render failure (the first sheet fails to draw AFTER a successful
-   *   parse/load): routed to the shared `_reportRenderError` contract (`onError`
-   *   if provided, else `console.error` — never silent) and `load` still
-   *   RESOLVES, matching every subsequent navigation call.
+   * Parse, load, and initial-render failures always reject this Promise.
+   * `onError` is reserved for later Viewer-managed work that has no directly
+   * awaitable method result, so one failure is never delivered twice.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
     this.assertOpen();
@@ -1011,6 +991,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     // load itself (the old workbook is freed the moment the new model arrives).
     try {
       const wb = await this.acquisition.replace(() => XlsxWorkbook.load(source, {
+          password: this.opts.password,
           useGoogleFonts: this.opts.useGoogleFonts,
           maxZipEntryBytes: this.opts.maxZipEntryBytes,
           resourceLimits: this.opts.resourceLimits,
@@ -1035,12 +1016,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       await this.activateWorkbook(wb);
     } catch (err) {
       if (this._destroyed) throw this.destroyedError();
-      const e = err instanceof Error ? err : new Error(String(err));
-      if (this.opts.onError) {
-        this.opts.onError(e);
-        return;
-      }
-      throw e;
+      throw err instanceof Error ? err : new Error(String(err));
     }
   }
 
@@ -1112,7 +1088,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     else this.acquisition.destroy();
   }
 
-  async showSheet(index: number): Promise<void> {
+  private async showSheet(index: number): Promise<void> {
     const generation = ++this.sheetRequestGeneration;
     const workbook = this.workbook;
     let worksheet: Worksheet;
@@ -1129,6 +1105,8 @@ class XlsxViewerEngine implements ZoomableViewer {
 
     this.currentSheet = index;
     this.currentWorksheet = worksheet;
+    this.setElementContext(null);
+    this.pendingElementClick = null;
     this.updateFooterDirection();
     this.viewportTop = 0;
     this.selectionController.reset();
@@ -1757,8 +1735,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
   /**
    * Navigate to a sheet by index, clamped to range. Canonical navigation verb
-   * matching {@link PptxViewer.goToSlide} / {@link DocxViewer.goToPage};
-   * {@link showSheet} is the lower-level form that assumes a valid index.
+   * matching {@link PptxViewer.goToSlide} / {@link DocxViewer.goToPage}.
    */
   async goToSheet(index: number): Promise<void> {
     if (this.sheetCount === 0) return;
@@ -1876,6 +1853,52 @@ class XlsxViewerEngine implements ZoomableViewer {
     });
   }
 
+  /** Click-only DrawingML hit test. It walks just the sheet's anchored object
+   * arrays and never scans worksheet cells or runs during render/scroll. */
+  private elementContextViewport(): XlsxElementHitViewport | null {
+    const worksheet = this.currentWorksheet;
+    if (!worksheet) return null;
+    const width = this.canvasArea.clientWidth;
+    const height = this.canvasArea.clientHeight;
+    if (width <= 0 || height <= 0) return null;
+    const scale = this.viewport.scale;
+    const geometry = getGridGeometryForWorksheet(worksheet);
+    const visible = geometry.visibleRange({
+      width,
+      height,
+      scale,
+      scrollX: this.effectiveScrollLeft,
+      scrollY: this.viewportTop,
+      headerWidth: HEADER_W,
+      headerHeight: HEADER_H,
+      buffer: 2,
+    });
+    return {
+      width,
+      height,
+      cellScale: scale,
+      viewport: visible.range,
+      scrollOffsetX: visible.offsetX,
+      scrollOffsetY: visible.offsetY,
+      freezeRows: worksheet.freezeRows ?? 0,
+      freezeCols: worksheet.freezeCols ?? 0,
+    };
+  }
+
+  private elementContextAt(clientX: number, clientY: number): XlsxElementContext | null {
+    if (!this.opts.enableElementSelection || this._destroyed) return null;
+    const worksheet = this.currentWorksheet;
+    const viewport = this.elementContextViewport();
+    if (!worksheet || !viewport) return null;
+    const rect = this.canvasArea.getBoundingClientRect();
+    return hitTestXlsxElementContext(
+      worksheet,
+      this.currentSheet,
+      { x: clientX - rect.left, y: clientY - rect.top },
+      viewport,
+    );
+  }
+
   /** Returns the CSS-pixel rect of a cell within canvasArea, or null if not
    *  computable. Mirrors the renderer's per-cell rounding (Math.round(px * cs))
    *  so the selection overlay sits exactly on the canvas's drawn cell borders;
@@ -1924,6 +1947,9 @@ class XlsxViewerEngine implements ZoomableViewer {
    */
   getSelectionContext(options: XlsxSelectionContextOptions = {}): XlsxSelectionContext | null {
     this.assertOpen();
+    if (this.elementContext) {
+      return limitXlsxElementContext(this.elementContext, options.maxTextCharacters);
+    }
     const worksheet = this.currentWorksheet;
     const selection = this.selectionState;
     if (!worksheet || !selection) return null;
@@ -1979,14 +2005,26 @@ class XlsxViewerEngine implements ZoomableViewer {
     ]).sort((a, b) => a.row - b.row || Number(a.active) - Number(b.active));
     const activeRectangles = new Set<number>();
     let eventIndex = 0;
-    let lastWorksheetRow = 0;
     let activeColumnIntervals: SelectionInterval[] = [];
     const cells: XlsxSelectionContextCell[] = [];
     let cellsTruncated = false;
+    const selectedRowIntervals = sheetSelected || columnIntervals.length > 0
+      ? [{ first: 1, last: MAX_WORKSHEET_ROW }]
+      : mergeSelectionIntervals([
+          ...rowIntervals,
+          ...rectangles.map((area) => ({ first: area.top, last: area.bottom })),
+        ]);
+    let rows = this.selectionContextRows.get(worksheet);
+    if (!rows) {
+      rows = orderedBy(worksheet.rows, (row) => row.index);
+      this.selectionContextRows.set(worksheet, rows);
+    }
 
-    cellScan: for (const row of worksheet.rows) {
-      let cellIntervals: SelectionInterval[];
-      if (row.index >= lastWorksheetRow) {
+    cellScan: for (const selectedRows of selectedRowIntervals) {
+      let rowIndex = lowerBoundBy(rows, selectedRows.first, (row) => row.index);
+      while (rowIndex < rows.length) {
+        const row = rows[rowIndex++];
+        if (row.index > selectedRows.last) break;
         let changed = false;
         while (eventIndex < events.length && events[eventIndex].row <= row.index) {
           const event = events[eventIndex++];
@@ -2000,40 +2038,43 @@ class XlsxViewerEngine implements ZoomableViewer {
             last: rectangles[index].right,
           })));
         }
-        cellIntervals = activeColumnIntervals;
-      } else {
-        // Structural fixtures may provide rows out of order. Real worksheets
-        // are ordered, but keep this public context snapshot correct for both.
-        cellIntervals = mergeSelectionIntervals(rectangles
-          .filter((area) => row.index >= area.top && row.index <= area.bottom)
-          .map((area) => ({ first: area.left, last: area.right })));
-      }
-      lastWorksheetRow = row.index;
-      const wholeRow = sheetSelected || intervalContains(rowIntervals, row.index);
-      for (const cell of row.cells) {
-        if (!wholeRow &&
-            !intervalContains(columnIntervals, cell.col) &&
-            !intervalContains(cellIntervals, cell.col)) continue;
-        if (cells.length >= maxCells) { cellsTruncated = true; break cellScan; }
-        const raw = cell.value;
-        const displayText = boundedField(this.wb?.cellText(worksheet, cell) ?? '');
-        const value = raw.type === 'text'
-          ? boundedField(raw.runs ?? raw.text)
-          : raw.type === 'number'
-            ? raw.number
-            : raw.type === 'bool'
-              ? raw.bool
-              : raw.type === 'error'
-                ? boundedField(raw.error)
-                : null;
-        cells.push({
-          address: { row: cell.row, col: cell.col },
-          displayText,
-          valueType: raw.type,
-          value,
-          ...(cell.formula === undefined ? {} : { formula: boundedField(cell.formula) }),
-        });
-        if (textTruncated) break cellScan;
+        const wholeRow = sheetSelected || intervalContains(rowIntervals, row.index);
+        const selectedColumns = wholeRow
+          ? [{ first: 1, last: MAX_WORKSHEET_COL }]
+          : mergeSelectionIntervals([...columnIntervals, ...activeColumnIntervals]);
+        for (const selectedColumnsInterval of selectedColumns) {
+          let rowCells = this.selectionContextCells.get(row);
+          if (!rowCells) {
+            rowCells = orderedBy(row.cells, (cell) => cell.col);
+            this.selectionContextCells.set(row, rowCells);
+          }
+          let cellIndex = lowerBoundBy(rowCells, selectedColumnsInterval.first, (cell) => cell.col);
+          while (cellIndex < rowCells.length) {
+            const cell = rowCells[cellIndex++];
+            if (cell.col > selectedColumnsInterval.last) break;
+            const raw = cell.value;
+            if (raw.type === 'empty' && cell.formula === undefined) continue;
+            if (cells.length >= maxCells) { cellsTruncated = true; break cellScan; }
+            const displayText = boundedField(this.wb?.cellText(worksheet, cell) ?? '');
+            const value = raw.type === 'text'
+              ? boundedField(raw.runs ?? raw.text)
+              : raw.type === 'number'
+                ? raw.number
+                : raw.type === 'bool'
+                  ? raw.bool
+                  : raw.type === 'error'
+                    ? boundedField(raw.error)
+                    : null;
+            cells.push({
+              address: { row: cell.row, col: cell.col },
+              displayText,
+              valueType: raw.type,
+              value,
+              ...(cell.formula === undefined ? {} : { formula: boundedField(cell.formula) }),
+            });
+            if (textTruncated) break cellScan;
+          }
+        }
       }
     }
     const truncationReasons: Array<'cells' | 'text'> = [];
@@ -2055,26 +2096,8 @@ class XlsxViewerEngine implements ZoomableViewer {
     };
   }
 
-  /**
-   * @deprecated Use `selectionState`. Scheduled for removal in 0.77.0.
-   * This is a lossy projection of the active area.
-   */
-  get selection(): CellRange | null {
-    return legacySelectionProjection(this.selectionState);
-  }
-
-  /**
-   * @deprecated Use `setSelection`. Scheduled for removal in 0.77.0.
-   * Retains the old no-op behavior for malformed references.
-   */
-  select(ref: string): void {
-    this.assertOpen();
-    const state = selectionStateFromReference(ref);
-    if (!state) return;
-    this.commitSelection(state);
-  }
-
   private commitSelection(next: XlsxSelectionState | null): void {
+    this.setElementContext(null);
     const current = this.selectionState;
     if (selectionStatesEqual(current, next)) return;
     this.hideValidationPanel();
@@ -2084,14 +2107,46 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.emitSelectionChange();
   }
 
+  private setElementContext(context: XlsxElementContext | null): boolean {
+    if (JSON.stringify(this.elementContext) === JSON.stringify(context)) return false;
+    this.elementContext = context ? structuredClone(context) : null;
+    this.updateSelectionOverlay();
+    this.scheduleSelectionContextNotification();
+    return true;
+  }
+
+  private scheduleSelectionContextNotification(): void {
+    if (!this.opts.onSelectionContextChange || this._destroyed ||
+        this.selectionContextNotificationFrame !== null ||
+        this.selectionContextNotificationMicrotask) return;
+    const notify = () => {
+      this.selectionContextNotificationFrame = null;
+      this.selectionContextNotificationMicrotask = false;
+      if (this._destroyed) return;
+      const context = this.getSelectionContext({
+        maxTextCharacters: DEFAULT_SELECTION_CONTEXT_NOTIFICATION_TEXT_CHARACTERS,
+      });
+      this.opts.onSelectionContextChange?.(context ? structuredClone(context) : null);
+    };
+    if (typeof this.hostWindow.requestAnimationFrame === 'function') {
+      this.selectionContextNotificationFrame = this.hostWindow.requestAnimationFrame(notify);
+    } else {
+      this.selectionContextNotificationMicrotask = true;
+      queueMicrotask(notify);
+    }
+  }
+
   private emitSelectionChange(): void {
+    const state = this.selectionState;
+    if (!selectionStatesEqual(state, this.lastNotifiedSelectionState)) {
+      this.scheduleSelectionContextNotification();
+    }
     if (this.emittingSelectionChange) {
       this.pendingSelectionChange = true;
       this.scheduleSelectionNotification();
       return;
     }
     this.pendingSelectionChange = false;
-    const state = this.selectionState;
     if (selectionStatesEqual(state, this.lastNotifiedSelectionState)) {
       this.finishSelectionNotificationChain();
       return;
@@ -2110,7 +2165,6 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.emittingSelectionChange = true;
     try {
       this.opts.onSelectionStateChange?.(state ? structuredClone(state) : null);
-      this.opts.onSelectionChange?.(legacySelectionProjection(state));
     } finally {
       this.emittingSelectionChange = false;
       if (this.pendingSelectionChange ||
@@ -2405,6 +2459,10 @@ class XlsxViewerEngine implements ZoomableViewer {
 
   private updateSelectionOverlay(): void {
     this.overlayHost.clearSelection();
+    if (this.elementContext) {
+      this.drawElementContextOverlay();
+      return;
+    }
     const state = this.selectionState;
     if (!state) return;
     const cs = this.viewport.scale;
@@ -2534,6 +2592,33 @@ class XlsxViewerEngine implements ZoomableViewer {
     // pointerdown handler, which opens a panel listing the allowed values
     // (display only — picking a value never changes the cell).
     this.maybeDrawValidationDropdown();
+  }
+
+  private drawElementContextOverlay(): void {
+    const context = this.elementContext;
+    const worksheet = this.currentWorksheet;
+    const viewport = this.elementContextViewport();
+    if (!context || !worksheet || !viewport || context.sheetIndex !== this.currentSheet) return;
+    const projection = projectXlsxElementContext(worksheet, context, viewport);
+    if (!projection) return;
+    const clip = this.hostDocument.createElement('div');
+    clip.setAttribute('data-xlsx-element-context-clip', '');
+    clip.style.cssText =
+      `position:absolute;left:${projection.clip.x}px;top:${projection.clip.y}px;` +
+      `width:${projection.clip.width}px;height:${projection.clip.height}px;` +
+      'overflow:hidden;pointer-events:none;';
+    const frame = this.hostDocument.createElement('div');
+    frame.setAttribute('data-xlsx-element-context-outline', context.elementType);
+    const color = this.opts.selectionColor ?? DEFAULT_SELECTION_COLOR;
+    frame.style.cssText =
+      `position:absolute;left:${projection.rect.x - projection.clip.x}px;` +
+      `top:${projection.rect.y - projection.clip.y}px;` +
+      `width:${projection.rect.width}px;height:${projection.rect.height}px;` +
+      `box-sizing:border-box;border:2px solid ${color};` +
+      `background:color-mix(in srgb, ${color} 6%, transparent);` +
+      `transform:rotate(${projection.rotation}deg);transform-origin:center;pointer-events:none;`;
+    clip.appendChild(frame);
+    this.overlayHost.appendSelection(clip);
   }
 
   /** Draw the Excel list-validation dropdown button just outside the
@@ -2996,7 +3081,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     }
     const idx = this.sheetNames.indexOf(sheetPart);
     if (idx >= 0) {
-      void this.goToSheet(idx);
+      void this.goToSheet(idx).catch((error) => this._reportRenderError(error));
     }
     // Unknown sheet → no-op (do not invent scrolling math; §CLAUDE spec-first).
   }
@@ -3098,7 +3183,7 @@ class XlsxViewerEngine implements ZoomableViewer {
         }
       }
       this.updateSelectionOverlay();
-      void this.renderCurrentSheet();
+      void this.renderCurrentSheet().catch((error) => this._reportRenderError(error));
       this.emitSelectionChange();
       return;
     }
@@ -3280,11 +3365,61 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.selectionAutoScrollLastTime = null;
   }
 
+  private contextMenuTargetIsSelected(clientX: number, clientY: number): boolean {
+    const selection = this.selectionState;
+    if (!selection) return false;
+    const header = this.getHeaderHit(clientX, clientY);
+    if (header?.kind === 'corner') {
+      return selection.areas.some((area) => area.kind === 'sheet');
+    }
+    if (header?.kind === 'row') {
+      return selection.areas.some((area) => area.kind === 'sheet' ||
+        (area.kind === 'rows' && header.row >= area.firstRow && header.row <= area.lastRow));
+    }
+    if (header?.kind === 'col') {
+      return selection.areas.some((area) => area.kind === 'sheet' ||
+        (area.kind === 'columns' &&
+          header.col >= area.firstColumn && header.col <= area.lastColumn));
+    }
+    const cell = this.getCellAt(clientX, clientY);
+    return cell !== null && selection.areas.some((area) => areaContainsCell(area, cell));
+  }
+
+  private resolveContextMenuContext(event: MouseEvent): Promise<XlsxSelectionContext | null> {
+    if (this._destroyed) return Promise.resolve(null);
+    const element = this.elementContextAt(event.clientX, event.clientY);
+    if (element) {
+      this.setElementContext(element);
+    } else {
+      this.setElementContext(null);
+      if (!this.contextMenuTargetIsSelected(event.clientX, event.clientY)) {
+        this.applyPointerSelection(event.clientX, event.clientY, false, -1, false);
+      }
+    }
+    const context = this.getSelectionContext();
+    return Promise.resolve(context ? structuredClone(context) : null);
+  }
+
   private setupSelectionEvents(): void {
     // Distance (CSS px) beyond which a touch/pen pointerdown→pointerup is treated as a swipe (scroll), not a tap.
     const TAP_SLOP = 8;
 
+    if (this.opts.onContextMenu) {
+      this.surface.on('contextmenu', (event: MouseEvent) => {
+        let context: Promise<XlsxSelectionContext | null> | undefined;
+        this.opts.onContextMenu?.({
+          originalEvent: event,
+          getContext: () => context ??= this.resolveContextMenuContext(event),
+        });
+      });
+    }
+
     this.surface.on('pointerdown', (e: PointerEvent) => {
+      // focus() is programmatic even though this path originated from a pointer,
+      // so Chromium may otherwise match :focus-visible and draw a full blue
+      // viewport frame on every cell click. Mark that focus origin explicitly;
+      // keyboard Tab focus still receives the accessible focus indicator.
+      this.scrollHost.setAttribute('data-xlsx-pointer-focus', '');
       this.scrollHost.focus?.({ preventScroll: true });
       if (e.button !== 0) return;
       if (this.isSelecting && e.pointerId !== this.selectionPointerId) return;
@@ -3344,6 +3479,22 @@ class XlsxViewerEngine implements ZoomableViewer {
         (this.scrollHost.scrollHeight > this.scrollHost.clientHeight &&
           this.scrollHost.clientWidth - localX <= OVERLAY_SCROLLBAR_BAND));
 
+      const elementContext = this.elementContextAt(e.clientX, e.clientY);
+      if (elementContext) {
+        this.pendingTap = null;
+        this.pendingClick = null;
+        this.pendingElementClick = {
+          x: e.clientX,
+          y: e.clientY,
+          pointerId: e.pointerId,
+          context: elementContext,
+        };
+        return;
+      }
+      // A cell/header/empty-space press leaves object focus and returns the
+      // authoritative context to the existing cell-selection state.
+      this.setElementContext(null);
+
       // Touch / pen: defer selection until pointerup so swipe-to-scroll doesn't change the cell.
       // Mouse: select immediately to preserve drag-to-extend behavior.
       if (e.pointerType !== 'mouse' || inOverlayBand) {
@@ -3360,6 +3511,10 @@ class XlsxViewerEngine implements ZoomableViewer {
         : null;
 
       this.applyPointerSelection(e.clientX, e.clientY, e.shiftKey, e.pointerId, true);
+    });
+
+    this.surface.on('blur', () => {
+      this.scrollHost.removeAttribute('data-xlsx-pointer-focus');
     });
 
     this.surface.on('pointermove', (e: PointerEvent) => {
@@ -3401,6 +3556,11 @@ class XlsxViewerEngine implements ZoomableViewer {
           this.pendingClick = null;
         }
       }
+      if (this.pendingElementClick?.pointerId === e.pointerId) {
+        const dx = e.clientX - this.pendingElementClick.x;
+        const dy = e.clientY - this.pendingElementClick.y;
+        if (dx * dx + dy * dy > TAP_SLOP * TAP_SLOP) this.pendingElementClick = null;
+      }
 
       // Comment hover popup (mouse only — touch/pen have no hover, so they get
       // the popup on selection instead, below). Suppressed while drag-selecting
@@ -3433,6 +3593,23 @@ class XlsxViewerEngine implements ZoomableViewer {
       if (this.resizeDrag && this.resizeDrag.pointerId === e.pointerId) {
         this.scrollHost.releasePointerCapture(e.pointerId);
         this.resizeDrag = null;
+        return;
+      }
+      if (this.pendingElementClick?.pointerId === e.pointerId) {
+        const pending = this.pendingElementClick;
+        this.pendingElementClick = null;
+        const dx = e.clientX - pending.x;
+        const dy = e.clientY - pending.y;
+        const current = dx * dx + dy * dy <= TAP_SLOP * TAP_SLOP
+          ? this.elementContextAt(e.clientX, e.clientY)
+          : null;
+        if (
+          current &&
+          current.sheetIndex === pending.context.sheetIndex &&
+          current.elementType === pending.context.elementType &&
+          current.elementIndex === pending.context.elementIndex &&
+          current.shapeIndex === pending.context.shapeIndex
+        ) this.setElementContext(current);
         return;
       }
       if (this.pendingTap && this.pendingTap.pointerId === e.pointerId) {
@@ -3487,6 +3664,9 @@ class XlsxViewerEngine implements ZoomableViewer {
       }
       if (this.pendingClick && this.pendingClick.pointerId === e.pointerId) {
         this.pendingClick = null;
+      }
+      if (this.pendingElementClick?.pointerId === e.pointerId) {
+        this.pendingElementClick = null;
       }
       if (e.pointerId === this.selectionPointerId) {
         this.stopSelectionAutoScroll();
@@ -3566,7 +3746,9 @@ class XlsxViewerEngine implements ZoomableViewer {
       btn.textContent = name;
       btn.title = name;
       btn.style.cssText = this.tabCss(i, false);
-      btn.addEventListener('click', () => this.showSheet(i));
+      btn.addEventListener('click', () => {
+        void this.goToSheet(i).catch((error) => this._reportRenderError(error));
+      });
       this.tabList.appendChild(btn);
       this.tabs.push(btn);
     });
@@ -3863,7 +4045,7 @@ class XlsxViewerEngine implements ZoomableViewer {
         this.setViewportLeft(prevEffective);
       }
     }
-    void this.renderCurrentSheet();
+    void this.renderCurrentSheet().catch((error) => this._reportRenderError(error));
     this.updateSelectionOverlay();
     this.updateFindOverlay();
     this.updateNavButtons();
@@ -4005,16 +4187,12 @@ class XlsxViewerEngine implements ZoomableViewer {
   }
 
   private async renderCurrentSheet(): Promise<void> {
-    // PD14 render-error contract (shared with the scroll viewers): most callers
-    // invoke this `void`-style from scroll/resize/selection handlers, so an
-    // unguarded throw would surface as an unhandled promise rejection. Catch here
-    // and route to `onError` (or `console.error` — never silent), matching
-    // DocxViewer._render and the scroll viewers.
     const generation = this.renderDispatcher.begin();
     try {
       await this._renderCurrentSheet(generation);
     } catch (err) {
-      if (this.renderDispatcher.isCurrent(generation)) this._reportRenderError(err);
+      if (!this.renderDispatcher.isCurrent(generation)) return;
+      throw err;
     }
   }
 
@@ -4158,6 +4336,11 @@ class XlsxViewerEngine implements ZoomableViewer {
     // viewer (checked at the top of _reportRenderError). The acquisition owner
     // invalidates any load still in flight below.
     this._destroyed = true;
+    if (this.selectionContextNotificationFrame !== null) {
+      this.hostWindow.cancelAnimationFrame(this.selectionContextNotificationFrame);
+      this.selectionContextNotificationFrame = null;
+    }
+    this.selectionContextNotificationMicrotask = false;
     this.stopSelectionAutoScroll();
     this.sheetRequestGeneration++;
     this.resizeObserver?.disconnect();
@@ -4175,6 +4358,8 @@ class XlsxViewerEngine implements ZoomableViewer {
       releaseProjection.call(this.wb, this.projectionId);
     }
     this.currentWorksheet = null;
+    this.elementContext = null;
+    this.pendingElementClick = null;
     this.selectionController.reset();
     this.lastNotifiedSelectionState = null;
     this.finishSelectionNotificationChain();
@@ -4225,7 +4410,6 @@ type XlsxSheetViewerSnapshot = Readonly<{
   sheetNames: string[];
   viewport: XlsxViewportOffset;
   selectionState: XlsxSelectionState | null;
-  selection: CellRange | null;
   scale: number;
   hiddenSheetMode: HiddenSheetMode;
   visibleSheetCount: number;
@@ -4289,7 +4473,6 @@ export class XlsxSheetViewer implements ZoomableViewer {
       sheetNames: [],
       viewport: { x: 0, y: 0 },
       selectionState: null,
-      selection: null,
       scale: this.engine.getScale(),
       hiddenSheetMode: this.engine.hiddenSheetMode,
       visibleSheetCount: 0,
@@ -4397,19 +4580,6 @@ export class XlsxSheetViewer implements ZoomableViewer {
     return this.engine.getSelectionContext(options);
   }
 
-  /** @deprecated Use `selectionState`. Scheduled for removal in 0.77.0. */
-  get selection(): CellRange | null {
-    const value = this.destroyed ? this.snapshot.selection : this.engine.selection;
-    return value ? structuredClone(value) : null;
-  }
-
-  /** @deprecated Use `setSelection`. Scheduled for removal in 0.77.0. */
-  select(ref: string): void {
-    this.assertOpen();
-    this.engine.select(ref);
-    this.captureSnapshot();
-  }
-
   async copySelection(): Promise<XlsxCopyResult> {
     this.assertOpen();
     return await this.engine.copySelection();
@@ -4482,7 +4652,6 @@ export class XlsxSheetViewer implements ZoomableViewer {
   }
 
   private captureSnapshot(): void {
-    const selection = this.engine.selection;
     const selectionState = this.engine.selectionState;
     this.snapshot = {
       sheetIndex: this.engine.sheetIndex,
@@ -4490,7 +4659,6 @@ export class XlsxSheetViewer implements ZoomableViewer {
       sheetNames: [...this.engine.sheetNames],
       viewport: { ...this.engine.getViewportOffset() },
       selectionState: selectionState ? structuredClone(selectionState) : null,
-      selection: selection ? structuredClone(selection) : null,
       scale: this.engine.getScale(),
       hiddenSheetMode: this.engine.hiddenSheetMode,
       visibleSheetCount: this.engine.visibleSheetCount,

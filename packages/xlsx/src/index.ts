@@ -1,5 +1,8 @@
-export { XlsxWorkbook, type LoadOptions } from './workbook.js';
-export type { WireRenderViewportOptions, WireSizeOverrides } from './worker-protocol.js';
+export {
+  XlsxWorkbook,
+  type LoadOptions,
+  type RenderViewportToBitmapOptions,
+} from './workbook.js';
 export { XlsxViewer, XlsxSheetViewer } from './viewer.js';
 // Resolved list-validation values (reachable via XlsxWorkbook.resolveValidationList).
 export type { ResolvedList } from './validation-list.js';
@@ -9,14 +12,15 @@ export type {
   XlsxViewportOffset,
   XlsxScrollToCellOptions,
   HiddenSheetMode,
-  CellRange,
-  SelectionMode,
   XlsxCopyResult,
 } from './viewer.js';
 export type {
   CellAddress,
   XlsxSelectionArea,
   XlsxSelectionContext,
+  XlsxRangeSelectionContext,
+  XlsxElementAnchorMarker,
+  XlsxElementContext,
   XlsxSelectionContextCell,
   XlsxSelectionContextOptions,
   XlsxSelectionInput,
@@ -31,6 +35,41 @@ export {
 // `FindMatch` / `FindMatchesOptions` come from core (shared across formats).
 export type { XlsxMatchLocation } from './find.js';
 export type { FindHighlightColors, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
+export type {
+  ChartLabelBox,
+  ChartRect,
+  ChartTrendline,
+  ChartType,
+  ChartexBoxSeries,
+  ChartexBoxWhisker,
+  ChartexSunburst,
+  ChartexSunburstRow,
+  MathAccent,
+  MathArray,
+  MathBar,
+  MathBorderBox,
+  MathBox,
+  MathDelimiter,
+  MathFraction,
+  MathFunc,
+  MathGroup,
+  MathGroupChr,
+  MathLimit,
+  MathRenderer,
+  MathNary,
+  MathNode,
+  MathPhant,
+  MathRadical,
+  MathRun,
+  MathScript,
+  MathSPre,
+  MathStyle,
+  MathSvg,
+  SecondaryValueAxis,
+  SpaceLine,
+  ViewerContextMenuEvent,
+  ZoomableViewer,
+} from '@silurus/ooxml-core';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 // IX1 — the shared hyperlink target shape surfaced by `XlsxViewerOptions.
 // onHyperlinkClick`, plus the default "open in a new tab, sanitised" helper.
@@ -49,7 +88,6 @@ export {
   isOoxmlDecodedImageLimitError,
   type OoxmlDecodedImageLimitMetric,
   type OoxmlErrorCode,
-  type OoxmlErrorSource,
   type OoxmlErrorStage,
   type OoxmlFormat,
   type OoxmlResourceLimit,
@@ -68,6 +106,7 @@ export type {
   SheetMeta,
   SheetVisibility,
   Worksheet,
+  WorksheetCellRange,
   // Outline (row/column grouping) display flags, reachable via Worksheet.outlinePr.
   OutlinePr,
   Row,
@@ -83,8 +122,8 @@ export type {
   MergeCell,
   ParsedWorkbook,
   ViewportRange,
-  RenderViewportOptions,
   XlsxTextRunInfo,
+  XlsxRenderViewportOptions,
   // Rich-text run sub-types (reachable via Cell rich-text values).
   Run,
   RunFont,
@@ -153,13 +192,4 @@ export type {
   ChartErrBars,
   ChartManualLayout,
   LegendManualLayout,
-  // Back-compat aliases for the former XLSX-local chart types (now the core
-  // sub-types). `ChartData` is removed — it described the pre-adapter parse
-  // shape, which is no longer emitted.
-  XlsxChartSeries,
-  SeriesDataLabels,
-  DataLabelOverride,
-  DataPointOverride,
-  ErrBars,
-  ManualLayout,
 } from './types.js';

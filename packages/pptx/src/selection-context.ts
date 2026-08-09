@@ -1,4 +1,5 @@
 import type { TextSelectionContextOptions } from '@silurus/ooxml-core';
+import type { SlideElementOrigin } from './types.js';
 import { readBoundedNativeTextSelection } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 
 /** Snapshot-local locator for a rendered run intersecting a PPTX text selection. */
@@ -6,6 +7,8 @@ export interface PptxSelectionRunLocator {
   readonly slideIndex: number;
   readonly runIndex: number;
   readonly shapeId?: string;
+  readonly elementIndex?: number;
+  readonly origin?: SlideElementOrigin;
 }
 
 export interface PptxTextSelectionContext {
@@ -45,10 +48,15 @@ export function readPptxTextSelectionContext(
     const slideIndex = slideIndexFor(run);
     const runIndex = nonNegativeInteger(run.dataset.runIndex);
     if (slideIndex === null || runIndex === null) return null;
+    const elementIndex = nonNegativeInteger(run.dataset.elementIndex);
+    const origin = run.dataset.elementOrigin;
+    const hasElementLocator = elementIndex !== null &&
+      (origin === 'master' || origin === 'layout' || origin === 'slide');
     return {
       slideIndex,
       runIndex,
       ...(run.dataset.shapeId === undefined ? {} : { shapeId: run.dataset.shapeId }),
+      ...(hasElementLocator ? { elementIndex, origin } : {}),
     } satisfies PptxSelectionRunLocator;
   }, {
     maxChars: options.maxTextCharacters,

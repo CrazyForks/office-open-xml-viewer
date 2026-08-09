@@ -91,6 +91,8 @@ export function buildPptxTextLayer(
     setSelectionData(span, 'ooxmlSelectionRun', 'pptx');
     setSelectionData(span, 'runIndex', String(runIndex));
     if (run.shapeId !== undefined) setSelectionData(span, 'shapeId', run.shapeId);
+    if (run.elementIndex !== undefined) setSelectionData(span, 'elementIndex', String(run.elementIndex));
+    if (run.origin !== undefined) setSelectionData(span, 'elementOrigin', run.origin);
     span.textContent = run.text;
     // The `font` shorthand must precede `line-height` because the shorthand
     // resets `line-height` to `normal`. Reset `letter-spacing` so a parent

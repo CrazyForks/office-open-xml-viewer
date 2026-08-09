@@ -7,7 +7,6 @@ const base = read('./layouts/Base.astro');
 const footerSurfaces = [
   read('./pages/index.astro'),
   read('./pages/try.astro'),
-  read('./pages/deprecations.astro'),
   read('./pages/errors.astro'),
   read('./pages/announcements/index.astro'),
 ];

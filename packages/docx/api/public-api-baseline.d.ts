@@ -55,7 +55,7 @@ export type CellElement = ({
 } & DocParagraph) | ({
     type: 'table';
 } & DocTable);
-interface ChartDataLabelOverride {
+export interface ChartDataLabelOverride {
     idx: number;
     text: string;
     position?: string;
@@ -69,7 +69,7 @@ interface ChartDataLabelOverride {
     showPercent?: boolean;
     deleted?: boolean;
 }
-interface ChartDataPointOverride {
+export interface ChartDataPointOverride {
     idx: number;
     color?: string;
     markerSymbol?: string;
@@ -78,7 +78,7 @@ interface ChartDataPointOverride {
     markerLine?: string;
     explosion?: number;
 }
-interface ChartErrBars {
+export interface ChartErrBars {
     dir: string;
     barType: string;
     plus: (number | null)[];
@@ -88,7 +88,7 @@ interface ChartErrBars {
     lineWidthEmu?: number;
     dash?: string;
 }
-interface ChartexBoxSeries {
+export interface ChartexBoxSeries {
     name: string;
     color?: string | null;
     valuesByCategory: number[][];
@@ -98,23 +98,23 @@ interface ChartexBoxSeries {
     showNonoutliers: boolean;
     quartileMethod: string;
 }
-interface ChartexBoxWhisker {
+export interface ChartexBoxWhisker {
     categories: string[];
     series: ChartexBoxSeries[];
 }
-interface ChartexSunburst {
+export interface ChartexSunburst {
     rows: ChartexSunburstRow[];
 }
-interface ChartexSunburstRow {
+export interface ChartexSunburstRow {
     path: string[];
     size: number;
 }
-interface ChartLabelBox {
+export interface ChartLabelBox {
     fill?: string;
     borderColor?: string;
     borderWidthEmu?: number;
 }
-interface ChartManualLayout {
+export interface ChartManualLayout {
     xMode: string;
     yMode: string;
     layoutTarget?: string;
@@ -123,7 +123,7 @@ interface ChartManualLayout {
     w?: number;
     h?: number;
 }
-interface ChartModel {
+export interface ChartModel {
     chartType: ChartType;
     title: string | null;
     categories: string[];
@@ -227,6 +227,12 @@ interface ChartModel {
     chartexSunburst?: ChartexSunburst | null;
     chartexAccents?: string[] | null;
 }
+export interface ChartRect {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+}
 export interface ChartRun {
     chart: ChartModel;
     widthPt: number;
@@ -248,7 +254,7 @@ export interface ChartRun {
     anchorXRelativeFrom?: string | null;
     anchorYRelativeFrom?: string | null;
 }
-interface ChartSeries {
+export interface ChartSeries {
     name: string;
     color: string | null;
     values: (number | null)[];
@@ -273,7 +279,7 @@ interface ChartSeries {
     trendLines?: ChartTrendline[] | null;
     lineHidden?: boolean | null;
 }
-interface ChartSeriesDataLabels {
+export interface ChartSeriesDataLabels {
     showVal: boolean;
     showCatName: boolean;
     showSerName: boolean;
@@ -288,7 +294,7 @@ interface ChartSeriesDataLabels {
     leaderLineColor?: string;
     leaderLineWidthEmu?: number;
 }
-interface ChartTrendline {
+export interface ChartTrendline {
     trendlineType: string;
     order?: number | null;
     period?: number | null;
@@ -300,7 +306,8 @@ interface ChartTrendline {
     lineColor?: string | null;
     lineWidthEmu?: number | null;
 }
-type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | string;
+export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | string;
+export type CollectPageRunsOptions = Pick<RenderPageOptions, 'width' | 'currentDate'>;
 export interface ColSpec {
     widthPt: number;
     spacePt: number;
@@ -456,7 +463,8 @@ export class DocxDocument {
     };
     renderPage(target: HTMLCanvasElement | OffscreenCanvas, pageIndex: number, opts?: RenderPageOptions): Promise<void>;
     renderPageToBitmap(pageIndex: number, opts?: RenderPageToBitmapOptions): Promise<ImageBitmap>;
-    collectPageRuns(pageIndex: number, opts?: WireRenderPageOptions): Promise<DocxTextRunInfo[]>;
+    collectPageRuns(pageIndex: number, opts?: CollectPageRunsOptions): Promise<DocxTextRunInfo[]>;
+    getElementContextAt(pageIndex: number, point: DocxPagePoint, opts?: DocxElementContextOptions): Promise<DocxElementContext | null>;
     private __privatePresence;
     private constructor();
 }
@@ -477,6 +485,30 @@ export interface DocxDocumentModel {
     settings?: DocSettings;
     parseError?: string;
 }
+export interface DocxElementContext {
+    readonly format: 'docx';
+    readonly kind: 'element';
+    readonly pageIndex: number;
+    readonly elementIndex: number;
+    readonly elementType: 'chart' | 'image' | 'shape';
+    readonly point: DocxPagePoint;
+    readonly bounds: Readonly<DocxPagePoint & {
+        widthPt: number;
+        heightPt: number;
+    }>;
+    readonly source: DocxSelectionSourceLocator;
+    readonly text?: string;
+    readonly mimeType?: string;
+    readonly seriesCount?: number;
+    readonly truncated: boolean;
+    readonly truncationReasons: readonly 'text'[];
+    readonly textCharacters: number;
+    readonly maxTextCharacters: number;
+}
+export interface DocxElementContextOptions {
+    readonly maxTextCharacters?: number;
+    readonly currentDate?: Date | number;
+}
 export type DocxHighlightColors = FindHighlightColors;
 export interface DocxHighlightMatch {
     slices: MatchRunSlice[];
@@ -484,6 +516,10 @@ export interface DocxHighlightMatch {
 }
 export interface DocxMatchLocation {
     page: number;
+}
+export interface DocxPagePoint {
+    readonly xPt: number;
+    readonly yPt: number;
 }
 export interface DocxRunBorder {
     style: string;
@@ -525,7 +561,9 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
     paddingRight?: number;
     overscan?: number;
     enableTextSelection?: boolean;
+    enableElementSelection?: boolean;
     onSelectionContextChange?: (context: DocxSelectionContext | null) => void;
+    onContextMenu?: (event: ViewerContextMenuEvent<DocxSelectionContext>) => void;
     findHighlightColors?: FindHighlightColors;
     zoomMin?: number;
     zoomMax?: number;
@@ -539,24 +577,18 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
     enableHyperlinks?: boolean;
     onError?: (err: Error) => void;
 }
-export interface DocxSelectionContext {
-    readonly format: 'docx';
-    readonly kind: 'text';
-    readonly text: string;
-    readonly pageIndexes: readonly number[];
-    readonly paragraphIds: readonly string[];
-    readonly runs: readonly DocxSelectionRunLocator[];
-    readonly truncated: boolean;
-    readonly truncationReasons: readonly ('text' | 'runs')[];
-    readonly textCharacters: number;
-    readonly maxTextCharacters: number;
-    readonly maxRunLocators: number;
-}
+export type DocxSelectionContext = DocxTextSelectionContext | DocxElementContext;
 export type DocxSelectionContextOptions = TextSelectionContextOptions;
 export interface DocxSelectionRunLocator {
     readonly pageIndex: number;
     readonly runIndex: number;
     readonly paragraphId?: string;
+    readonly source?: DocxSelectionSourceLocator;
+}
+export interface DocxSelectionSourceLocator {
+    readonly story: 'body' | 'header' | 'footer' | 'footnote' | 'endnote' | 'textbox';
+    readonly storyInstance: string;
+    readonly path: readonly number[];
 }
 export interface DocxTextRun {
     text: string;
@@ -605,6 +637,11 @@ export interface DocxTextRun {
     noteRef?: NoteRef;
 }
 export interface DocxTextRunInfo {
+    source?: Readonly<{
+        story: 'body' | 'header' | 'footer' | 'footnote' | 'endnote' | 'textbox';
+        storyInstance: string;
+        path: readonly number[];
+    }>;
     paragraphId?: string;
     text: string;
     x: number;
@@ -617,6 +654,19 @@ export interface DocxTextRunInfo {
     transform?: string;
     hyperlink?: HyperlinkTarget;
     eastAsianVert?: boolean;
+}
+export interface DocxTextSelectionContext {
+    readonly format: 'docx';
+    readonly kind: 'text';
+    readonly text: string;
+    readonly pageIndexes: readonly number[];
+    readonly paragraphIds: readonly string[];
+    readonly runs: readonly DocxSelectionRunLocator[];
+    readonly truncated: boolean;
+    readonly truncationReasons: readonly ('text' | 'runs')[];
+    readonly textCharacters: number;
+    readonly maxTextCharacters: number;
+    readonly maxRunLocators: number;
 }
 export class DocxViewer implements ZoomableViewer {
     static fromDocument(canvas: HTMLCanvasElement, document: DocxDocument, opts?: Omit<DocxViewerOptions, keyof LoadOptions>): Omit<DocxViewer, 'load'>;
@@ -643,10 +693,12 @@ export class DocxViewer implements ZoomableViewer {
     destroy(): void;
     private __privatePresence;
 }
-export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
+export interface DocxViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>, LoadOptions {
     container?: HTMLElement;
     enableTextSelection?: boolean;
+    enableElementSelection?: boolean;
     onSelectionContextChange?: (context: DocxSelectionContext | null) => void;
+    onContextMenu?: (event: ViewerContextMenuEvent<DocxSelectionContext>) => void;
     findHighlightColors?: FindHighlightColors;
     onPageChange?: (index: number, total: number) => void;
     zoomMin?: number;
@@ -656,7 +708,7 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
     enableHyperlinks?: boolean;
     onError?: (err: Error) => void;
 }
-interface Duotone {
+export interface Duotone {
     clr1: string;
     clr2: string;
 }
@@ -687,7 +739,7 @@ export interface FieldRun {
     highlight?: string | null;
     emphasisMark?: EmphasisMark;
 }
-interface FillRect {
+export interface FillRect {
     l?: number;
     t?: number;
     r?: number;
@@ -777,7 +829,7 @@ export interface ImageRun {
     anchorYRelativeFrom?: string | null;
 }
 export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
-interface LegendManualLayout {
+export interface LegendManualLayout {
     xMode: string;
     yMode: string;
     x: number;
@@ -816,27 +868,27 @@ interface LoadOptions__emitterCollision1 {
     workerTimeoutMs?: number;
     math?: MathRenderer;
 }
-interface MatchRunSlice {
+export interface MatchRunSlice {
     runIndex: number;
     start: number;
     end: number;
 }
-interface MathAccent {
+export interface MathAccent {
     kind: 'accent';
     char: string;
     base: MathNode[];
 }
-interface MathArray {
+export interface MathArray {
     kind: 'array';
     rows: MathNode[][][];
     align: 'eq' | 'center' | 'left';
 }
-interface MathBar {
+export interface MathBar {
     kind: 'bar';
     pos: 'top' | 'bot';
     base: MathNode[];
 }
-interface MathBorderBox {
+export interface MathBorderBox {
     kind: 'borderBox';
     hideTop?: boolean;
     hideBot?: boolean;
@@ -848,44 +900,44 @@ interface MathBorderBox {
     strikeTlbr?: boolean;
     base: MathNode[];
 }
-interface MathBox {
+export interface MathBox {
     kind: 'box';
     base: MathNode[];
 }
-interface MathDelimiter {
+export interface MathDelimiter {
     kind: 'delimiter';
     begChar: string;
     endChar: string;
     items: MathNode[][];
 }
-interface MathFraction {
+export interface MathFraction {
     kind: 'fraction';
     num: MathNode[];
     den: MathNode[];
     bar?: boolean;
 }
-interface MathFunc {
+export interface MathFunc {
     kind: 'func';
     name: MathNode[];
     arg: MathNode[];
 }
-interface MathGroup {
+export interface MathGroup {
     kind: 'group';
     items: MathNode[];
 }
-interface MathGroupChr {
+export interface MathGroupChr {
     kind: 'groupChr';
     char: string;
     pos: 'top' | 'bot';
     base: MathNode[];
 }
-interface MathLimit {
+export interface MathLimit {
     kind: 'limit';
     base: MathNode[];
     lower?: MathNode[];
     upper?: MathNode[];
 }
-interface MathNary {
+export interface MathNary {
     kind: 'nary';
     op: string;
     limLoc?: string;
@@ -893,8 +945,8 @@ interface MathNary {
     sup?: MathNode[];
     body: MathNode[];
 }
-type MathNode = MathRun | MathFraction | MathScript | MathNary | MathDelimiter | MathRadical | MathLimit | MathArray | MathGroupChr | MathBar | MathAccent | MathFunc | MathGroup | MathPhant | MathSPre | MathBox | MathBorderBox;
-interface MathPhant {
+export type MathNode = MathRun | MathFraction | MathScript | MathNary | MathDelimiter | MathRadical | MathLimit | MathArray | MathGroupChr | MathBar | MathAccent | MathFunc | MathGroup | MathPhant | MathSPre | MathBox | MathBorderBox;
+export interface MathPhant {
     kind: 'phant';
     show: boolean;
     zeroWid?: boolean;
@@ -902,34 +954,34 @@ interface MathPhant {
     zeroDesc?: boolean;
     base: MathNode[];
 }
-interface MathRadical {
+export interface MathRadical {
     kind: 'radical';
     index?: MathNode[];
     radicand: MathNode[];
 }
-interface MathRenderer {
+export interface MathRenderer {
     loadMathJax(): Promise<void>;
     mathMLToSvg(mathml: string): Promise<MathSvg>;
 }
-interface MathRun {
+export interface MathRun {
     kind: 'run';
     text: string;
     style: MathStyle;
 }
-interface MathScript {
+export interface MathScript {
     kind: 'sup' | 'sub' | 'subSup';
     base: MathNode[];
     sup?: MathNode[];
     sub?: MathNode[];
 }
-interface MathSPre {
+export interface MathSPre {
     kind: 'sPre';
     sub: MathNode[];
     sup: MathNode[];
     base: MathNode[];
 }
-type MathStyle = 'roman' | 'italic' | 'bold' | 'boldItalic';
-interface MathSvg {
+export type MathStyle = 'roman' | 'italic' | 'bold' | 'boldItalic';
+export interface MathSvg {
     svg: string;
     widthEm: number;
     ascentEm: number;
@@ -971,7 +1023,6 @@ export class OoxmlError extends Error {
     constructor(code: OoxmlErrorCode, message: string);
 }
 export type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml';
-export type OoxmlErrorSource = 'container' | 'zip-part' | 'parser' | 'serializer' | 'layout' | 'renderer' | 'worker';
 export type OoxmlErrorStage = 'container' | 'decompression' | 'parsing' | 'serialization' | 'layout' | 'rendering' | 'worker';
 export type OoxmlFormat = 'docx' | 'xlsx' | 'pptx';
 export type OoxmlResourceLimit = number | null;
@@ -1102,25 +1153,15 @@ export interface PTabRun {
     leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'middleDot';
     fontSize: number;
 }
-export function readDocxSelectionContext(root: HTMLElement, selection: Selection | null, options?: DocxSelectionContextOptions): DocxSelectionContext | null;
+export function readDocxTextSelectionContext(root: HTMLElement, selection: Selection | null, options?: DocxSelectionContextOptions): DocxTextSelectionContext | null;
 export interface RenderPageOptions {
     width?: number;
     dpr?: number;
     defaultTextColor?: string;
-    onTextRun?: (run: {
-        text: string;
-        x: number;
-        y: number;
-        w: number;
-        h: number;
-        fontSize: number;
-        font: string;
-        transform?: string;
-    }) => void;
-    showTrackChanges?: boolean;
+    onTextRun?: (run: DocxTextRunInfo) => void;
     currentDate?: Date | number;
 }
-export type RenderPageToBitmapOptions = WireRenderPageOptions & {
+export type RenderPageToBitmapOptions = Omit<RenderPageOptions, 'onTextRun'> & {
     onTextRun?: (run: DocxTextRunInfo) => void;
 };
 export interface RubyAnnotation {
@@ -1133,7 +1174,7 @@ export interface RunRevision {
     author?: string;
     date?: string;
 }
-interface SecondaryValueAxis {
+export interface SecondaryValueAxis {
     min: number | null;
     max: number | null;
     title: string | null;
@@ -1235,7 +1276,7 @@ export interface ShapeRun {
     stroke: string | null;
     strokeWidth?: number;
     strokeDash?: string | null;
-    strokeCap?: CanvasLineCap | null;
+    strokeCap?: 'butt' | 'round' | 'square' | null;
     headEnd?: LineEnd | null;
     tailEnd?: LineEnd | null;
     rotation?: number;
@@ -1333,7 +1374,7 @@ export interface TextSelectionContextOptions {
     readonly maxTextCharacters?: number;
     readonly maxRunLocators?: number;
 }
-interface TileInfo {
+export interface TileInfo {
     tx: number;
     ty: number;
     sx: number;
@@ -1341,8 +1382,11 @@ interface TileInfo {
     flip: string;
     algn?: string;
 }
-export type WireRenderPageOptions = Omit<RenderPageOptions, 'onTextRun'>;
-interface ZoomableViewer {
+export interface ViewerContextMenuEvent<TContext> {
+    readonly originalEvent: MouseEvent;
+    getContext(): Promise<TContext | null>;
+}
+export interface ZoomableViewer {
     getScale(): number;
     setScale(scale: number): void | Promise<void>;
     zoomIn(): void | Promise<void>;

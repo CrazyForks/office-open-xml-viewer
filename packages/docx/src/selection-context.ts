@@ -4,15 +4,22 @@ import { readBoundedNativeTextSelection } from '@silurus/ooxml-core/internal/can
 /** Bounds for a DOCX selection-context snapshot. Extensible per format. */
 export type DocxSelectionContextOptions = TextSelectionContextOptions;
 
+export interface DocxSelectionSourceLocator {
+  readonly story: 'body' | 'header' | 'footer' | 'footnote' | 'endnote' | 'textbox';
+  readonly storyInstance: string;
+  readonly path: readonly number[];
+}
+
 /** Snapshot-local locator for a rendered run intersecting a DOCX text selection. */
 export interface DocxSelectionRunLocator {
   readonly pageIndex: number;
   readonly runIndex: number;
   readonly paragraphId?: string;
+  readonly source?: DocxSelectionSourceLocator;
 }
 
-/** Detached, bounded context for a read-only AI/MCP handoff. */
-export interface DocxSelectionContext {
+/** Detached, bounded native-text context for a read-only AI/MCP handoff. */
+export interface DocxTextSelectionContext {
   readonly format: 'docx';
   readonly kind: 'text';
   readonly text: string;
@@ -25,6 +32,32 @@ export interface DocxSelectionContext {
   readonly maxTextCharacters: number;
   readonly maxRunLocators: number;
 }
+
+export interface DocxPagePoint {
+  readonly xPt: number;
+  readonly yPt: number;
+}
+
+export interface DocxElementContext {
+  readonly format: 'docx';
+  readonly kind: 'element';
+  readonly pageIndex: number;
+  /** Index in the retained page paint snapshot, not a mutable document index. */
+  readonly elementIndex: number;
+  readonly elementType: 'chart' | 'image' | 'shape';
+  readonly point: DocxPagePoint;
+  readonly bounds: Readonly<DocxPagePoint & { widthPt: number; heightPt: number }>;
+  readonly source: DocxSelectionSourceLocator;
+  readonly text?: string;
+  readonly mimeType?: string;
+  readonly seriesCount?: number;
+  readonly truncated: boolean;
+  readonly truncationReasons: readonly ('text')[];
+  readonly textCharacters: number;
+  readonly maxTextCharacters: number;
+}
+
+export type DocxSelectionContext = DocxTextSelectionContext | DocxElementContext;
 
 function nonNegativeInteger(value: string | undefined): number | null {
   if (value === undefined || !/^\d+$/.test(value)) return null;
@@ -40,11 +73,30 @@ function pageIndexFor(run: HTMLElement): number | null {
   return null;
 }
 
-export function readDocxSelectionContext(
+const SOURCE_STORIES = new Set<DocxSelectionSourceLocator['story']>([
+  'body', 'header', 'footer', 'footnote', 'endnote', 'textbox',
+]);
+
+function sourceLocatorFor(run: HTMLElement): DocxSelectionSourceLocator | null {
+  const story = run.dataset.sourceStory as DocxSelectionSourceLocator['story'] | undefined;
+  const storyInstance = run.dataset.sourceStoryInstance;
+  const encodedPath = run.dataset.sourcePath;
+  if (!story || !SOURCE_STORIES.has(story) || !storyInstance || !encodedPath) return null;
+  try {
+    const path: unknown = JSON.parse(encodedPath);
+    if (!Array.isArray(path) || path.length === 0 || path.length > 32 ||
+      !path.every((index) => Number.isSafeInteger(index) && index >= 0)) return null;
+    return { story, storyInstance, path: [...path] as number[] };
+  } catch {
+    return null;
+  }
+}
+
+export function readDocxTextSelectionContext(
   root: HTMLElement,
   selection: Selection | null,
   options: DocxSelectionContextOptions = {},
-): DocxSelectionContext | null {
+): DocxTextSelectionContext | null {
   const bounded = readBoundedNativeTextSelection(root, selection, (run) => {
     const pageIndex = pageIndexFor(run);
     const runIndex = nonNegativeInteger(run.dataset.runIndex);
@@ -53,6 +105,7 @@ export function readDocxSelectionContext(
       pageIndex,
       runIndex,
       ...(run.dataset.paragraphId === undefined ? {} : { paragraphId: run.dataset.paragraphId }),
+      ...(sourceLocatorFor(run) === null ? {} : { source: sourceLocatorFor(run)! }),
     } satisfies DocxSelectionRunLocator;
   }, {
     maxChars: options.maxTextCharacters,

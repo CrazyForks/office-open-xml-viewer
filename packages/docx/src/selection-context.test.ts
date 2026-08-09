@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readDocxSelectionContext } from './selection-context.js';
+import { readDocxTextSelectionContext } from './selection-context.js';
 
 describe('DOCX selection context', () => {
   it('returns detached page, paragraph, and run locators with bounded text', () => {
@@ -11,9 +11,15 @@ describe('DOCX selection context', () => {
       contains: (node: Node) => node === start || node === end,
     } as unknown as HTMLElement;
     const runs = [
-      { dataset: { runIndex: '4', paragraphId: 'p1' }, parentElement: layer,
+      { dataset: {
+        runIndex: '4', paragraphId: 'p1', sourceStory: 'body',
+        sourceStoryInstance: 'body', sourcePath: '[6]',
+      }, parentElement: layer,
         childNodes: [{ nodeType: 3, data: 'selected', childNodes: [] }] },
-      { dataset: { runIndex: '5', paragraphId: 'p1' }, parentElement: layer,
+      { dataset: {
+        runIndex: '5', paragraphId: 'p1', sourceStory: 'body',
+        sourceStoryInstance: 'body', sourcePath: '[6]',
+      }, parentElement: layer,
         childNodes: [{ nodeType: 3, data: ' text', childNodes: [] }] },
     ] as unknown as HTMLElement[];
     const root = {
@@ -35,15 +41,21 @@ describe('DOCX selection context', () => {
       toString: () => 'selected text',
     } as unknown as Selection;
 
-    expect(readDocxSelectionContext(root, selection, { maxTextCharacters: 8 })).toEqual({
+    expect(readDocxTextSelectionContext(root, selection, { maxTextCharacters: 8 })).toEqual({
       format: 'docx',
       kind: 'text',
       text: 'selected',
       pageIndexes: [3],
       paragraphIds: ['p1'],
       runs: [
-        { pageIndex: 3, runIndex: 4, paragraphId: 'p1' },
-        { pageIndex: 3, runIndex: 5, paragraphId: 'p1' },
+        {
+          pageIndex: 3, runIndex: 4, paragraphId: 'p1',
+          source: { story: 'body', storyInstance: 'body', path: [6] },
+        },
+        {
+          pageIndex: 3, runIndex: 5, paragraphId: 'p1',
+          source: { story: 'body', storyInstance: 'body', path: [6] },
+        },
       ],
       truncated: true,
       truncationReasons: ['text'],

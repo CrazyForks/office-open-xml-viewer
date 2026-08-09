@@ -90,7 +90,7 @@ export interface XlsxWorkbookSession {
  * callers consume worksheet rows sequentially without reopening the package.
  */
 export async function openXlsxWorkbook(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
+  buffer: ArrayBuffer | Uint8Array,
   options: OpenXlsxWorkbookOptions = {},
 ): Promise<XlsxWorkbookSession> {
   const bytes = toUint8(buffer);
@@ -302,7 +302,7 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
 /** Materialize only the workbook metadata/index through the canonical owned
  * archive. No worksheet cursor is opened. */
 export async function materializeXlsxWorkbookIndex(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
+  buffer: ArrayBuffer | Uint8Array,
   options: OpenXlsxWorkbookOptions = {},
 ): Promise<ParsedWorkbook> {
   return usingOwnedSession(
@@ -313,7 +313,7 @@ export async function materializeXlsxWorkbookIndex(
 
 /** Materialize one caller-owned worksheet by sheet index. */
 export async function materializeXlsxWorksheet(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
+  buffer: ArrayBuffer | Uint8Array,
   sheetIndex: number,
   options: OpenXlsxWorkbookOptions = {},
 ): Promise<Worksheet> {
@@ -325,7 +325,7 @@ export async function materializeXlsxWorksheet(
 
 /** Materialize the complete workbook without reopening the package per sheet. */
 export async function materializeXlsxWorkbook(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
+  buffer: ArrayBuffer | Uint8Array,
   options: OpenXlsxWorkbookOptions = {},
 ): Promise<MaterializedXlsxWorkbook> {
   return usingOwnedSession(
@@ -436,6 +436,6 @@ function decodeUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined 
   }
 }
 
-function toUint8(buffer: ArrayBuffer | Uint8Array | Buffer): Uint8Array {
+function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
   return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
 }

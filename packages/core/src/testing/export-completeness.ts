@@ -278,10 +278,20 @@ export function findMissingExports(opts: CheckOptions): MissingExport[] {
 export function findMissingExportsFromUrl(
   metaUrl: string,
   relIndexPath = './index.ts',
-  extra?: Omit<CheckOptions, 'indexPath'>,
+  extra?: Omit<CheckOptions, 'indexPath' | 'srcDir'> & {
+    srcDir?: string;
+    /** Resolve srcDir from the test module without importing node:url there. */
+    srcDirRelativeToMeta?: string;
+  },
 ): MissingExport[] {
   const indexPath = fileURLToPath(new URL(relIndexPath, metaUrl));
-  return findMissingExports({ indexPath, ...extra });
+  const { srcDirRelativeToMeta, ...checkOptions } = extra ?? {};
+  const srcDir = checkOptions.srcDir ?? (
+    srcDirRelativeToMeta === undefined
+      ? undefined
+      : fileURLToPath(new URL(srcDirRelativeToMeta, metaUrl))
+  );
+  return findMissingExports({ indexPath, ...checkOptions, srcDir });
 }
 
 /**

@@ -299,6 +299,12 @@ decision.
 
 The public Viewer surface is the compatibility boundary:
 
+> Version note: the error-delivery statements and table in this section record
+> the 0.76 contract in effect when resource governance was introduced. Version
+> 0.77 supersedes that contract: every awaitable Viewer operation rejects on
+> failure regardless of `onError`. See
+> [the 0.77 error migration](migration-viewer-errors-0.77.md).
+
 ```ts
 new DocxViewer(canvas, options).load(source)
 new XlsxViewer(container, options).load(source)

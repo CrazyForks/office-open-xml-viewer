@@ -502,8 +502,14 @@ h1, h2, h3 { line-height: 1.08; letter-spacing: -0.035em; margin: 0; }
 .demo-sheet-window-row button:hover { border-color: var(--accent); background: var(--surface-muted); }
 
 @media (max-width: 620px) {
-  .demo-sheet-window-summary { align-items: flex-start; }
-  .demo-sheet-window-actions { align-items: flex-end; grid-auto-flow: row; }
+  .demo-sheet-window-summary { align-items: flex-start; flex-direction: column; }
+  .demo-sheet-window-actions {
+    width: 100%;
+    margin-left: 0;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
   .demo-sheet-window-row { align-items: flex-start; flex-direction: column; }
   .demo-sheet-window-row button { width: 100%; margin-left: 0; }
 }

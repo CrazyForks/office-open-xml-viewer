@@ -9,7 +9,7 @@ import type {
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import type {
   PptxElementContextOptions,
-  PptxElementSelectionContext,
+  PptxElementContext,
   PptxSlidePoint,
 } from './element-selection';
 
@@ -107,4 +107,4 @@ export type RenderWorkerResponse =
     }
   | { kind: 'slideRendered'; id: number; bitmap: ImageBitmap; runs: PptxTextRunInfo[] }
   | { kind: 'runsCollected'; id: number; runs: PptxTextRunInfo[] }
-  | { kind: 'elementHit'; id: number; context: PptxElementSelectionContext | null };
+  | { kind: 'elementHit'; id: number; context: PptxElementContext | null };

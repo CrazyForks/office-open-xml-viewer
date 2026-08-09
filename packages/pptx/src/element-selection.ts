@@ -1,5 +1,6 @@
 import type { Slide, SlideElement, SlideElementOrigin, TextBody } from './types.js';
 import type { TextSelectionContextOptions } from '@silurus/ooxml-core';
+import { boundedChartContextText } from '@silurus/ooxml-core/internal/chart-context';
 
 /** Bounds for a PPTX text-or-element selection-context snapshot. */
 export type PptxSelectionContextOptions = TextSelectionContextOptions;
@@ -16,7 +17,7 @@ export interface PptxElementContextOptions {
   readonly maxTextCharacters?: number;
 }
 
-export interface PptxElementSelectionContext {
+export interface PptxElementContext {
   readonly format: 'pptx';
   readonly kind: 'element';
   readonly slideIndex: number;
@@ -51,7 +52,7 @@ export interface PptxElementSelectionContext {
 
 export type PptxSelectionContext =
   | import('./selection-context.js').PptxTextSelectionContext
-  | PptxElementSelectionContext;
+  | PptxElementContext;
 
 export const MAX_ELEMENT_TEXT_CHARACTERS = 65_536;
 const DEFAULT_ELEMENT_TEXT_CHARACTERS = 16_384;
@@ -139,27 +140,6 @@ function* elementTextParts(element: SlideElement): Iterable<ElementTextPiece> {
     }
     return;
   }
-  if (element.type === 'chart') {
-    yield { text: `Chart type: ${element.chart.chartType}`, beginsPart: true };
-    if (element.chart.title) {
-      yield { text: `Title: ${element.chart.title}`, beginsPart: true };
-    }
-    if (element.chart.categories.length > 0) {
-      yield { text: 'Categories: ', beginsPart: true };
-      for (const [index, category] of element.chart.categories.entries()) {
-        yield { text: `${index === 0 ? '' : ', '}${category}`, beginsPart: false };
-      }
-    }
-    for (const series of element.chart.series) {
-      yield { text: `Series ${series.name || '(unnamed)'}: `, beginsPart: true };
-      for (const [index, value] of series.values.entries()) {
-        yield {
-          text: `${index === 0 ? '' : ', '}${value === null ? '' : value}`,
-          beginsPart: false,
-        };
-      }
-    }
-  }
 }
 
 function safeUtf16Prefix(value: string, maxCodeUnits: number): string {
@@ -172,10 +152,10 @@ function safeUtf16Prefix(value: string, maxCodeUnits: number): string {
   return value.slice(0, end);
 }
 
-export function limitPptxElementSelectionContext(
-  context: PptxElementSelectionContext,
+export function limitPptxElementContext(
+  context: PptxElementContext,
   requestedMaxTextCharacters = DEFAULT_ELEMENT_TEXT_CHARACTERS,
-): PptxElementSelectionContext {
+): PptxElementContext {
   if (!Number.isFinite(requestedMaxTextCharacters) || requestedMaxTextCharacters < 0) {
     throw new RangeError('maxTextCharacters must be a finite non-negative number.');
   }
@@ -230,7 +210,7 @@ export function hitTestPptxSlideContext(
   slide: Slide,
   point: PptxSlidePoint,
   options: PptxElementContextOptions = {},
-): PptxElementSelectionContext | null {
+): PptxElementContext | null {
   if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) {
     throw new RangeError('PPTX hit-test point must contain finite coordinates.');
   }
@@ -246,7 +226,9 @@ export function hitTestPptxSlideContext(
   for (let elementIndex = slide.elements.length - 1; elementIndex >= 0; elementIndex--) {
     const element = slide.elements[elementIndex];
     if (!hitTestPptxElement(element, point, tolerance)) continue;
-    const boundedText = boundedJoinedText(elementTextParts(element), maxTextCharacters);
+    const boundedText = element.type === 'chart'
+      ? boundedChartContextText(element.chart, maxTextCharacters)
+      : boundedJoinedText(elementTextParts(element), maxTextCharacters);
     return {
       format: 'pptx',
       kind: 'element',

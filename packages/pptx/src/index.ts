@@ -4,9 +4,16 @@ export {
   PptxPresentation,
   type LoadOptions,
   type RenderSlideOptions,
+  type PresentSlideOptions,
   type RenderSlideToBitmapOptions,
 } from './presentation';
-export { renderSlide, type RenderOptions, type PptxTextRunInfo, type TextRunCallback } from './renderer';
+export {
+  renderSlide,
+  type RenderOptions,
+  type SlideRenderOptions,
+  type PptxTextRunInfo,
+  type TextRunCallback,
+} from './renderer';
 export { buildPptxTextLayer } from './text-layer';
 export {
   readPptxTextSelectionContext,
@@ -15,12 +22,58 @@ export {
 } from './selection-context';
 export {
   type PptxElementContextOptions,
-  type PptxElementSelectionContext,
+  type PptxElementContext,
   type PptxSelectionContext,
   type PptxSelectionContextOptions,
   type PptxSlidePoint,
 } from './element-selection';
-export type { TextSelectionContextOptions } from '@silurus/ooxml-core';
+export type {
+  ArrowEnd,
+  ChartDataLabelOverride,
+  ChartDataPointOverride,
+  ChartErrBars,
+  ChartLabelBox,
+  ChartManualLayout,
+  ChartRect,
+  ChartSeriesDataLabels,
+  ChartTrendline,
+  ChartType,
+  ChartexBoxSeries,
+  ChartexBoxWhisker,
+  ChartexSunburst,
+  ChartexSunburstRow,
+  Duotone,
+  EquationRun,
+  LegendManualLayout,
+  MathAccent,
+  MathArray,
+  MathBar,
+  MathBorderBox,
+  MathBox,
+  MathDelimiter,
+  MathFraction,
+  MathFunc,
+  MathGroup,
+  MathGroupChr,
+  MathLimit,
+  MathRenderer,
+  MathNary,
+  MathNode,
+  MathPhant,
+  MathRadical,
+  MathRun,
+  MathScript,
+  MathSPre,
+  MathStyle,
+  MathSvg,
+  MatchRunSlice,
+  PatternFill,
+  SecondaryValueAxis,
+  TextOutline,
+  TextSelectionContextOptions,
+  ViewerContextMenuEvent,
+  ZoomableViewer,
+} from '@silurus/ooxml-core';
 // IX2 find-in-document: the highlight overlay builder + the pptx match-location
 // shape. `FindMatch` / `FindMatchesOptions` come from core (shared across formats).
 export {
@@ -46,7 +99,6 @@ export {
   isOoxmlDecodedImageLimitError,
   type OoxmlDecodedImageLimitMetric,
   type OoxmlErrorCode,
-  type OoxmlErrorSource,
   type OoxmlErrorStage,
   type OoxmlFormat,
   type OoxmlResourceLimit,
