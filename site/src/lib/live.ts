@@ -151,7 +151,7 @@ export function mountXlsx(root: HTMLElement, url: string): LiveController {
     showZoomSlider: true,
     onError: (error: Error) => host.setAttribute('data-error', error.message),
   });
-  viewer.load(url).catch(() => { /* surfaced through onError */ });
+  viewer.load(url).catch((error) => host.setAttribute('data-error', message(error)));
 
   return {
     destroy: () => {

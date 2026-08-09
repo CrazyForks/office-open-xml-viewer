@@ -54,11 +54,11 @@ describe('XlsxViewer.load() — no orphaned workbook on re-load (SC20)', () => {
     // Isolate SC20 from the sheet-render path: showSheet needs a full worksheet
     // model to lay out, which is out of scope here. The engine-swap happens in
     // load() BEFORE showSheet, so a resolved no-op keeps this test on the leak.
-    vi.spyOn(
+    const showSheet = vi.spyOn(
       v as unknown as { showSheet: (i: number) => Promise<void> },
       'showSheet',
     ).mockResolvedValue(undefined);
-    return { v };
+    return { v, showSheet };
   }
 
   it('destroys the previous workbook when load() is called again', async () => {
@@ -131,9 +131,23 @@ describe('XlsxViewer.load() — no orphaned workbook on re-load (SC20)', () => {
 
     await v.load('one.xlsx');
 
-    await v.load('bad.xlsx');
-    expect(onError).toHaveBeenCalledTimes(1);
+    await expect(v.load('bad.xlsx')).rejects.toThrow('boom');
+    expect(onError).not.toHaveBeenCalled();
     expect(a.destroy).not.toHaveBeenCalled();
+
+    v.destroy();
+    expect(a.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an initial sheet-render failure without also calling onError', async () => {
+    const onError = vi.fn();
+    const { v, showSheet } = build({ onError });
+    const a = fakeWorkbook();
+    vi.spyOn(XlsxWorkbook, 'load').mockResolvedValueOnce(a.wb);
+    showSheet.mockRejectedValueOnce(new Error('initial render boom'));
+
+    await expect(v.load('one.xlsx')).rejects.toThrow('initial render boom');
+    expect(onError).not.toHaveBeenCalled();
 
     v.destroy();
     expect(a.destroy).toHaveBeenCalledTimes(1);

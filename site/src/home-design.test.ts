@@ -2,18 +2,19 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const showcase = readFileSync(new URL('./components/LiveShowcase.astro', import.meta.url), 'utf8');
+const formatTabs = readFileSync(new URL('./components/FormatTabs.astro', import.meta.url), 'utf8');
 const live = readFileSync(new URL('./lib/live.ts', import.meta.url), 'utf8');
 const capabilities = readFileSync(new URL('./components/Capabilities.astro', import.meta.url), 'utf8');
 const home = readFileSync(new URL('./pages/index.astro', import.meta.url), 'utf8');
 
 describe('official-site home design', () => {
   it('keeps the format switcher inside the preview toolbar', () => {
-    expect(showcase).toMatch(/<div class="panel-head">\s*<div class="tabs"/);
-    expect(showcase).toContain(".tab[aria-selected='true'] {");
-    expect(showcase).toContain('background: var(--border);');
-    expect(showcase).not.toMatch(/\.tab\[aria-selected='true'\][\s\S]*?var\(--signal\)/);
-    expect(showcase).not.toContain('tab-dot');
-    expect(showcase).not.toContain('--fmt');
+    expect(showcase).toMatch(/<div class="panel-head">\s*<FormatTabs selected="docx"/);
+    expect(formatTabs).toContain(".tab[aria-selected='true'] {");
+    expect(formatTabs).toContain('background: var(--border);');
+    expect(formatTabs).not.toMatch(/\.tab\[aria-selected='true'\][\s\S]*?var\(--signal\)/);
+    expect(formatTabs).not.toContain('tab-dot');
+    expect(formatTabs).not.toContain('--fmt');
   });
 
   it('uses circular feature bullets and one-pixel separators', () => {
@@ -66,7 +67,7 @@ describe('official-site home design', () => {
   });
 
   it('keeps one lazily-created viewer per format instead of reparsing on every tab switch', () => {
-    expect(showcase).toContain('data-format-pane={format.id}');
+    expect(showcase).toContain('data-format-pane={format}');
     expect(showcase).toContain('const cache = new Map<string, CachedViewer>();');
     expect(showcase).toContain('cache.get(id)');
     expect(showcase).toContain('cache.set(id, entry)');

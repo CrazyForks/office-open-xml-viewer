@@ -49,7 +49,6 @@ export interface DocxPageRenderOptions {
   width?: number;
   dpr?: number;
   defaultTextColor?: string;
-  showTrackChanges?: boolean;
   onTextRun?: (run: DocxTextRunInfo) => void;
 }
 
@@ -82,7 +81,7 @@ export interface DocxDocumentSession extends AsyncIterable<DocxRenderedPage> {
  * and then renders one caller-owned canvas at a time.
  */
 export async function openDocxDocument(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
+  buffer: ArrayBuffer | Uint8Array,
   options: OpenDocxDocumentOptions,
 ): Promise<DocxDocumentSession> {
   if (!options?.factory) throw new TypeError('openDocxDocument requires a canvas factory');
@@ -97,7 +96,7 @@ export async function openDocxDocument(
     throwIfAborted(options.signal);
     const measurementCanvas = options.factory.createCanvas(1, 1);
     const services = createLayoutServices(acquired.result, {
-      measureContext: measurementCanvas.getContext('2d'),
+      measureContext: measurementCanvas.getContext('2d') as CanvasRenderingContext2D,
     });
     const defaultCurrentDateMs = normalizeCurrentDate(options.currentDate);
     const retained = retainRenderWorkerDocumentLayout(
@@ -136,7 +135,7 @@ export async function openDocxDocument(
 /** Materialize the public DOCX compatibility model through the acknowledged
  * body-unit coordinator without creating measurement or page-layout state. */
 export async function materializeDocxDocument(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
+  buffer: ArrayBuffer | Uint8Array,
   options: OoxmlNodeSessionOptions = {},
 ): Promise<DocxDocumentModel> {
   return usingOwnedSession(
@@ -346,7 +345,7 @@ function normalizeCurrentDate(value: Date | number | undefined): number {
   return current;
 }
 
-function toUint8(buffer: ArrayBuffer | Uint8Array | Buffer): Uint8Array {
+function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
   return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
 }
 

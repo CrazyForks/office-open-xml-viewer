@@ -296,7 +296,7 @@ describe('PptxScrollViewer — layout + virtualization (T2)', () => {
 describe('PptxScrollViewer — rendering (T3)', () => {
   it("main mode: calls renderSlide once per mounted slot with that slide's px width", () => {
     installDom();
-    const container = makeContainer(200, 400);
+    const container = makeContainer(200, 100);
     const engine = new FakePptxEngine(10, SLIDE_W_EMU, SLIDE_H_EMU);
     const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
@@ -972,12 +972,16 @@ describe('PptxScrollViewer — self-load path (T7 story)', () => {
     // self-loaded (non-borrowed) viewer is not left blank (I-2).
     const engine = new FakePptxEngine(10, SLIDE_W_EMU, SLIDE_H_EMU);
     const loadSpy = vi.spyOn(PptxPresentation, 'load').mockResolvedValue(engine.asPres());
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, { gap: 10 });
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, { gap: 10, password: 'secret' });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
     scrollHost.clientWidth = 200;
     await v.load('sample.pptx');
     expect(loadSpy).toHaveBeenCalledTimes(1);
+    expect(loadSpy).toHaveBeenCalledWith(
+      'sample.pptx',
+      expect.objectContaining({ password: 'secret' }),
+    );
     // Layout happened: slots mounted and the spacer was sized.
     expect(v.mountedSlideIndicesForTest().length).toBeGreaterThan(0);
     const spacer = scrollHost.children[0] as FakeEl;
@@ -1417,22 +1421,50 @@ describe('PptxScrollViewer — interactive media lifecycle', () => {
   it('invalidates same-index pending handles when a new deck is loaded', async () => {
     installDom();
     const container = makeContainer(200, 400);
-    const oldEngine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
-    const newEngine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU, 'main', false);
+    const oldEngine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
+    const newEngine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
     vi.spyOn(PptxPresentation, 'load')
       .mockResolvedValueOnce(oldEngine.asPres())
       .mockResolvedValueOnce(newEngine.asPres());
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       enableMediaPlayback: true,
       gap: 10,
+      overscan: 0,
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientWidth = 200;
-    scrollHost.clientHeight = 400;
+    scrollHost.clientHeight = 100;
 
-    await v.load('old.pptx');
-    const stale = oldEngine.presentationCalls.find((call) => call.slide === 0)!;
-    await v.load('new.pptx');
+    // load() now owns the initial-window render Promise. Resolve that window so
+    // the first load can complete, then create a genuinely background pending
+    // handle by virtualizing to a later slide.
+    const oldLoad = v.load('old.pptx');
+    await Promise.resolve();
+    await Promise.resolve();
+    for (const call of oldEngine.presentationCalls) call.resolve();
+    await oldLoad;
+
+    const initialCallCount = oldEngine.presentationCalls.length;
+    scrollHost.scrollTop = 2000;
+    scrollHost.dispatch('scroll');
+    // Bring slide 0 back so the stale old-deck request and the new deck both
+    // target the same index (and may reuse the same pooled slot). Only the
+    // presentation generation distinguishes them.
+    scrollHost.scrollTop = 0;
+    scrollHost.dispatch('scroll');
+    const stale = oldEngine.presentationCalls
+      .slice(initialCallCount)
+      .find((call) => call.slide === 0)!;
+    expect(stale).toBeDefined();
+
+    const newLoad = v.load('new.pptx');
+    await Promise.resolve();
+    await Promise.resolve();
+    const fresh = newEngine.presentationCalls.find((call) => call.slide === 0);
+    expect(fresh).toBeDefined();
+    expect(fresh!.canvas).toBe(stale.canvas);
+    for (const call of newEngine.presentationCalls) call.resolve();
+    await newLoad;
     stale.resolve();
     await Promise.resolve();
     await Promise.resolve();

@@ -6,6 +6,12 @@ interface Props {
 }
 const { format } = Astro.props;
 const classes = apiReference[format];
+const isEventHandler = (name: string) => name.startsWith('on');
+const groupedClasses = classes.map((apiClass) => ({
+  ...apiClass,
+  properties: (apiClass.options ?? []).filter((option) => !isEventHandler(option.name)),
+  eventHandlers: (apiClass.options ?? []).filter((option) => isEventHandler(option.name)),
+}));
 const borrowedEngine = {
   docx: { className: 'DocxDocument', factory: 'fromDocument()' },
   pptx: { className: 'PptxPresentation', factory: 'fromPresentation()' },
@@ -73,33 +79,74 @@ const borrowedEngine = {
     <a class="api-detail-link" href="/errors">Open the error reference →</a>
   </div>
 
-  {classes.map((c) => (
+  <div class="api-selection">
+    <h4>Selection context for AI and external tools</h4>
+    <p>
+      Viewer selection remains read-only UI state. <code>getSelectionContext()</code> turns the
+      current focus into a detached, resource-bounded snapshot; every format can notify you through
+      <code>onSelectionContextChange</code> when that snapshot may have changed.
+    </p>
+    <a class="api-detail-link" href="/selection-context">Open the selection &amp; AI guide →</a>
+  </div>
+
+  {groupedClasses.map((c) => (
     <div class="api-class">
       <h4 class="api-class-name">{c.name}</h4>
       {c.note && <p class="api-note">{c.note}</p>}
       <pre class="api-ctor"><code>{c.ctor}</code></pre>
 
-      {c.options && c.options.length > 0 && (
+      {c.properties.length + c.eventHandlers.length > 0 && (
         <>
           <p class="api-sub">Options</p>
           <div class="api-table-wrap">
-            <table class="api-table">
-              <thead><tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
-              <tbody>
-                {c.options.map((o) => (
-                  <tr>
-                    <td><code>{o.name}</code></td>
-                    <td><code class="api-type">{o.type}</code></td>
-                    <td>{o.def ? <code>{o.def}</code> : <span class="api-dash">—</span>}</td>
-                    <td class="api-description">
-                      <InlineApiDescription item={o} />
-                      {o.detailsHref && (
-                        <> <a class="api-detail-link" href={o.detailsHref}>{o.detailsLabel ?? 'Details'} →</a></>
-                      )}
-                    </td>
+            <table class="api-table api-options-table">
+              <colgroup>
+                <col class="api-option-col" />
+                <col class="api-type-col" />
+                <col class="api-default-col" />
+                <col class="api-description-col" />
+              </colgroup>
+              <thead><tr><th>Name</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+              {c.properties.length > 0 && (
+                <tbody class="api-option-group">
+                  <tr class="api-group-row">
+                    <th scope="rowgroup" colspan="4">Properties</th>
                   </tr>
-                ))}
-              </tbody>
+                  {c.properties.map((o) => (
+                    <tr>
+                      <td><code>{o.name}</code></td>
+                      <td><code class="api-type">{o.type}</code></td>
+                      <td>{o.def ? <code>{o.def}</code> : <span class="api-dash">—</span>}</td>
+                      <td class="api-description">
+                        <InlineApiDescription item={o} />
+                        {o.detailsHref && (
+                          <> <a class="api-detail-link" href={o.detailsHref}>{o.detailsLabel ?? 'Details'} →</a></>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              )}
+              {c.eventHandlers.length > 0 && (
+                <tbody class="api-option-group">
+                  <tr class="api-group-row">
+                    <th scope="rowgroup" colspan="4">Event handlers</th>
+                  </tr>
+                  {c.eventHandlers.map((o) => (
+                    <tr>
+                      <td><code>{o.name}</code></td>
+                      <td><code class="api-type">{o.type}</code></td>
+                      <td>{o.def ? <code>{o.def}</code> : <span class="api-dash">—</span>}</td>
+                      <td class="api-description">
+                        <InlineApiDescription item={o} />
+                        {o.detailsHref && (
+                          <> <a class="api-detail-link" href={o.detailsHref}>{o.detailsLabel ?? 'Details'} →</a></>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              )}
             </table>
           </div>
         </>
@@ -107,7 +154,11 @@ const borrowedEngine = {
 
       <p class="api-sub">Methods</p>
       <div class="api-table-wrap">
-        <table class="api-table">
+        <table class="api-table api-methods-table">
+          <colgroup>
+            <col class="api-signature-col" />
+            <col class="api-method-description-col" />
+          </colgroup>
           <tbody>
             {c.methods.map((m) => (
               <tr>
@@ -145,9 +196,10 @@ const borrowedEngine = {
   .api-mode-table td { color: var(--text-dim); }
   .api-mode-table th + th, .api-mode-table th + td, .api-mode-table td + td { border-left: 1px solid var(--border); }
 
-  .api-errors { margin-top: 30px; padding: 26px 28px 28px; border: 1px solid var(--border); background: var(--bg-elev); }
-  .api-errors h4 { margin: 0; font-size: 19px; }
-  .api-errors > p { max-width: 92ch; margin: 10px 0 14px; color: var(--text-dim); font-size: 14.5px; }
+  .api-errors, .api-selection { margin-top: 30px; padding: 26px 28px 28px; border: 1px solid var(--border); background: var(--bg-elev); }
+  .api-errors h4, .api-selection h4 { margin: 0; font-size: 19px; }
+  .api-errors > p, .api-selection > p { max-width: 92ch; margin: 10px 0 14px; color: var(--text-dim); font-size: 14.5px; }
+  .api-selection code { font-family: var(--mono); font-size: .9em; color: var(--text); }
   .api-detail-link { color: var(--accent); font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
 
   .api-class { margin-top: 30px; }
@@ -165,15 +217,36 @@ const borrowedEngine = {
   }
   .api-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
   .api-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .api-options-table { table-layout: fixed; min-width: 760px; }
+  .api-option-col { width: 18%; }
+  .api-type-col { width: 22%; }
+  .api-default-col { width: 15%; }
+  .api-description-col { width: 45%; }
+  .api-methods-table { table-layout: fixed; min-width: 680px; }
+  .api-signature-col { width: 40%; }
+  .api-method-description-col { width: 60%; }
   .api-table th {
     text-align: left; font-weight: 600; color: var(--text-dim); font-size: 12px;
     text-transform: uppercase; letter-spacing: 0.04em;
     padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-elev);
   }
+  .api-group-row th {
+    padding-block: 8px;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    background: var(--code-bg);
+    color: var(--text);
+    font-size: 11px;
+    letter-spacing: .08em;
+  }
   .api-table td { padding: 10px 14px; border-top: 1px solid var(--border); color: var(--text-dim); vertical-align: top; }
   .api-table tbody tr:first-child td { border-top: none; }
   .api-table code { font-family: var(--mono); font-size: 12.5px; color: var(--text); white-space: nowrap; }
-  .api-table .api-type { color: var(--accent-2); white-space: normal; }
-  .api-sig code { color: var(--accent); white-space: normal; }
+  .api-options-table td:nth-child(-n + 3) code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .api-table .api-type { color: var(--accent-2); }
+  .api-sig code { color: var(--accent); white-space: normal; overflow-wrap: anywhere; }
   .api-dash { color: var(--text-faint); }
 </style>

@@ -38,7 +38,9 @@ export type XlsxSelectionInput = string | XlsxSelectionState | null;
 export interface XlsxSelectionContextOptions {
   /** Maximum populated cells returned. Default 1,000; hard maximum 10,000. */
   readonly maxCells?: number;
-  /** Maximum returned UTF-16 code units across text, display text, and formulas. Default 1 Mi; hard maximum 8 Mi. */
+  /** Maximum returned UTF-16 code units. Range context defaults to 1 Mi and has
+   * an 8 Mi hard cap; element context retains its snapshot budget and has a
+   * 65,536-character hard cap. Viewer change notifications request 65,536. */
   readonly maxTextCharacters?: number;
 }
 
@@ -57,7 +59,7 @@ export interface XlsxSelectionContextCell {
  * Selection state remains the UI authority; this snapshot adds displayed cell
  * content without exposing mutable workbook internals.
  */
-export interface XlsxSelectionContext {
+export interface XlsxRangeSelectionContext {
   readonly format: 'xlsx';
   /** Discriminant shared with DOCX/PPTX selection-context snapshots. */
   readonly kind: 'range';
@@ -74,6 +76,46 @@ export interface XlsxSelectionContext {
   readonly textCharacters: number;
   readonly maxTextCharacters: number;
 }
+
+export interface XlsxElementAnchorMarker {
+  /** One-based worksheet row/column containing the DrawingML marker. */
+  readonly row: number;
+  readonly col: number;
+  /** Marker offsets inside the cell, in DrawingML EMU. */
+  readonly offsetX: number;
+  readonly offsetY: number;
+}
+
+/**
+ * Detached context for the topmost rendered worksheet object established by a
+ * click. The Viewer outlines this focus for clarity, but it is not an editable
+ * Excel object selection and intentionally exposes no mutable drawing model.
+ */
+export interface XlsxElementContext {
+  readonly format: 'xlsx';
+  readonly kind: 'element';
+  readonly sheetIndex: number;
+  readonly sheetName: string;
+  readonly elementType: 'chart' | 'image' | 'shape';
+  /** Index in the matching immutable worksheet collection for this snapshot. */
+  readonly elementIndex: number;
+  /** Leaf index inside a shape group; present only for `elementType: "shape"`. */
+  readonly shapeIndex?: number;
+  readonly anchor: Readonly<{
+    from: XlsxElementAnchorMarker;
+    to: XlsxElementAnchorMarker;
+  }>;
+  readonly text?: string;
+  readonly mimeType?: string;
+  readonly seriesCount?: number;
+  readonly shapeCount?: number;
+  readonly truncated: boolean;
+  readonly truncationReasons: readonly ('text')[];
+  readonly textCharacters: number;
+  readonly maxTextCharacters: number;
+}
+
+export type XlsxSelectionContext = XlsxRangeSelectionContext | XlsxElementContext;
 
 export const MAX_SELECTION_AREAS = 128;
 export const MAX_SELECTION_CONTEXT_CELLS = 10_000;

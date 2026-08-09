@@ -237,13 +237,65 @@ const TEXT_LAYER_STYLE =
 const HIGHLIGHT_LAYER_STYLE =
   'position:absolute;top:0;left:0;width:100%;height:100%;' +
   'overflow:hidden;pointer-events:none;';
+const ELEMENT_OUTLINE_LAYER_STYLE =
+  'position:absolute;top:0;left:0;width:100%;height:100%;' +
+  'overflow:hidden;pointer-events:none;';
+
+export interface CanvasElementOutline {
+  /** Normalized coordinates relative to the page/slide canvas. */
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly rotation?: number;
+}
+
+/** Create the transparent layer used only by explicit element-context opt-in. */
+export function createCanvasElementOutlineLayer(
+  wrapper: HTMLElement,
+  enabled: boolean,
+): HTMLDivElement | null {
+  if (!enabled) return null;
+  const ownerDocument = wrapper.ownerDocument ?? document;
+  const layer = ownerDocument.createElement('div');
+  layer.style.cssText = ELEMENT_OUTLINE_LAYER_STYLE;
+  wrapper.appendChild(layer);
+  return layer;
+}
+
+/** Draw one non-editable selection frame without changing the document canvas. */
+export function renderCanvasElementOutline(
+  layer: HTMLDivElement | null,
+  outline: CanvasElementOutline | null,
+): void {
+  if (!layer) return;
+  layer.innerHTML = '';
+  if (!outline || !Number.isFinite(outline.x) || !Number.isFinite(outline.y) ||
+      !Number.isFinite(outline.width) || !Number.isFinite(outline.height) ||
+      outline.width <= 0 || outline.height <= 0) return;
+  const ownerDocument = layer.ownerDocument ?? document;
+  const frame = ownerDocument.createElement('div');
+  const rotation = Number.isFinite(outline.rotation) ? outline.rotation ?? 0 : 0;
+  frame.style.cssText =
+    `position:absolute;left:${outline.x * 100}%;top:${outline.y * 100}%;` +
+    `width:${outline.width * 100}%;height:${outline.height * 100}%;` +
+    'box-sizing:border-box;border:2px solid #1a73e8;' +
+    'background:color-mix(in srgb, #1a73e8 6%, transparent);' +
+    `transform:rotate(${rotation}deg);transform-origin:center;pointer-events:none;`;
+  layer.appendChild(frame);
+}
 
 /** DOM containers only; each format remains responsible for overlay contents. */
 export class CanvasOverlayHost {
   readonly textLayer: HTMLDivElement | null;
   readonly highlightLayer: HTMLDivElement;
+  readonly elementLayer: HTMLDivElement | null;
 
-  constructor(wrapper: HTMLElement, enableTextSelection: boolean) {
+  constructor(
+    wrapper: HTMLElement,
+    enableTextSelection: boolean,
+    enableElementSelection = false,
+  ) {
     const ownerDocument = wrapper.ownerDocument ?? document;
     this.textLayer = enableTextSelection ? ownerDocument.createElement('div') : null;
     if (this.textLayer) {
@@ -253,6 +305,7 @@ export class CanvasOverlayHost {
     this.highlightLayer = ownerDocument.createElement('div');
     this.highlightLayer.style.cssText = HIGHLIGHT_LAYER_STYLE;
     wrapper.appendChild(this.highlightLayer);
+    this.elementLayer = createCanvasElementOutlineLayer(wrapper, enableElementSelection);
   }
 }
 

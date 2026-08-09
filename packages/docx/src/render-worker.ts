@@ -45,6 +45,7 @@ import {
   type RetainedRenderWorkerDocumentLayout,
 } from './render-worker-layout.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
+import { hitTestSelectedDocxElementContext } from './element-context.js';
 import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
 import { materializeDocumentPullOwnedModelsSession } from './document-pull-client.js';
 import {
@@ -280,6 +281,17 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
       });
       post({ type: 'runsCollected', id, runs });
+      return;
+    }
+    if (req.type === 'hitTestElement') {
+      if (!doc) throw new Error('Document not loaded');
+      const context = hitTestSelectedDocxElementContext(
+        doc.layoutServices,
+        req.pageIndex,
+        req.point,
+        { ...req.opts, defaultCurrentDateMs: doc.defaultCurrentDateMs },
+      );
+      post({ type: 'elementHit', id, context });
       return;
     }
     if (req.type === 'extractImage') {

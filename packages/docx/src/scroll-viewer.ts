@@ -1,6 +1,8 @@
 import { computeVisibleRange, openExternalHyperlink, PT_TO_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type VisibleRange } from '@silurus/ooxml-core';
-import type { FindHighlightColors, FindMatch, FindMatchesOptions, HyperlinkTarget, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
+import type { FindHighlightColors, FindMatch, FindMatchesOptions, HyperlinkTarget, OoxmlResourceMetrics, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
 import {
+  createCanvasElementOutlineLayer,
+  renderCanvasElementOutline,
   resolveCanvasViewerMode,
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
@@ -13,10 +15,15 @@ import { DocxFindController, type DocxMatchLocation } from './find';
 import { buildDocxHighlightLayer } from './find-highlight-layer';
 import type { RenderPageOptions } from './types';
 import {
-  readDocxSelectionContext,
+  readDocxTextSelectionContext,
+  type DocxElementContext,
   type DocxSelectionContext,
   type DocxSelectionContextOptions,
 } from './selection-context';
+import {
+  limitDocxElementContext,
+  MAX_DOCX_ELEMENT_TEXT_CHARACTERS,
+} from './element-context';
 
 /**
  * Debounce window (ms) after the last `setScale` in a zoom burst before the
@@ -88,8 +95,19 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    *  shipped back beside the page bitmap, so the overlay is populated identically
    *  to main mode (no more empty overlay / one-time warning). */
   enableTextSelection?: boolean;
-  /** Emits bounded, detached text context suitable for read-only AI/MCP use. */
+  /**
+   * Enable read-only selection of mounted pictures, charts, and shapes. The
+   * selected object exposes element context and receives a non-editable outline.
+   */
+  enableElementSelection?: boolean;
+  /** Emits bounded, detached text or element context suitable for read-only AI/MCP use. */
   onSelectionContextChange?: (context: DocxSelectionContext | null) => void;
+  /**
+   * Called synchronously for a browser `contextmenu` event. The original event
+   * can suppress the native menu; `getContext()` resolves the text or element
+   * context established at the event target.
+   */
+  onContextMenu?: (event: ViewerContextMenuEvent<DocxSelectionContext>) => void;
   /** CSS backgrounds for ordinary and active in-document search matches. */
   findHighlightColors?: FindHighlightColors;
   /** Minimum zoom scale (px-per-pt multiplier floor). Default 0.1. */
@@ -152,11 +170,12 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    *  `onHyperlinkClick` is never called. Links still render exactly as authored
    *  but are inert, like plain text. */
   enableHyperlinks?: boolean;
-  /** Error callback. When set, `load()` invokes it and resolves (otherwise the
-   *  error is rethrown — shared viewer error contract). It ALSO fires for async
-   *  per-slot render failures (both main `renderPage` and worker
-   *  `renderPageToBitmap` rejections); a failed page is left blank rather than
-   *  crashing the loop. Without an `onError`, render failures are logged via
+  /** Receives asynchronous Viewer-managed failures that cannot be observed by
+   *  awaiting the method that started them. `load()` failures always reject and
+   *  are not also delivered here. Virtualized per-slot render failures (both
+   *  main `renderPage` and worker `renderPageToBitmap` rejections) invoke it; a
+   *  failed page is left blank rather than crashing the loop. Without an
+   *  `onError`, render failures are logged via
    *  `console.error` so they are never fully silent. Stable cases can be
    *  narrowed with `OoxmlError`, `OoxmlResourceLimitError`, or
    *  `OoxmlDecodedImageLimitError` re-exported by this package. Other failures
@@ -174,6 +193,7 @@ interface PageSlot {
   canvas: HTMLCanvasElement;
   textLayer: HTMLDivElement | null;
   highlightLayer: HTMLDivElement;
+  elementLayer: HTMLDivElement | null;
   /** page index this slot is currently rendering / has rendered, or -1 when free. */
   renderedPage: number;
   /** The `_scale` at which this slot's on-screen canvas bitmap (and text overlay)
@@ -232,6 +252,10 @@ export class DocxScrollViewer implements ZoomableViewer {
   private _scrollListener: (() => void) | null = null;
   private _selectionChangeListener: (() => void) | null = null;
   private _selectionContextKey = 'null';
+  private _elementClickListener: ((event: MouseEvent) => void) | null = null;
+  private _contextMenuListener: ((event: MouseEvent) => void) | null = null;
+  private _elementContext: DocxElementContext | null = null;
+  private _elementHitGeneration = 0;
   /** Set by `destroy()`. Async render callbacks (main + worker) check it before
    *  reporting an error so a rejection that lands after teardown is swallowed
    *  rather than surfaced to a `onError` on a dead viewer. */
@@ -367,9 +391,19 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._wrapper.appendChild(this._scrollHost);
     this._container.appendChild(this._wrapper);
 
-    if (opts.enableTextSelection && opts.onSelectionContextChange) {
+    if (opts.enableTextSelection && (opts.onSelectionContextChange || opts.enableElementSelection)) {
       this._selectionChangeListener = () => this._emitSelectionContextChange();
       this._wrapper.ownerDocument.addEventListener('selectionchange', this._selectionChangeListener);
+    }
+    if (opts.enableElementSelection) {
+      this._elementClickListener = (event) => {
+        void this._onElementClick(event).catch((error) => this._reportRenderError(error));
+      };
+      this._scrollHost.addEventListener('click', this._elementClickListener);
+    }
+    if (opts.onContextMenu) {
+      this._contextMenuListener = (event) => this._onContextMenu(event);
+      this._scrollHost.addEventListener('contextmenu', this._contextMenuListener);
     }
 
     this._scrollListener = () => this._onScroll();
@@ -437,8 +471,10 @@ export class DocxScrollViewer implements ZoomableViewer {
     // re-load then keeps the current document rendered rather than going blank.
     // (The borrowed path returned above can never reach here, so this only ever
     // frees an engine we created.)
+    let elementInvalidated = false;
     try {
       const doc = await this._documentOwner.replace(() => DocxDocument.load(source, {
+        password: this._opts.password,
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
         resourceLimits: this._opts.resourceLimits,
@@ -449,6 +485,8 @@ export class DocxScrollViewer implements ZoomableViewer {
         math: this._opts.math,
         mode: this._mode,
       }), (ownedDocument) => {
+        this._invalidateElementContext(false);
+        elementInvalidated = true;
         this._find.invalidate();
         this._findActive = false;
         if (ownedDocument) {
@@ -466,18 +504,16 @@ export class DocxScrollViewer implements ZoomableViewer {
       // borrowed-engine path in the constructor). relayout() is idempotent and
       // defers under a zero-width container — `_onResize` re-runs it once width
       // appears.
-      this.relayout();
+      const initialRenders: Promise<void>[] = [];
+      this._relayout(initialRenders);
+      await Promise.all(initialRenders);
     } catch (err) {
       // Superseded loads own no error reporting — the winning load (or destroy())
       // is the outcome the caller awaits; swallow this stale rejection.
       if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
-      const e = err instanceof Error ? err : new Error(String(err));
-      if (this._opts.onError) {
-        this._opts.onError(e);
-        return;
-      }
-      throw e;
+      throw err instanceof Error ? err : new Error(String(err));
     }
+    if (elementInvalidated && !this._destroyed) this._emitSelectionContextChange();
   }
 
   get pageCount(): number {
@@ -537,6 +573,13 @@ export class DocxScrollViewer implements ZoomableViewer {
    * fit is deferred until width appears, design §11).
    */
   relayout(): void {
+    this._relayout();
+  }
+
+  /** Synchronous geometry/layout pass. When `initialRenders` is supplied by
+   * load(), newly-mounted slot Promises are collected for direct rejection
+   * instead of being routed through the background onError channel. */
+  private _relayout(initialRenders?: Promise<void>[]): void {
     if (!this._doc) return;
     // Establish the base fit scale on the first layout that has a positive
     // width. Zoom (T4) layers its own multiplier on top of this; here we only
@@ -571,7 +614,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     }
     this._recomputeHeights();
     this._syncSpacer();
-    this._mountVisible();
+    this._mountVisible(initialRenders);
   }
 
   private _recomputeHeights(): void {
@@ -672,7 +715,7 @@ export class DocxScrollViewer implements ZoomableViewer {
   }
 
   /** Mount/recycle slots for the current visible window. */
-  private _mountVisible(): void {
+  private _mountVisible(initialRenders?: Promise<void>[]): void {
     if (!this._doc || this._doc.pageCount === 0) return;
     const r = this._range();
     this._lastRange = r;
@@ -689,7 +732,8 @@ export class DocxScrollViewer implements ZoomableViewer {
         const slot = this._acquireSlot();
         this._positionSlot(slot, i, r);
         this._slots.set(i, slot);
-        this._renderSlot(i, slot);
+        const render = this._renderSlot(i, slot, initialRenders === undefined);
+        if (initialRenders && render) initialRenders.push(render);
       } else {
         // Re-position (offsets shift after a spacer/height change).
         this._positionSlot(this._slots.get(i)!, i, r);
@@ -744,12 +788,17 @@ export class DocxScrollViewer implements ZoomableViewer {
       'position:absolute;top:0;left:0;width:100%;height:100%;' +
       'overflow:hidden;pointer-events:none;';
     wrapper.appendChild(highlightLayer);
+    const elementLayer = createCanvasElementOutlineLayer(
+      wrapper,
+      this._opts.enableElementSelection === true,
+    );
     this._scrollHost.appendChild(wrapper);
     const slot: PageSlot = {
       wrapper,
       canvas,
       textLayer,
       highlightLayer,
+      elementLayer,
       renderedPage: -1,
       renderedScale: -1,
       dispatcher: new StaticCanvasRenderDispatcher(canvas, this._mode === 'worker'),
@@ -777,6 +826,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     slot.highlightLayer.innerHTML = '';
     slot.highlightLayer.style.transform = '';
     slot.highlightLayer.style.transformOrigin = '';
+    renderCanvasElementOutline(slot.elementLayer, null);
     slot.renderedPage = -1;
     slot.renderedScale = -1;
     slot.wrapper.remove();
@@ -789,6 +839,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     const hpx = this._pageHeightPx(i);
     slot.wrapper.style.width = `${wpx}px`;
     slot.wrapper.style.height = `${hpx}px`;
+    this._redrawElementOutlineForSlot(i, slot);
     // Horizontal placement (replaces the old CSS `left:0;right:0;margin:0 auto`
     // auto-centering, which cannot honour a left gutter). Centre the page in the
     // scroll viewport, but never let its left edge cross the left gutter: when the
@@ -828,10 +879,10 @@ export class DocxScrollViewer implements ZoomableViewer {
    * with stale x/y/w/h (the pool reuses slot objects, so the identity check alone
    * can pass for an old-epoch resolution). We gate them on the captured epoch.
    */
-  private _renderSlot(i: number, slot: PageSlot): void {
-    if (!this._doc) return;
+  private _renderSlot(i: number, slot: PageSlot, reportErrors = true): Promise<void> | null {
+    if (!this._doc) return null;
     // Slot-identity guard: this slot is already rendering / has rendered page i.
-    if (slot.renderedPage === i) return;
+    if (slot.renderedPage === i) return null;
     slot.renderedPage = i;
 
     const dpr = this._dpr();
@@ -842,8 +893,16 @@ export class DocxScrollViewer implements ZoomableViewer {
     const generation = dispatcher.begin();
 
     if (this._mode === 'worker') {
-      void this._renderSlotBitmap(i, slot, widthPx, dpr, scale, dispatcher, generation);
-      return;
+      return this._renderSlotBitmap(
+        i,
+        slot,
+        widthPx,
+        dpr,
+        scale,
+        dispatcher,
+        generation,
+        reportErrors,
+      );
     }
 
     // Main mode: render straight onto the slot's canvas.
@@ -851,14 +910,23 @@ export class DocxScrollViewer implements ZoomableViewer {
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
     const wantRuns = wantOverlay || this._findActive;
     const onTextRun = wantRuns ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
-    this._doc
-      .renderPage(slot.canvas, i, {
+    let render: Promise<void>;
+    try {
+      render = this._doc.renderPage(slot.canvas, i, {
         width: widthPx, // this page's own px width → uniform px-per-pt scale (§7)
         dpr,
         defaultTextColor: this._opts.defaultTextColor,
-        showTrackChanges: this._opts.showTrackChanges,
+        currentDate: this._opts.currentDate,
         onTextRun,
-      })
+      });
+    } catch (error) {
+      if (reportErrors) {
+        this._reportRenderError(error);
+        return Promise.resolve();
+      }
+      return Promise.reject(error);
+    }
+    return render
       .then(() => {
         // Stale if the epoch moved (a setScale rescaled mid-flight — the run
         // geometry is at the old scale), or a recycle re-purposed this slot for a
@@ -889,12 +957,14 @@ export class DocxScrollViewer implements ZoomableViewer {
         this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
-        if (
+        const isCurrent =
           dispatcher.isCurrent(generation) &&
           epoch === this._renderEpoch &&
           this._slots.get(i) === slot &&
-          slot.renderedPage === i
-        ) this._reportRenderError(err);
+          slot.renderedPage === i;
+        if (!isCurrent) return;
+        if (reportErrors) this._reportRenderError(err);
+        else throw err;
       });
   }
 
@@ -994,6 +1064,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     scale: number,
     dispatcher = slot.dispatcher,
     generation = dispatcher.begin(),
+    reportErrors = true,
   ): Promise<void> {
     if (this._bitmapInFlight.has(i)) return; // coalesce: already dispatched
     // Drop-stale before dispatch: if this page already scrolled out of the
@@ -1016,7 +1087,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         width: widthPx,
         dpr,
         defaultTextColor: this._opts.defaultTextColor,
-        showTrackChanges: this._opts.showTrackChanges,
+        currentDate: this._opts.currentDate,
         onTextRun: wantRuns ? (r) => runs.push(r) : undefined,
       });
       // Stale if EITHER (a) the epoch moved (a setScale rescaled mid-flight, so
@@ -1067,12 +1138,15 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._redrawSlotHighlights(i, slot);
       painted = true;
     } catch (err) {
-      if (
+      const isCurrent =
         dispatcher.isCurrent(generation) &&
         epoch === this._renderEpoch &&
         this._slots.get(i) === slot &&
-        slot.renderedPage === i
-      ) this._reportRenderError(err);
+        slot.renderedPage === i;
+      if (isCurrent) {
+        if (reportErrors) this._reportRenderError(err);
+        else throw err;
+      }
     } finally {
       this._bitmapInFlight.delete(i);
       // Re-dispatch ONLY when this invocation went stale — a LIVE slot for page
@@ -1457,7 +1531,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         width: widthPx,
         dpr,
         defaultTextColor: this._opts.defaultTextColor,
-        showTrackChanges: this._opts.showTrackChanges,
+        currentDate: this._opts.currentDate,
         onTextRun,
       })
       .then(() => {
@@ -1602,8 +1676,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     if (!this._doc) return [];
     return this._doc.collectPageRuns(page, {
       width: this._pageWidthPx(page),
-      defaultTextColor: this._opts.defaultTextColor,
-      showTrackChanges: this._opts.showTrackChanges,
+      currentDate: this._opts.currentDate,
     });
   }
 
@@ -1775,23 +1848,130 @@ export class DocxScrollViewer implements ZoomableViewer {
     return await this._doc.getResourceMetrics();
   }
 
-  /** Return the current mounted browser text selection with DOCX source locators. */
+  /** Return the current mounted text selection or clicked drawing context. */
   getSelectionContext(options: DocxSelectionContextOptions = {}): DocxSelectionContext | null {
     if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
-    if (!this._opts.enableTextSelection) return null;
-    return readDocxSelectionContext(
-      this._wrapper,
-      this._wrapper.ownerDocument.getSelection(),
-      options,
-    );
+    const text = this._opts.enableTextSelection
+      ? readDocxTextSelectionContext(
+          this._wrapper,
+          this._wrapper.ownerDocument?.getSelection?.() ?? null,
+          options,
+        )
+      : null;
+    return text ?? (this._elementContext
+      ? limitDocxElementContext(this._elementContext, options.maxTextCharacters)
+      : null);
   }
 
   private _emitSelectionContextChange(): void {
     const context = this.getSelectionContext();
+    if (context?.kind === 'text') {
+      this._elementHitGeneration++;
+      this._elementContext = null;
+      this._redrawElementOutlines();
+    }
     const key = JSON.stringify(context);
     if (key === this._selectionContextKey) return;
     this._selectionContextKey = key;
     this._opts.onSelectionContextChange?.(context ? structuredClone(context) : null);
+  }
+
+  private _setElementContext(context: DocxElementContext | null): void {
+    this._elementContext = context ? structuredClone(context) : null;
+    this._redrawElementOutlines();
+    this._emitSelectionContextChange();
+  }
+
+  private _invalidateElementContext(notify = true): void {
+    this._elementHitGeneration++;
+    this._elementContext = null;
+    this._redrawElementOutlines();
+    if (notify) this._emitSelectionContextChange();
+  }
+
+  private _redrawElementOutlines(): void {
+    for (const [page, slot] of this._slots) this._redrawElementOutlineForSlot(page, slot);
+  }
+
+  private _redrawElementOutlineForSlot(pageIndex: number, slot: PageSlot): void {
+    const context = this._elementContext;
+    const doc = this._doc;
+    if (!context || !doc || context.pageIndex !== pageIndex) {
+      renderCanvasElementOutline(slot.elementLayer, null);
+      return;
+    }
+    const page = doc.pageSize(pageIndex);
+    renderCanvasElementOutline(slot.elementLayer, {
+      x: context.bounds.xPt / page.widthPt,
+      y: context.bounds.yPt / page.heightPt,
+      width: context.bounds.widthPt / page.widthPt,
+      height: context.bounds.heightPt / page.heightPt,
+    });
+  }
+
+  private async _onElementClick(event: MouseEvent): Promise<void> {
+    if (this._destroyed || event.defaultPrevented || event.button !== 0) return;
+    await this._resolveContextAt(event);
+  }
+
+  private _onContextMenu(event: MouseEvent): void {
+    let context: Promise<DocxSelectionContext | null> | undefined;
+    this._opts.onContextMenu?.({
+      originalEvent: event,
+      getContext: () => context ??= this._resolveContextAt(event),
+    });
+  }
+
+  private async _resolveContextAt(event: MouseEvent): Promise<DocxSelectionContext | null> {
+    const doc = this._doc;
+    if (this._destroyed || !doc) return null;
+    if (this._opts.enableTextSelection && readDocxTextSelectionContext(
+      this._wrapper,
+      this._wrapper.ownerDocument?.getSelection?.() ?? null,
+    )) {
+      this._emitSelectionContextChange();
+      return this._destroyed ? null : this.getSelectionContext();
+    }
+    if (!this._opts.enableElementSelection) return this.getSelectionContext();
+    const target = event.target as Node | null;
+    const entry = [...this._slots].find(([, slot]) =>
+      target !== null && slot.wrapper.contains(target));
+    if (!entry) {
+      this._invalidateElementContext();
+      return null;
+    }
+    const [pageIndex, slot] = entry;
+    const rect = slot.canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      this._invalidateElementContext();
+      return null;
+    }
+    const localX = event.clientX - rect.left;
+    const localY = event.clientY - rect.top;
+    if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) {
+      this._invalidateElementContext();
+      return null;
+    }
+    const generation = ++this._elementHitGeneration;
+    const pageSize = doc.pageSize(pageIndex);
+    let context: DocxElementContext | null;
+    try {
+      context = await doc.getElementContextAt(pageIndex, {
+        xPt: localX / rect.width * pageSize.widthPt,
+        yPt: localY / rect.height * pageSize.heightPt,
+      }, {
+        currentDate: this._opts.currentDate,
+        maxTextCharacters: MAX_DOCX_ELEMENT_TEXT_CHARACTERS,
+      });
+    } catch (error) {
+      if (this._destroyed || generation !== this._elementHitGeneration || doc !== this._doc) {
+        return null;
+      }
+      throw error;
+    }
+    if (this._destroyed || generation !== this._elementHitGeneration || doc !== this._doc) return null;
+    this._setElementContext(context);
+    return this._destroyed ? null : this.getSelectionContext();
   }
 
   /**
@@ -1808,6 +1988,16 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._wrapper.ownerDocument.removeEventListener('selectionchange', this._selectionChangeListener);
       this._selectionChangeListener = null;
     }
+    this._elementHitGeneration++;
+    if (this._elementClickListener) {
+      this._scrollHost.removeEventListener('click', this._elementClickListener);
+      this._elementClickListener = null;
+    }
+    if (this._contextMenuListener) {
+      this._scrollHost.removeEventListener('contextmenu', this._contextMenuListener);
+      this._contextMenuListener = null;
+    }
+    this._elementContext = null;
     if (this._scrollListener) {
       this._scrollHost.removeEventListener('scroll', this._scrollListener);
       this._scrollListener = null;

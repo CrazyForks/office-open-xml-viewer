@@ -1,5 +1,8 @@
 # Migrating XLSX selection APIs for 0.77
 
+**Applies to:** browser applications that call the XLSX Viewer selection API.
+It does not affect DOCX/PPTX selection or applications that only render XLSX.
+
 Version 0.77 removes the endpoint-based XLSX selection compatibility API. Move
 to the canonical selection state before upgrading:
 
@@ -72,8 +75,8 @@ const viewer = new XlsxViewer(container, {
 ```
 
 The callback fires only for semantic changes. Sheet changes clear the selection
-and report `null`. The deprecated callback receives only a lossy projection of
-the active area and cannot expose independent ActiveCell or multiple areas.
+and report `null`. The removed callback received only a lossy projection of the
+active area and could not expose independent ActiveCell or multiple areas.
 
 ## Clipboard behavior
 
@@ -85,10 +88,14 @@ const context = viewer.getSelectionContext({
   maxCells: 1_000,
   maxTextCharacters: 1_048_576,
 });
-sendToAssistant(context);
+if (context?.kind === 'range') {
+  sendToAssistant(context);
+}
 ```
 
-The context is discriminated as `{ format: 'xlsx', kind: 'range' }` and contains
+`XlsxSelectionContext` now also covers element selection, so narrow on `kind`
+before reading `cells`. The range branch is available directly as
+`XlsxRangeSelectionContext` and contains
 canonical selection geometry, sheet identity, formulas,
 scalar values, and Viewer-formatted display text. It returns populated cells
 only, is detached from workbook internals, and reports whether cells or text
@@ -115,8 +122,8 @@ areas into one TSV has no lossless representation.
 Copy shortcuts are focus-scoped to the Viewer viewport; typing Ctrl/Cmd+C in an
 unrelated input or another Viewer never copies this workbook.
 
-## Removal schedule
+## Removal in 0.77
 
 `select()`, `selection`, `onSelectionChange`, `CellRange`, and `SelectionMode`
-remain as migration-only compatibility surfaces on the development line and
-are scheduled for removal in 0.77.0. Do not add new usage of them.
+are removed in 0.77. No compatibility aliases remain; migrate every call site
+before upgrading.

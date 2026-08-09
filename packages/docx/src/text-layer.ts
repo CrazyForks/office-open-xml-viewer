@@ -75,6 +75,11 @@ export function buildDocxTextLayer(
     setSelectionData(span, 'ooxmlSelectionRun', 'docx');
     setSelectionData(span, 'runIndex', String(runIndex));
     if (run.paragraphId !== undefined) setSelectionData(span, 'paragraphId', run.paragraphId);
+    if (run.source !== undefined) {
+      setSelectionData(span, 'sourceStory', run.source.story);
+      setSelectionData(span, 'sourceStoryInstance', run.source.storyInstance);
+      setSelectionData(span, 'sourcePath', JSON.stringify(run.source.path));
+    }
     span.textContent = run.text;
     // The `font` shorthand must precede `line-height` because the shorthand
     // resets `line-height` to `normal`. Reset `letter-spacing` so a parent
@@ -126,7 +131,13 @@ export function buildDocxTextLayer(
       `white-space:pre;color:transparent;cursor:${cursor};pointer-events:all;`;
     if (link && onHyperlinkClick) {
       span.title = link.kind === 'external' ? link.url : link.ref;
-      span.addEventListener('click', () => onHyperlinkClick(link));
+      span.addEventListener('click', (event) => {
+        // Hyperlink activation owns this click. The Viewer-level element-context
+        // listener observes defaultPrevented and must not focus a drawing under
+        // link text in the same gesture.
+        event.preventDefault();
+        onHyperlinkClick(link);
+      });
     }
     layer.appendChild(span);
   }

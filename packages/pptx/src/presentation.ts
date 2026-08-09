@@ -59,7 +59,7 @@ import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
 import {
   hitTestPptxSlideContext,
   type PptxElementContextOptions,
-  type PptxElementSelectionContext,
+  type PptxElementContext,
   type PptxSlidePoint,
 } from './element-selection';
 
@@ -114,9 +114,14 @@ export interface RenderSlideOptions {
   skipMediaControls?: boolean;
   /** Translucent overlay drawn over the finished slide (hidden-slide dimming). */
   dim?: DimOptions;
+}
+
+/** Options for {@link PptxPresentation.presentSlide}. */
+export interface PresentSlideOptions extends Omit<RenderSlideOptions, 'skipMediaControls'> {
   /**
-   * Called for asynchronous embedded-media fetch, decode, and playback
-   * failures created by {@link PptxPresentation.presentSlide}.
+   * Called for embedded-media decode and playback failures that occur after
+   * the presentation handle has been returned. Initial rendering and media
+   * acquisition failures reject `presentSlide()` instead.
    */
   onError?: (error: Error) => void;
 }
@@ -606,7 +611,7 @@ export class PptxPresentation {
     slideIndex: number,
     point: PptxSlidePoint,
     options: PptxElementContextOptions = {},
-  ): Promise<PptxElementSelectionContext | null> {
+  ): Promise<PptxElementContext | null> {
     this._assertResourceHealthy();
     if (!Number.isInteger(slideIndex) || slideIndex < 0 || slideIndex >= this.slideCount) {
       throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
@@ -724,7 +729,7 @@ export class PptxPresentation {
   async presentSlide(
     canvas: HTMLCanvasElement,
     slideIndex: number,
-    opts: RenderSlideOptions = {},
+    opts: PresentSlideOptions = {},
   ): Promise<PresentationHandle> {
     this._assertResourceHealthy();
     try {

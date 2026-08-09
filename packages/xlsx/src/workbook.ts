@@ -28,7 +28,7 @@ import {
   HARD_MAX_RAW_PART_CACHE_ENTRIES,
 } from '@silurus/ooxml-core/worker';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
-import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility } from './types.js';
+import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, XlsxRenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
@@ -64,6 +64,13 @@ import {
 } from './worksheet-pull-client.js';
 import { GridGeometry } from './internal/grid-geometry.js';
 import { inheritSheetRenderCache } from './renderer.js';
+
+/** Public options for {@link XlsxWorkbook.renderViewportToBitmap}. Viewer-only
+ * worksheet projection state is intentionally not part of this contract. */
+export type RenderViewportToBitmapOptions = Omit<
+  XlsxRenderViewportOptions,
+  'onTextRun'
+> & { width: number; height: number };
 
 /** @internal Viewer-only hook for retaining web fonts in the canvas document. */
 export const retainXlsxViewerFonts = Symbol('retain-xlsx-viewer-fonts');
@@ -681,14 +688,14 @@ export class XlsxWorkbook {
     return formatCellValue(cell, this.parsedWorkbook.styles, null, ws.date1904);
   }
 
-  /**
-   * Render a sheet viewport into `target`. Note: `opts.fetchImage` is ignored
-   * here — image bytes always come from this workbook's own archive through its
-   * stable per-instance loader, whose closure identity keys the shared decoded
-   * caches, the render-pass lease, and {@link destroy}'s cache drops. Callers
-   * needing a custom byte source should use the standalone
-   * `renderWorksheetViewport` orchestrator directly.
-   */
+  /** Render a sheet viewport into `target`. Image bytes and decoded-image cache
+   * ownership stay with this workbook instance. */
+  async renderViewport(
+    target: HTMLCanvasElement | OffscreenCanvas,
+    sheetIndex: number,
+    viewport: ViewportRange,
+    opts?: XlsxRenderViewportOptions,
+  ): Promise<void>;
   async renderViewport(
     target: HTMLCanvasElement | OffscreenCanvas,
     sheetIndex: number,
@@ -733,6 +740,11 @@ export class XlsxWorkbook {
    * `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`
    * when done, or its backing memory is held until GC.
    */
+  async renderViewportToBitmap(
+    sheetIndex: number,
+    viewport: ViewportRange,
+    opts: RenderViewportToBitmapOptions,
+  ): Promise<ImageBitmap>;
   async renderViewportToBitmap(
     sheetIndex: number,
     viewport: ViewportRange,

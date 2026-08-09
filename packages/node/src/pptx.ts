@@ -75,14 +75,14 @@ export interface PptxPresentationSession extends AsyncIterable<Slide> {
  * Exhausting or breaking the iterator closes the retained WASM archive.
  */
 export async function openPptxPresentation(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
+  buffer: ArrayBuffer | Uint8Array,
   options: OpenPptxPresentationOptions = {},
 ): Promise<PptxPresentationSession> {
   return openPptxPresentationImpl(buffer, options);
 }
 
 async function openPptxPresentationImpl(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
+  buffer: ArrayBuffer | Uint8Array,
   options: OpenPptxPresentationOptions = {},
 ): Promise<PptxPresentationSessionImpl> {
   const acquired = await acquirePptxNodeSession(toUint8(buffer), getPptxWasmModule(), options);
@@ -323,7 +323,7 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
 /** Materialize a complete caller-owned presentation through the same retained
  * archive and acknowledged slide producer as {@link openPptxPresentation}. */
 export async function materializePptxPresentation(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
+  buffer: ArrayBuffer | Uint8Array,
   options: OpenPptxPresentationOptions = {},
 ): Promise<Presentation> {
   return usingOwnedSession(
@@ -336,7 +336,7 @@ export async function materializePptxPresentation(
   );
 }
 
-function toUint8(buffer: ArrayBuffer | Uint8Array | Buffer): Uint8Array {
+function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
   return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
 }
 

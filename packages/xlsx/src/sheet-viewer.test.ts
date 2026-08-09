@@ -38,7 +38,163 @@ function worksheet(name: string): Worksheet {
   } as unknown as Worksheet;
 }
 
+function worksheetWithChart(name: string): Worksheet {
+  return {
+    ...worksheet(name),
+    charts: [{
+      fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0,
+      toCol: 4, toColOff: 0, toRow: 8, toRowOff: 0,
+      chart: {
+        chartType: 'bar', title: 'Revenue', categories: ['Q1', 'Q2'],
+        series: [{ name: 'Actual', values: [10, 20] }],
+      },
+    }],
+  } as unknown as Worksheet;
+}
+
+function pointerEvent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    button: 0,
+    pointerId: 1,
+    pointerType: 'mouse',
+    clientX: 100,
+    clientY: 80,
+    shiftKey: false,
+    preventDefault: () => undefined,
+    ...overrides,
+  };
+}
+
 describe('XlsxSheetViewer canvas mount', () => {
+  it('keeps an existing range on contextmenu inside it and selects an outside target', async () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const received: Array<{ originalEvent: MouseEvent; getContext(): Promise<unknown> }> = [];
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      onContextMenu(event) { received.push(event); },
+    });
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      canvasArea: FakeEl;
+      scrollHost: FakeEl;
+      getCellAt(clientX: number, clientY: number): { row: number; col: number } | null;
+    } }).engine;
+    engine.currentWorksheet = worksheet('Context menu');
+    engine.canvasArea.clientWidth = 800;
+    engine.canvasArea.clientHeight = 600;
+    engine.scrollHost.clientWidth = 800;
+    engine.scrollHost.clientHeight = 600;
+    viewer.setSelection({
+      areas: [
+        { kind: 'cells', top: 1, left: 1, bottom: 5, right: 2 },
+        { kind: 'cells', top: 10, left: 4, bottom: 11, right: 5 },
+      ],
+      activeAreaIndex: 1,
+      activeCell: { row: 10, col: 4 },
+      extensionAnchor: { row: 11, col: 5 },
+    });
+    const before = viewer.selectionState;
+    const insideEvent = {
+      button: 2, clientX: 100, clientY: 80, defaultPrevented: false,
+    } as unknown as MouseEvent;
+
+    engine.scrollHost.dispatch('contextmenu', insideEvent);
+
+    expect(received[0].originalEvent).toBe(insideEvent);
+    expect(viewer.selectionState).toEqual(before);
+    await expect(received[0].getContext()).resolves.toMatchObject({ kind: 'range', selection: before });
+
+    const outsideEvent = {
+      button: 2, clientX: 300, clientY: 200, defaultPrevented: false,
+    } as unknown as MouseEvent;
+    const outsideCell = engine.getCellAt(300, 200);
+    engine.scrollHost.dispatch('contextmenu', outsideEvent);
+
+    await expect(received[1].getContext()).resolves.toMatchObject({ kind: 'range' });
+    expect(viewer.selectionState).toMatchObject({
+      areas: [{ kind: 'cells', top: outsideCell?.row, left: outsideCell?.col,
+        bottom: outsideCell?.row, right: outsideCell?.col }],
+      activeCell: outsideCell,
+    });
+    viewer.destroy();
+  });
+
+  it('selects and outlines a chart from contextmenu when element selection is enabled', async () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const contexts: Array<Promise<unknown>> = [];
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      enableElementSelection: true,
+      onContextMenu(event) { contexts.push(event.getContext()); },
+    });
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      canvasArea: FakeEl;
+      scrollHost: FakeEl;
+      selectionOverlay: FakeEl;
+    } }).engine;
+    engine.currentWorksheet = worksheetWithChart('Objects');
+    engine.canvasArea.clientWidth = 800;
+    engine.canvasArea.clientHeight = 600;
+    engine.scrollHost.clientWidth = 800;
+    engine.scrollHost.clientHeight = 600;
+
+    engine.scrollHost.dispatch('contextmenu', {
+      button: 2, clientX: 100, clientY: 80, defaultPrevented: false,
+    });
+
+    await expect(contexts[0]).resolves.toMatchObject({
+      format: 'xlsx', kind: 'element', elementType: 'chart',
+    });
+    expect(engine.selectionOverlay.querySelector('[data-xlsx-element-context-outline]')).not.toBeNull();
+    viewer.destroy();
+  });
+
+  it('preserves a selected row from its header contextmenu and selects an unselected row', async () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const contexts: Array<Promise<unknown>> = [];
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      onContextMenu(event) { contexts.push(event.getContext()); },
+      onError: vi.fn(),
+    });
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      canvasArea: FakeEl;
+      scrollHost: FakeEl;
+    } }).engine;
+    engine.currentWorksheet = worksheet('Headers');
+    engine.canvasArea.clientWidth = 800;
+    engine.canvasArea.clientHeight = 600;
+    engine.scrollHost.clientWidth = 800;
+    engine.scrollHost.clientHeight = 600;
+    viewer.setSelection('2:4');
+
+    engine.scrollHost.dispatch('contextmenu', {
+      button: 2, clientX: 25, clientY: 80, defaultPrevented: false,
+    });
+    expect(viewer.selectionState?.areas).toEqual([{ kind: 'rows', firstRow: 2, lastRow: 4 }]);
+    await expect(contexts[0]).resolves.toMatchObject({ kind: 'range' });
+
+    engine.scrollHost.dispatch('contextmenu', {
+      button: 2, clientX: 25, clientY: 200, defaultPrevented: false,
+    });
+    const outsideArea = viewer.selectionState?.areas[0];
+    expect(outsideArea?.kind).toBe('rows');
+    if (outsideArea?.kind === 'rows') {
+      expect(outsideArea.firstRow).toBe(outsideArea.lastRow);
+      expect(outsideArea.firstRow < 2 || outsideArea.firstRow > 4).toBe(true);
+    }
+    await expect(contexts[1]).resolves.toMatchObject({ kind: 'range' });
+    viewer.destroy();
+  });
+
   it('selects an A1 range as geometry without inventing ActiveCell direction', () => {
     installDom();
     const parent = makeContainer();
@@ -120,6 +276,115 @@ describe('XlsxSheetViewer canvas mount', () => {
       activeCell: { row: 3, col: 1 },
       extensionAnchor: { row: 1, col: 1 },
     })).toThrow(/activeCell/);
+    viewer.destroy();
+  });
+
+  it('coalesces bounded context notifications to the latest selection per frame', () => {
+    const document = installDom();
+    const frames: FrameRequestCallback[] = [];
+    Object.assign(document.defaultView, {
+      requestAnimationFrame(callback: FrameRequestCallback) {
+        frames.push(callback);
+        return frames.length;
+      },
+      cancelAnimationFrame: vi.fn(),
+    });
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const contexts: unknown[] = [];
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      onSelectionContextChange(context) {
+        contexts.push(context);
+      },
+    });
+    const engine = (viewer as unknown as { engine: { currentWorksheet: Worksheet } }).engine;
+    engine.currentWorksheet = {
+      ...worksheet('AI context'),
+      rows: [
+        { index: 1, cells: [{ row: 1, col: 1, value: { type: 'text', text: 'old' } }] },
+        { index: 2, cells: [{ row: 2, col: 2, value: { type: 'text', text: 'latest' } }] },
+      ],
+    } as unknown as Worksheet;
+
+    viewer.setSelection('A1');
+    viewer.setSelection('B2');
+    expect(contexts).toEqual([]);
+    expect(frames).toHaveLength(1);
+    frames.shift()?.(0);
+
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0]).toMatchObject({
+      format: 'xlsx',
+      kind: 'range',
+      maxCells: 1_000,
+      maxTextCharacters: 65_536,
+      cells: [{ address: { row: 2, col: 2 }, value: 'latest' }],
+    });
+    viewer.destroy();
+  });
+
+  it('keeps element context disabled when only the context callback is supplied', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      onSelectionContextChange: vi.fn(),
+    });
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      canvasArea: FakeEl;
+      scrollHost: FakeEl;
+      selectionOverlay: FakeEl;
+    } }).engine;
+    engine.currentWorksheet = worksheetWithChart('Objects');
+    engine.canvasArea.clientWidth = 800;
+    engine.canvasArea.clientHeight = 600;
+    engine.scrollHost.clientWidth = 800;
+    engine.scrollHost.clientHeight = 600;
+    expect(engine.scrollHost._listeners.get('contextmenu') ?? []).toHaveLength(0);
+
+    engine.scrollHost.dispatch('pointerdown', pointerEvent({ clientX: 100, clientY: 80 }));
+    engine.scrollHost.dispatch('pointerup', pointerEvent({ clientX: 100, clientY: 80 }));
+
+    expect(viewer.getSelectionContext()?.kind).toBe('range');
+    viewer.destroy();
+  });
+
+  it('supports getter-only chart context when explicitly enabled', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      enableElementSelection: true,
+    });
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      canvasArea: FakeEl;
+      scrollHost: FakeEl;
+      selectionOverlay: FakeEl;
+    } }).engine;
+    engine.currentWorksheet = worksheetWithChart('Objects');
+    engine.canvasArea.clientWidth = 800;
+    engine.canvasArea.clientHeight = 600;
+    engine.scrollHost.clientWidth = 800;
+    engine.scrollHost.clientHeight = 600;
+
+    engine.scrollHost.dispatch('pointerdown', pointerEvent({ clientX: 100, clientY: 80 }));
+    engine.scrollHost.dispatch('pointerup', pointerEvent({ clientX: 100, clientY: 80 }));
+
+    expect(viewer.getSelectionContext()).toMatchObject({
+      format: 'xlsx', kind: 'element', sheetName: 'Objects', elementType: 'chart',
+      text: expect.stringContaining('Revenue'),
+    });
+    expect(engine.selectionOverlay.querySelector('[data-xlsx-element-context-outline]')).not.toBeNull();
+
+    engine.scrollHost.dispatch('pointerdown', pointerEvent({ clientX: 700, clientY: 500 }));
+    engine.scrollHost.dispatch('pointerup', pointerEvent({ clientX: 700, clientY: 500 }));
+    expect(viewer.getSelectionContext()?.kind).toBe('range');
+    expect(engine.selectionOverlay.querySelector('[data-xlsx-element-context-outline]')).toBeNull();
     viewer.destroy();
   });
 
@@ -215,27 +480,6 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(() => viewer.setSelection('A1')).toThrow('consumer failure');
     await Promise.resolve();
     expect(activeRows).toEqual([1, 2]);
-    viewer.destroy();
-  });
-
-  it('preserves complete geometry in the deprecated projection for an interior anchor', () => {
-    installDom();
-    const parent = makeContainer();
-    const canvas = makeEl('canvas');
-    parent.appendChild(canvas);
-    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
-    viewer.setSelection({
-      areas: [{ kind: 'cells', top: 1, left: 1, bottom: 4, right: 4 }],
-      activeAreaIndex: 0,
-      activeCell: { row: 2, col: 2 },
-      extensionAnchor: { row: 2, col: 2 },
-    });
-
-    expect(viewer.selection).toEqual({
-      anchor: { row: 1, col: 1 },
-      active: { row: 4, col: 4 },
-      mode: 'cells',
-    });
     viewer.destroy();
   });
 
@@ -394,7 +638,7 @@ describe('XlsxSheetViewer canvas mount', () => {
       ],
     } as unknown as Worksheet;
 
-    viewer.select('B2:XFC1048575');
+    viewer.setSelection('B2:XFC1048575');
     const result = await engine.copySelection();
 
     expect(writeText).not.toHaveBeenCalled();
@@ -484,12 +728,128 @@ describe('XlsxSheetViewer canvas mount', () => {
       truncated: true,
       maxCells: 2,
     });
-    expect(context?.cells).toEqual([
+    expect(context?.kind).toBe('range');
+    if (!context || context.kind !== 'range') throw new Error('Expected range context');
+    expect(context.cells).toEqual([
       { address: { row: 1, col: 1 }, displayText: '', valueType: 'text', value: 'Revenue' },
       {
         address: { row: 1, col: 2 }, displayText: '', valueType: 'number', value: 42,
         formula: 'SUM(B2:B4)',
       },
+    ]);
+    viewer.destroy();
+  });
+
+  it('does not let explicit empty cells consume the populated-cell limit', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: { currentWorksheet: Worksheet } }).engine;
+    engine.currentWorksheet = {
+      ...worksheet('Sparse'),
+      rows: [{ index: 1, cells: [
+        { row: 1, col: 1, value: { type: 'empty' } },
+        { row: 1, col: 2, value: { type: 'number', number: 42 } },
+      ] }],
+    } as unknown as Worksheet;
+    viewer.setSelection('A1:B1');
+
+    const context = viewer.getSelectionContext({ maxCells: 1 });
+
+    expect(context?.kind).toBe('range');
+    if (!context || context.kind !== 'range') throw new Error('Expected range context');
+    expect(context.cells).toEqual([
+      { address: { row: 1, col: 2 }, displayText: '', valueType: 'number', value: 42 },
+    ]);
+    expect(context.truncated).toBe(false);
+    viewer.destroy();
+  });
+
+  it('preserves the published 1 MiB default text budget for direct range queries', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: { currentWorksheet: Worksheet } }).engine;
+    const value = 'x'.repeat(40_000);
+    engine.currentWorksheet = {
+      ...worksheet('Large context'),
+      rows: [{ index: 1, cells: [
+        { row: 1, col: 1, value: { type: 'text', text: value } },
+        { row: 1, col: 2, value: { type: 'text', text: value } },
+      ] }],
+    } as unknown as Worksheet;
+    viewer.setSelection('A1:B1');
+
+    const context = viewer.getSelectionContext();
+
+    expect(context?.kind).toBe('range');
+    if (!context || context.kind !== 'range') throw new Error('Expected range context');
+    expect(context.maxTextCharacters).toBe(1_048_576);
+    expect(context.textCharacters).toBe(80_000);
+    expect(context.truncated).toBe(false);
+    expect(context.cells).toHaveLength(2);
+    viewer.destroy();
+  });
+
+  it('skips rows and cells outside a small selected interval', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: { currentWorksheet: Worksheet } }).engine;
+    let rowCellReads = 0;
+    const rows = Array.from({ length: 10_000 }, (_, index) => {
+      const row = index + 1;
+      return {
+        index: row,
+        get cells() {
+          rowCellReads++;
+          return [{ row, col: 10_000, value: { type: 'number' as const, number: row } }];
+        },
+      };
+    });
+    engine.currentWorksheet = { ...worksheet('Sparse'), rows } as unknown as Worksheet;
+    viewer.setSelection('NTP10000');
+
+    const context = viewer.getSelectionContext();
+    expect(context?.kind).toBe('range');
+    if (!context || context.kind !== 'range') throw new Error('Expected range context');
+    expect(context.cells).toMatchObject([
+      { address: { row: 10_000, col: 10_000 }, value: 10_000 },
+    ]);
+    expect(rowCellReads).toBeLessThan(10);
+    viewer.destroy();
+  });
+
+  it('extracts context from parser-accepted rows and cells in document order', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: { currentWorksheet: Worksheet } }).engine;
+    engine.currentWorksheet = {
+      ...worksheet('Document order'),
+      rows: [
+        { index: 10, cells: [{ row: 10, col: 1, value: { type: 'text', text: 'later' } }] },
+        { index: 1, cells: [
+          { row: 1, col: 10, value: { type: 'text', text: 'right' } },
+          { row: 1, col: 1, value: { type: 'text', text: 'selected' } },
+        ] },
+      ],
+    } as unknown as Worksheet;
+    viewer.setSelection('A1');
+
+    const context = viewer.getSelectionContext();
+    expect(context?.kind).toBe('range');
+    if (!context || context.kind !== 'range') throw new Error('Expected range context');
+    expect(context.cells).toMatchObject([
+      { address: { row: 1, col: 1 }, value: 'selected' },
     ]);
     viewer.destroy();
   });
@@ -537,8 +897,16 @@ describe('XlsxSheetViewer canvas mount', () => {
     } as unknown as Worksheet;
     viewer.setSelection('A1');
 
-    expect(viewer.getSelectionContext({ maxTextCharacters: 1 })?.cells[0].value).toBe('');
-    expect(viewer.getSelectionContext({ maxTextCharacters: 2 })?.cells[0].value).toBe('\ud83d\ude00');
+    const oneCharacter = viewer.getSelectionContext({ maxTextCharacters: 1 });
+    const twoCharacters = viewer.getSelectionContext({ maxTextCharacters: 2 });
+    expect(oneCharacter?.kind).toBe('range');
+    expect(twoCharacters?.kind).toBe('range');
+    if (!oneCharacter || oneCharacter.kind !== 'range' ||
+      !twoCharacters || twoCharacters.kind !== 'range') {
+      throw new Error('Expected range context');
+    }
+    expect(oneCharacter.cells[0].value).toBe('');
+    expect(twoCharacters.cells[0].value).toBe('\ud83d\ude00');
     viewer.destroy();
   });
 
@@ -576,9 +944,27 @@ describe('XlsxSheetViewer canvas mount', () => {
     const mounted = descendants(parent);
 
     expect(mounted.every((element) => element.ownerDocument === popupDocument)).toBe(true);
-    expect(popupDocument.head.querySelector('style[data-xlsx-viewer-styles]')).not.toBeNull();
+    const viewerStyle = popupDocument.head.querySelector('style[data-xlsx-viewer-styles]');
+    expect(viewerStyle).not.toBeNull();
+    expect(viewerStyle?.textContent).toContain(
+      '[data-xlsx-viewport-input]:focus{outline:none}',
+    );
+    expect(viewerStyle?.textContent).toContain(
+      '[data-xlsx-viewport-input]:focus-visible:not([data-xlsx-pointer-focus]){outline:2px solid #1a73e8;outline-offset:-2px}',
+    );
     expect(openerDocument.head.querySelector('style[data-xlsx-viewer-styles]')).toBeNull();
     const viewportInput = mounted.find((element) => element.hasAttribute('data-xlsx-viewport-input')) as FakeEl;
+    viewportInput.dispatch('pointerdown', {
+      button: 0,
+      pointerId: 1,
+      pointerType: 'mouse',
+      clientX: 0,
+      clientY: 0,
+      shiftKey: false,
+    });
+    expect(viewportInput.hasAttribute('data-xlsx-pointer-focus')).toBe(true);
+    viewportInput.dispatch('blur');
+    expect(viewportInput.hasAttribute('data-xlsx-pointer-focus')).toBe(false);
     expect(viewportInput._listeners.get('keydown')).toHaveLength(1);
     expect(popupDocument.listenerCount('keydown')).toBe(0);
     expect(openerDocument.listenerCount('keydown')).toBe(0);
@@ -716,14 +1102,14 @@ describe('XlsxSheetViewer canvas mount', () => {
       clientY: 300,
     }));
     engine.scrollHost.dispatch('pointerdown', pointer({}));
-    const primarySelection = viewer.selection;
+    const primarySelection = viewer.selectionState;
     engine.scrollHost.dispatch('pointerup', pointer({
       pointerId: 2,
       pointerType: 'touch',
       clientX: 400,
       clientY: 300,
     }));
-    expect(viewer.selection).toEqual(primarySelection);
+    expect(viewer.selectionState).toEqual(primarySelection);
 
     engine.scrollHost.dispatch('pointerdown', pointer({
       pointerId: 2,
@@ -745,11 +1131,11 @@ describe('XlsxSheetViewer canvas mount', () => {
     engine.scrollHost.dispatch('pointerup', pointer({ pointerId: 2 }));
     engine.scrollHost.dispatch('pointercancel', pointer({ pointerId: 2 }));
     expect(frames).toHaveLength(0);
-    expect(viewer.selection).toEqual(primarySelection);
+    expect(viewer.selectionState).toEqual(primarySelection);
 
     engine.scrollHost.dispatch('pointermove', pointer({ clientX: 1_600, clientY: 1_200 }));
-    expect(viewer.selection?.active).toEqual(engine.getCellAt(779, 579));
-    const visibleEdgeSelection = viewer.selection;
+    expect(viewer.selectionState?.activeCell).toEqual(engine.getCellAt(779, 579));
+    const visibleEdgeSelection = viewer.selectionState;
     engine.scrollHost.dispatch('pointerup', pointer({ pointerId: 2 }));
     engine.scrollHost.dispatch('pointercancel', pointer({ pointerId: 2 }));
     for (let frame = 1; frame <= 20; frame += 1) {
@@ -760,8 +1146,12 @@ describe('XlsxSheetViewer canvas mount', () => {
 
     expect(viewer.getViewportOffset().x).toBeGreaterThan(0);
     expect(viewer.getViewportOffset().y).toBeGreaterThan(0);
-    expect(viewer.selection?.active.row).toBeGreaterThan(visibleEdgeSelection?.active.row ?? 0);
-    expect(viewer.selection?.active.col).toBeGreaterThan(visibleEdgeSelection?.active.col ?? 0);
+    expect(viewer.selectionState?.activeCell.row).toBeGreaterThan(
+      visibleEdgeSelection?.activeCell.row ?? 0,
+    );
+    expect(viewer.selectionState?.activeCell.col).toBeGreaterThan(
+      visibleEdgeSelection?.activeCell.col ?? 0,
+    );
 
     engine.scrollHost.dispatch('pointerup', pointer({ clientX: 1_600, clientY: 1_200 }));
     viewer.destroy();
@@ -808,7 +1198,7 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(viewer.sheetCount).toBe(0);
     expect(viewer.sheetNames).toEqual([]);
     expect(viewer.getViewportOffset()).toEqual({ x: 0, y: 0 });
-    expect(viewer.selection).toBeNull();
+    expect(viewer.selectionState).toBeNull();
     expect(viewer.getScale()).toBe(1.25);
     expect(viewer.hiddenSheetMode).toBe('dim');
     expect(viewer.visibleSheetCount).toBe(0);
@@ -832,7 +1222,7 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(() => viewer.zoomOut()).toThrow(closed);
     expect(() => viewer.fitWidth()).toThrow(closed);
     expect(() => viewer.fitPage()).toThrow(closed);
-    expect(() => viewer.select('A1')).toThrow(closed);
+    expect(() => viewer.setSelection('A1')).toThrow(closed);
     expect(() => viewer.setSelectionColor('#000')).toThrow(closed);
     expect(() => viewer.clearFind()).toThrow(closed);
   });
@@ -860,17 +1250,21 @@ describe('XlsxSheetViewer canvas mount', () => {
       destroy: vi.fn(),
       getResourceMetrics: vi.fn().mockResolvedValue(metrics),
     } as unknown as XlsxWorkbook;
-    vi.spyOn(XlsxWorkbook, 'load').mockImplementation(async (_source, options) => {
+    const loadSpy = vi.spyOn(XlsxWorkbook, 'load').mockImplementation(async (_source, options) => {
       options?.onResourceMetrics?.(metrics);
       return workbook;
     });
 
     const canvas = makeEl('canvas');
-    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, { password: 'secret' });
     const engine = (viewer as unknown as { engine: { showSheet(index: number): Promise<void> } }).engine;
     vi.spyOn(engine, 'showSheet').mockResolvedValue(undefined);
 
     await viewer.load(new ArrayBuffer(0));
+    expect(loadSpy).toHaveBeenCalledWith(
+      expect.any(ArrayBuffer),
+      expect.objectContaining({ password: 'secret' }),
+    );
     viewer.destroy();
 
     await expect(viewer.getResourceMetrics()).resolves.toEqual(metrics);

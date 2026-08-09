@@ -471,7 +471,7 @@ function mountSheet(el: HTMLElement, url: string): void {
   host.className = 'demo-xlsx';
   el.appendChild(host);
   const viewer = new XlsxViewer(host, { useGoogleFonts: true, showZoomSlider: true });
-  viewer.load(url).catch(() => { /* viewer surfaces its own errors */ });
+  viewer.load(url).catch((error) => host.setAttribute('data-error', err(error)));
 }
 
 function button(label: string): HTMLButtonElement {

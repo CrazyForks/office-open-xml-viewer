@@ -3,6 +3,7 @@ import { DocxScrollViewer } from './scroll-viewer.js';
 import { DocxDocument } from './document.js';
 import { installDom, makeContainer, makeEl, makeBorrowedDocxScrollViewer, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 import * as docxIndex from './index.js';
+import type { DocxElementContext } from './selection-context.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -909,12 +910,16 @@ describe('DocxScrollViewer — self-load path (T7 story)', () => {
     // self-loaded (non-borrowed) viewer is not left blank (I-2).
     const engine = new FakeDocxEngine(10, [{ widthPt: 100, heightPt: 200 }]);
     const loadSpy = vi.spyOn(DocxDocument, 'load').mockResolvedValue(engine.asDoc());
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, { gap: 10 });
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, { gap: 10, password: 'secret' });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
     scrollHost.clientWidth = 200;
     await v.load('sample.docx');
     expect(loadSpy).toHaveBeenCalledTimes(1);
+    expect(loadSpy).toHaveBeenCalledWith(
+      'sample.docx',
+      expect.objectContaining({ password: 'secret' }),
+    );
     // Layout happened: slots mounted and the spacer was sized.
     expect(v.mountedPageIndicesForTest().length).toBeGreaterThan(0);
     const spacer = scrollHost.children[0] as FakeEl;
@@ -1089,6 +1094,148 @@ describe('DocxScrollViewer — text selection (T5)', () => {
     // slot/layer holds zero spans from the superseded render.
     expect(staleLayer.children.length).toBe(0);
     v.destroy();
+  });
+});
+
+describe('DocxScrollViewer — element context', () => {
+  function elementContext(): DocxElementContext {
+    return {
+      format: 'docx', kind: 'element', pageIndex: 0, elementIndex: 0,
+      elementType: 'chart', point: { xPt: 50, yPt: 100 },
+      bounds: { xPt: 10, yPt: 20, widthPt: 80, heightPt: 60 },
+      source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+      text: 'Revenue', seriesCount: 1, truncated: false,
+      truncationReasons: [], textCharacters: 7, maxTextCharacters: 16_384,
+    };
+  }
+
+  async function setupElementContext(opts: ConstructorParameters<typeof DocxScrollViewer>[1]) {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(1, [{ widthPt: 100, heightPt: 200 }]);
+    engine.elementContext = elementContext();
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(), gap: 10, paddingLeft: 0, paddingRight: 0, ...opts,
+    });
+    const scrollHost = container.children[0].children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    await Promise.resolve();
+    await Promise.resolve();
+    const wrapper = scrollHost.children.find((child) =>
+      child.children.some((candidate) => candidate.tag === 'canvas')) as FakeEl;
+    const canvas = wrapper.children.find((child) => child.tag === 'canvas') as FakeEl;
+    canvas.clientWidth = parseFloat(wrapper.style.width);
+    canvas.clientHeight = parseFloat(wrapper.style.height);
+    return { canvas, engine, scrollHost, v, wrapper };
+  }
+
+  it('maps contextmenu to the mounted page while keeping the native event synchronous', async () => {
+    const received: Array<{ originalEvent: MouseEvent; getContext(): Promise<unknown> }> = [];
+    const mounted = await setupElementContext({
+      enableElementSelection: true,
+      onContextMenu(event) { received.push(event); },
+    });
+    const originalEvent = {
+      target: mounted.canvas, button: 2,
+      clientX: mounted.canvas.clientWidth / 2,
+      clientY: mounted.canvas.clientHeight / 2,
+      defaultPrevented: false,
+    } as unknown as MouseEvent;
+
+    mounted.scrollHost.dispatch('contextmenu', originalEvent);
+
+    expect(received).toHaveLength(1);
+    expect(received[0].originalEvent).toBe(originalEvent);
+    await expect(received[0].getContext()).resolves.toMatchObject({
+      format: 'docx', kind: 'element', pageIndex: 0,
+    });
+    expect(mounted.engine.elementContextCalls).toHaveLength(1);
+    mounted.v.destroy();
+    expect(mounted.scrollHost._listeners.get('contextmenu') ?? []).toHaveLength(0);
+  });
+
+  it('rejects contextmenu context lookup failures without also calling onError', async () => {
+    const failure = new Error('element lookup failed');
+    const onError = vi.fn();
+    let received: { getContext(): Promise<unknown> } | undefined;
+    const mounted = await setupElementContext({
+      enableElementSelection: true,
+      onError,
+      onContextMenu(event) { received = event; },
+    });
+    mounted.engine.getElementContextAt = vi.fn().mockRejectedValue(failure);
+
+    mounted.scrollHost.dispatch('contextmenu', {
+      target: mounted.canvas, button: 2,
+      clientX: mounted.canvas.clientWidth / 2,
+      clientY: mounted.canvas.clientHeight / 2,
+      defaultPrevented: false,
+    });
+
+    await expect(received?.getContext()).rejects.toBe(failure);
+    expect(onError).not.toHaveBeenCalled();
+    mounted.v.destroy();
+  });
+
+  it('does not activate object hit-testing from the callback alone', async () => {
+    const onSelectionContextChange = vi.fn();
+    const mounted = await setupElementContext({ onSelectionContextChange });
+
+    mounted.scrollHost.dispatch('click', {
+      target: mounted.canvas, button: 0, clientX: 100, clientY: 200,
+      defaultPrevented: false,
+    });
+    await Promise.resolve();
+
+    expect(mounted.engine.elementContextCalls).toEqual([]);
+    expect(onSelectionContextChange).not.toHaveBeenCalled();
+    expect(mounted.v.getSelectionContext()).toBeNull();
+    mounted.v.destroy();
+  });
+
+  it('supports getter-only element context when explicitly enabled', async () => {
+    const currentDate = new Date('2026-08-09T12:00:00Z');
+    const mounted = await setupElementContext({ enableElementSelection: true, currentDate });
+
+    mounted.scrollHost.dispatch('click', {
+      target: mounted.canvas, button: 0,
+      clientX: mounted.canvas.clientWidth / 2,
+      clientY: mounted.canvas.clientHeight / 2,
+      defaultPrevented: false,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mounted.engine.elementContextCalls).toEqual([{
+      pageIndex: 0,
+      point: { xPt: 50, yPt: 100 },
+      options: { currentDate, maxTextCharacters: 65_536 },
+    }]);
+    expect(mounted.v.getSelectionContext()).toMatchObject({
+      format: 'docx', kind: 'element', elementType: 'chart',
+    });
+    expect(mounted.wrapper.children.at(-1)?.children).toHaveLength(1);
+    mounted.v.destroy();
+  });
+
+  it('uses the same currentDate for mounted rendering and element hit-testing', async () => {
+    const currentDate = Date.parse('2026-08-09T12:00:00Z');
+    const mounted = await setupElementContext({ enableElementSelection: true, currentDate });
+
+    expect(mounted.engine.renderCalls[0]?.currentDate).toBe(currentDate);
+    mounted.scrollHost.dispatch('click', {
+      target: mounted.canvas, button: 0,
+      clientX: mounted.canvas.clientWidth / 2,
+      clientY: mounted.canvas.clientHeight / 2,
+      defaultPrevented: false,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mounted.engine.elementContextCalls[0]?.options.currentDate).toBe(currentDate);
+    mounted.v.destroy();
   });
 });
 

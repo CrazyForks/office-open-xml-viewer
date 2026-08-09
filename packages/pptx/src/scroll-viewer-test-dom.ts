@@ -1,10 +1,10 @@
 import { vi } from 'vitest';
-import type { PptxPresentation, RenderSlideOptions, RenderSlideToBitmapOptions } from './presentation';
+import type { PptxPresentation, PresentSlideOptions, RenderSlideOptions, RenderSlideToBitmapOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
 import type {
   PptxElementContextOptions,
-  PptxElementSelectionContext,
+  PptxElementContext,
   PptxSlidePoint,
 } from './element-selection';
 import { PptxScrollViewer, type PptxScrollViewerOptions } from './scroll-viewer';
@@ -360,7 +360,7 @@ export class FakePptxEngine {
    *  worker path now ships runs back beside the bitmap, so the stub mirrors that
    *  by replaying `feedTextRuns` to `renderSlideToBitmap`'s `onTextRun` too. */
   feedTextRuns?: PptxTextRunInfo[];
-  elementContext: PptxElementSelectionContext | null = null;
+  elementContext: PptxElementContext | null = null;
   elementContextCalls: Array<{
     slideIndex: number;
     point: PptxSlidePoint;
@@ -439,7 +439,7 @@ export class FakePptxEngine {
       if (!this.deferred) resolve(bmp as unknown as ImageBitmap);
     });
   }
-  presentSlide(_canvas: unknown, slide: number, opts?: RenderSlideOptions): Promise<PresentationHandle> {
+  presentSlide(_canvas: unknown, slide: number, opts?: PresentSlideOptions): Promise<PresentationHandle> {
     const canvas = _canvas as FakeEl | undefined;
     if (canvas && opts?.width && opts.width > 0) {
       const dpr = opts.dpr ?? 1;
@@ -477,7 +477,7 @@ export class FakePptxEngine {
     slideIndex: number,
     point: PptxSlidePoint,
     options: PptxElementContextOptions = {},
-  ): Promise<PptxElementSelectionContext | null> {
+  ): Promise<PptxElementContext | null> {
     this.elementContextCalls.push({ slideIndex, point, options });
     return Promise.resolve(this.elementContext ? {
       ...structuredClone(this.elementContext),

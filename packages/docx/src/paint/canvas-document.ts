@@ -33,7 +33,6 @@ export interface CanvasDocumentPaintOptions<TTextRun> {
   readonly width?: number;
   readonly dpr?: number;
   readonly defaultTextColor?: string;
-  readonly showTrackChanges?: boolean;
   readonly fetchImage?: DocxFetchImage;
   readonly parseError: boolean;
   readonly registry: PaintResourceRegistry;
@@ -206,7 +205,6 @@ export async function renderSelectedDocumentPage<TTextRun>(
         resources,
         documentDefaultTextColor: options.defaultTextColor ?? '#000000',
         defaultTextColor: options.defaultTextColor ?? '#000000',
-        showTrackChanges: options.showTrackChanges ?? true,
       });
     } finally {
       context.restore();

@@ -248,6 +248,7 @@ export interface MeasuredTabPlanSegment {
 export interface MeasuredResourcePlanSegment {
   readonly kind: 'resource';
   readonly range: import('./types.js').TextRange;
+  readonly sourceRunIndex?: number;
   readonly measuredWidthPt: number;
   readonly resourceKey: string;
   readonly resourceKind: import('./types.js').InlineResourceKind;
@@ -812,6 +813,8 @@ export function planLine(input: PlanLineInput): LineLayout {
     } else if (segment.kind === 'resource') {
       placements.push({
         kind: 'resource', range: segment.range,
+        ...(segment.sourceRunIndex === undefined
+          ? {} : { sourceRunIndex: segment.sourceRunIndex }),
         resourceKey: segment.resourceKey, resourceKind: segment.resourceKind,
         ...(segment.orientation ? { orientation: segment.orientation } : {}),
         bounds: {
@@ -2219,6 +2222,7 @@ function planMeasuredLines(
           ?? (image.chart ? chartResourceKey(occurrence) : imageResourceKey(occurrence, image.imagePath));
         segments.push({
           kind: 'resource', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
+          ...(runIndex === undefined ? {} : { sourceRunIndex: runIndex }),
           resourceKey, resourceKind, measuredWidthPt: image.measuredWidth,
           widthPt: image.widthPt, heightPt: image.heightPt, topOffsetPt: -image.heightPt,
           ...(verticalPageFrame
@@ -2230,6 +2234,8 @@ function planMeasuredLines(
         segments.push({
           kind: 'resource',
           range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
+          ...(sourceRunIndex(segment) === undefined
+            ? {} : { sourceRunIndex: sourceRunIndex(segment) }),
           resourceKey: math.mathResourceKey, resourceKind: 'math',
           measuredWidthPt: math.measuredWidth, widthPt: math.measuredWidth,
           heightPt: math.mathAscent + math.mathDescent, topOffsetPt: -math.mathAscent,

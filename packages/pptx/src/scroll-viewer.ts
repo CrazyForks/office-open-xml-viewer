@@ -1,5 +1,7 @@
-import { computeVisibleRange, EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindHighlightColors, type FindMatch, type FindMatchesOptions, type VisibleRange, type HyperlinkTarget, type OoxmlResourceMetrics, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
+import { computeVisibleRange, EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindHighlightColors, type FindMatch, type FindMatchesOptions, type VisibleRange, type HyperlinkTarget, type OoxmlResourceMetrics, type ViewerContextMenuEvent, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
 import {
+  createCanvasElementOutlineLayer,
+  renderCanvasElementOutline,
   resolveCanvasViewerMode,
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
@@ -14,12 +16,12 @@ import {
   readPptxTextSelectionContext,
 } from './selection-context';
 import type {
-  PptxElementSelectionContext,
+  PptxElementContext,
   PptxSelectionContext,
   PptxSelectionContextOptions,
 } from './element-selection';
 import {
-  limitPptxElementSelectionContext,
+  limitPptxElementContext,
   MAX_ELEMENT_TEXT_CHARACTERS,
 } from './element-selection';
 
@@ -51,22 +53,11 @@ type InternalPptxScrollViewerOptions = PptxScrollViewerOptions & {
 };
 
 /**
- * Options for {@link PptxScrollViewer}. Extends `RenderSlideOptions` (per-slide
- * render knobs, minus `onTextRun`) and `LoadOptions` (parse/worker knobs). See
- * design §8.2.
- *
- * `onTextRun` is omitted deliberately: the viewer drives it internally per
- * mounted slot to build the optional per-slide selection overlay (gated by
- * `enableTextSelection`), so exposing it here would let a caller's callback be
- * silently overridden.
- *
- * NOTE: `RenderSlideOptions` also carries `dim` and `skipMediaControls`. The v1
- * scroll viewer never sets `dim` or `skipMediaControls` (hidden-slide dimming is
- * a PAGER policy, not a scroll-viewer feature — design §8.2 / Delta 6). These
- * inherited fields are accepted for type-compatibility but are not part of the
- * scroll-viewer's supported API.
+ * Options for {@link PptxScrollViewer}. Only the `width` and `dpr` per-slide
+ * render knobs apply to this virtualized Viewer; it owns text-run collection,
+ * media controls, and hidden-slide dimming itself.
  */
-export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTextRun'>, LoadOptions {
+export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width' | 'dpr'>, LoadOptions {
   /** Base fit width in CSS px → base zoom scale. Default: the container's width
    *  at first non-zero layout (design §7/§11 zero-width deferral). */
   width?: number;
@@ -99,12 +90,18 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    *  shipped back beside the slide bitmap, so the overlay is populated identically
    *  to main mode (no more empty overlay / one-time warning). */
   enableTextSelection?: boolean;
-  /** Enable read-only click focus for slide elements. Default false. */
+  /** Enable read-only slide-element selection with a non-editable outline. Default false. */
   enableElementSelection?: boolean;
   /** Straight-line hit tolerance in CSS pixels. Default 6. */
   elementHitTolerance?: number;
   /** Emits bounded, detached text or element context for read-only AI/MCP use. */
   onSelectionContextChange?: (context: PptxSelectionContext | null) => void;
+  /**
+   * Called synchronously for a browser `contextmenu` event. The original event
+   * can suppress the native menu; `getContext()` resolves the text or element
+   * context established at the event target.
+   */
+  onContextMenu?: (event: ViewerContextMenuEvent<PptxSelectionContext>) => void;
   /** CSS backgrounds for ordinary and active in-document search matches. */
   findHighlightColors?: FindHighlightColors;
   /**
@@ -170,11 +167,12 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    *  `onScaleChange` to match the single-canvas viewers so all five share one
    *  notification shape. */
   onScaleChange?: (scale: number) => void;
-  /** Error callback. When set, `load()` invokes it and resolves (otherwise the
-   *  error is rethrown — shared viewer error contract). It ALSO fires for async
-   *  per-slot render failures (both main `renderSlide` and worker
-   *  `renderSlideToBitmap` rejections) and embedded-media fetch/decode/playback
-   *  failures. A failed slide is left blank rather than crashing the loop.
+  /** Receives asynchronous Viewer-managed failures that cannot be observed by
+   *  awaiting the method that started them. `load()` failures always reject and
+   *  are not also delivered here. Virtualized per-slot render failures (both
+   *  main `renderSlide` and worker `renderSlideToBitmap` rejections) and
+   *  embedded-media fetch/decode/playback failures invoke it. A failed slide is
+   *  left blank rather than crashing the loop.
    *  Without an `onError`, failures are logged via `console.error` so they are
    *  never fully silent. Stable cases can be narrowed with `OoxmlError`,
    *  `OoxmlResourceLimitError`, or `OoxmlDecodedImageLimitError` re-exported by
@@ -211,6 +209,7 @@ interface SlideSlot {
   canvas: HTMLCanvasElement;
   textLayer: HTMLDivElement | null;
   highlightLayer: HTMLDivElement;
+  elementLayer: HTMLDivElement | null;
   /** slide index this slot is currently rendering / has rendered, or -1 when free. */
   renderedSlide: number;
   /** The `_scale` at which this slot's on-screen canvas bitmap (and text overlay)
@@ -286,7 +285,8 @@ export class PptxScrollViewer implements ZoomableViewer {
   private _selectionChangeListener: (() => void) | null = null;
   private _selectionContextKey = 'null';
   private _elementClickListener: ((event: MouseEvent) => void) | null = null;
-  private _elementSelectionContext: PptxElementSelectionContext | null = null;
+  private _contextMenuListener: ((event: MouseEvent) => void) | null = null;
+  private _elementContext: PptxElementContext | null = null;
   private _elementHitGeneration = 0;
   private readonly _elementHitTolerance: number;
   /** Set by `destroy()`. Async render callbacks (main + worker) check it before
@@ -432,8 +432,14 @@ export class PptxScrollViewer implements ZoomableViewer {
       this._wrapper.ownerDocument.addEventListener('selectionchange', this._selectionChangeListener);
     }
     if (opts.enableElementSelection) {
-      this._elementClickListener = (event) => { void this._onElementClick(event); };
+      this._elementClickListener = (event) => {
+        void this._onElementClick(event).catch((error) => this._reportRenderError(error));
+      };
       this._scrollHost.addEventListener('click', this._elementClickListener);
+    }
+    if (opts.onContextMenu) {
+      this._contextMenuListener = (event) => this._onContextMenu(event);
+      this._scrollHost.addEventListener('contextmenu', this._contextMenuListener);
     }
 
     this._scrollListener = () => this._onScroll();
@@ -504,6 +510,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     let selectionInvalidated = false;
     try {
       const pres = await this._presentationOwner.replace(() => PptxPresentation.load(source, {
+        password: this._opts.password,
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
         resourceLimits: this._opts.resourceLimits,
@@ -535,13 +542,12 @@ export class PptxScrollViewer implements ZoomableViewer {
       // borrowed-engine path in the constructor). relayout() is idempotent and
       // defers under a zero-width container — `_onResize` re-runs it once width
       // appears.
-      this.relayout();
+      const initialRenders: Promise<void>[] = [];
+      this._relayout(initialRenders);
+      await Promise.all(initialRenders);
     } catch (err) {
       if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
-      const e = err instanceof Error ? err : new Error(String(err));
-      if (this._opts.onError) {
-        this._opts.onError(e);
-      } else throw e;
+      throw err instanceof Error ? err : new Error(String(err));
     }
     // Notify only after the replacement has committed and relayout completed;
     // consumer callback failures are not presentation/render failures.
@@ -608,6 +614,13 @@ export class PptxScrollViewer implements ZoomableViewer {
    * fit is deferred until width appears, design §11).
    */
   relayout(): void {
+    this._relayout();
+  }
+
+  /** Synchronous geometry/layout pass. When `initialRenders` is supplied by
+   * load(), newly-mounted slot Promises are collected for direct rejection
+   * instead of being routed through the background onError channel. */
+  private _relayout(initialRenders?: Promise<void>[]): void {
     if (!this._pres) return;
     // Establish the base fit scale on the first layout that has a positive
     // width. Zoom (T4) layers its own multiplier on top of this; here we only
@@ -642,7 +655,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     }
     this._recomputeHeights();
     this._syncSpacer();
-    this._mountVisible();
+    this._mountVisible(initialRenders);
   }
 
   /** All slides are the same size, so heights = n × uniform. We still feed this
@@ -759,7 +772,7 @@ export class PptxScrollViewer implements ZoomableViewer {
   }
 
   /** Mount/recycle slots for the current visible window. */
-  private _mountVisible(): void {
+  private _mountVisible(initialRenders?: Promise<void>[]): void {
     if (!this._pres || this._pres.slideCount === 0) return;
     const r = this._range();
     const mediaRange = this._opts.enableMediaPlayback ? this._mediaRange() : null;
@@ -777,7 +790,13 @@ export class PptxScrollViewer implements ZoomableViewer {
         const slot = this._acquireSlot();
         this._positionSlot(slot, i, r);
         this._slots.set(i, slot);
-        this._renderSlot(i, slot, !!mediaRange && this._rangeContains(mediaRange, i));
+        const render = this._renderSlot(
+          i,
+          slot,
+          !!mediaRange && this._rangeContains(mediaRange, i),
+          initialRenders === undefined,
+        );
+        if (initialRenders && render) initialRenders.push(render);
       } else {
         // Re-position (offsets shift after a spacer/height change).
         this._positionSlot(this._slots.get(i)!, i, r);
@@ -833,12 +852,17 @@ export class PptxScrollViewer implements ZoomableViewer {
       'position:absolute;top:0;left:0;width:100%;height:100%;' +
       'overflow:hidden;pointer-events:none;';
     wrapper.appendChild(highlightLayer);
+    const elementLayer = createCanvasElementOutlineLayer(
+      wrapper,
+      this._opts.enableElementSelection === true,
+    );
     this._scrollHost.appendChild(wrapper);
     const slot: SlideSlot = {
       wrapper,
       canvas,
       textLayer,
       highlightLayer,
+      elementLayer,
       renderedSlide: -1,
       renderedScale: -1,
       dispatcher: new StaticCanvasRenderDispatcher(canvas, this._mode === 'worker'),
@@ -878,6 +902,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     slot.highlightLayer.innerHTML = '';
     slot.highlightLayer.style.transform = '';
     slot.highlightLayer.style.transformOrigin = '';
+    renderCanvasElementOutline(slot.elementLayer, null);
     // `_previewSlot` pins an explicit CSS height while stretching the current
     // bitmap during a zoom burst. A slot can leave the visible range before the
     // debounced settle replaces that canvas, so do not carry the old-scale height
@@ -896,6 +921,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     const wpx = this._slideWidthPx();
     slot.wrapper.style.width = `${wpx}px`;
     slot.wrapper.style.height = `${this._slideHeightPx()}px`;
+    this._redrawElementOutlineForSlot(i, slot);
     // Horizontal placement (replaces the old CSS `left:0;right:0;margin:0 auto`
     // auto-centering, which cannot honour a left gutter). Centre the slide in the
     // scroll viewport, but never let its left edge cross the left gutter: when the
@@ -935,10 +961,15 @@ export class PptxScrollViewer implements ZoomableViewer {
    * with stale x/y/w/h (the pool reuses slot objects, so the identity check alone
    * can pass for an old-epoch resolution). We gate them on the captured epoch.
    */
-  private _renderSlot(i: number, slot: SlideSlot, mediaInteractive = false): void {
-    if (!this._pres) return;
+  private _renderSlot(
+    i: number,
+    slot: SlideSlot,
+    mediaInteractive = false,
+    reportErrors = true,
+  ): Promise<void> | null {
+    if (!this._pres) return null;
     // Slot-identity guard: this slot is already rendering / has rendered slide i.
-    if (slot.renderedSlide === i) return;
+    if (slot.renderedSlide === i) return null;
     slot.renderedSlide = i;
     const renderGeneration = ++slot.renderGeneration;
 
@@ -951,13 +982,12 @@ export class PptxScrollViewer implements ZoomableViewer {
 
     if (this._opts.enableMediaPlayback && mediaInteractive) {
       slot.mediaInteractive = true;
-      this._renderInteractiveSlot(i, slot, widthPx, dpr, scale, epoch);
-      return;
+      return this._renderInteractiveSlot(i, slot, widthPx, dpr, scale, epoch, reportErrors);
     }
     slot.mediaInteractive = false;
 
     if (this._mode === 'worker') {
-      void this._renderSlotBitmap(
+      return this._renderSlotBitmap(
         i,
         slot,
         widthPx,
@@ -966,8 +996,8 @@ export class PptxScrollViewer implements ZoomableViewer {
         renderGeneration,
         dispatcher,
         generation,
+        reportErrors,
       );
-      return;
     }
 
     // Main mode: render straight onto the slot's canvas.
@@ -976,7 +1006,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     const wantRuns = wantOverlay || this._findActive;
     const onTextRun = wantRuns ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
     const canvas = slot.canvas;
-    this._pres
+    return this._pres
       .renderSlide(canvas, i, {
         width: widthPx, // this slide's own px width → uniform px-per-EMU scale (§7)
         dpr,
@@ -1012,14 +1042,16 @@ export class PptxScrollViewer implements ZoomableViewer {
         this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
-        if (
+        const isCurrent =
           renderGeneration === slot.renderGeneration &&
           dispatcher.isCurrent(generation) &&
           canvas === slot.canvas &&
           epoch === this._renderEpoch &&
           this._slots.get(i) === slot &&
-          slot.renderedSlide === i
-        ) this._reportRenderError(err);
+          slot.renderedSlide === i;
+        if (!isCurrent) return;
+        if (reportErrors) this._reportRenderError(err);
+        else throw err;
       });
   }
 
@@ -1038,8 +1070,9 @@ export class PptxScrollViewer implements ZoomableViewer {
     dpr: number,
     scale: number,
     epoch: number,
-  ): void {
-    if (!this._pres) return;
+    reportErrors = true,
+  ): Promise<void> {
+    if (!this._pres) return Promise.resolve();
     const generation = ++slot.presentationGeneration;
     slot.presentationHandle?.destroy();
     slot.presentationHandle = null;
@@ -1048,7 +1081,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     const wantRuns = wantOverlay || this._findActive;
     const onTextRun = wantRuns ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
 
-    this._pres
+    return this._pres
       .presentSlide(slot.canvas, i, {
         width: widthPx,
         dpr,
@@ -1084,7 +1117,9 @@ export class PptxScrollViewer implements ZoomableViewer {
         this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
-        if (generation === slot.presentationGeneration) this._reportRenderError(err);
+        if (generation !== slot.presentationGeneration) return;
+        if (reportErrors) this._reportRenderError(err);
+        else throw err;
       });
   }
 
@@ -1166,6 +1201,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     renderGeneration = ++slot.renderGeneration,
     dispatcher = slot.dispatcher,
     generation = dispatcher.begin(),
+    reportErrors = true,
   ): Promise<void> {
     if (this._slideInFlight.has(i)) return; // coalesce: already dispatched
     // Drop-stale before dispatch: if this slide already scrolled out of the
@@ -1240,14 +1276,17 @@ export class PptxScrollViewer implements ZoomableViewer {
       this._redrawSlotHighlights(i, slot);
       painted = true;
     } catch (err) {
-      if (
+      const isCurrent =
         renderGeneration === slot.renderGeneration &&
         dispatcher.isCurrent(generation) &&
         canvas === slot.canvas &&
         epoch === this._renderEpoch &&
         this._slots.get(i) === slot &&
-        slot.renderedSlide === i
-      ) this._reportRenderError(err);
+        slot.renderedSlide === i;
+      if (isCurrent) {
+        if (reportErrors) this._reportRenderError(err);
+        else throw err;
+      }
     } finally {
       this._slideInFlight.delete(i);
       // Re-dispatch ONLY when this invocation went stale — a LIVE slot for slide
@@ -2106,13 +2145,13 @@ export class PptxScrollViewer implements ZoomableViewer {
     const text = this._opts.enableTextSelection
       ? readPptxTextSelectionContext(
           this._wrapper,
-          this._wrapper.ownerDocument.getSelection(),
+          this._wrapper.ownerDocument?.getSelection?.() ?? null,
           options,
         )
       : null;
-    return text ?? (this._elementSelectionContext
-      ? limitPptxElementSelectionContext(
-          this._elementSelectionContext,
+    return text ?? (this._elementContext
+      ? limitPptxElementContext(
+          this._elementContext,
           options.maxTextCharacters,
         )
       : null);
@@ -2122,7 +2161,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     const context = this.getSelectionContext();
     if (context?.kind === 'text') {
       this._elementHitGeneration++;
-      this._elementSelectionContext = null;
+      this._elementContext = null;
+      this._redrawElementOutlines();
     }
     const key = JSON.stringify(context);
     if (key === this._selectionContextKey) return;
@@ -2130,61 +2170,100 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._opts.onSelectionContextChange?.(context ? structuredClone(context) : null);
   }
 
-  private _setElementSelectionContext(context: PptxElementSelectionContext | null): void {
-    this._elementSelectionContext = context ? structuredClone(context) : null;
+  private _setElementContext(context: PptxElementContext | null): void {
+    this._elementContext = context ? structuredClone(context) : null;
+    this._redrawElementOutlines();
     this._emitSelectionContextChange();
   }
 
   private _invalidateElementSelection(notify = true): void {
     this._elementHitGeneration++;
-    this._elementSelectionContext = null;
+    this._elementContext = null;
+    this._redrawElementOutlines();
     if (notify) this._emitSelectionContextChange();
   }
 
-  private async _onElementClick(event: MouseEvent): Promise<void> {
-    if (this._destroyed || event.defaultPrevented || event.button !== 0 || !this._pres) return;
-    if (this._opts.enableTextSelection && readPptxTextSelectionContext(
-      this._wrapper,
-      this._wrapper.ownerDocument.getSelection(),
-    )) {
-      this._emitSelectionContextChange();
+  private _redrawElementOutlines(): void {
+    for (const [slide, slot] of this._slots) this._redrawElementOutlineForSlot(slide, slot);
+  }
+
+  private _redrawElementOutlineForSlot(slideIndex: number, slot: SlideSlot): void {
+    const context = this._elementContext;
+    const presentation = this._pres;
+    if (!context || !presentation || context.slideIndex !== slideIndex) {
+      renderCanvasElementOutline(slot.elementLayer, null);
       return;
     }
+    renderCanvasElementOutline(slot.elementLayer, {
+      x: context.bounds.x / presentation.slideWidth,
+      y: context.bounds.y / presentation.slideHeight,
+      width: context.bounds.width / presentation.slideWidth,
+      height: context.bounds.height / presentation.slideHeight,
+      rotation: context.bounds.rotation,
+    });
+  }
+
+  private async _onElementClick(event: MouseEvent): Promise<void> {
+    if (this._destroyed || event.defaultPrevented || event.button !== 0) return;
+    await this._resolveContextAt(event);
+  }
+
+  private _onContextMenu(event: MouseEvent): void {
+    let context: Promise<PptxSelectionContext | null> | undefined;
+    this._opts.onContextMenu?.({
+      originalEvent: event,
+      getContext: () => context ??= this._resolveContextAt(event),
+    });
+  }
+
+  private async _resolveContextAt(event: MouseEvent): Promise<PptxSelectionContext | null> {
+    const presentation = this._pres;
+    if (this._destroyed || !presentation) return null;
+    if (this._opts.enableTextSelection && readPptxTextSelectionContext(
+      this._wrapper,
+      this._wrapper.ownerDocument?.getSelection?.() ?? null,
+    )) {
+      this._emitSelectionContextChange();
+      return this._destroyed ? null : this.getSelectionContext();
+    }
+    if (!this._opts.enableElementSelection) return this.getSelectionContext();
     const target = event.target as Node | null;
     const entry = [...this._slots].find(([, slot]) => target !== null && slot.wrapper.contains(target));
     if (!entry) {
       this._invalidateElementSelection();
-      return;
+      return null;
     }
     const [slideIndex, slot] = entry;
     const rect = slot.canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) {
       this._invalidateElementSelection();
-      return;
+      return null;
     }
     const localX = event.clientX - rect.left;
     const localY = event.clientY - rect.top;
     if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) {
       this._invalidateElementSelection();
-      return;
+      return null;
     }
     const generation = ++this._elementHitGeneration;
     const point = {
-      x: localX / rect.width * this._pres.slideWidth,
-      y: localY / rect.height * this._pres.slideHeight,
+      x: localX / rect.width * presentation.slideWidth,
+      y: localY / rect.height * presentation.slideHeight,
     };
-    let context: PptxElementSelectionContext | null;
+    let context: PptxElementContext | null;
     try {
-      context = await this._pres.getElementContextAt(slideIndex, point, {
-        tolerance: this._elementHitTolerance / rect.width * this._pres.slideWidth,
+      context = await presentation.getElementContextAt(slideIndex, point, {
+        tolerance: this._elementHitTolerance / rect.width * presentation.slideWidth,
         maxTextCharacters: MAX_ELEMENT_TEXT_CHARACTERS,
       });
     } catch (error) {
-      if (!this._destroyed && generation === this._elementHitGeneration) this._reportRenderError(error);
-      return;
+      if (this._destroyed || generation !== this._elementHitGeneration ||
+        presentation !== this._pres) return null;
+      throw error;
     }
-    if (this._destroyed || generation !== this._elementHitGeneration) return;
-    this._setElementSelectionContext(context);
+    if (this._destroyed || generation !== this._elementHitGeneration || presentation !== this._pres) return null;
+    this._setElementContext(context);
+    return this._destroyed ? null : this.getSelectionContext();
   }
 
   /**
@@ -2206,7 +2285,11 @@ export class PptxScrollViewer implements ZoomableViewer {
       this._scrollHost.removeEventListener('click', this._elementClickListener);
       this._elementClickListener = null;
     }
-    this._elementSelectionContext = null;
+    if (this._contextMenuListener) {
+      this._scrollHost.removeEventListener('contextmenu', this._contextMenuListener);
+      this._contextMenuListener = null;
+    }
+    this._elementContext = null;
     if (this._scrollListener) {
       this._scrollHost.removeEventListener('scroll', this._scrollListener);
       this._scrollListener = null;

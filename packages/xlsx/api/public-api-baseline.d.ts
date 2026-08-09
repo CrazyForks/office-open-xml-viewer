@@ -51,17 +51,6 @@ export interface CellFont {
     underlineStyle?: string;
     vertAlign?: 'superscript' | 'subscript';
 }
-export interface CellRange {
-    anchor: CellAddress;
-    active: CellAddress;
-    mode: SelectionMode;
-}
-interface CellRange__emitterCollision1 {
-    top: number;
-    left: number;
-    bottom: number;
-    right: number;
-}
 export type CellValue = {
     type: 'empty';
 } | {
@@ -202,7 +191,7 @@ export interface ChartErrBars {
     lineWidthEmu?: number;
     dash?: string;
 }
-interface ChartexBoxSeries {
+export interface ChartexBoxSeries {
     name: string;
     color?: string | null;
     valuesByCategory: number[][];
@@ -212,18 +201,18 @@ interface ChartexBoxSeries {
     showNonoutliers: boolean;
     quartileMethod: string;
 }
-interface ChartexBoxWhisker {
+export interface ChartexBoxWhisker {
     categories: string[];
     series: ChartexBoxSeries[];
 }
-interface ChartexSunburst {
+export interface ChartexSunburst {
     rows: ChartexSunburstRow[];
 }
-interface ChartexSunburstRow {
+export interface ChartexSunburstRow {
     path: string[];
     size: number;
 }
-interface ChartLabelBox {
+export interface ChartLabelBox {
     fill?: string;
     borderColor?: string;
     borderWidthEmu?: number;
@@ -341,6 +330,12 @@ export interface ChartModel {
     chartexSunburst?: ChartexSunburst | null;
     chartexAccents?: string[] | null;
 }
+export interface ChartRect {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+}
 export interface ChartSeries {
     name: string;
     color: string | null;
@@ -381,7 +376,7 @@ export interface ChartSeriesDataLabels {
     leaderLineColor?: string;
     leaderLineWidthEmu?: number;
 }
-interface ChartTrendline {
+export interface ChartTrendline {
     trendlineType: string;
     order?: number | null;
     period?: number | null;
@@ -393,13 +388,11 @@ interface ChartTrendline {
     lineColor?: string | null;
     lineWidthEmu?: number | null;
 }
-type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | string;
+export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | string;
 export interface ConditionalFormat {
-    sqref: CellRange__emitterCollision1[];
+    sqref: WorksheetCellRange[];
     rules: CfRule[];
 }
-export type DataLabelOverride = ChartDataLabelOverride;
-export type DataPointOverride = ChartDataPointOverride;
 export interface DataValidation {
     sqref: string;
     validationType?: string;
@@ -426,7 +419,6 @@ export interface Dxf {
     border: Border | null;
     numFmt?: NumFmt | null;
 }
-export type ErrBars = ChartErrBars;
 type ExtensibleLiteral<Known extends string> = Known | (string & Record<never, never>);
 export interface FindHighlightColors {
     match?: string;
@@ -515,23 +507,22 @@ interface LoadOptions__emitterCollision1 {
     workerTimeoutMs?: number;
     math?: MathRenderer;
 }
-export type ManualLayout = ChartManualLayout;
-interface MathAccent {
+export interface MathAccent {
     kind: 'accent';
     char: string;
     base: MathNode[];
 }
-interface MathArray {
+export interface MathArray {
     kind: 'array';
     rows: MathNode[][][];
     align: 'eq' | 'center' | 'left';
 }
-interface MathBar {
+export interface MathBar {
     kind: 'bar';
     pos: 'top' | 'bot';
     base: MathNode[];
 }
-interface MathBorderBox {
+export interface MathBorderBox {
     kind: 'borderBox';
     hideTop?: boolean;
     hideBot?: boolean;
@@ -543,44 +534,44 @@ interface MathBorderBox {
     strikeTlbr?: boolean;
     base: MathNode[];
 }
-interface MathBox {
+export interface MathBox {
     kind: 'box';
     base: MathNode[];
 }
-interface MathDelimiter {
+export interface MathDelimiter {
     kind: 'delimiter';
     begChar: string;
     endChar: string;
     items: MathNode[][];
 }
-interface MathFraction {
+export interface MathFraction {
     kind: 'fraction';
     num: MathNode[];
     den: MathNode[];
     bar?: boolean;
 }
-interface MathFunc {
+export interface MathFunc {
     kind: 'func';
     name: MathNode[];
     arg: MathNode[];
 }
-interface MathGroup {
+export interface MathGroup {
     kind: 'group';
     items: MathNode[];
 }
-interface MathGroupChr {
+export interface MathGroupChr {
     kind: 'groupChr';
     char: string;
     pos: 'top' | 'bot';
     base: MathNode[];
 }
-interface MathLimit {
+export interface MathLimit {
     kind: 'limit';
     base: MathNode[];
     lower?: MathNode[];
     upper?: MathNode[];
 }
-interface MathNary {
+export interface MathNary {
     kind: 'nary';
     op: string;
     limLoc?: string;
@@ -588,8 +579,8 @@ interface MathNary {
     sup?: MathNode[];
     body: MathNode[];
 }
-type MathNode = MathRun | MathFraction | MathScript | MathNary | MathDelimiter | MathRadical | MathLimit | MathArray | MathGroupChr | MathBar | MathAccent | MathFunc | MathGroup | MathPhant | MathSPre | MathBox | MathBorderBox;
-interface MathPhant {
+export type MathNode = MathRun | MathFraction | MathScript | MathNary | MathDelimiter | MathRadical | MathLimit | MathArray | MathGroupChr | MathBar | MathAccent | MathFunc | MathGroup | MathPhant | MathSPre | MathBox | MathBorderBox;
+export interface MathPhant {
     kind: 'phant';
     show: boolean;
     zeroWid?: boolean;
@@ -597,34 +588,34 @@ interface MathPhant {
     zeroDesc?: boolean;
     base: MathNode[];
 }
-interface MathRadical {
+export interface MathRadical {
     kind: 'radical';
     index?: MathNode[];
     radicand: MathNode[];
 }
-interface MathRenderer {
+export interface MathRenderer {
     loadMathJax(): Promise<void>;
     mathMLToSvg(mathml: string): Promise<MathSvg>;
 }
-interface MathRun {
+export interface MathRun {
     kind: 'run';
     text: string;
     style: MathStyle;
 }
-interface MathScript {
+export interface MathScript {
     kind: 'sup' | 'sub' | 'subSup';
     base: MathNode[];
     sup?: MathNode[];
     sub?: MathNode[];
 }
-interface MathSPre {
+export interface MathSPre {
     kind: 'sPre';
     sub: MathNode[];
     sup: MathNode[];
     base: MathNode[];
 }
-type MathStyle = 'roman' | 'italic' | 'bold' | 'boldItalic';
-interface MathSvg {
+export type MathStyle = 'roman' | 'italic' | 'bold' | 'boldItalic';
+export interface MathSvg {
     svg: string;
     widthEm: number;
     ascentEm: number;
@@ -656,7 +647,6 @@ export class OoxmlError extends Error {
     constructor(code: OoxmlErrorCode, message: string);
 }
 export type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml';
-export type OoxmlErrorSource = 'container' | 'zip-part' | 'parser' | 'serializer' | 'layout' | 'renderer' | 'worker';
 export type OoxmlErrorStage = 'container' | 'decompression' | 'parsing' | 'serialization' | 'layout' | 'rendering' | 'worker';
 export type OoxmlFormat = 'docx' | 'xlsx' | 'pptx';
 export type OoxmlResourceLimit = number | null;
@@ -820,7 +810,7 @@ export interface PivotDiagnostic {
         kind: 'invalidLocation';
     };
 }
-export interface PivotLocation extends CellRange__emitterCollision1 {
+export interface PivotLocation extends WorksheetCellRange {
     firstHeaderRow: number;
     firstDataRow: number;
     firstDataCol: number;
@@ -877,31 +867,10 @@ export interface PivotTableMetadata {
     status: PivotMetadataStatus;
     extensionUris?: string[];
 }
-export interface RenderViewportOptions {
-    width?: number;
-    height?: number;
-    dpr?: number;
-    defaultFontFamily?: string;
-    defaultFontSize?: number;
-    scrollOffsetX?: number;
-    scrollOffsetY?: number;
-    freezeRows?: number;
-    freezeCols?: number;
-    cellScale?: number;
-    loadedImages?: Map<string, CanvasImageSource | null>;
-    fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
-    onTextRun?: (info: XlsxTextRunInfo) => void;
-    selectedRowRange?: {
-        start: number;
-        end: number;
-        strong: boolean;
-    } | null;
-    selectedColRange?: {
-        start: number;
-        end: number;
-        strong: boolean;
-    } | null;
-}
+export type RenderViewportToBitmapOptions = Omit<XlsxRenderViewportOptions, 'onTextRun'> & {
+    width: number;
+    height: number;
+};
 export type ResolvedList = {
     kind: 'values';
     values: string[];
@@ -933,7 +902,7 @@ export interface RunFont {
     underlineStyle?: string;
     vertAlign?: 'superscript' | 'subscript';
 }
-interface SecondaryValueAxis {
+export interface SecondaryValueAxis {
     min: number | null;
     max: number | null;
     title: string | null;
@@ -950,8 +919,6 @@ interface SecondaryValueAxis {
     titleFontBold?: boolean | null;
     titleFontColor?: string | null;
 }
-export type SelectionMode = 'cells' | 'rows' | 'cols' | 'all';
-export type SeriesDataLabels = ChartSeriesDataLabels;
 export interface ShapeAnchor {
     fromCol: number;
     fromColOff: number;
@@ -1086,7 +1053,7 @@ export interface SlicerStyle {
     selectedItemWithData?: SlicerElementStyle;
     unselectedItemWithData?: SlicerElementStyle;
 }
-type SpaceLine = {
+export type SpaceLine = {
     type: 'pct';
     val: number;
 } | {
@@ -1137,7 +1104,7 @@ export interface TableColumnInfo {
     totalsRowDxfId?: number;
 }
 export interface TableInfo {
-    range: CellRange__emitterCollision1;
+    range: WorksheetCellRange;
     styleName: string;
     headerRowCount: number;
     totalsRowCount: number;
@@ -1156,18 +1123,15 @@ export interface TableInfo {
     band2HorizontalDxf?: number;
     columns: TableColumnInfo[];
 }
+export interface ViewerContextMenuEvent<TContext> {
+    readonly originalEvent: MouseEvent;
+    getContext(): Promise<TContext | null>;
+}
 export interface ViewportRange {
     row: number;
     col: number;
     rows: number;
     cols: number;
-}
-export type WireRenderViewportOptions = Omit<RenderViewportOptions, 'onTextRun' | 'loadedImages' | 'fetchImage'> & {
-    sizeOverrides?: WireSizeOverrides;
-};
-export interface WireSizeOverrides {
-    rows?: Record<number, number | null>;
-    cols?: Record<number, number | null>;
 }
 export interface Workbook {
     sheets: SheetMeta[];
@@ -1196,7 +1160,7 @@ export interface Worksheet {
     rightToLeft?: boolean;
     outlinePr?: OutlinePr;
     tabColor?: string | null;
-    autoFilter?: CellRange__emitterCollision1 | null;
+    autoFilter?: WorksheetCellRange | null;
     hyperlinks?: Hyperlink[];
     commentRefs?: string[];
     comments?: XlsxComment[];
@@ -1212,7 +1176,12 @@ export interface Worksheet {
     date1904?: boolean;
     parseError?: string;
 }
-export type XlsxChartSeries = ChartSeries;
+export interface WorksheetCellRange {
+    top: number;
+    left: number;
+    bottom: number;
+    right: number;
+}
 export interface XlsxComment {
     cellRef: string;
     author?: string;
@@ -1234,12 +1203,76 @@ export type XlsxCopyResult = Readonly<{
 }> | Readonly<{
     status: 'clipboard-denied';
 }>;
+export interface XlsxElementAnchorMarker {
+    readonly row: number;
+    readonly col: number;
+    readonly offsetX: number;
+    readonly offsetY: number;
+}
+export interface XlsxElementContext {
+    readonly format: 'xlsx';
+    readonly kind: 'element';
+    readonly sheetIndex: number;
+    readonly sheetName: string;
+    readonly elementType: 'chart' | 'image' | 'shape';
+    readonly elementIndex: number;
+    readonly shapeIndex?: number;
+    readonly anchor: Readonly<{
+        from: XlsxElementAnchorMarker;
+        to: XlsxElementAnchorMarker;
+    }>;
+    readonly text?: string;
+    readonly mimeType?: string;
+    readonly seriesCount?: number;
+    readonly shapeCount?: number;
+    readonly truncated: boolean;
+    readonly truncationReasons: readonly 'text'[];
+    readonly textCharacters: number;
+    readonly maxTextCharacters: number;
+}
 export interface XlsxMatchLocation {
     sheet: number;
     sheetName: string;
     ref: string;
     row: number;
     col: number;
+}
+export interface XlsxRangeSelectionContext {
+    readonly format: 'xlsx';
+    readonly kind: 'range';
+    readonly sheetIndex: number;
+    readonly sheetName: string;
+    readonly selection: XlsxSelectionState;
+    readonly coordinateCountUpperBound: number;
+    readonly cells: readonly XlsxSelectionContextCell[];
+    readonly truncated: boolean;
+    readonly truncationReasons: readonly ('cells' | 'text')[];
+    readonly maxCells: number;
+    readonly textCharacters: number;
+    readonly maxTextCharacters: number;
+}
+export interface XlsxRenderViewportOptions {
+    width?: number;
+    height?: number;
+    dpr?: number;
+    defaultFontFamily?: string;
+    defaultFontSize?: number;
+    scrollOffsetX?: number;
+    scrollOffsetY?: number;
+    freezeRows?: number;
+    freezeCols?: number;
+    cellScale?: number;
+    onTextRun?: (info: XlsxTextRunInfo) => void;
+    selectedRowRange?: {
+        start: number;
+        end: number;
+        strong: boolean;
+    } | null;
+    selectedColRange?: {
+        start: number;
+        end: number;
+        strong: boolean;
+    } | null;
 }
 export interface XlsxScrollToCellOptions {
     readonly align?: 'nearest' | 'start' | 'center' | 'end';
@@ -1261,20 +1294,7 @@ export type XlsxSelectionArea = Readonly<{
 }> | Readonly<{
     kind: 'sheet';
 }>;
-export interface XlsxSelectionContext {
-    readonly format: 'xlsx';
-    readonly kind: 'range';
-    readonly sheetIndex: number;
-    readonly sheetName: string;
-    readonly selection: XlsxSelectionState;
-    readonly coordinateCountUpperBound: number;
-    readonly cells: readonly XlsxSelectionContextCell[];
-    readonly truncated: boolean;
-    readonly truncationReasons: readonly ('cells' | 'text')[];
-    readonly maxCells: number;
-    readonly textCharacters: number;
-    readonly maxTextCharacters: number;
-}
+export type XlsxSelectionContext = XlsxRangeSelectionContext | XlsxElementContext;
 export interface XlsxSelectionContextCell {
     readonly address: CellAddress;
     readonly displayText: string;
@@ -1295,7 +1315,7 @@ export interface XlsxSelectionState {
 }
 export class XlsxSheetViewer implements ZoomableViewer {
     readonly canvasElement: HTMLCanvasElement;
-    static fromWorkbook(canvasElement: HTMLCanvasElement, workbook: XlsxWorkbook, options?: Omit<XlsxSheetViewerOptions, keyof LoadOptions__emitterCollision1>): Omit<XlsxSheetViewer, 'load'>;
+    static fromWorkbook(canvasElement: HTMLCanvasElement, workbook: XlsxWorkbook, options?: Omit<XlsxSheetViewerOptions, keyof LoadOptions>): Omit<XlsxSheetViewer, 'load'>;
     constructor(canvasElement: HTMLCanvasElement, options?: XlsxSheetViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     get sheetIndex(): number;
@@ -1318,8 +1338,6 @@ export class XlsxSheetViewer implements ZoomableViewer {
     get selectionState(): XlsxSelectionState | null;
     setSelection(selection: XlsxSelectionInput): void;
     getSelectionContext(options?: XlsxSelectionContextOptions): XlsxSelectionContext | null;
-    get selection(): CellRange | null;
-    select(ref: string): void;
     copySelection(): Promise<XlsxCopyResult>;
     setSelectionColor(color: string): void;
     setHiddenSheetMode(mode: HiddenSheetMode): Promise<void>;
@@ -1333,7 +1351,7 @@ export class XlsxSheetViewer implements ZoomableViewer {
     destroy(): void;
     private __privatePresence;
 }
-export interface XlsxSheetViewerOptions extends LoadOptions__emitterCollision1 {
+export interface XlsxSheetViewerOptions extends LoadOptions {
     cellScale?: number;
     resizable?: boolean;
     showScrollbars?: boolean;
@@ -1344,12 +1362,13 @@ export interface XlsxSheetViewerOptions extends LoadOptions__emitterCollision1 {
     onSheetChange?: (index: number, total: number) => void;
     onError?: (err: Error) => void;
     onSelectionStateChange?: (selection: XlsxSelectionState | null) => void;
-    onSelectionChange?: (selection: CellRange | null) => void;
+    onSelectionContextChange?: (context: XlsxSelectionContext | null) => void;
+    onContextMenu?: (event: ViewerContextMenuEvent<XlsxSelectionContext>) => void;
+    enableElementSelection?: boolean;
     onHyperlinkClick?: (target: HyperlinkTarget) => void;
     enableHyperlinks?: boolean;
     selectionColor?: string;
     findHighlightColors?: FindHighlightColors;
-    mode?: 'main' | 'worker';
     hiddenSheetMode?: HiddenSheetMode;
     onViewportChange?: (offset: XlsxViewportOffset) => void;
 }
@@ -1365,13 +1384,12 @@ export interface XlsxTextRunInfo {
     col: number;
 }
 export class XlsxViewer extends XlsxViewerEngine {
-    static fromWorkbook(container: HTMLElement, workbook: XlsxWorkbook, opts?: Omit<XlsxViewerOptions, keyof LoadOptions__emitterCollision1>): Omit<XlsxViewer, 'load'>;
+    static fromWorkbook(container: HTMLElement, workbook: XlsxWorkbook, opts?: Omit<XlsxViewerOptions, keyof LoadOptions>): Omit<XlsxViewer, 'load'>;
     constructor(container: HTMLElement, opts?: XlsxViewerOptions);
 }
 class XlsxViewerEngine implements ZoomableViewer {
     constructor(container: HTMLElement, opts: XlsxViewerOptions | XlsxSheetViewerOptions | undefined, mount: XlsxViewerMount);
     load(source: string | ArrayBuffer): Promise<void>;
-    showSheet(index: number): Promise<void>;
     get sheetIndex(): number;
     get sheetCount(): number;
     goToSheet(index: number): Promise<void>;
@@ -1385,8 +1403,6 @@ class XlsxViewerEngine implements ZoomableViewer {
     get selectionState(): XlsxSelectionState | null;
     setSelection(input: XlsxSelectionInput): void;
     getSelectionContext(options?: XlsxSelectionContextOptions): XlsxSelectionContext | null;
-    get selection(): CellRange | null;
-    select(ref: string): void;
     setSelectionColor(color: string): void;
     setHiddenSheetMode(mode: HiddenSheetMode): Promise<void>;
     get hiddenSheetMode(): HiddenSheetMode;
@@ -1436,16 +1452,13 @@ export class XlsxWorkbook {
     toMarkdown(): Promise<string>;
     resolveValidationList(sheetIndex: number, formula1: string | undefined): Promise<ResolvedList>;
     cellText(ws: Worksheet, cell: Cell): string;
-    renderViewport(target: HTMLCanvasElement | OffscreenCanvas, sheetIndex: number, viewport: ViewportRange, opts?: RenderViewportOptions): Promise<void>;
-    renderViewportToBitmap(sheetIndex: number, viewport: ViewportRange, opts: WireRenderViewportOptions & {
-        width: number;
-        height: number;
-    }): Promise<ImageBitmap>;
+    renderViewport(target: HTMLCanvasElement | OffscreenCanvas, sheetIndex: number, viewport: ViewportRange, opts?: XlsxRenderViewportOptions): Promise<void>;
+    renderViewportToBitmap(sheetIndex: number, viewport: ViewportRange, opts: RenderViewportToBitmapOptions): Promise<ImageBitmap>;
     destroy(): void;
     private __privatePresence;
     private constructor();
 }
-interface ZoomableViewer {
+export interface ZoomableViewer {
     getScale(): number;
     setScale(scale: number): void | Promise<void>;
     zoomIn(): void | Promise<void>;

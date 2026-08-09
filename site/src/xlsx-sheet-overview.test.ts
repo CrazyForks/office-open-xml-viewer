@@ -59,4 +59,9 @@ describe('XLSX multi-window sheet demo', () => {
     expect(demos).toContain("attributeFilter: ['data-theme']");
     expect(demos).toContain('themeObserver.disconnect()');
   });
+
+  it('stacks the workbook summary controls inside the card on mobile', () => {
+    expect(styles).toMatch(/@media \(max-width: 620px\)[\s\S]*?\.demo-sheet-window-summary\s*\{[^}]*flex-direction: column;/);
+    expect(styles).toMatch(/@media \(max-width: 620px\)[\s\S]*?\.demo-sheet-window-actions\s*\{[^}]*width: 100%;[^}]*margin-left: 0;/);
+  });
 });

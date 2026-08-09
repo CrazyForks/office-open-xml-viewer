@@ -17,7 +17,7 @@ export const sitemapPaths = [
   '/announcements/',
   ...announcements.map(({ slug }) => `/announcements/${slug}/`),
   '/errors/',
-  '/deprecations/',
+  '/selection-context/',
 ] as const;
 
 export function GET(): Response {

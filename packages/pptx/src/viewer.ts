@@ -16,6 +16,7 @@ import {
   type FindMatch,
   type FindMatchesOptions,
   type OoxmlResourceMetrics,
+  type ViewerContextMenuEvent,
   type ZoomableViewer,
   EMU_PER_PX,
   openExternalHyperlink,
@@ -28,6 +29,7 @@ import {
   CallerCanvasMount,
   CanvasOverlayHost,
   CanvasViewerErrorRouter,
+  renderCanvasElementOutline,
   resolveCanvasViewerMode,
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
@@ -36,12 +38,12 @@ import {
   readPptxTextSelectionContext,
 } from './selection-context';
 import type {
-  PptxElementSelectionContext,
+  PptxElementContext,
   PptxSelectionContext,
   PptxSelectionContextOptions,
 } from './element-selection';
 import {
-  limitPptxElementSelectionContext,
+  limitPptxElementContext,
   MAX_ELEMENT_TEXT_CHARACTERS,
 } from './element-selection';
 
@@ -56,15 +58,15 @@ export type HiddenSlideMode = 'show' | 'skip' | 'dim';
 /** Default `'dim'` overlay: 60% white (hidden content shows at 40%). */
 const DEFAULT_HIDDEN_DIM: DimOptions = { color: '#ffffff', opacity: 0.6 };
 
-export interface PptxViewerOptions extends RenderOptions, LoadOptions {
+export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr'>, LoadOptions {
   /** Called when a slide finishes rendering */
   onSlideChange?: (index: number, total: number) => void;
   /**
-   * Receives load failures plus asynchronous render or embedded-media failures
-   * handled by the Viewer. Supplying this callback changes load-failure
-   * delivery: `load()` invokes it and resolves; without it, the same load/parse
-   * failure rejects `load()`. Viewer-managed failures invoke it, or fall back
-   * to `console.error` when omitted.
+   * Receives asynchronous Viewer-managed failures that cannot be observed by
+   * awaiting the method that started them. Failures from `load()`, including
+   * its initial render, always reject that Promise and are not also delivered
+   * here. Later event-driven render or media failures invoke this callback, or
+   * fall back to `console.error` when omitted.
    *
    * Stable cases can be narrowed with `OoxmlError`,
    * `OoxmlResourceLimitError`, or `OoxmlDecodedImageLimitError` re-exported by
@@ -97,12 +99,18 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
    * browser's native text selection works on slide content.
    */
   enableTextSelection?: boolean;
-  /** Enable read-only click focus for slide elements. Default false. */
+  /** Enable read-only slide-element selection with a non-editable outline. Default false. */
   enableElementSelection?: boolean;
   /** Straight-line hit tolerance in CSS pixels. Default 6. */
   elementHitTolerance?: number;
   /** Emits bounded, detached text or element context for read-only AI/MCP use. */
   onSelectionContextChange?: (context: PptxSelectionContext | null) => void;
+  /**
+   * Called synchronously for a browser `contextmenu` event. The original event
+   * can suppress the native menu; `getContext()` resolves the text or element
+   * context established at the event target.
+   */
+  onContextMenu?: (event: ViewerContextMenuEvent<PptxSelectionContext>) => void;
   /** CSS backgrounds for ordinary and active in-document search matches. */
   findHighlightColors?: FindHighlightColors;
   /**
@@ -171,6 +179,7 @@ export class PptxViewer implements ZoomableViewer {
   /** IX2 — the find-highlight overlay layer (always created, above the text
    *  layer, `pointer-events:none`). */
   private highlightLayer: HTMLDivElement | null = null;
+  private elementLayer: HTMLDivElement | null = null;
   /** IX2 — find state (per-slide runs, matches, active cursor). */
   private _find: PptxFindController;
   /** Private 2d context for measuring highlight text (own 1×1 canvas). */
@@ -190,7 +199,8 @@ export class PptxViewer implements ZoomableViewer {
   private selectionChangeListener: (() => void) | null = null;
   private selectionContextKey = 'null';
   private elementClickListener: ((event: MouseEvent) => void) | null = null;
-  private elementSelectionContext: PptxElementSelectionContext | null = null;
+  private contextMenuListener: ((event: MouseEvent) => void) | null = null;
+  private elementContext: PptxElementContext | null = null;
   private elementHitGeneration = 0;
   private readonly elementHitTolerance: number;
   /**
@@ -243,16 +253,27 @@ export class PptxViewer implements ZoomableViewer {
       this._mode === 'worker' && !opts.enableMediaPlayback,
     );
     this.errorRouter = new CanvasViewerErrorRouter('PptxViewer', opts.onError);
-    const overlays = new CanvasOverlayHost(this.wrapper, opts.enableTextSelection === true);
+    const overlays = new CanvasOverlayHost(
+      this.wrapper,
+      opts.enableTextSelection === true,
+      opts.enableElementSelection === true,
+    );
     this.textLayer = overlays.textLayer;
     this.highlightLayer = overlays.highlightLayer;
+    this.elementLayer = overlays.elementLayer;
     if (this.textLayer && (opts.onSelectionContextChange || opts.enableElementSelection)) {
       this.selectionChangeListener = () => this._emitSelectionContextChange();
       this.wrapper.ownerDocument.addEventListener('selectionchange', this.selectionChangeListener);
     }
     if (opts.enableElementSelection) {
-      this.elementClickListener = (event) => { void this._onElementClick(event); };
+      this.elementClickListener = (event) => {
+        void this._onElementClick(event).catch((error) => this._reportRenderError(error));
+      };
       this.wrapper.addEventListener('click', this.elementClickListener);
+    }
+    if (opts.onContextMenu) {
+      this.contextMenuListener = (event) => this._onContextMenu(event);
+      this.wrapper.addEventListener('contextmenu', this.contextMenuListener);
     }
 
     this._find = new PptxFindController(
@@ -264,15 +285,9 @@ export class PptxViewer implements ZoomableViewer {
   /**
    * Load a PPTX from URL or ArrayBuffer and render the first slide.
    *
-   * Error contract (shared by all three viewers):
-   * - Parse/load failure (the underlying `PptxPresentation.load()` call itself
-   *   rejects): if an `onError` callback was provided it is invoked and `load`
-   *   resolves normally; if not, the error is rethrown so it is never silently
-   *   swallowed.
-   * - Render failure (the first slide fails to draw AFTER a successful
-   *   parse/load): routed to the shared `_reportRenderError` contract (`onError`
-   *   if provided, else `console.error` — never silent) and `load` still
-   *   RESOLVES, matching every subsequent navigation call.
+   * Parse, load, and initial-render failures always reject this Promise.
+   * `onError` is reserved for later Viewer-managed work that has no directly
+   * awaitable method result, so one failure is never delivered twice.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
     if (this.destroyed) throw new Error('PptxViewer is destroyed');
@@ -291,6 +306,7 @@ export class PptxViewer implements ZoomableViewer {
     let selectionInvalidated = false;
     try {
       const engine = await this.presentationOwner.replace(() => PptxPresentation.load(source, {
+        password: this.opts.password,
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
         resourceLimits: this.opts.resourceLimits,
@@ -324,10 +340,7 @@ export class PptxViewer implements ZoomableViewer {
       await this.renderCurrentSlide();
     } catch (err) {
       if (this.destroyed) throw new Error('PptxViewer is destroyed');
-      const e = err instanceof Error ? err : new Error(String(err));
-      if (this.opts.onError) {
-        this.opts.onError(e);
-      } else throw e;
+      throw err instanceof Error ? err : new Error(String(err));
     }
     // Consumer selection callbacks are outside the engine/render error path and
     // cannot prevent the replacement deck from being committed and rendered.
@@ -572,8 +585,8 @@ export class PptxViewer implements ZoomableViewer {
       }
       this.opts.onSlideChange?.(this.currentSlide, this.slideCount);
     } catch (err) {
-      if (this.renderDispatcher.isCurrent(generation)) this._reportRenderError(err);
-      return;
+      if (!this.renderDispatcher.isCurrent(generation)) return;
+      throw err;
     }
 
     // IX6 — identical overlay build for both modes: the run geometry the worker
@@ -736,7 +749,9 @@ export class PptxViewer implements ZoomableViewer {
       openExternalHyperlink(enriched.url, undefined, this.hostWindow);
       return;
     }
-    if (enriched.slideIndex !== undefined) void this.goToSlide(enriched.slideIndex);
+    if (enriched.slideIndex !== undefined) {
+      void this.goToSlide(enriched.slideIndex).catch((error) => this._reportRenderError(error));
+    }
   }
 
   /** Populate an internal {@link HyperlinkTarget}'s `slideIndex` from its `ref`
@@ -771,13 +786,13 @@ export class PptxViewer implements ZoomableViewer {
     const text = this.textLayer
       ? readPptxTextSelectionContext(
           this.wrapper,
-          this.wrapper.ownerDocument.getSelection(),
+          this.wrapper.ownerDocument?.getSelection?.() ?? null,
           options,
         )
       : null;
-    return text ?? (this.elementSelectionContext
-      ? limitPptxElementSelectionContext(
-          this.elementSelectionContext,
+    return text ?? (this.elementContext
+      ? limitPptxElementContext(
+          this.elementContext,
           options.maxTextCharacters,
         )
       : null);
@@ -789,7 +804,8 @@ export class PptxViewer implements ZoomableViewer {
     // previously clicked element when that browser selection later collapses.
     if (context?.kind === 'text') {
       this.elementHitGeneration++;
-      this.elementSelectionContext = null;
+      this.elementContext = null;
+      this._redrawElementOutline();
     }
     const key = JSON.stringify(context);
     if (key === this.selectionContextKey) return;
@@ -797,60 +813,96 @@ export class PptxViewer implements ZoomableViewer {
     this.opts.onSelectionContextChange?.(context ? structuredClone(context) : null);
   }
 
-  private _setElementSelectionContext(context: PptxElementSelectionContext | null): void {
-    this.elementSelectionContext = context ? structuredClone(context) : null;
+  private _setElementContext(context: PptxElementContext | null): void {
+    this.elementContext = context ? structuredClone(context) : null;
+    this._redrawElementOutline();
     this._emitSelectionContextChange();
   }
 
   private _invalidateElementSelection(notify = true): void {
     this.elementHitGeneration++;
-    this.elementSelectionContext = null;
+    this.elementContext = null;
+    this._redrawElementOutline();
     if (notify) this._emitSelectionContextChange();
   }
 
+  private _redrawElementOutline(): void {
+    const context = this.elementContext;
+    const engine = this.engine;
+    if (!context || !engine || context.slideIndex !== this.currentSlide) {
+      renderCanvasElementOutline(this.elementLayer, null);
+      return;
+    }
+    renderCanvasElementOutline(this.elementLayer, {
+      x: context.bounds.x / engine.slideWidth,
+      y: context.bounds.y / engine.slideHeight,
+      width: context.bounds.width / engine.slideWidth,
+      height: context.bounds.height / engine.slideHeight,
+      rotation: context.bounds.rotation,
+    });
+  }
+
   private async _onElementClick(event: MouseEvent): Promise<void> {
-    if (this.destroyed || event.defaultPrevented || event.button !== 0 || !this.engine) return;
+    if (this.destroyed || event.defaultPrevented || event.button !== 0) return;
+    await this._resolveContextAt(event);
+  }
+
+  private _onContextMenu(event: MouseEvent): void {
+    let context: Promise<PptxSelectionContext | null> | undefined;
+    this.opts.onContextMenu?.({
+      originalEvent: event,
+      getContext: () => context ??= this._resolveContextAt(event),
+    });
+  }
+
+  private async _resolveContextAt(event: MouseEvent): Promise<PptxSelectionContext | null> {
+    const engine = this.engine;
+    if (this.destroyed || !engine) return null;
     if (this.textLayer && readPptxTextSelectionContext(
       this.wrapper,
-      this.wrapper.ownerDocument.getSelection(),
+      this.wrapper.ownerDocument?.getSelection?.() ?? null,
     )) {
       // selectionchange is task-delivered and may not have run yet. Establish
       // text precedence synchronously so an older pending element hit cannot
       // survive a select/click/collapse sequence in the same task.
       this._emitSelectionContextChange();
-      return;
+      return this.destroyed ? null : this.getSelectionContext();
     }
+    if (!this.opts.enableElementSelection) return this.getSelectionContext();
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) {
       this._invalidateElementSelection();
-      return;
+      return null;
     }
     const localX = event.clientX - rect.left;
     const localY = event.clientY - rect.top;
     if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) {
       this._invalidateElementSelection();
-      return;
+      return null;
     }
     const generation = ++this.elementHitGeneration;
     const slideIndex = this.currentSlide;
     const point = {
-      x: localX / rect.width * this.engine.slideWidth,
-      y: localY / rect.height * this.engine.slideHeight,
+      x: localX / rect.width * engine.slideWidth,
+      y: localY / rect.height * engine.slideHeight,
     };
-    let context: PptxElementSelectionContext | null;
+    let context: PptxElementContext | null;
     try {
-      context = await this.engine.getElementContextAt(slideIndex, point, {
-        tolerance: this.elementHitTolerance / rect.width * this.engine.slideWidth,
+      context = await engine.getElementContextAt(slideIndex, point, {
+        tolerance: this.elementHitTolerance / rect.width * engine.slideWidth,
         maxTextCharacters: MAX_ELEMENT_TEXT_CHARACTERS,
       });
     } catch (error) {
-      if (!this.destroyed && generation === this.elementHitGeneration) this._reportRenderError(error);
-      return;
+      if (this.destroyed || generation !== this.elementHitGeneration ||
+        slideIndex !== this.currentSlide || engine !== this.engine) return null;
+      throw error;
     }
-    if (this.destroyed || generation !== this.elementHitGeneration || slideIndex !== this.currentSlide) return;
+    if (this.destroyed || generation !== this.elementHitGeneration ||
+      slideIndex !== this.currentSlide || engine !== this.engine) return null;
     // Keep consumer callback exceptions outside the engine-error path. They are
     // application failures, not presentation/render failures.
-    this._setElementSelectionContext(context);
+    this._setElementContext(context);
+    return this.destroyed ? null : this.getSelectionContext();
   }
 
   /**
@@ -888,7 +940,11 @@ export class PptxViewer implements ZoomableViewer {
       this.wrapper.removeEventListener('click', this.elementClickListener);
       this.elementClickListener = null;
     }
-    this.elementSelectionContext = null;
+    if (this.contextMenuListener) {
+      this.wrapper.removeEventListener('contextmenu', this.contextMenuListener);
+      this.contextMenuListener = null;
+    }
+    this.elementContext = null;
     this.canvasMount.restore();
   }
 }

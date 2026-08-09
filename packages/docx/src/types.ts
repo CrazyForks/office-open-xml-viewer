@@ -5,6 +5,7 @@ import type {
   ChartModel,
   Duotone,
   FillRect,
+  HyperlinkTarget,
   TileInfo,
 } from '@silurus/ooxml-core';
 import type {
@@ -843,7 +844,7 @@ export interface ShapeRun {
   /** `<a:ln><a:prstDash val>` — ECMA-376 §20.1.8.48. Absent = solid. */
   strokeDash?: string | null;
   /** Normalized line cap: `butt` | `round` | `square`. */
-  strokeCap?: CanvasLineCap | null;
+  strokeCap?: 'butt' | 'round' | 'square' | null;
   /** `<a:ln><a:headEnd>` line-start decoration (ECMA-376 §20.1.8.3). */
   headEnd?: LineEnd | null;
   /** `<a:ln><a:tailEnd>` line-end decoration (ECMA-376 §20.1.8.3). */
@@ -1567,6 +1568,39 @@ export type WorkerResponse =
 
 // ===== Public API types =====
 
+/** Information about a rendered text segment for overlays and read-only integrations. */
+export interface DocxTextRunInfo {
+  /** Canonical structural source of the owning paragraph. */
+  source?: Readonly<{
+    story: 'body' | 'header' | 'footer' | 'footnote' | 'endnote' | 'textbox';
+    storyInstance: string;
+    path: readonly number[];
+  }>;
+  /** Authored `w14:paraId`, when present. */
+  paragraphId?: string;
+  text: string;
+  /** Left edge in canvas CSS px. */
+  x: number;
+  /** Top of line box in canvas CSS px. */
+  y: number;
+  /** Measured text width in CSS px. */
+  w: number;
+  /** Line height in CSS px. */
+  h: number;
+  /** Font size in CSS px. */
+  fontSize: number;
+  /** CSS `font` shorthand used for canvas drawing. */
+  font: string;
+  /** Uniform per-code-point pitch in CSS px for horizontal text. */
+  letterSpacingPx?: number;
+  /** CSS transform used by the overlay for vertical-page text. */
+  transform?: string;
+  /** Resolved external or internal hyperlink target. */
+  hyperlink?: HyperlinkTarget;
+  /** True for an ECMA-376 §17.3.2.10 tate-chu-yoko run. */
+  eastAsianVert?: boolean;
+}
+
 export interface RenderPageOptions {
   /** Canvas CSS width in px; height is auto-computed from page aspect ratio.
    *  Applies per CALL — pages of different physical widths (per-section pgSz,
@@ -1580,11 +1614,7 @@ export interface RenderPageOptions {
    *  selection overlay. On a vertical (§17.6.20 tbRl) page `x`/`y` are the
    *  PHYSICAL top-left and `transform` is the CSS rotation the overlay span
    *  applies about its top-left; absent for horizontal pages. */
-  onTextRun?: (run: { text: string; x: number; y: number; w: number; h: number; fontSize: number; font: string; transform?: string }) => void;
-  /** Default `true`. When false, ECMA-376 §17.13.5 track-changes runs render
-   *  in their normal style (no author colour, no underline / strikethrough)
-   *  — equivalent to Word's "Final / No Markup" view. */
-  showTrackChanges?: boolean;
+  onTextRun?: (run: DocxTextRunInfo) => void;
   /** ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — the "current" instant a
    *  DATE/TIME field formats through its `\@` date picture (§17.16.4.1). A `Date`
    *  or epoch-ms number. Default = the real current time at render. Set a fixed
