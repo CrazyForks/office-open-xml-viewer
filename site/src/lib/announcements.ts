@@ -29,8 +29,8 @@ export interface Announcement {
 export const announcements: readonly Announcement[] = [
   {
     slug: 'v077-migration-guide',
-    date: '2026-08-09',
-    label: 'Upcoming release',
+    date: '2026-08-10',
+    label: 'Release note',
     version: 'v0.77',
     title: 'Migrating to v0.77',
     summary: 'v0.77 updates selection APIs, adds selectable document elements, simplifies OOXML MCP tools, and makes errors from asynchronous Viewer methods easier to handle.',
@@ -227,7 +227,7 @@ try {
   {
     slug: 'v076-migration-guide',
     date: '2026-08-06',
-    label: 'Upcoming release',
+    label: 'Release note',
     version: 'v0.76',
     title: 'Migrating to v0.76',
     summary: 'v0.76 makes shared-engine Viewer construction explicit, adds the canvas-mounted XLSX sheet Viewer, and replaces the synchronous Node parser compatibility APIs with one owned asynchronous pipeline.',
@@ -344,7 +344,7 @@ workbook.destroy();`,
   {
     slug: 'v075-resource-governance',
     date: '2026-08-02',
-    label: 'Upcoming release',
+    label: 'Release note',
     version: 'v0.75',
     title: 'Resource limits, typed failures and metrics for large files',
     summary: 'v0.75 applies default inflated-package limits to every DOCX, XLSX and PPTX load, reports measured limit failures with typed errors, and exposes content-free usage metrics.',
