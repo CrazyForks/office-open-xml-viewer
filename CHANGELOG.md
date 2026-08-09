@@ -5,6 +5,50 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.77.0 — 2026-08-10
+
+Breaking minor release. Unifies read-only selection and integration context
+across DOCX, XLSX, and PPTX; lets applications identify selected document
+elements and context-menu targets; and connects the active VS Code preview to
+the OOXML MCP server. See the
+[v0.77 migration guide](https://ooxml.silurus.dev/announcements/v077-migration-guide/)
+for every removed or renamed API.
+
+- **Excel-compatible XLSX selection:** replace the lossy range-only
+  compatibility API with `setSelection()`, `selectionState`, and
+  `onSelectionStateChange()`. The canonical state keeps selected areas,
+  ActiveCell, and the Shift-extension anchor separate, supports multiple areas,
+  and preserves row, column, whole-sheet, RTL, clipboard, keyboard, pointer,
+  and programmatic behavior. (#1176)
+- **cross-format selection context:** expose bounded, detached text, cell-range,
+  and chart/picture/shape context through `getSelectionContext()` and the common
+  `onSelectionContextChange` callback. Optional `enableElementSelection` adds
+  read-only object selection with a visible outline in DOCX, XLSX, and PPTX;
+  `onContextMenu` provides the original browser event plus a lazy asynchronous
+  target lookup. The official site includes matching three-format demos and
+  browser-integration guidance. (#1181, #1182)
+- **VS Code and MCP integration:** add an authenticated loopback bridge from the
+  active OOXML preview to one `ooxml_get_active_context` tool, including local
+  document identity and bounded selected content. Consolidate strict-subset
+  DOCX, XLSX, and PPTX tools, validate the bridge payload and lifecycle, and
+  document the Copilot-specific active-context path separately from standalone
+  path-based MCP use. (#1182)
+- **predictable asynchronous errors:** Promise-returning Viewer and headless
+  operations now reject their Promise on failure even when `onError` is set;
+  `onError` remains for later Viewer-managed work that has no Promise to await.
+  Initial scroll-window and presentation-media work follows the same rule.
+  (#1182)
+- **public API cleanup:** remove the legacy XLSX selection names, no-op rendering
+  options, internal worker transport types, and exact aliases that duplicated a
+  canonical type. Narrow borrowed and operation-specific options, export every
+  reachable public type, forward Viewer passwords correctly, and align the Node
+  and Markdown input contracts with their documented binary inputs. Migration
+  tables cover each source change without temporary duplicate APIs. (#1182)
+- **package guidance and regression evidence:** clarify npm unpacked size versus
+  the assets reachable from each format entry, keep the optional MathJax engine
+  separately lazy-loaded, and verify the complete private DOCX/XLSX/PPTX corpus
+  against the previous renderer with pixel-identical output. (#1180, #1182)
+
 ## 0.76.2 — 2026-08-08
 
 Patch. Improves Word-compatible text and table layout, extends spreadsheet

@@ -46,6 +46,11 @@ npm install @silurus/ooxml
 pnpm add @silurus/ooxml
 ```
 
+> Upgrading from v0.76? Review the
+> [v0.77 migration guide](https://ooxml.silurus.dev/announcements/v077-migration-guide/)
+> for the XLSX selection, selection-context, MCP-tool, option/type, and Viewer
+> error-handling changes.
+
 > **Bundler note**: the Rust parsers ship as real `.wasm` asset files next to the
 > JavaScript, referenced with the standard `new URL('…', import.meta.url)` form
 > and fetched (streaming-compiled) at load time. Verified to work with zero
@@ -74,15 +79,15 @@ pnpm add @silurus/ooxml
 > **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked
 > Size* sums every entry bundle **and** the standalone MathJax + STIX Two Math
 > asset, so the reported figure is much larger than any single app build. For
-> v0.76.2, the complete npm package is approximately 11.2 MB unpacked (3.7 MB
+> v0.77.0, the complete npm package is approximately 11.3 MB unpacked (3.8 MB
 > as the downloaded tarball), while a format-specific application graph is
 > approximately:
 >
 > | Imported entry | Reachable assets | gzip | Includes |
 > |---|---:|---:|---|
-> | `@silurus/ooxml/docx` | 3.9 MB | 1.2 MB | DOCX renderer, parser WASM, and lazy worker |
-> | `@silurus/ooxml/xlsx` | 2.5 MB | 0.81 MB | XLSX renderer, parser WASM, and lazy worker |
-> | `@silurus/ooxml/pptx` | 2.5 MB | 0.77 MB | PPTX renderer, parser WASM, and lazy worker |
+> | `@silurus/ooxml/docx` | 4.0 MB | 1.2 MB | DOCX renderer, parser WASM, and lazy worker |
+> | `@silurus/ooxml/xlsx` | 2.6 MB | 0.82 MB | XLSX renderer, parser WASM, and lazy worker |
+> | `@silurus/ooxml/pptx` | 2.5 MB | 0.78 MB | PPTX renderer, parser WASM, and lazy worker |
 > | `@silurus/ooxml/math` | 3.1 MB | 1.1 MB | Optional MathJax + STIX Two Math engine |
 >
 > These are production-artifact estimates, not initial-load figures: each row
