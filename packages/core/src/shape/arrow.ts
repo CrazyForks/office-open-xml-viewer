@@ -40,6 +40,13 @@ export function lineEndRetract(arrowEnd: ArrowEnd, stroke: Stroke, scale: number
   return arrowGeom(arrowEnd, stroke, scale).len;
 }
 
+/** Conservative radius around a line-end tip occupied by its painted pixels. */
+export function lineEndPaintExtent(arrowEnd: ArrowEnd, stroke: Stroke, scale: number): number {
+  if (arrowEnd.type === 'none') return 0;
+  const { lw, halfW, len } = arrowGeom(arrowEnd, stroke, scale);
+  return Math.max(len, halfW) + lw / 2;
+}
+
 /**
  * Pull `p` toward its neighbour `toward` by `amount` px, clamped so it never
  * passes the neighbour. Used to retract a polyline's terminal vertex before

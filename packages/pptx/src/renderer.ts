@@ -40,9 +40,11 @@ import {
   buildPresetGeometryPath,
   buildPresetGeometryFillPath,
   getPresetGeometryBounds,
+  getCustomGeometryBounds,
   getConnectorAnchors,
   getCustGeomEndpoints,
   drawArrowHead,
+  lineEndPaintExtent,
   lineEndRetract,
   retractLineEndpoint,
   computeScene3dQuad,
@@ -2788,17 +2790,38 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const needsRasterEffectBounds = Boolean(
     el.shadow || el.reflection || el.softEdge || el.innerShadow,
   );
-  const adjustedGeometryBounds = usePresetEngine && needsRasterEffectBounds
-    ? getPresetGeometryBounds(
-        geom,
-        x,
-        y,
-        w,
-        h,
-        [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
-      )
+  const adjustedGeometryBounds = needsRasterEffectBounds
+    ? usePresetEngine
+      ? getPresetGeometryBounds(
+          geom,
+          x,
+          y,
+          w,
+          h,
+          [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
+        )
+      : el.custGeom && el.custGeom.length > 0
+        ? getCustomGeometryBounds(el.custGeom, x, y, w, h)
+        : null
     : null;
-  const effectBounds = adjustedGeometryBounds ?? { x, y, w, h };
+  const geometryBounds = adjustedGeometryBounds ?? { x, y, w, h };
+  const strokeHalf = el.stroke ? el.stroke.width * scale / 2 : 0;
+  const lineEndExtent = el.stroke
+    ? Math.max(
+        el.stroke.headEnd ? lineEndPaintExtent(el.stroke.headEnd, el.stroke, scale) : 0,
+        el.stroke.tailEnd ? lineEndPaintExtent(el.stroke.tailEnd, el.stroke, scale) : 0,
+      )
+    : 0;
+  const contourExtent = el.sp3d?.contourW ? el.sp3d.contourW * scale : 0;
+  const paintedPad = Math.max(strokeHalf, lineEndExtent, contourExtent);
+  const effectBounds = paintedPad > 0
+    ? {
+        x: geometryBounds.x - paintedPad,
+        y: geometryBounds.y - paintedPad,
+        w: geometryBounds.w + paintedPad * 2,
+        h: geometryBounds.h + paintedPad * 2,
+      }
+    : geometryBounds;
   const effBBox = transformedEffectBounds(
     liveTransform,
     effectBounds.x,
@@ -2820,6 +2843,102 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       )
     : [];
   const flatBevelEdgePadCss = (el.stroke ? (el.stroke.width * scale) / 2 : 0) + 2;
+  const paintLineDecorations = (target: CanvasRenderingContext2D): void => {
+    if (el.stroke && (CONNECTOR_GEOMS.has(geom) || CALLOUT_GEOMS.has(geom))) {
+      // The preset body deliberately suppresses retractable leader strokes. Paint
+      // the shortened leader and its line ends into the same target as the body
+      // so outer shadows, reflections and soft edges see one composed object.
+      const anchors = getConnectorAnchors(
+        geom,
+        x,
+        y,
+        w,
+        h,
+        [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
+      );
+      if (!anchors) return;
+      const cmpd = el.stroke.cmpd;
+      const isStraight = geom === 'line' || geom === 'straightconnector1';
+      if (isRetractableLeader(geom) && anchors.vertices.length >= 2 && !(cmpd && isStraight)) {
+        const pts = anchors.vertices.map((v) => ({ x: v.x, y: v.y }));
+        if (el.stroke.tailEnd) {
+          const retract = lineEndRetract(el.stroke.tailEnd, el.stroke, scale);
+          pts[pts.length - 1] = retractLineEndpoint(
+            pts[pts.length - 1],
+            pts[pts.length - 2],
+            retract,
+          );
+        }
+        if (el.stroke.headEnd) {
+          const retract = lineEndRetract(el.stroke.headEnd, el.stroke, scale);
+          pts[0] = retractLineEndpoint(pts[0], pts[1], retract);
+        }
+        applyStroke(target, el.stroke, scale);
+        target.beginPath();
+        target.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) target.lineTo(pts[i].x, pts[i].y);
+        target.stroke();
+      }
+      if (cmpd && isStraight) {
+        drawCompoundLine(target, anchors.start, anchors.end, el.stroke, cmpd, scale);
+      }
+      if (el.stroke.tailEnd) {
+        drawArrowHead(
+          target,
+          anchors.end.x,
+          anchors.end.y,
+          anchors.end.angle,
+          el.stroke.tailEnd,
+          el.stroke,
+          scale,
+        );
+      }
+      if (el.stroke.headEnd) {
+        drawArrowHead(
+          target,
+          anchors.start.x,
+          anchors.start.y,
+          anchors.start.angle,
+          el.stroke.headEnd,
+          el.stroke,
+          scale,
+        );
+      }
+      return;
+    }
+
+    if (
+      !el.stroke ||
+      !el.custGeom ||
+      el.custGeom.length === 0 ||
+      ((!el.stroke.headEnd || el.stroke.headEnd.type === 'none') &&
+        (!el.stroke.tailEnd || el.stroke.tailEnd.type === 'none'))
+    ) return;
+
+    const { start, end } = getCustGeomEndpoints(el.custGeom);
+    if (start && el.stroke.headEnd && el.stroke.headEnd.type !== 'none') {
+      drawArrowHead(
+        target,
+        x + start.x * w,
+        y + start.y * h,
+        Math.atan2(start.dy * h, start.dx * w),
+        el.stroke.headEnd,
+        el.stroke,
+        scale,
+      );
+    }
+    if (end && el.stroke.tailEnd && el.stroke.tailEnd.type !== 'none') {
+      drawArrowHead(
+        target,
+        x + end.x * w,
+        y + end.y * h,
+        Math.atan2(end.dy * h, end.dx * w),
+        el.stroke.tailEnd,
+        el.stroke,
+        scale,
+      );
+    }
+  };
   const paintVisibleShapeBody = (target: CanvasRenderingContext2D): void => {
     if (flatBevels.length > 0) {
       const ok = paintBeveledFlat(
@@ -2835,11 +2954,13 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
         flatBevelEdgePadCss,
       );
       if (ok) {
+        paintLineDecorations(target);
         clearShadow(target);
         return;
       }
     }
     paintShapeBody(target);
+    paintLineDecorations(target);
   };
   const applyLiveTransform = (c: CanvasRenderingContext2D) => {
     c.setTransform(liveTransform);
@@ -2897,8 +3018,9 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     applySoftEdge(
       ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintVisibleShapeBody(c as CanvasRenderingContext2D); },
       effBBox, el.softEdge, effScale, deviceW, deviceH,
-      // Mask is the flat filled silhouette (no stroke) — see applySoftEdge.
-      (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D, '#000'); },
+      // Reuse the composed body so line-end decorations participate in the
+      // feather mask as well as the colour layer.
+      (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintVisibleShapeBody(c as CanvasRenderingContext2D); },
     );
     ctx.restore();
   } else {
@@ -2918,86 +3040,6 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       effBBox, el.innerShadow, effScale, deviceW, deviceH,
     );
     ctx.restore();
-  }
-
-  if (el.stroke && (CONNECTOR_GEOMS.has(geom) || CALLOUT_GEOMS.has(geom))) {
-    // Connectors and callouts both decorate a *leader line* whose two ends +
-    // outward tangents are resolved by getConnectorAnchors from the geometry's
-    // last `<path>` (presets.json). For a connector that is the line itself;
-    // for a callout it is the attach→tip leader (callout1 straight, callout2/3
-    // polyline). headEnd sits on the attach end, tailEnd on the tip — exactly
-    // as the `m … l …` order of the preset's leader path dictates.
-    const anchors = getConnectorAnchors(geom, x, y, w, h, [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8]);
-    if (anchors) {
-      // ECMA-376 §20.1.8.42 — compound line styles. For straight lines /
-      // connectors we re-stroke the segment with multiple parallel lines
-      // along the perpendicular of the line direction. Curved connectors and
-      // callout leaders fall through to the single-stroke fast path (parallel
-      // curves / polylines are a non-trivial geometric operation).
-      const cmpd = el.stroke.cmpd;
-      const isStraight = geom === 'line' || geom === 'straightconnector1';
-      // Retractable leaders (callout / straight / bent connector): paintShapeBody
-      // suppressed the preset leader stroke, so re-stroke the polyline here with
-      // each decorated end pulled back by the decoration's length, so the line
-      // stops at the arrow base instead of poking through its tip (PowerPoint
-      // behaviour). Filled ends (triangle/stealth/diamond/oval) retract; open
-      // `arrow` / `none` do not (lineEndRetract → 0). A compound straight segment
-      // is drawn by drawCompoundLine below instead, so skip the retract there.
-      if (isRetractableLeader(geom) && anchors.vertices.length >= 2 && !(cmpd && isStraight)) {
-        const pts = anchors.vertices.map((v) => ({ x: v.x, y: v.y }));
-        if (el.stroke.tailEnd) {
-          const r = lineEndRetract(el.stroke.tailEnd, el.stroke, scale);
-          pts[pts.length - 1] = retractLineEndpoint(pts[pts.length - 1], pts[pts.length - 2], r);
-        }
-        if (el.stroke.headEnd) {
-          const r = lineEndRetract(el.stroke.headEnd, el.stroke, scale);
-          pts[0] = retractLineEndpoint(pts[0], pts[1], r);
-        }
-        applyStroke(ctx, el.stroke, scale);
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-        ctx.stroke();
-      }
-      if (cmpd && isStraight) {
-        drawCompoundLine(ctx, anchors.start, anchors.end, el.stroke, cmpd, scale);
-      }
-      if (el.stroke.tailEnd) {
-        drawArrowHead(ctx, anchors.end.x, anchors.end.y, anchors.end.angle, el.stroke.tailEnd, el.stroke, scale);
-      }
-      if (el.stroke.headEnd) {
-        drawArrowHead(ctx, anchors.start.x, anchors.start.y, anchors.start.angle, el.stroke.headEnd, el.stroke, scale);
-      }
-    }
-  } else if (
-    el.stroke &&
-    el.custGeom &&
-    el.custGeom.length > 0 &&
-    ((el.stroke.headEnd && el.stroke.headEnd.type !== 'none') ||
-      (el.stroke.tailEnd && el.stroke.tailEnd.type !== 'none'))
-  ) {
-    // Freeform / curve (custGeom) lines also carry `<a:ln><a:headEnd|tailEnd>`.
-    // The connector/callout branches above only cover preset geometries, so a
-    // custGeom path's arrow heads were dropped. Extract the open path's two
-    // terminal points + outward tangents and decorate them like a connector.
-    // Endpoints on a *closed* sub-path are returned as null (PowerPoint draws no
-    // line-end decoration on a closed contour).
-    const { start, end } = getCustGeomEndpoints(el.custGeom);
-    // The endpoint tangent is expressed in normalised (0..1) space; convert to
-    // device space accounting for anisotropic scaling (w ≠ h) before atan2 so
-    // the arrow head orientation is correct on non-square boxes.
-    if (start && el.stroke.headEnd && el.stroke.headEnd.type !== 'none') {
-      const sx = x + start.x * w;
-      const sy = y + start.y * h;
-      const sAngle = Math.atan2(start.dy * h, start.dx * w);
-      drawArrowHead(ctx, sx, sy, sAngle, el.stroke.headEnd, el.stroke, scale);
-    }
-    if (end && el.stroke.tailEnd && el.stroke.tailEnd.type !== 'none') {
-      const ex = x + end.x * w;
-      const ey = y + end.y * h;
-      const eAngle = Math.atan2(end.dy * h, end.dx * w);
-      drawArrowHead(ctx, ex, ey, eAngle, el.stroke.tailEnd, el.stroke, scale);
-    }
   }
 
   // Render text inside the rotation context so text follows shape rotation
@@ -5080,10 +5122,42 @@ async function renderPicture(
       liveTransform.a * liveTransform.d - liveTransform.b * liveTransform.c,
     );
     const devScale = det > 0 ? Math.sqrt(det) : 1;
-    const effBBox = { x: x * devScale, y: y * devScale, w: w * devScale, h: h * devScale };
+    const paintedPad = strokeHalfCss + contourCss;
+    const effBBox = transformedEffectBounds(
+      liveTransform,
+      x - paintedPad,
+      y - paintedPad,
+      w + paintedPad * 2,
+      h + paintedPad * 2,
+    );
     const effScale = scale * devScale; // EMU → device px
     const applyLiveTransform = (c: CanvasRenderingContext2D) => c.setTransform(liveTransform);
     const haveAux = deviceW > 0 && deviceH > 0;
+
+    // Cast one shadow from the composed picture (bitmap + border + contour).
+    // Native canvas shadow state would cast once for each of those paint calls,
+    // producing stacked shadows and using the pre-transform rectangle as crop.
+    let nativeShadowFallback = false;
+    if (el.shadow && haveAux) {
+      ctx.save();
+      ctx.setTransform(new DOMMatrix());
+      const painted = applyOuterShadow(
+        ctx,
+        (c) => {
+          applyLiveTransform(c as CanvasRenderingContext2D);
+          paintImage(c as CanvasRenderingContext2D);
+        },
+        effBBox,
+        el.shadow,
+        effScale,
+        deviceW,
+        deviceH,
+      );
+      ctx.restore();
+      nativeShadowFallback = !painted;
+    } else if (el.shadow) {
+      nativeShadowFallback = true;
+    }
 
     // Reflection sits below the picture — paint it first. §20.1.8.50. The aux
     // paint bakes in the live rotation/flip via setTransform, so the blit runs
@@ -5099,9 +5173,9 @@ async function renderPicture(
       ctx.restore();
     }
 
-    // outerShdw / glow use the single Canvas shadow slot, cast by the image's
-    // own opaque pixels. Outer shadow wins when both are present (as in p:sp).
-    if (el.shadow) applyShadow(ctx, el.shadow, scale);
+    // Glow remains a native fallback effect. Outer shadow wins when both are
+    // present, matching the shape path's precedence.
+    if (nativeShadowFallback) applyShadow(ctx, el.shadow ?? null, scale);
     else if (el.glow) applyGlow(ctx, el.glow, scale);
 
     // softEdge feathers the whole picture, REPLACING the direct body paint
@@ -5120,7 +5194,7 @@ async function renderPicture(
     } else {
       paintImage(ctx);
     }
-    if (el.shadow || el.glow) clearShadow(ctx);
+    if (nativeShadowFallback || el.glow) clearShadow(ctx);
 
     // innerShdw casts inward, on top of the picture (§20.1.8.40).
     if (el.innerShadow && haveAux) {

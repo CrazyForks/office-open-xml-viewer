@@ -133,7 +133,11 @@ export {
 } from './fonts/symbol-font';
 export { renderChart } from './chart/renderer';
 export { autoResize, type AutoResizeOptions } from './autoResize';
-export { buildCustomPath } from './shape/custGeom';
+export {
+  buildCustomPath,
+  getCustomGeometryBounds,
+  type CustomGeometryBounds,
+} from './shape/custGeom';
 export {
   getCustGeomEndpoints,
   type CustGeomEndpoint,
@@ -149,7 +153,12 @@ export {
   type DrawingMLShapeGeometry,
   type DrawingMLShapePaintPlan,
 } from './shape/drawingml-shape';
-export { drawArrowHead, lineEndRetract, retractLineEndpoint } from './shape/arrow';
+export {
+  drawArrowHead,
+  lineEndPaintExtent,
+  lineEndRetract,
+  retractLineEndpoint,
+} from './shape/arrow';
 // Shared embedded-SVG decoder (Microsoft asvg:svgBlip extension) — used by all
 // three renderers to prefer the vector original over the raster fallback.
 // Path-keyed for the lazy byte-on-demand pipeline: fetches SVG bytes via a
