@@ -100,9 +100,13 @@ export function drawArrowHead(
       ctx.fill();
       break;
     case 'arrow':
-      ctx.moveTo(0, 0);
-      ctx.lineTo(-len, -halfW);
-      ctx.moveTo(0, 0);
+      // An open DrawingML arrow is one continuous chevron. Separate subpaths
+      // leave two flat caps stacked at the tip, producing a visibly broken,
+      // jagged point. PowerPoint joins the two arms and rounds the exposed ends.
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.moveTo(-len, -halfW);
+      ctx.lineTo(0, 0);
       ctx.lineTo(-len, halfW);
       ctx.stroke();
       break;
