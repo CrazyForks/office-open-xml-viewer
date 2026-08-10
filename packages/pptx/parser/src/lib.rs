@@ -4160,11 +4160,11 @@ mod tests {
     }
 
     /// ECMA-376 §20.1.2.3.34 defines tint as retained input colour: an 80%
-    /// tint keeps 80% of the source and adds 20% white. Presentation background
-    /// fills follow that literal definition; the SmartArt compatibility mode is
-    /// intentionally not applied to normal p:bgPr fills.
+    /// tint keeps 80% of the source and adds 20% white. PowerPoint performs
+    /// that blend in linear sRGB for ordinary presentation backgrounds as well
+    /// as theme style-matrix fills.
     #[test]
-    fn test_parse_background_uses_literal_tint_semantics() {
+    fn test_parse_background_uses_powerpoint_linear_tint_semantics() {
         let xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
           xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
           <p:bg><p:bgPr><a:solidFill><a:schemeClr val="bg2"><a:tint val="80000"/></a:schemeClr></a:solidFill></p:bgPr></p:bg>
@@ -4173,8 +4173,8 @@ mod tests {
         let theme = HashMap::from([("bg2".to_owned(), "7DAFC3".to_owned())]);
         let mut resolve = |_rid: &str| -> Option<String> { None };
         match parse_background(doc.root_element(), &theme, &mut resolve) {
-            Some(Fill::Solid { color }) => assert_eq!(color, "97BFCF"),
-            other => panic!("expected literal-tint solid fill, got {other:?}"),
+            Some(Fill::Solid { color }) => assert_eq!(color, "A3C3D1"),
+            other => panic!("expected linear-tint solid fill, got {other:?}"),
         }
     }
 
@@ -4230,7 +4230,11 @@ mod tests {
         )
         .expect("shape should parse");
         match shape.fill {
-            Some(Fill::Gradient { stops, .. }) => assert_eq!(stops.len(), 2),
+            Some(Fill::Gradient { stops, .. }) => {
+                assert_eq!(stops.len(), 2);
+                assert_eq!(stops[0].color, "C2CDE1");
+                assert_eq!(stops[1].color, "EFF1F7");
+            }
             other => panic!("expected style-matrix gradient, got {other:?}"),
         }
     }
