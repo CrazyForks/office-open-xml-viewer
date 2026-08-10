@@ -295,6 +295,39 @@ fn merge_local_stroke(
     }
 }
 
+/// Resolve `p:style/a:lnRef` into the inherited line component. The complete
+/// theme line recipe will move to the shared format-scheme model; until then,
+/// keeping this fallback in one place prevents shapes, connectors and pictures
+/// from disagreeing about the same CT_ShapeStyle component.
+fn parse_style_stroke(
+    style_node: Option<roxmltree::Node<'_, '_>>,
+    theme: &HashMap<String, String>,
+) -> Option<Stroke> {
+    style_node
+        .and_then(|style| child(style, "lnRef"))
+        .and_then(|line_ref| {
+            let idx: u32 = attr(&line_ref, "idx")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1);
+            if idx == 0 {
+                return None;
+            }
+            parse_color_node(line_ref, theme).map(|color| Stroke {
+                color,
+                width: theme
+                    .get(&format!("+lnRef-{idx}"))
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(9525),
+                fill: None,
+                dash_style: None,
+                line_cap: None,
+                head_end: None,
+                tail_end: None,
+                cmpd: None,
+            })
+        })
+}
+
 pub(crate) fn parse_shape(
     sp_node: roxmltree::Node<'_, '_>,
     lph: &LayoutPlaceholders,
@@ -431,29 +464,7 @@ pub(crate) fn parse_shape(
     // lnStyleLst (stored as "+lnRef-N") and color from the ref's own solidFill.
     // Falling back to 9525 under-weights idx>=2 strokes (Office default theme
     // idx=2 is 19050 EMU = 1.5pt, idx=3 is 25400 EMU = 2pt).
-    let style_stroke: Option<Stroke> = style_node.and_then(|s| child(s, "lnRef")).and_then(|lr| {
-        let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
-        if idx == 0 {
-            None
-        } else {
-            parse_color_node(lr, theme).map(|c| {
-                let width = theme
-                    .get(&format!("+lnRef-{}", idx))
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(9525);
-                Stroke {
-                    color: c,
-                    width,
-                    fill: None,
-                    dash_style: None,
-                    line_cap: None,
-                    head_end: None,
-                    tail_end: None,
-                    cmpd: None,
-                }
-            })
-        }
-    });
+    let style_stroke = parse_style_stroke(style_node, theme);
 
     // fontRef → default text color for this shape.
     // Fall back to layout/master placeholder inherited color (lstStyle > lvl1pPr > defRPr
@@ -654,7 +665,9 @@ pub(crate) fn parse_shape(
         placeholder_idx: ph_idx,
         text_rect: None,
         scene3d: sp_pr.and_then(parse_scene3d).or(style_scene3d),
-        sp3d: sp_pr.and_then(parse_sp3d).or(style_sp3d),
+        sp3d: sp_pr
+            .and_then(|node| parse_sp3d(node, theme))
+            .or(style_sp3d),
     })
 }
 
@@ -837,20 +850,40 @@ pub(crate) fn parse_picture(
     let cust_geom = child(sp_pr, "custGeom")
         .map(|geometry| parse_cust_geom(geometry, t.cx as f64, t.cy as f64));
 
-    // §19.3.1.37: p:pic's spPr is CT_ShapeProperties, so effectLst (§20.1.8.16)
-    // applies to images exactly as it does to shapes.
+    // A picture has the same CT_ShapeStyle component references as a shape.
+    // Resolve the theme recipe first; a local spPr component then replaces or
+    // overlays it according to MS-OI29500 §20.1.2.2.37(b).
+    let style_node = child(pic_node, "style");
+    let style_effects = style_node
+        .and_then(|style| child(style, "effectRef"))
+        .map(|effect_ref| parse_style_matrix_effects(effect_ref, theme))
+        .unwrap_or_default();
+    let style_scene3d = style_effects.scene3d;
+    let style_sp3d = style_effects.sp3d;
+    let local_effect_node = child(sp_pr, "effectLst").or_else(|| child(sp_pr, "effectDag"));
+
+    // §19.3.1.37: p:pic's spPr is CT_ShapeProperties, so effects apply to the
+    // composed bitmap/border silhouette exactly as they do to shapes.
     let EffectLst {
         shadow,
         inner_shadow,
         glow,
         soft_edge,
         reflection,
-    } = parse_effect_lst(child(sp_pr, "effectLst"), theme);
+    } = if local_effect_node.is_some() {
+        parse_effect_lst(local_effect_node, theme)
+    } else {
+        style_effects.effects
+    };
 
     // §20.1.2.2.24 — a `p:pic`'s spPr may carry an `<a:ln>` border (e.g. the
     // white frame of PowerPoint's picture styles). `parse_stroke` returns None
     // for `<a:noFill/>`, so an explicitly border-less picture stays None.
-    let stroke = child(sp_pr, "ln").and_then(|n| parse_stroke(n, theme));
+    let stroke = merge_local_stroke(
+        child(sp_pr, "ln"),
+        parse_style_stroke(style_node, theme),
+        theme,
+    );
 
     let (prst_geom, prst_adjust) = parse_pic_prst_geom(sp_pr);
     Some(PictureElement {
@@ -884,8 +917,8 @@ pub(crate) fn parse_picture(
         glow,
         soft_edge,
         reflection,
-        scene3d: parse_scene3d(sp_pr),
-        sp3d: parse_sp3d(sp_pr),
+        scene3d: parse_scene3d(sp_pr).or(style_scene3d),
+        sp3d: parse_sp3d(sp_pr, theme).or(style_sp3d),
     })
 }
 
@@ -1802,7 +1835,7 @@ pub(crate) fn parse_sp_tree_node(
                                     soft_edge,
                                     reflection,
                                     scene3d: sp_pr_node.and_then(parse_scene3d),
-                                    sp3d: sp_pr_node.and_then(parse_sp3d),
+                                    sp3d: sp_pr_node.and_then(|node| parse_sp3d(node, theme)),
                                 }));
                                 return;
                             }
@@ -2445,29 +2478,7 @@ fn parse_connector(
     // theme fmtScheme lnStyleLst entry N (1-based). We look up the canonical
     // width from the theme map ("+lnRef-N") rather than hardcoding 9525.
     let style_node = child(node, "style");
-    let style_stroke: Option<Stroke> = style_node.and_then(|s| child(s, "lnRef")).and_then(|lr| {
-        let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
-        if idx == 0 {
-            None
-        } else {
-            parse_color_node(lr, theme).map(|c| {
-                let width = theme
-                    .get(&format!("+lnRef-{}", idx))
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(9525);
-                Stroke {
-                    color: c,
-                    width,
-                    fill: None,
-                    dash_style: None,
-                    line_cap: None,
-                    head_end: None,
-                    tail_end: None,
-                    cmpd: None,
-                }
-            })
-        }
-    });
+    let style_stroke = parse_style_stroke(style_node, theme);
 
     let stroke = merge_local_stroke(child(sp_pr, "ln"), style_stroke, theme);
 
@@ -2570,7 +2581,7 @@ fn parse_connector(
         placeholder_idx: None,
         text_rect: None,
         scene3d: parse_scene3d(sp_pr).or(style_scene3d),
-        sp3d: parse_sp3d(sp_pr).or(style_sp3d),
+        sp3d: parse_sp3d(sp_pr, theme).or(style_sp3d),
     })
 }
 

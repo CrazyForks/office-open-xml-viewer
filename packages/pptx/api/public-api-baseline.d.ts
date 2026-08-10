@@ -1008,6 +1008,12 @@ export interface Shadow {
     blur: number;
     dist: number;
     dir: number;
+    sx?: number;
+    sy?: number;
+    kx?: number;
+    ky?: number;
+    algn?: 'tl' | 't' | 'tr' | 'l' | 'ctr' | 'r' | 'bl' | 'b' | 'br';
+    rotWithShape?: boolean;
 }
 export interface ShapeElement {
     type: 'shape';
@@ -1078,6 +1084,7 @@ export interface Sp3d {
     extrusionH?: number;
     contourW?: number;
     contourClr?: string;
+    extrusionClr?: string;
     prstMaterial: string;
     bevelT?: Bevel3d;
     bevelB?: Bevel3d;

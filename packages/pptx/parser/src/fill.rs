@@ -351,6 +351,15 @@ fn parse_shadow_node_with_resolver<R: ThemeResolver + ?Sized>(
     let blur = attr_i64(&n, "blurRad").unwrap_or(0);
     let dist = attr_i64(&n, "dist").unwrap_or(0);
     let dir = attr_f64(&n, "dir").unwrap_or(0.0) / 60_000.0;
+    // CT_OuterShadowEffect (§20.1.8.45). These attributes do not exist on
+    // CT_InnerShadowEffect, so the shared reader keeps them optional.
+    let sx = attr_f64(&n, "sx").map(|value| value / 100_000.0);
+    let sy = attr_f64(&n, "sy").map(|value| value / 100_000.0);
+    let kx = attr_f64(&n, "kx").map(|value| value / 60_000.0);
+    let ky = attr_f64(&n, "ky").map(|value| value / 60_000.0);
+    let algn = attr(&n, "algn");
+    let rot_with_shape =
+        attr(&n, "rotWithShape").map(|value| value == "1" || value.eq_ignore_ascii_case("true"));
 
     let color_str = ooxml_common::color::parse_color_node(n, resolver, tint_mode)
         .unwrap_or_else(|| "000000".to_owned());
@@ -367,6 +376,12 @@ fn parse_shadow_node_with_resolver<R: ThemeResolver + ?Sized>(
         blur,
         dist,
         dir,
+        sx,
+        sy,
+        kx,
+        ky,
+        algn,
+        rot_with_shape,
     })
 }
 
@@ -537,7 +552,13 @@ pub(crate) fn parse_style_matrix_effects(
             ooxml_common::color::TintMode::PowerPointLinear,
         ),
         scene3d: effect_style.and_then(parse_scene3d),
-        sp3d: effect_style.and_then(parse_sp3d),
+        sp3d: effect_style.and_then(|node| {
+            parse_sp3d_with_resolver(
+                node,
+                &resolver,
+                ooxml_common::color::TintMode::PowerPointLinear,
+            )
+        }),
     }
 }
 
@@ -595,17 +616,33 @@ pub(crate) fn parse_bevel3d(bevel: roxmltree::Node<'_, '_>) -> Bevel3d {
 /// Parse `<a:sp3d>` (`CT_Shape3D`, ECMA-376 §20.1.5.12). Defaults follow the
 /// schema: z=0, extrusionH=0, contourW=0, prstMaterial="warmMatte". Parsed in
 /// full but not rendered in Phase A.
-pub(crate) fn parse_sp3d(sppr: roxmltree::Node<'_, '_>) -> Option<Sp3d> {
+pub(crate) fn parse_sp3d(
+    sppr: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> Option<Sp3d> {
+    parse_sp3d_with_resolver(
+        sppr,
+        &PptxSchemeResolver { theme },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    )
+}
+
+fn parse_sp3d_with_resolver<R: ThemeResolver + ?Sized>(
+    sppr: roxmltree::Node<'_, '_>,
+    resolver: &R,
+    tint_mode: ooxml_common::color::TintMode,
+) -> Option<Sp3d> {
     let n = child(sppr, "sp3d")?;
-    // contourClr is colour-only here; pass an empty theme map because sp3d
-    // contour colours in practice are srgbClr (no theme lookup needed) and this
-    // parser has the theme threaded only into the line/fill paths.
-    let contour_clr = child(n, "contourClr").and_then(|c| parse_color_node(c, &HashMap::new()));
+    let contour_clr = child(n, "contourClr")
+        .and_then(|c| ooxml_common::color::parse_color_node(c, resolver, tint_mode));
+    let extrusion_clr = child(n, "extrusionClr")
+        .and_then(|c| ooxml_common::color::parse_color_node(c, resolver, tint_mode));
     Some(Sp3d {
         z: attr_i64(&n, "z").unwrap_or(0),
         extrusion_h: attr_i64(&n, "extrusionH").unwrap_or(0),
         contour_w: attr_i64(&n, "contourW").unwrap_or(0),
         contour_clr,
+        extrusion_clr,
         prst_material: attr(&n, "prstMaterial").unwrap_or_else(|| "warmMatte".into()),
         bevel_t: child(n, "bevelT").map(parse_bevel3d),
         bevel_b: child(n, "bevelB").map(parse_bevel3d),

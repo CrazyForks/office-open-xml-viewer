@@ -134,6 +134,18 @@ export interface Shadow {
   dist: number;   // EMU
   /** degrees clockwise from East */
   dir: number;
+  /** Horizontal scale (1.0 = unchanged). Outer shadows only. */
+  sx?: number;
+  /** Vertical scale (1.0 = unchanged). Outer shadows only. */
+  sy?: number;
+  /** Horizontal skew in degrees. Outer shadows only. */
+  kx?: number;
+  /** Vertical skew in degrees. Outer shadows only. */
+  ky?: number;
+  /** Alignment origin used before scaling/skewing. Default `b`. */
+  algn?: 'tl' | 't' | 'tr' | 'l' | 'ctr' | 'r' | 'bl' | 'b' | 'br';
+  /** Whether shadow transforms and offset rotate with the shape. Default true. */
+  rotWithShape?: boolean;
 }
 
 /** ECMA-376 §20.1.8.17 (CT_GlowEffect) — coloured halo with blur radius. */

@@ -2985,6 +2985,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       effScale,
       deviceW,
       deviceH,
+      Math.atan2(liveTransform.b, liveTransform.a) * 180 / Math.PI,
     );
     ctx.restore();
     nativeShadowFallback = !painted;
@@ -5152,6 +5153,7 @@ async function renderPicture(
         effScale,
         deviceW,
         deviceH,
+        Math.atan2(liveTransform.b, liveTransform.a) * 180 / Math.PI,
       );
       ctx.restore();
       nativeShadowFallback = !painted;

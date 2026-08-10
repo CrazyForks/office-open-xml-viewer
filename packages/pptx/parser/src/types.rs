@@ -324,6 +324,9 @@ pub(crate) struct Sp3d {
     /// the shape's line/fill colour, which the renderer does not approximate).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) contour_clr: Option<String>,
+    /// Extrusion side-wall colour (`<a:extrusionClr>` child).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) extrusion_clr: Option<String>,
     /// Preset surface material (`ST_PresetMaterialType`), default "warmMatte".
     pub(crate) prst_material: String,
     /// Top bevel.
@@ -587,6 +590,24 @@ pub(crate) struct Shadow {
     pub(crate) dist: i64,
     /// direction in degrees, clockwise from East
     pub(crate) dir: f64,
+    /// Horizontal scale (1.0 = unchanged). Outer shadows only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sx: Option<f64>,
+    /// Vertical scale (1.0 = unchanged). Outer shadows only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sy: Option<f64>,
+    /// Horizontal skew in degrees. Outer shadows only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) kx: Option<f64>,
+    /// Vertical skew in degrees. Outer shadows only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ky: Option<f64>,
+    /// Alignment origin for scale/skew.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) algn: Option<String>,
+    /// Whether the shadow transform follows shape rotation. Schema default true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rot_with_shape: Option<bool>,
 }
 
 /// ECMA-376 §20.1.8.17 (CT_GlowEffect) — coloured halo with blur radius.
