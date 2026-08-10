@@ -3628,10 +3628,11 @@ mod tests {
         assert!(BulletProps::default().is_inherit());
     }
 
-    /// ECMA-376 §21.1.2.4.3 defines buChar@char as xsd:string. Preserve the
-    /// complete authored value, including multi-scalar grapheme clusters.
+    /// PowerPoint paints one marker glyph when a flattened SmartArt cache
+    /// serializes a duplicated string-valued buChar. Preserve other authored
+    /// multi-character values because ECMA-376 types the attribute as a string.
     #[test]
-    fn character_bullet_preserves_the_authored_string() {
+    fn character_bullet_collapses_only_a_duplicated_marker() {
         let doc = roxmltree::Document::parse(
             r#"<a:pPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:buChar char="••"/></a:pPr>"#,
         )
@@ -3639,18 +3640,35 @@ mod tests {
         let theme = HashMap::new();
         let mut resolve_blip = |_: &str| None;
         match parse_bullet(Some(doc.root_element()), &theme, &mut resolve_blip) {
-            Bullet::Char { ch, .. } => assert_eq!(ch, "••"),
+            Bullet::Char { ch, .. } => assert_eq!(ch, "•"),
             other => panic!("expected Char, got {other:?}"),
         }
 
-        let emoji_doc = roxmltree::Document::parse(
+        let multi_char_doc = roxmltree::Document::parse(
             r#"<a:pPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:buChar char="🡆x"/></a:pPr>"#,
         )
-        .expect("valid supplementary-plane marker");
-        match parse_bullet(Some(emoji_doc.root_element()), &theme, &mut resolve_blip) {
+        .expect("valid multi-character marker");
+        match parse_bullet(
+            Some(multi_char_doc.root_element()),
+            &theme,
+            &mut resolve_blip,
+        ) {
             Bullet::Char { ch, .. } => assert_eq!(ch, "🡆x"),
             other => panic!("expected Char, got {other:?}"),
         }
+    }
+
+    /// PowerPoint serializes an unbound placeholder as idx=2^32-1. That value
+    /// is a sentinel rather than a layout slot, so the paragraph still inherits
+    /// its bullet marker from the master bodyStyle.
+    #[test]
+    fn max_placeholder_idx_uses_type_style_fallback() {
+        let slide_sp = r#"<p:sp><p:nvSpPr><p:cNvPr id="5" name="Unbound body"/><p:cNvSpPr/><p:nvPr><p:ph idx="4294967295"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:buClr><a:srgbClr val="C00000"/></a:buClr></a:pPr><a:r><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>"#;
+        let data = build_align_pptx(slide_sp, "", &txstyles_body_lvl1(r#"<a:buChar char="•"/>"#));
+        let b = first_para_bullet(&data);
+        assert_eq!(b["type"], "char");
+        assert_eq!(b["char"], "•");
+        assert_eq!(b["color"], "C00000");
     }
 
     /// §21.1.2.4.9 — `<a:buSzPct val>` accepts both the Transitional integer
