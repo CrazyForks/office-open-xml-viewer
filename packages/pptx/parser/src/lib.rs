@@ -5006,7 +5006,11 @@ mod tests {
     fn test_pic_effect_lst_resolves_all_effects() {
         let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
             <effectLst>
-                <outerShdw blurRad="50800" dist="38100" dir="2700000"><srgbClr val="000000"><alpha val="40000"/></srgbClr></outerShdw>
+                <outerShdw blurRad="50800" dist="38100" dir="2700000"
+                            sx="50000" sy="150000" kx="1200000" ky="-600000"
+                            algn="tr" rotWithShape="0">
+                    <srgbClr val="000000"><alpha val="40000"/></srgbClr>
+                </outerShdw>
                 <innerShdw blurRad="63500" dist="50800" dir="5400000"><srgbClr val="111111"/></innerShdw>
                 <glow rad="63500"><srgbClr val="FFCC00"/></glow>
                 <softEdge rad="25400"/>
@@ -5022,6 +5026,12 @@ mod tests {
         assert_eq!(shadow.blur, 50_800);
         assert_eq!(shadow.dist, 38_100);
         assert!((shadow.alpha - 0.4).abs() < 0.01);
+        assert_eq!(shadow.sx, Some(0.5));
+        assert_eq!(shadow.sy, Some(1.5));
+        assert_eq!(shadow.kx, Some(20.0));
+        assert_eq!(shadow.ky, Some(-10.0));
+        assert_eq!(shadow.algn.as_deref(), Some("tr"));
+        assert_eq!(shadow.rot_with_shape, Some(false));
 
         let inner = eff.inner_shadow.expect("innerShdw should resolve");
         assert_eq!(inner.blur, 63_500);
@@ -6445,7 +6455,7 @@ mod tests {
         assert_eq!(lr.rig, "threePt");
         assert_eq!(lr.dir, "t");
 
-        let sp3d = parse_sp3d(sppr).expect("sp3d should parse");
+        let sp3d = parse_sp3d(sppr, &HashMap::new()).expect("sp3d should parse");
         assert_eq!(sp3d.contour_w, 6350);
         assert_eq!(sp3d.prst_material, "matte");
         assert_eq!(sp3d.z, 0); // default
@@ -6488,7 +6498,7 @@ mod tests {
         // No <a:rot> → None (renderer uses the preset base orientation).
         assert!(scene.camera.rot.is_none());
 
-        let sp3d = parse_sp3d(sppr).unwrap();
+        let sp3d = parse_sp3d(sppr, &HashMap::new()).unwrap();
         assert_eq!(sp3d.z, 0);
         assert_eq!(sp3d.extrusion_h, 0);
         assert_eq!(sp3d.contour_w, 0);
@@ -6507,7 +6517,7 @@ mod tests {
         let doc = roxmltree::Document::parse(xml).unwrap();
         let sppr = parse_sppr_frag(&doc);
         assert!(parse_scene3d(sppr).is_none());
-        assert!(parse_sp3d(sppr).is_none());
+        assert!(parse_sp3d(sppr, &HashMap::new()).is_none());
     }
 
     // ===== sp3d contour colour (ECMA-376 §20.1.5.12 contourClr) =====
@@ -6519,19 +6529,26 @@ mod tests {
             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
             xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
           <p:spPr>
-            <a:sp3d contourW="6350" prstMaterial="matte">
+            <a:sp3d contourW="6350" extrusionH="12700" prstMaterial="matte">
               <a:bevelT w="101600" h="101600"/>
-              <a:contourClr><a:srgbClr val="969696"/></a:contourClr>
+              <a:contourClr><a:schemeClr val="accent1"/></a:contourClr>
+              <a:extrusionClr><a:schemeClr val="accent2"/></a:extrusionClr>
             </a:sp3d>
           </p:spPr>
         </root>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
         let sppr = parse_sppr_frag(&doc);
-        let sp3d = parse_sp3d(sppr).expect("sp3d should parse");
+        let theme = HashMap::from([
+            ("accent1".to_owned(), "969696".to_owned()),
+            ("accent2".to_owned(), "4472C4".to_owned()),
+        ]);
+        let sp3d = parse_sp3d(sppr, &theme).expect("sp3d should parse");
         assert_eq!(sp3d.contour_w, 6350);
         assert_eq!(sp3d.contour_clr.as_deref(), Some("969696"));
+        assert_eq!(sp3d.extrusion_clr.as_deref(), Some("4472C4"));
         let json = serde_json::to_string(&sp3d).unwrap();
         assert!(json.contains("\"contourClr\":\"969696\""), "{json}");
+        assert!(json.contains("\"extrusionClr\":\"4472C4\""), "{json}");
     }
 
     #[test]
@@ -6543,7 +6560,7 @@ mod tests {
         </root>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
         let sppr = parse_sppr_frag(&doc);
-        let sp3d = parse_sp3d(sppr).unwrap();
+        let sp3d = parse_sp3d(sppr, &HashMap::new()).unwrap();
         assert!(sp3d.contour_clr.is_none());
         // Omitted from JSON when absent.
         let json = serde_json::to_string(&sp3d).unwrap();
@@ -7483,6 +7500,61 @@ mod tests {
         assert!(
             pic.svg_image_path.is_none(),
             "svg_image_path must be None without an svgBlip extension"
+        );
+    }
+
+    /// p:pic carries the same CT_ShapeStyle references as p:sp. A picture with
+    /// no local line/effect component must therefore inherit lnRef/effectRef,
+    /// including effect-style 3D colours resolved through phClr.
+    #[test]
+    fn picture_inherits_line_effect_and_3d_from_style_matrix() {
+        let pic_xml = r#"<p:pic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:nvPicPr><p:cNvPr id="5" name="StyledPic"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+  <p:blipFill><a:blip r:embed="rIdPng"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+  <p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="300000" cy="300000"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+  <p:style>
+    <a:lnRef idx="2"><a:schemeClr val="accent2"/></a:lnRef>
+    <a:fillRef idx="0"><a:schemeClr val="accent1"/></a:fillRef>
+    <a:effectRef idx="1"><a:schemeClr val="accent1"/></a:effectRef>
+    <a:fontRef idx="minor"><a:schemeClr val="tx1"/></a:fontRef>
+  </p:style>
+</p:pic>"#;
+        let doc = roxmltree::Document::parse(pic_xml).unwrap();
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_owned(), "../media/image1.png".to_owned());
+        let mut theme = HashMap::from([
+            ("accent1".to_owned(), "112233".to_owned()),
+            ("accent2".to_owned(), "445566".to_owned()),
+            ("+lnRef-2".to_owned(), "19050".to_owned()),
+        ]);
+        theme.insert(
+            "+effectStyle-1".to_owned(),
+            r#"<a:effectStyle>
+              <a:effectLst><a:outerShdw blurRad="12700"><a:schemeClr val="phClr"/></a:outerShdw></a:effectLst>
+              <a:scene3d><a:camera prst="orthographicFront"/></a:scene3d>
+              <a:sp3d extrusionH="25400"><a:extrusionClr><a:schemeClr val="phClr"/></a:extrusionClr></a:sp3d>
+            </a:effectStyle>"#.to_owned(),
+        );
+        let data = build_blip_media_zip(b"png", b"<svg/>");
+        let mut zip = PptxZip::new(Cursor::new(data)).unwrap();
+
+        let pic = parse_picture(doc.root_element(), "ppt/slides", &rels, &theme, &mut zip)
+            .expect("styled picture should parse");
+
+        let stroke = pic.stroke.expect("lnRef should supply a picture border");
+        assert_eq!(stroke.width, 19_050);
+        assert_eq!(stroke.color, "445566");
+        assert_eq!(pic.shadow.expect("effectRef shadow").color, "112233");
+        assert_eq!(
+            pic.scene3d.expect("effectRef scene3d").camera.prst,
+            "orthographicFront"
+        );
+        assert_eq!(
+            pic.sp3d.expect("effectRef sp3d").extrusion_clr.as_deref(),
+            Some("112233")
         );
     }
 

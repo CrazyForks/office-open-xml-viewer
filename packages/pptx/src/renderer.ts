@@ -51,6 +51,7 @@ import {
   isScene3dNonIdentity,
   drawProjected,
   expandProjectedQuad,
+  projectQuadPoint,
   createAuxCanvas,
   applyBevelShading,
   applyExtrusion,
@@ -2518,6 +2519,208 @@ export function transformedEffectBounds(
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
+type EffectPaint = (target: CanvasRenderingContext2D) => void;
+
+interface RasterEffects {
+  shadow?: ShapeElement['shadow'];
+  innerShadow?: ShapeElement['innerShadow'];
+  glow?: ShapeElement['glow'];
+  softEdge?: ShapeElement['softEdge'];
+  reflection?: ShapeElement['reflection'];
+}
+
+const ALIGNMENT_UV: Record<NonNullable<Shadow['algn']>, readonly [number, number]> = {
+  tl: [0, 0], t: [0.5, 0], tr: [1, 0],
+  l: [0, 0.5], ctr: [0.5, 0.5], r: [1, 0.5],
+  bl: [0, 1], b: [0.5, 1], br: [1, 1],
+};
+
+function transformPoint(transform: EffectTransform, x: number, y: number): [number, number] {
+  return [
+    transform.a * x + transform.c * y + transform.e,
+    transform.b * x + transform.d * y + transform.f,
+  ];
+}
+
+function authoredAlignmentAnchor(
+  transform: EffectTransform,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  algn: Shadow['algn'],
+): [number, number] {
+  const [u, v] = ALIGNMENT_UV[algn ?? 'b'];
+  return transformPoint(transform, x + u * w, y + v * h);
+}
+
+export function projectedEffectGeometry(
+  camera: CameraInput,
+  transform: EffectTransform,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  edgePadCss: number,
+  algn: Shadow['algn'],
+): { bbox: { x: number; y: number; w: number; h: number }; anchor: [number, number] } {
+  const face = computeScene3dQuad(camera, w, h).corners;
+  const painted = edgePadCss > 0
+    ? expandProjectedQuad(face, edgePadCss / w, edgePadCss / h) ?? face
+    : face;
+  const devicePoints = painted.map((point) => transformPoint(transform, x + point.x, y + point.y));
+  const xs = devicePoints.map(([px]) => px);
+  const ys = devicePoints.map(([, py]) => py);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  const maxX = Math.max(...xs);
+  const maxY = Math.max(...ys);
+  const [u, v] = ALIGNMENT_UV[algn ?? 'b'];
+  const projectedAnchor = projectQuadPoint(face, u, v);
+  return {
+    bbox: { x: minX, y: minY, w: maxX - minX, h: maxY - minY },
+    anchor: projectedAnchor
+      ? transformPoint(transform, x + projectedAnchor.x, y + projectedAnchor.y)
+      : authoredAlignmentAnchor(transform, x, y, w, h, algn),
+  };
+}
+
+/** Cache an expensive projected body for this one render call only. */
+export function cacheDevicePaint(
+  paint: EffectPaint,
+  liveTransform: EffectTransform,
+  bbox: { x: number; y: number; w: number; h: number },
+  viewport?: { w: number; h: number },
+): EffectPaint {
+  const x = Math.floor(bbox.x) - 1;
+  const y = Math.floor(bbox.y) - 1;
+  const w = Math.max(1, Math.ceil(bbox.x + bbox.w) - x + 1);
+  const h = Math.max(1, Math.ceil(bbox.y + bbox.h) - y + 1);
+  // This cache is an optimization, not a rendering dependency. Do not allocate
+  // a fully viewport-external or oversized projected surface: replaying the source
+  // projection is slower but preserves both effect reach and the shared canvas
+  // safety limits without risking an OOM/DOMException.
+  if (viewport && (x + w <= 0 || y + h <= 0 || x >= viewport.w || y >= viewport.h)) return paint;
+  if (clampCanvasSize(w, h).clamped) return paint;
+  let canvas: ReturnType<typeof createAuxCanvas> = null;
+  try {
+    canvas = createAuxCanvas(w, h);
+  } catch {
+    return paint;
+  }
+  const cache = canvas?.getContext('2d') as CanvasRenderingContext2D | null;
+  if (!canvas || !cache) return paint;
+  cache.setTransform(
+    liveTransform.a,
+    liveTransform.b,
+    liveTransform.c,
+    liveTransform.d,
+    liveTransform.e - x,
+    liveTransform.f - y,
+  );
+  paint(cache);
+  const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } as DOMMatrix;
+  return (target) => {
+    target.save();
+    target.setTransform(identity);
+    target.drawImage(canvas as CanvasImageSource, x, y);
+    target.restore();
+  };
+}
+
+function paintWithRasterEffects(
+  ctx: CanvasRenderingContext2D,
+  effects: RasterEffects,
+  paintBody: EffectPaint,
+  paintMask: EffectPaint,
+  bbox: { x: number; y: number; w: number; h: number },
+  alignmentAnchor: readonly [number, number],
+  scale: number,
+  effectScale: number,
+  liveTransform: EffectTransform,
+  hasInterior = true,
+  paintInnerMask: EffectPaint = paintMask,
+): void {
+  const deviceW = (ctx.canvas as { width: number }).width || 0;
+  const deviceH = (ctx.canvas as { height: number }).height || 0;
+  const haveAux = deviceW > 0 && deviceH > 0;
+  const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } as DOMMatrix;
+  const applyLiveTransform = (target: CanvasRenderingContext2D) => target.setTransform(liveTransform);
+  const body = (target: CanvasRenderingContext2D) => {
+    applyLiveTransform(target);
+    paintBody(target);
+  };
+  const mask = (target: CanvasRenderingContext2D) => {
+    applyLiveTransform(target);
+    paintMask(target);
+  };
+  const innerMask = (target: CanvasRenderingContext2D) => {
+    applyLiveTransform(target);
+    paintInnerMask(target);
+  };
+  let nativeShadowFallback = false;
+  if (effects.shadow && haveAux) {
+    ctx.save();
+    ctx.setTransform(identity);
+    nativeShadowFallback = !applyOuterShadow(
+      ctx,
+      body as never,
+      bbox,
+      effects.shadow,
+      effectScale,
+      deviceW,
+      deviceH,
+      Math.atan2(liveTransform.b, liveTransform.a) * 180 / Math.PI,
+      alignmentAnchor,
+    );
+    ctx.restore();
+  } else if (effects.shadow) {
+    nativeShadowFallback = true;
+  }
+  if (effects.reflection && haveAux) {
+    ctx.save();
+    ctx.setTransform(identity);
+    applyReflection(ctx, body as never, bbox, effects.reflection, effectScale, deviceW, deviceH);
+    ctx.restore();
+  }
+  if (nativeShadowFallback) applyShadow(ctx, effects.shadow ?? null, scale);
+  else if (effects.glow) applyGlow(ctx, effects.glow, scale);
+
+  if (effects.softEdge && haveAux) {
+    ctx.save();
+    ctx.setTransform(identity);
+    applySoftEdge(
+      ctx,
+      body as never,
+      bbox,
+      effects.softEdge,
+      effectScale,
+      deviceW,
+      deviceH,
+      mask as never,
+    );
+    ctx.restore();
+  } else {
+    paintBody(ctx);
+  }
+  if (nativeShadowFallback || effects.glow) clearShadow(ctx);
+
+  if (effects.innerShadow && hasInterior && haveAux) {
+    ctx.save();
+    ctx.setTransform(identity);
+    applyInnerShadow(
+      ctx,
+      innerMask as never,
+      bbox,
+      effects.innerShadow,
+      effectScale,
+      deviceW,
+      deviceH,
+    );
+    ctx.restore();
+  }
+}
+
 function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }, onTextRun?: TextRunCallback, fetchImage?: FetchImage) {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
@@ -2602,34 +2805,104 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       // The outer projection owns bevel and extrusion. Retaining sp3d here
       // would shade the recursive flat body and then shade it again outside.
       sp3d: undefined,
+      // Raster effects apply to the projected silhouette, not to the flat
+      // source face. Keeping them here clips their reach at the source
+      // offscreen and then warps the already-clipped result.
+      shadow: null,
+      innerShadow: undefined,
+      glow: undefined,
+      softEdge: undefined,
+      reflection: undefined,
     };
-    const ok = projectScene3dPaint(
-      ctx,
-      spScene3d.camera,
-      x,
-      y,
-      w,
-      h,
-      (octx) => {
+    const localBodyEl: ShapeElement = { ...localEl, textBody: null };
+    const localTextEl: ShapeElement = {
+      ...localEl,
+      fill: null,
+      stroke: null,
+    };
+    const edgePadCss =
+      (el.stroke ? (el.stroke.width * scale) / 2 : 0) +
+      (el.sp3d?.contourW ? el.sp3d.contourW * scale : 0) +
+      (extrusion ? Math.hypot(extrusion.offsetX, extrusion.offsetY) / ctxDevScale : 0) +
+      2;
+    const paintProjectedElement = (
+      target: CanvasRenderingContext2D,
+      projectedElement: ShapeElement,
+      padded: boolean,
+    ): boolean =>
+      projectScene3dPaint(
+        target,
+        spScene3d.camera,
+        x,
+        y,
+        w,
+        h,
+        (octx) => {
         // localEl is at the origin (x=y=0) with the element's own EMU size, so
         // the recursive render fills the (0,0,w,h) offscreen at the same scale.
         // No onTextRun → the projected text is not selectable (see the note).
-        renderShape(octx, localEl, scale, themeDefaultColor, slideNumber, rc, undefined);
-      },
-      {
-        bevels,
-        extrusion: extrusion ?? undefined,
-        // Edge margin so the centre-aligned stroke's outer half and the
-        // extrusion sweep aren't clipped by the box-sized offscreen (see
-        // Project3dOpts.edgePadCss).
-        edgePadCss:
-          (el.stroke ? (el.stroke.width * scale) / 2 : 0) +
-          (el.sp3d?.contourW ? el.sp3d.contourW * scale : 0) +
-          (extrusion ? Math.hypot(extrusion.offsetX, extrusion.offsetY) / ctxDevScale : 0) +
-          2,
-      },
+          renderShape(octx, projectedElement, scale, themeDefaultColor, slideNumber, rc, undefined);
+        },
+        padded
+          ? { bevels, extrusion: extrusion ?? undefined, edgePadCss }
+          : {},
+      );
+    const paintProjectedBody = (target: CanvasRenderingContext2D): boolean =>
+      paintProjectedElement(target, localBodyEl, true);
+    const paintProjectedText = (target: CanvasRenderingContext2D): boolean =>
+      !el.textBody || paintProjectedElement(target, localTextEl, false);
+    const hasRasterEffects = Boolean(
+      el.shadow || el.innerShadow || el.glow || el.softEdge || el.reflection,
     );
-    if (ok) {
+    if (hasRasterEffects) {
+      const liveTransform = ctx.getTransform();
+      const det = Math.abs(liveTransform.a * liveTransform.d - liveTransform.b * liveTransform.c);
+      const devScale = det > 0 ? Math.sqrt(det) : 1;
+      const projectedGeometry = projectedEffectGeometry(
+        spScene3d.camera,
+        liveTransform,
+        x,
+        y,
+        w,
+        h,
+        edgePadCss,
+        el.shadow?.algn,
+      );
+      let projectionSucceeded = false;
+      const rawPaint: EffectPaint = (target) => {
+        projectionSucceeded = paintProjectedBody(target) || projectionSucceeded;
+      };
+      const cachedPaint = cacheDevicePaint(
+        rawPaint,
+        liveTransform,
+        projectedGeometry.bbox,
+        {
+          w: (ctx.canvas as { width: number }).width || 0,
+          h: (ctx.canvas as { height: number }).height || 0,
+        },
+      );
+      // A declined cache is still a valid projection path: the compositor will
+      // replay rawPaint. Check success only AFTER that first paint so an
+      // off-viewport or oversized cache request cannot demote a 3-D shape to
+      // the flat fallback merely because the optimization was skipped.
+      paintWithRasterEffects(
+        ctx,
+        el,
+        cachedPaint,
+        cachedPaint,
+        projectedGeometry.bbox,
+        projectedGeometry.anchor,
+        scale,
+        scale * devScale,
+        liveTransform,
+        Boolean(el.fill),
+      );
+      if (projectionSucceeded) {
+        paintProjectedText(ctx);
+        ctx.restore();
+        return;
+      }
+    } else if (paintProjectedElement(ctx, localEl, true)) {
       ctx.restore();
       return;
     }
@@ -2771,9 +3044,6 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   };
 
   // ── effectLst edge/blur effects (independent siblings, ECMA-376 §20.1.8.25)
-  // Device-pixel canvas extent for the auxiliary effect canvases.
-  const deviceW = (ctx.canvas as { width: number }).width || 0;
-  const deviceH = (ctx.canvas as { height: number }).height || 0;
   // The effect helpers operate in DEVICE pixels: the aux silhouette is painted
   // through the live transform (which already folds in devicePixelRatio +
   // rotation + flip), and the blit happens at identity. So bbox / radii passed
@@ -2962,85 +3232,26 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     paintShapeBody(target);
     paintLineDecorations(target);
   };
-  const applyLiveTransform = (c: CanvasRenderingContext2D) => {
-    c.setTransform(liveTransform);
-  };
-
-  // outerShdw applies to the composed shape, including its outline. Drawing it
-  // from the fill alone lets a thick outline cover the dense part of the shadow
-  // (common for title bars); drawing fill and stroke with native shadow state
-  // stacks two shadows. Rasterise the complete body once and shadow that union.
-  let nativeShadowFallback = false;
-  if (el.shadow && deviceW > 0 && deviceH > 0) {
-    ctx.save();
-    ctx.setTransform(new DOMMatrix());
-    const painted = applyOuterShadow(
-      ctx,
-      (c) => {
-        applyLiveTransform(c as CanvasRenderingContext2D);
-        paintVisibleShapeBody(c as CanvasRenderingContext2D);
-      },
-      effBBox,
-      el.shadow,
-      effScale,
-      deviceW,
-      deviceH,
-    );
-    ctx.restore();
-    nativeShadowFallback = !painted;
-  } else if (el.shadow) {
-    nativeShadowFallback = true;
-  }
-  if (nativeShadowFallback) applyShadow(ctx, el.shadow ?? null, scale);
-
-  // Reflection sits BEHIND/below the shape — draw it first so the body paints
-  // on top. §20.1.8.50. The aux silhouette bakes in the live rotation/flip via
-  // setTransform, and the helper's mirror transform operates in device space,
-  // so the live ctx must blit at identity.
-  if (el.reflection && deviceW > 0 && deviceH > 0) {
-    ctx.save();
-    ctx.setTransform(new DOMMatrix());
-    applyReflection(
-      ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintVisibleShapeBody(c as CanvasRenderingContext2D); },
-      effBBox, el.reflection, effScale, deviceW, deviceH,
-    );
-    ctx.restore();
-  }
-
-  // softEdge feathers the whole body, so it REPLACES the direct body paint.
-  // §20.1.8.53. When absent, paint the body normally.
-  if (el.softEdge && deviceW > 0 && deviceH > 0) {
-    // The feathered body is composited in untransformed device space, so reset
-    // the live transform around the blit and re-apply the same transform when
-    // painting the body into the aux canvas.
-    ctx.save();
-    ctx.setTransform(new DOMMatrix());
-    applySoftEdge(
-      ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintVisibleShapeBody(c as CanvasRenderingContext2D); },
-      effBBox, el.softEdge, effScale, deviceW, deviceH,
-      // Reuse the composed body so line-end decorations participate in the
-      // feather mask as well as the colour layer.
-      (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintVisibleShapeBody(c as CanvasRenderingContext2D); },
-    );
-    ctx.restore();
-  } else {
-    paintVisibleShapeBody(ctx);
-  }
-
-  // innerShdw casts inward, ON TOP of the fill. §20.1.8.40. Composite after the
-  // body. The silhouette callback paints a flat opaque mask.
-  // Inner shadow is cast by the filled surface. A no-fill shape has no interior
-  // to shade; synthesizing an opaque mask here invents an effect Office does
-  // not paint (a stroke, if present, remains independently visible).
-  if (el.innerShadow && fillStyle && deviceW > 0 && deviceH > 0) {
-    ctx.save();
-    ctx.setTransform(new DOMMatrix());
-    applyInnerShadow(
-      ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D, '#000'); },
-      effBBox, el.innerShadow, effScale, deviceW, deviceH,
-    );
-    ctx.restore();
-  }
+  paintWithRasterEffects(
+    ctx,
+    el,
+    paintVisibleShapeBody,
+    paintVisibleShapeBody,
+    effBBox,
+    authoredAlignmentAnchor(
+      liveTransform,
+      x,
+      y,
+      w,
+      h,
+      el.shadow?.algn,
+    ),
+    scale,
+    effScale,
+    liveTransform,
+    Boolean(fillStyle),
+    (target) => paintShapeBody(target, '#000'),
+  );
 
   // Render text inside the rotation context so text follows shape rotation
   if (el.textBody) {
@@ -5115,98 +5326,81 @@ async function renderPicture(
 
     // ── effectLst (§19.3.1.37 routes p:pic's spPr through CT_ShapeProperties,
     // so §20.1.8.16 effects apply to images). Same sequence as the p:sp path.
-    const deviceW = (ctx.canvas as { width: number }).width || 0;
-    const deviceH = (ctx.canvas as { height: number }).height || 0;
     const liveTransform = ctx.getTransform();
     const det = Math.abs(
       liveTransform.a * liveTransform.d - liveTransform.b * liveTransform.c,
     );
     const devScale = det > 0 ? Math.sqrt(det) : 1;
     const paintedPad = strokeHalfCss + contourCss;
-    const effBBox = transformedEffectBounds(
-      liveTransform,
-      x - paintedPad,
-      y - paintedPad,
-      w + paintedPad * 2,
-      h + paintedPad * 2,
-    );
+    const clipGeometryBounds = el.custGeom && el.custGeom.length > 0
+      ? getCustomGeometryBounds(el.custGeom, x, y, w, h)
+      : el.prstGeom && hasPreset(el.prstGeom.toLowerCase())
+        ? getPresetGeometryBounds(
+            el.prstGeom.toLowerCase(),
+            x,
+            y,
+            w,
+            h,
+            el.prstAdjust ?? [],
+          )
+        : null;
+    const flatGeometryBounds = clipGeometryBounds ?? { x, y, w, h };
+    const projectedGeometry = scene3d
+      ? projectedEffectGeometry(
+          scene3d.camera,
+          liveTransform,
+          x,
+          y,
+          w,
+          h,
+          edgePadCss,
+          el.shadow?.algn,
+        )
+      : {
+          bbox: transformedEffectBounds(
+            liveTransform,
+            flatGeometryBounds.x - paintedPad,
+            flatGeometryBounds.y - paintedPad,
+            flatGeometryBounds.w + paintedPad * 2,
+            flatGeometryBounds.h + paintedPad * 2,
+          ),
+          anchor: authoredAlignmentAnchor(
+            liveTransform,
+            x,
+            y,
+            w,
+            h,
+            el.shadow?.algn,
+          ),
+        };
     const effScale = scale * devScale; // EMU → device px
-    const applyLiveTransform = (c: CanvasRenderingContext2D) => c.setTransform(liveTransform);
-    const haveAux = deviceW > 0 && deviceH > 0;
-
-    // Cast one shadow from the composed picture (bitmap + border + contour).
-    // Native canvas shadow state would cast once for each of those paint calls,
-    // producing stacked shadows and using the pre-transform rectangle as crop.
-    let nativeShadowFallback = false;
-    if (el.shadow && haveAux) {
-      ctx.save();
-      ctx.setTransform(new DOMMatrix());
-      const painted = applyOuterShadow(
-        ctx,
-        (c) => {
-          applyLiveTransform(c as CanvasRenderingContext2D);
-          paintImage(c as CanvasRenderingContext2D);
-        },
-        effBBox,
-        el.shadow,
-        effScale,
-        deviceW,
-        deviceH,
-      );
-      ctx.restore();
-      nativeShadowFallback = !painted;
-    } else if (el.shadow) {
-      nativeShadowFallback = true;
-    }
-
-    // Reflection sits below the picture — paint it first. §20.1.8.50. The aux
-    // paint bakes in the live rotation/flip via setTransform, so the blit runs
-    // at identity.
-    if (el.reflection && haveAux) {
-      ctx.save();
-      ctx.setTransform(new DOMMatrix());
-      applyReflection(
-        ctx,
-        (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintImage(c as CanvasRenderingContext2D); },
-        effBBox, el.reflection, effScale, deviceW, deviceH,
-      );
-      ctx.restore();
-    }
-
-    // Glow remains a native fallback effect. Outer shadow wins when both are
-    // present, matching the shape path's precedence.
-    if (nativeShadowFallback) applyShadow(ctx, el.shadow ?? null, scale);
-    else if (el.glow) applyGlow(ctx, el.glow, scale);
-
-    // softEdge feathers the whole picture, REPLACING the direct body paint
-    // (§20.1.8.53). The shadow/glow set above is carried into the aux paint via
-    // setTransform of the same live context, so it still casts.
-    if (el.softEdge && haveAux) {
-      ctx.save();
-      ctx.setTransform(new DOMMatrix());
-      applySoftEdge(
-        ctx,
-        (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintImage(c as CanvasRenderingContext2D); },
-        effBBox, el.softEdge, effScale, deviceW, deviceH,
-        (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintMask(c as CanvasRenderingContext2D, '#000'); },
-      );
-      ctx.restore();
-    } else {
-      paintImage(ctx);
-    }
-    if (nativeShadowFallback || el.glow) clearShadow(ctx);
-
-    // innerShdw casts inward, on top of the picture (§20.1.8.40).
-    if (el.innerShadow && haveAux) {
-      ctx.save();
-      ctx.setTransform(new DOMMatrix());
-      applyInnerShadow(
-        ctx,
-        (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintMask(c as CanvasRenderingContext2D, '#000'); },
-        effBBox, el.innerShadow, effScale, deviceW, deviceH,
-      );
-      ctx.restore();
-    }
+    const hasRasterEffects = Boolean(
+      el.shadow || el.innerShadow || el.glow || el.softEdge || el.reflection,
+    );
+    const rawMask: EffectPaint = (target) => paintMask(target, '#000');
+    const effectBody = scene3d && hasRasterEffects
+      ? cacheDevicePaint(paintImage, liveTransform, projectedGeometry.bbox, {
+          w: (ctx.canvas as { width: number }).width || 0,
+          h: (ctx.canvas as { height: number }).height || 0,
+        })
+      : paintImage;
+    const effectMask = scene3d && hasRasterEffects
+      ? cacheDevicePaint(rawMask, liveTransform, projectedGeometry.bbox, {
+          w: (ctx.canvas as { width: number }).width || 0,
+          h: (ctx.canvas as { height: number }).height || 0,
+        })
+      : rawMask;
+    paintWithRasterEffects(
+      ctx,
+      el,
+      effectBody,
+      effectMask,
+      projectedGeometry.bbox,
+      projectedGeometry.anchor,
+      scale,
+      effScale,
+      liveTransform,
+    );
 
     ctx.restore();
     // bitmap is owned by getCachedBitmapByPath's cache — do not close it here.

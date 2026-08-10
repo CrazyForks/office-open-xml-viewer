@@ -7,9 +7,11 @@
 
 use crate::fill::{
     parse_background, parse_blip_alpha, parse_color_node, parse_cust_geom, parse_fill,
-    parse_reflection, parse_stroke, parse_xfrm,
+    parse_reflection, parse_xfrm,
 };
-use crate::shape::extract_decorative_shapes;
+use crate::shape::{
+    extract_decorative_shapes, resolve_picture_shape_properties, PictureShapeProperties,
+};
 use crate::text::{
     empty_level_bullets, extract_level_bullets, extract_level_font_sizes, extract_level_indents,
     extract_lvl1_font_size, has_any_level_bullet, has_any_level_indent, has_any_level_size,
@@ -105,6 +107,12 @@ pub(crate) struct LayoutPlaceholders {
     pub(crate) by_type_stroke: HashMap<String, Stroke>,
     /// Stroke per placeholder idx from layout spPr > ln
     pub(crate) by_idx_stroke: HashMap<u32, Stroke>,
+    /// Complete picture-like shape properties inherited from the matching
+    /// layout placeholder. This accompanies an inherited `blipFill` so every
+    /// PictureElement construction path retains the same effects and 3-D
+    /// components as an ordinary `p:pic`.
+    pub(crate) by_type_picture_properties: HashMap<String, PictureShapeProperties>,
+    pub(crate) by_idx_picture_properties: HashMap<u32, PictureShapeProperties>,
     /// Default line spacing (spcPct val, e.g. 90000 = 90%) per placeholder idx, from layout lstStyle
     pub(crate) by_idx_line_spacing: HashMap<u32, f64>,
     /// Default line spacing (spcPct val) per placeholder type, from layout lstStyle
@@ -545,6 +553,44 @@ impl LayoutPlaceholders {
                 None
             }
         })
+    }
+
+    /// Look up all picture-affecting shape properties from the same placeholder
+    /// slot as an inherited blipFill. Explicit idx matching remains strict per
+    /// §19.7.16, exactly like fill, geometry, stroke and blipFill.
+    pub(crate) fn lookup_picture_properties(
+        &self,
+        ph_type: &str,
+        ph_idx: Option<u32>,
+    ) -> Option<PictureShapeProperties> {
+        if let Some(i) = ph_idx {
+            return self.by_idx_picture_properties.get(&i).cloned().or_else(|| {
+                self.by_idx_stroke
+                    .get(&i)
+                    .cloned()
+                    .map(|stroke| PictureShapeProperties {
+                        stroke: Some(stroke),
+                        ..Default::default()
+                    })
+            });
+        }
+        self.by_type_picture_properties
+            .get(ph_type)
+            .cloned()
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_picture_properties.get("").cloned()
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                self.lookup_stroke(ph_type, None)
+                    .map(|stroke| PictureShapeProperties {
+                        stroke: Some(stroke),
+                        ..Default::default()
+                    })
+            })
     }
 
     /// Look up inherited default text color for this placeholder (layout then master fallback).
@@ -1391,8 +1437,12 @@ pub(crate) fn parse_layout_placeholders(
         ];
         let has_layout_text_inset = layout_text_insets.iter().any(Option::is_some);
 
-        // Layout spPr > ln stroke (real visible border, not edit-mode indicator when solidFill is present)
-        let layout_stroke: Option<Stroke> = child(sp_pr, "ln").and_then(|n| parse_stroke(n, theme));
+        // A picture placeholder inherits the same CT_ShapeProperties component
+        // cascade as an ordinary picture. Resolve the layout's local/style
+        // tiers once, then retain that bundle alongside its blipFill.
+        let layout_picture_properties =
+            resolve_picture_shape_properties(Some(sp_pr), child(sp, "style"), None, theme);
+        let layout_stroke = layout_picture_properties.stroke.clone();
 
         // Layout spPr fill (solidFill / noFill / gradFill / pattFill). The
         // slide-level placeholder shape inherits this when its own `<p:spPr>` is
@@ -1479,6 +1529,11 @@ pub(crate) fn parse_layout_placeholders(
                 }
                 if let Some(ref s) = layout_stroke {
                     lph.by_idx_stroke.entry(idx).or_insert(s.clone());
+                }
+                if !layout_picture_properties.is_empty() {
+                    lph.by_idx_picture_properties
+                        .entry(idx)
+                        .or_insert_with(|| layout_picture_properties.clone());
                 }
                 if let Some(ls) = layout_line_spacing {
                     lph.by_idx_line_spacing.entry(idx).or_insert(ls);
@@ -1599,6 +1654,11 @@ pub(crate) fn parse_layout_placeholders(
             }
             if let Some(s) = layout_stroke {
                 lph.by_type_stroke.entry(ph_type.clone()).or_insert(s);
+            }
+            if !layout_picture_properties.is_empty() {
+                lph.by_type_picture_properties
+                    .entry(ph_type.clone())
+                    .or_insert(layout_picture_properties);
             }
             if let Some(bf) = layout_blip_fill {
                 lph.by_type_blip_fill.entry(ph_type.clone()).or_insert(bf);
@@ -2067,6 +2127,49 @@ mod placeholder_geometry_tests {
             &mut zip,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn layout_retains_picture_effect_components_for_placeholder_inheritance() {
+        let placeholders = parse_layout_geometry(
+            r#"<p:sp>
+              <p:nvSpPr><p:cNvPr id="2" name="Picture slot"/><p:cNvSpPr/>
+                <p:nvPr><p:ph type="pic" idx="9"/></p:nvPr></p:nvSpPr>
+              <p:spPr>
+                <a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm>
+                <a:ln w="33333"><a:solidFill><a:srgbClr val="445566"/></a:solidFill></a:ln>
+                <a:effectLst><a:outerShdw blurRad="500" dist="700" dir="0"><a:srgbClr val="112233"/></a:outerShdw></a:effectLst>
+                <a:scene3d><a:camera prst="perspectiveFront"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>
+                <a:sp3d prstMaterial="plastic"/>
+              </p:spPr>
+            </p:sp>"#,
+        );
+
+        let properties = placeholders
+            .lookup_picture_properties("pic", Some(9))
+            .expect("layout picture properties");
+        assert_eq!(
+            properties.stroke.as_ref().map(|stroke| stroke.width),
+            Some(33_333)
+        );
+        assert_eq!(
+            properties.shadow.as_ref().map(|shadow| shadow.dist),
+            Some(700)
+        );
+        assert_eq!(
+            properties
+                .scene3d
+                .as_ref()
+                .map(|scene| scene.camera.prst.as_str()),
+            Some("perspectiveFront")
+        );
+        assert_eq!(
+            properties
+                .sp3d
+                .as_ref()
+                .map(|surface| surface.prst_material.as_str()),
+            Some("plastic")
+        );
     }
 
     #[test]

@@ -37,6 +37,20 @@ export interface EffectBBox {
   h: number;
 }
 
+function shadowAlignmentPoint(bbox: EffectBBox, algn: Shadow['algn']): [number, number] {
+  const x = algn === 'tl' || algn === 'l' || algn === 'bl'
+    ? bbox.x
+    : algn === 'tr' || algn === 'r' || algn === 'br'
+      ? bbox.x + bbox.w
+      : bbox.x + bbox.w / 2;
+  const y = algn === 'tl' || algn === 't' || algn === 'tr'
+    ? bbox.y
+    : algn === 'l' || algn === 'ctr' || algn === 'r'
+      ? bbox.y + bbox.h / 2
+      : bbox.y + bbox.h;
+  return [x, y];
+}
+
 /**
  * EMU → device px. Mirrors `emuToPx` in the pptx renderer, where `scale` is
  * px-per-EMU (it already folds in the EMU→px conversion), so this is a bare
@@ -177,10 +191,16 @@ export function applyOuterShadow(
   scale: number,
   deviceW: number,
   deviceH: number,
+  shapeRotationDegrees = 0,
+  alignmentAnchor?: readonly [number, number],
 ): boolean {
   const blur = Math.max(0, emuToPx(shadow.blur, scale));
   const dist = emuToPx(shadow.dist, scale);
-  const dirRad = (shadow.dir * Math.PI) / 180;
+  // rotWithShape defaults true (§20.1.8.45). A false value keeps the effect in
+  // page space while the source silhouette itself remains the rotated object.
+  const followRotation = shadow.rotWithShape !== false;
+  const effectRotation = followRotation ? shapeRotationDegrees : 0;
+  const dirRad = ((shadow.dir + effectRotation) * Math.PI) / 180;
   const dx = Math.cos(dirRad) * dist;
   const dy = Math.sin(dirRad) * dist;
   // CSS blur has an unbounded Gaussian tail. Three radii cover the visible
@@ -207,7 +227,27 @@ export function applyOuterShadow(
 
   liveCtx.save();
   if (blur > 0) liveCtx.filter = `blur(${blur}px)`;
-  liveCtx.drawImage(aux as CanvasImageSource, crop.x + dx, crop.y + dy);
+  // ECMA-376 defines the order as alignment origin, scale/skew, then offset.
+  // The source aux is already in absolute device coordinates; compose the
+  // page-space offset separately so it is not itself scaled or skewed.
+  // Placement owns the authored shape frame.  In particular, the corner of a
+  // rotated or perspective-projected shape is not the corresponding corner of
+  // its post-transform AABB.  Callers that know that frame pass the exact
+  // device-space anchor; bbox-based placement remains the compatibility
+  // fallback for headless/custom callers that only have a silhouette box.
+  const [anchorX, anchorY] = alignmentAnchor ??
+    shadowAlignmentPoint(bbox, shadow.algn ?? 'b');
+  const sx = shadow.sx ?? 1;
+  const sy = shadow.sy ?? 1;
+  const kx = Math.tan(((shadow.kx ?? 0) * Math.PI) / 180);
+  const ky = Math.tan(((shadow.ky ?? 0) * Math.PI) / 180);
+  liveCtx.translate(dx, dy);
+  liveCtx.translate(anchorX, anchorY);
+  if (effectRotation !== 0) liveCtx.rotate((effectRotation * Math.PI) / 180);
+  liveCtx.transform(sx, ky, kx, sy, 0, 0);
+  if (effectRotation !== 0) liveCtx.rotate((-effectRotation * Math.PI) / 180);
+  liveCtx.translate(-anchorX, -anchorY);
+  liveCtx.drawImage(aux as CanvasImageSource, crop.x, crop.y);
   liveCtx.restore();
   return true;
 }
