@@ -3592,6 +3592,33 @@ mod tests {
         assert!(BulletProps::default().is_inherit());
     }
 
+    /// PowerPoint treats `buChar` as a single marker even when a producer writes
+    /// more than one Unicode scalar into the schema's string-valued attribute.
+    /// Keep the first scalar so malformed SmartArt caches do not paint doubled
+    /// bullets, while supplementary-plane markers remain intact.
+    #[test]
+    fn character_bullet_uses_one_unicode_scalar() {
+        let doc = roxmltree::Document::parse(
+            r#"<a:pPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:buChar char="••"/></a:pPr>"#,
+        )
+        .expect("valid paragraph properties");
+        let theme = HashMap::new();
+        let mut resolve_blip = |_: &str| None;
+        match parse_bullet(Some(doc.root_element()), &theme, &mut resolve_blip) {
+            Bullet::Char { ch, .. } => assert_eq!(ch, "•"),
+            other => panic!("expected Char, got {other:?}"),
+        }
+
+        let emoji_doc = roxmltree::Document::parse(
+            r#"<a:pPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:buChar char="🡆x"/></a:pPr>"#,
+        )
+        .expect("valid supplementary-plane marker");
+        match parse_bullet(Some(emoji_doc.root_element()), &theme, &mut resolve_blip) {
+            Bullet::Char { ch, .. } => assert_eq!(ch, "🡆"),
+            other => panic!("expected Char, got {other:?}"),
+        }
+    }
+
     /// §21.1.2.4.9 — `<a:buSzPct val>` accepts both the Transitional integer
     /// (thousandths of a percent, `"100000"` = 100%, what PowerPoint writes) and
     /// the Strict percentage string (`"111%"`, as in the spec example).

@@ -1087,7 +1087,14 @@ fn parse_bullet_marker<F: FnMut(&str) -> Option<String>>(
 
     // Character bullet
     if let Some(bu_char) = child(p_pr, "buChar") {
-        let ch = attr(&bu_char, "char").unwrap_or_else(|| "\u{2022}".into()); // •
+        // CT_TextCharBullet's attribute is schema-typed as a string, but Office
+        // paints a single marker glyph. Some flattened SmartArt caches contain
+        // duplicated values such as `••`; retaining the whole string paints a
+        // visibly doubled marker. Select one Unicode scalar (not one UTF-16
+        // code unit) so supplementary-plane symbols remain intact.
+        let ch = attr(&bu_char, "char")
+            .and_then(|value| value.chars().next().map(|ch| ch.to_string()))
+            .unwrap_or_else(|| "\u{2022}".into()); // •
         return Some(BuMarker::Char(ch));
     }
 
