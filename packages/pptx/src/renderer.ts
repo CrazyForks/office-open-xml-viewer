@@ -715,6 +715,21 @@ export function layoutParagraph(
   firstLineIndentPx: number = 0,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
+  // PowerPoint does not give paragraph-terminal whitespace any advance. In
+  // particular, a trailing space that lands exactly beyond the wrap boundary
+  // must not create a visually empty continuation line. Trim the terminal
+  // suffix across formatting-run boundaries without touching interior spaces
+  // or explicit line-break runs.
+  const terminalText = new Map<TextRun, string>();
+  let scanningTerminalWhitespace = true;
+  for (let i = para.runs.length - 1; i >= 0 && scanningTerminalWhitespace; i--) {
+    const run = para.runs[i];
+    if (run.type === 'break') continue;
+    if (run.type === 'math') break;
+    const trimmed = run.text.trimEnd();
+    if (trimmed !== run.text) terminalText.set(run, trimmed);
+    if (trimmed.length > 0 || run.fieldType != null) scanningTerminalWhitespace = false;
+  }
   // The first line's wrap budget is narrower by a POSITIVE first-line indent
   // (it occupies indentPx of the line); continuation lines use the full width.
   // `lines.length === 0` ⇒ still filling the first line (newLine() pushes to it).
@@ -1004,7 +1019,7 @@ export function layoutParagraph(
     // ~80% size is the long-established Office fallback when the font lacks
     // smcp; we just upper-case for now and rely on the configured size.
     const caps = run.caps;
-    let baseText = run.text;
+    let baseText = terminalText.get(run) ?? run.text;
     if (caps === 'all' || caps === 'small') baseText = baseText.toUpperCase();
 
     // Resolve field values (e.g. slidenum → actual slide number)
