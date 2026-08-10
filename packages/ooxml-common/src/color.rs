@@ -79,6 +79,29 @@ pub enum TintMode {
     PowerPointLinear,
 }
 
+/// Apply a DrawingML tint to normalized RGB channels without quantizing the
+/// intermediate result. Exposed for generated preset tables, which carry the
+/// same transforms as XML-backed colours but have no `roxmltree::Node`.
+pub fn apply_tint_channels(rgb: (f64, f64, f64), val: f64, tint_mode: TintMode) -> (f64, f64, f64) {
+    let (r, g, b) = rgb;
+    match tint_mode {
+        TintMode::WordLiteral => (
+            val * r + (1.0 - val),
+            val * g + (1.0 - val),
+            val * b + (1.0 - val),
+        ),
+        TintMode::PowerPointLinear => {
+            // PowerPoint retains `val` of the input in LINEAR sRGB. Verified
+            // against PDF exports of SmartArt accent recolors; treating val as
+            // the amount of white reverses common gradient stops.
+            let apply = |channel: f64| {
+                linear_to_srgb((val * srgb_to_linear(channel) + (1.0 - val)).clamp(0.0, 1.0))
+            };
+            (apply(r), apply(g), apply(b))
+        }
+    }
+}
+
 /// Apply OOXML color transforms to `hex` based on the modifier elements
 /// declared as direct children of `node`. Returns 6-char hex when fully
 /// opaque, or 8-char hex (RRGGBBAA) when alpha < 1.
@@ -170,26 +193,7 @@ pub fn apply_color_transforms(hex: &str, node: Node, tint_mode: TintMode) -> Str
             }
             "tint" => {
                 let val = attr_pct(&t, "val", 0.0);
-                match tint_mode {
-                    TintMode::WordLiteral => {
-                        // `result = val·input + (1-val)·white` per literal spec.
-                        rf = val * rf + (1.0 - val);
-                        gf = val * gf + (1.0 - val);
-                        bf = val * bf + (1.0 - val);
-                    }
-                    TintMode::PowerPointLinear => {
-                        // PowerPoint retains `val` of the input in LINEAR sRGB.
-                        // Verified against PDF exports of SmartArt accent
-                        // recolors; treating val as the amount of white reverses
-                        // the gradient stops used by common SmartArt styles.
-                        let lr = srgb_to_linear(rf);
-                        let lg = srgb_to_linear(gf);
-                        let lb = srgb_to_linear(bf);
-                        rf = linear_to_srgb((val * lr + (1.0 - val)).clamp(0.0, 1.0));
-                        gf = linear_to_srgb((val * lg + (1.0 - val)).clamp(0.0, 1.0));
-                        bf = linear_to_srgb((val * lb + (1.0 - val)).clamp(0.0, 1.0));
-                    }
-                }
+                (rf, gf, bf) = apply_tint_channels((rf, gf, bf), val, tint_mode);
             }
             "alpha" => {
                 // ECMA-376 §20.1.2.3.1 — sets absolute alpha.
