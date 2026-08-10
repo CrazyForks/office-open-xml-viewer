@@ -1769,6 +1769,18 @@ pub enum ShapeStrokeFill {
         stops: Vec<GradientStop>,
         angle: f64,
         grad_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scaled: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fill_to_rect: Option<FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tile_rect: Option<FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flip: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rot_with_shape: Option<bool>,
     },
     Pattern {
         fg: String,
@@ -1790,6 +1802,23 @@ pub enum ShapeFill {
         angle: f64,
         /// "linear" | "radial"
         grad_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scaled: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fill_to_rect: Option<FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tile_rect: Option<FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flip: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rot_with_shape: Option<bool>,
+    },
+    Pattern {
+        fg: String,
+        bg: String,
+        preset: String,
     },
     /// ECMA-376 §20.1.8.14 `a:blipFill` applied to a DrawingML shape.
     /// The embedded package path is retained for the renderer's ordinary lazy

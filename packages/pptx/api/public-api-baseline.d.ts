@@ -340,6 +340,12 @@ export interface GradientFill {
     stops: GradientStop[];
     angle: number;
     gradType: string;
+    scaled?: boolean;
+    path?: 'shape' | 'circle' | 'rect' | string;
+    fillToRect?: FillRect;
+    tileRect?: FillRect;
+    flip?: 'none' | 'x' | 'y' | 'xy' | string;
+    rotWithShape?: boolean;
 }
 export interface GradientStop {
     position: number;

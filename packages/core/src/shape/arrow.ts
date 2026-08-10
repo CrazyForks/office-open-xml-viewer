@@ -84,16 +84,17 @@ export function drawArrowHead(
   arrowEnd: ArrowEnd,
   stroke: Stroke,
   scale: number,
+  effectivePaint?: string | CanvasGradient | CanvasPattern,
 ): void {
   if (arrowEnd.type === 'none') return;
   const { lw, halfW, len } = arrowGeom(arrowEnd, stroke, scale);
-  const color = hexToRgba(stroke.color);
+  const paint = effectivePaint ?? hexToRgba(stroke.color);
 
   ctx.save();
   ctx.translate(tipX, tipY);
   ctx.rotate(angle);
-  ctx.fillStyle = color;
-  ctx.strokeStyle = color;
+  ctx.fillStyle = paint;
+  ctx.strokeStyle = paint;
   ctx.lineWidth = lw;
   ctx.setLineDash([]);
   ctx.beginPath();

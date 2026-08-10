@@ -1051,7 +1051,12 @@ export interface ShapeText {
 
 export type ShapeFill =
   | { fillType: 'solid'; color: string }
-  | { fillType: 'gradient'; stops: GradientStop[]; angle: number; gradType: string }
+  | {
+      fillType: 'gradient'; stops: GradientStop[]; angle: number; gradType: string;
+      scaled?: boolean; path?: string; fillToRect?: FillRect; tileRect?: FillRect;
+      flip?: string; rotWithShape?: boolean;
+    }
+  | { fillType: 'pattern'; fg: string; bg: string; preset: string }
   | {
       /** ECMA-376 §20.1.8.14 picture fill on a DrawingML shape. */
       fillType: 'image';
@@ -1068,7 +1073,11 @@ export type ShapeFill =
     };
 
 export type ShapeStrokeFill =
-  | { fillType: 'gradient'; stops: GradientStop[]; angle: number; gradType: string }
+  | {
+      fillType: 'gradient'; stops: GradientStop[]; angle: number; gradType: string;
+      scaled?: boolean; path?: string; fillToRect?: FillRect; tileRect?: FillRect;
+      flip?: string; rotWithShape?: boolean;
+    }
   | { fillType: 'pattern'; fg: string; bg: string; preset: string };
 
 export interface GradientStop {

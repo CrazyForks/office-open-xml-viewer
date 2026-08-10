@@ -57,6 +57,12 @@ function strokeFill(fill: DeepReadonly<ShapeRun['strokeFill']>): Stroke['fill'] 
       stops: fill.stops.map((stop) => ({ position: stop.position, color: stop.color })),
       angle: fill.angle,
       gradType: fill.gradType,
+      ...(fill.scaled === undefined ? {} : { scaled: fill.scaled }),
+      ...(fill.path === undefined ? {} : { path: fill.path }),
+      ...(fill.fillToRect === undefined ? {} : { fillToRect: { ...fill.fillToRect } }),
+      ...(fill.tileRect === undefined ? {} : { tileRect: { ...fill.tileRect } }),
+      ...(fill.flip === undefined ? {} : { flip: fill.flip }),
+      ...(fill.rotWithShape === undefined ? {} : { rotWithShape: fill.rotWithShape }),
     };
   }
   return { fillType: 'pattern', fg: fill.fg, bg: fill.bg, preset: fill.preset };

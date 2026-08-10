@@ -113,4 +113,30 @@ describe('drawArrowHead — open arrow geometry', () => {
       { name: 'lineTo', args: [-60, 30] },
     ]);
   });
+
+  it('uses the resolved stroke paint for the arrow head', () => {
+    const gradient = { addColorStop() {} } as unknown as CanvasGradient;
+    const ctx = {
+      fillStyle: '',
+      strokeStyle: '',
+      lineWidth: 1,
+      lineCap: 'butt',
+      lineJoin: 'miter',
+      save() {},
+      restore() {},
+      translate() {},
+      rotate() {},
+      setLineDash() {},
+      beginPath() {},
+      moveTo() {},
+      lineTo() {},
+      closePath() {},
+      fill() {},
+    } as unknown as CanvasRenderingContext2D;
+
+    drawArrowHead(ctx, 20, 30, 0, end('triangle'), stroke, 1, gradient);
+
+    expect(ctx.fillStyle).toBe(gradient);
+    expect(ctx.strokeStyle).toBe(gradient);
+  });
 });

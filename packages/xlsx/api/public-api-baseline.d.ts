@@ -430,7 +430,7 @@ export interface Dxf {
 }
 type ExtensibleLiteral<Known extends string> = Known | (string & Record<never, never>);
 type Fill = SolidFill | NoFill | GradientFill | PatternFill | ImageFill;
-interface FillRect {
+export interface FillRect {
     l?: number;
     t?: number;
     r?: number;
@@ -453,6 +453,12 @@ export interface GradientFill {
     stops: GradientStop[];
     angle: number;
     gradType: string;
+    scaled?: boolean;
+    path?: 'shape' | 'circle' | 'rect' | string;
+    fillToRect?: FillRect;
+    tileRect?: FillRect;
+    flip?: 'none' | 'x' | 'y' | 'xy' | string;
+    rotWithShape?: boolean;
 }
 export interface GradientFillSpec {
     gradientType: string;
@@ -977,6 +983,11 @@ export interface ShapeAnchor {
     nativeExtCy: number;
     shapes: ShapeInfo[];
 }
+export type ShapeFill = Exclude<Fill, {
+    fillType: 'image';
+} | {
+    fillType: 'none';
+}>;
 export type ShapeGeom = {
     type: 'preset';
     name: string;
@@ -1007,6 +1018,7 @@ export interface ShapeInfo {
     flipH?: boolean;
     flipV?: boolean;
     fillColor?: string;
+    fill?: ShapeFill;
     strokeColor?: string;
     strokeWidth: number;
     strokeFill?: Exclude<Fill, {

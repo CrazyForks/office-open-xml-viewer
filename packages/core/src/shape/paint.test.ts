@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hexToRgba, relativeLuma, autoContrastColor, applyStroke } from './paint.js';
+import { hexToRgba, relativeLuma, autoContrastColor, applyStroke, resolveFill } from './paint.js';
 import type { Stroke } from '../types/common.js';
 
 // hexToRgba is the colour pipeline's exit point: the pptx parser resolves a
@@ -80,6 +80,149 @@ describe('autoContrastColor (impl-defined; §17.3.2.6 w:color auto)', () => {
   it('tolerates a leading # (same normalisation as hexToRgba)', () => {
     expect(autoContrastColor('#000000')).toBe('#FFFFFF');
     expect(autoContrastColor('#ffffff')).toBe('#000000');
+  });
+});
+
+describe('DrawingML gradient geometry', () => {
+  function gradientContext() {
+    const calls: Array<{ kind: string; args: number[] }> = [];
+    const gradient = { addColorStop() {} } as unknown as CanvasGradient;
+    const ctx = {
+      createLinearGradient(...args: number[]) {
+        calls.push({ kind: 'linear', args });
+        return gradient;
+      },
+      createRadialGradient(...args: number[]) {
+        calls.push({ kind: 'radial', args });
+        return gradient;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    return { ctx, calls };
+  }
+
+  it('scales the linear vector by the fill dimensions (§20.1.8.41)', () => {
+    const { ctx, calls } = gradientContext();
+    resolveFill({
+      fillType: 'gradient',
+      stops: [{ position: 0, color: '000000' }, { position: 1, color: 'FFFFFF' }],
+      angle: 45,
+      gradType: 'linear',
+      scaled: true,
+    }, ctx, 0, 0, 200, 100);
+
+    expect(calls[0].kind).toBe('linear');
+    expect(calls[0].args).toHaveLength(4);
+    [0, 0, 200, 100].forEach((value, index) => {
+      expect(calls[0].args[index]).toBeCloseTo(value);
+    });
+  });
+
+  it('uses the authored path focus and tile rectangles', () => {
+    const { ctx, calls } = gradientContext();
+    resolveFill({
+      fillType: 'gradient',
+      stops: [{ position: 0, color: '000000' }, { position: 1, color: 'FFFFFF' }],
+      angle: 0,
+      gradType: 'radial',
+      path: 'rect',
+      tileRect: { l: 0.5 },
+      fillToRect: { l: 0.25, r: 0.25, t: 0.5, b: 0.5 },
+    }, ctx, 0, 0, 200, 100);
+
+    expect(calls[0]).toEqual({ kind: 'radial', args: [150, 50, 0, 150, 50, 50] });
+  });
+
+  it('counter-rotates a non-shape-rotating gradient', () => {
+    const { ctx, calls } = gradientContext();
+    resolveFill({
+      fillType: 'gradient',
+      stops: [{ position: 0, color: '000000' }, { position: 1, color: 'FFFFFF' }],
+      angle: 90,
+      gradType: 'linear',
+      rotWithShape: false,
+    }, ctx, 0, 0, 100, 100, 90);
+
+    [0, 50, 100, 50].forEach((value, index) => {
+      expect(calls[0].args[index]).toBeCloseTo(value);
+    });
+  });
+
+  it('does not allocate a repeating pattern for an all-zero tileRect', () => {
+    const { ctx, calls } = gradientContext();
+    const result = resolveFill({
+      fillType: 'gradient',
+      stops: [{ position: 0, color: '000000' }, { position: 1, color: 'FFFFFF' }],
+      angle: 0,
+      gradType: 'linear',
+      tileRect: { l: 0, t: 0, r: 0, b: 0 },
+    }, ctx, 0, 0, 100, 50);
+
+    expect(result).not.toBeNull();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].kind).toBe('linear');
+  });
+
+  it('tiles and mirrors the authored tileRect without unbounded allocation', () => {
+    const previous = globalThis.OffscreenCanvas;
+    const allocations: Array<{ width: number; height: number }> = [];
+    let matrix: DOMMatrix2DInit | undefined;
+    class FakeOffscreenCanvas {
+      readonly width: number;
+      readonly height: number;
+      constructor(width: number, height: number) {
+        this.width = width;
+        this.height = height;
+        allocations.push({ width, height });
+      }
+      getContext() {
+        return {
+          fillStyle: '',
+          createLinearGradient: () => ({ addColorStop() {} }),
+          createRadialGradient: () => ({ addColorStop() {} }),
+          fillRect() {}, save() {}, restore() {}, translate() {}, scale() {}, drawImage() {},
+        };
+      }
+    }
+    Object.defineProperty(globalThis, 'OffscreenCanvas', {
+      configurable: true,
+      value: FakeOffscreenCanvas,
+    });
+    try {
+      const ctx = {
+        createPattern() {
+          return { setTransform(value: DOMMatrix2DInit) { matrix = value; } };
+        },
+      } as unknown as CanvasRenderingContext2D;
+      const plain = resolveFill({
+        fillType: 'gradient',
+        stops: [{ position: 0, color: '000000' }, { position: 1, color: 'FFFFFF' }],
+        angle: 0,
+        gradType: 'linear',
+        tileRect: { l: 0.5 },
+      }, ctx, 0, 0, 200, 100);
+
+      expect(plain).not.toBeNull();
+      expect(allocations).toEqual([{ width: 100, height: 100 }]);
+      allocations.length = 0;
+
+      const result = resolveFill({
+        fillType: 'gradient',
+        stops: [{ position: 0, color: '000000' }, { position: 1, color: 'FFFFFF' }],
+        angle: 0,
+        gradType: 'linear',
+        tileRect: { l: 0.5 },
+        flip: 'x',
+      }, ctx, 0, 0, 200, 100);
+
+      expect(result).not.toBeNull();
+      expect(allocations).toEqual([{ width: 100, height: 100 }, { width: 200, height: 100 }]);
+      expect(matrix).toMatchObject({ a: 1, d: 1, e: 100, f: 0 });
+    } finally {
+      Object.defineProperty(globalThis, 'OffscreenCanvas', {
+        configurable: true,
+        value: previous,
+      });
+    }
   });
 });
 

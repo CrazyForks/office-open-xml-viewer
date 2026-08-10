@@ -3772,7 +3772,17 @@ function drawShape(
     // renders with its true outline instead of the old rect fallback. The
     // engine returns false for presets it doesn't carry; only then do we fall
     // back to a plain rectangle.
-    const baseFill = shape.fillColor ?? null;
+    const baseFill = resolveFill(
+      shape.fill ?? (shape.fillColor
+        ? { fillType: 'solid' as const, color: shape.fillColor }
+        : null),
+      ctx,
+      0,
+      0,
+      sw,
+      sh,
+      shape.rot,
+    );
     const applyAndStroke = shape.strokeColor && shape.strokeWidth > 0
       ? () => strokeShapePath(ctx, shape, sw, sh)
       : null;
@@ -4308,8 +4318,12 @@ function fillAndStroke(
   width: number,
   height: number,
 ): void {
-  if (shape.fillColor) {
-    ctx.fillStyle = shape.fillColor;
+  const fill = shape.fill ?? (shape.fillColor
+    ? { fillType: 'solid' as const, color: shape.fillColor }
+    : null);
+  const paint = resolveFill(fill, ctx, 0, 0, width, height, shape.rot);
+  if (paint) {
+    ctx.fillStyle = paint;
     ctx.fill();
   }
   strokeShapePath(ctx, shape, width, height);
@@ -4343,7 +4357,7 @@ function strokeShapePath(
   if (!stroke) return;
   applyStroke(ctx, stroke, 1 / EMU_PER_PX);
   if (stroke.fill) {
-    const paint = resolveFill(stroke.fill, ctx, 0, 0, width, height);
+    const paint = resolveFill(stroke.fill, ctx, 0, 0, width, height, shape.rot);
     if (paint) ctx.strokeStyle = paint;
   }
   ctx.stroke();

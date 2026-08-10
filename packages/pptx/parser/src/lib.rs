@@ -4253,9 +4253,15 @@ mod tests {
             .expect("bgRef 1002 should resolve the second bgFillStyleLst entry");
         match fill {
             Fill::Gradient {
-                stops, grad_type, ..
+                stops,
+                grad_type,
+                path,
+                rot_with_shape,
+                ..
             } => {
                 assert_eq!(grad_type, "radial");
+                assert_eq!(path.as_deref(), Some("circle"));
+                assert_eq!(rot_with_shape, Some(true));
                 assert_eq!(stops.len(), 2);
                 assert_ne!(
                     stops[0].color, "7DAFC3",
@@ -5248,6 +5254,7 @@ mod tests {
                 stops,
                 angle,
                 grad_type,
+                ..
             }) => {
                 assert_eq!(angle, 90.0);
                 assert_eq!(grad_type, "linear");
