@@ -1,14 +1,13 @@
 //! OOXML color transforms (lumMod, lumOff, satMod, satOff, hueMod, hueOff,
 //! shade, tint, alpha and friends) shared between the docx and pptx parsers.
 //!
-//! Word and PowerPoint diverge on the color space used by the `tint` transform.
-//! Both read `val` as the *retained fraction of the input color* (ECMA-376
-//! §20.1.2.3.34: `result = val·input + (1-val)·white`), but Word applies the
-//! blend to encoded sRGB channels while PowerPoint applies it in linear sRGB.
-//! Empirical comparison against PDF exports confirms the color-space split —
-//! see `TintMode` and the per-app `apply_color_transforms_with` flag.
+//! Word and PowerPoint diverge on the color space used by the `tint` and
+//! `shade` transforms. Both read `val` as the retained fraction of the input,
+//! but Word applies the blend to encoded sRGB channels while PowerPoint applies
+//! it in linear sRGB. Empirical comparison against PDF exports confirms the
+//! color-space split — see `TintMode`.
 //!
-//! Everything else (shade, lumMod/Off, satMod/Off, hueMod/Off, alpha
+//! Everything else (lumMod/Off, satMod/Off, hueMod/Off, alpha
 //! family) is identical between the two and lives here uncopied.
 
 use roxmltree::Node;
@@ -187,9 +186,18 @@ pub fn apply_color_transforms(hex: &str, node: Node, tint_mode: TintMode) -> Str
             "shade" => {
                 // ECMA-376 §20.1.2.3.31: result = val·input + (1-val)·black.
                 let val = attr_pct(&t, "val", 100_000.0);
-                rf *= val;
-                gf *= val;
-                bf *= val;
+                if tint_mode == TintMode::PowerPointLinear {
+                    let apply = |channel: f64| {
+                        linear_to_srgb((srgb_to_linear(channel) * val).clamp(0.0, 1.0))
+                    };
+                    rf = apply(rf);
+                    gf = apply(gf);
+                    bf = apply(bf);
+                } else {
+                    rf *= val;
+                    gf *= val;
+                    bf *= val;
+                }
             }
             "tint" => {
                 let val = attr_pct(&t, "val", 0.0);
@@ -925,6 +933,20 @@ mod tests {
         assert_eq!(word.len(), 6);
         assert!(!word.contains('#'));
         assert!(word.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    /// PowerPoint applies `shade` in linear sRGB before subsequent HSL
+    /// transforms. Word's encoded-channel interpretation remains unchanged.
+    #[test]
+    fn parse_color_node_shade_mode_diverges() {
+        let xml = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:srgbClr val="4F81BD"><a:shade val="45000"/><a:satMod val="135000"/></a:srgbClr></a:solidFill>"#
+        );
+        let word = parse(&xml, TintMode::WordLiteral).unwrap();
+        let ppt = parse(&xml, TintMode::PowerPointLinear).unwrap();
+
+        assert_eq!(word, "1B395E");
+        assert_eq!(ppt, "275791");
     }
 
     /// alpha < 1 yields an 8-char RRGGBBAA hex (transform emits the alpha byte).
