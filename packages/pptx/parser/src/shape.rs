@@ -7,8 +7,8 @@
 use crate::chart::{parse_chartex, parse_legacy_chart};
 use crate::fill::{
     parse_arrow_end, parse_blip_alpha, parse_color_node, parse_cust_geom, parse_effect_lst,
-    parse_fill, parse_scene3d, parse_shadow, parse_sp3d, parse_stroke, parse_table_style_fill,
-    parse_xfrm, EffectLst,
+    parse_fill, parse_scene3d, parse_shadow, parse_sp3d, parse_stroke, parse_style_matrix_fill,
+    parse_table_style_fill, parse_xfrm, EffectLst,
 };
 use crate::master::{InheritedShapeGeometry, LayoutPlaceholders};
 use crate::text::{
@@ -311,13 +311,16 @@ pub(crate) fn parse_shape(
     // --- Shape style (p:style) provides fill/stroke/text-color fallbacks ---
     let style_node = child(sp_node, "style");
 
-    // fillRef idx=0 → explicit no-fill; idx>0 → use referenced color as solid fill
+    // fillRef idx=0 → explicit no-fill; idx>0 → resolve the referenced
+    // theme fill style, substituting this ref's colour for phClr. Retain the
+    // former solid-colour fallback for incomplete/malformed themes.
     let style_fill: Option<Fill> = style_node.and_then(|s| child(s, "fillRef")).and_then(|fr| {
         let idx: u32 = attr(&fr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
         if idx == 0 {
             Some(Fill::None)
         } else {
-            parse_color_node(fr, theme).map(|c| Fill::Solid { color: c })
+            parse_style_matrix_fill(fr, theme, false)
+                .or_else(|| parse_color_node(fr, theme).map(|c| Fill::Solid { color: c }))
         }
     });
 
@@ -399,6 +402,7 @@ pub(crate) fn parse_shape(
     // Inherited defaults from layout/master for this placeholder type/idx
     let (
         inherited_font_size,
+        inherited_font_family,
         inherited_bold,
         inherited_italic,
         inherited_caps,
@@ -412,6 +416,7 @@ pub(crate) fn parse_shape(
     ) = if ph_node.is_some() {
         (
             lph.lookup_font_size(&ph_type, ph_idx),
+            lph.lookup_font_family(&ph_type, ph_idx),
             lph.lookup_bold(&ph_type),
             lph.lookup_italic(&ph_type),
             lph.lookup_caps(&ph_type),
@@ -425,7 +430,7 @@ pub(crate) fn parse_shape(
         )
     } else {
         (
-            None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None,
         )
     };
     let inherited_level_font_sizes: LevelFontSizes = if ph_node.is_some() {
@@ -468,6 +473,7 @@ pub(crate) fn parse_shape(
             rels,
             source_dir,
             inherited_font_size,
+            inherited_font_family,
             inherited_level_font_sizes,
             inherited_level_indents,
             &inherited_level_bullets,
@@ -1403,6 +1409,7 @@ pub(crate) fn parse_table_cell(
             theme,
             rels,
             source_dir,
+            None,
             None,
             [None; 9],
             Default::default(), // inherited_level_indents

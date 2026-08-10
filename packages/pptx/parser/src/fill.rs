@@ -7,8 +7,9 @@
 
 use crate::theme::PptxSchemeResolver;
 use crate::types::*;
-use crate::{attr, attr_f64, attr_i64, attr_r, child, children_vec};
+use crate::{attr, attr_f64, attr_i64, attr_r, child, children_vec, parse_preflighted_pptx_xml};
 use ooxml_common::blip::{mime_from_ext, parse_blip_duotone};
+use ooxml_common::color::ThemeResolver;
 use std::collections::HashMap;
 
 /// Parse `<a:blip><a:alphaModFix amt="..."/></a:blip>` from a blipFill node
@@ -57,12 +58,32 @@ pub(crate) fn parse_fill(
     node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> Option<Fill> {
+    parse_fill_tint(node, theme, ooxml_common::color::TintMode::PowerPointLinear)
+}
+
+/// Parse DrawingML fill properties with the caller-selected tint semantics.
+/// Normal presentation backgrounds and theme style-matrix fills use the
+/// literal ECMA-376 retained-input definition. The historical generic path
+/// keeps PowerPointLinear for SmartArt compatibility.
+fn parse_fill_tint(
+    node: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+    tint_mode: ooxml_common::color::TintMode,
+) -> Option<Fill> {
+    parse_fill_with_resolver(node, &PptxSchemeResolver { theme }, tint_mode)
+}
+
+fn parse_fill_with_resolver<R: ThemeResolver + ?Sized>(
+    node: roxmltree::Node<'_, '_>,
+    resolver: &R,
+    tint_mode: ooxml_common::color::TintMode,
+) -> Option<Fill> {
     for c in node.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
             "solidFill" => {
                 // If the color resolves, use it. If not (e.g. phClr with no theme slot),
                 // return None so the caller can fall back to the shape style color.
-                if let Some(color) = parse_color_node(c, theme) {
+                if let Some(color) = ooxml_common::color::parse_color_node(c, resolver, tint_mode) {
                     return Some(Fill::Solid { color });
                 }
                 // Unresolvable → don't default to black; let fallback logic handle it
@@ -73,21 +94,13 @@ pub(crate) fn parse_fill(
                 // Shared parse (ooxml_common::fill); colors resolve with pptx's
                 // PowerPointLinear tint via PptxSchemeResolver.
                 let ooxml_common::fill::PatternFill { fg, bg, preset } =
-                    ooxml_common::fill::parse_patt_fill(
-                        c,
-                        &PptxSchemeResolver { theme },
-                        ooxml_common::color::TintMode::PowerPointLinear,
-                    );
+                    ooxml_common::fill::parse_patt_fill(c, resolver, tint_mode);
                 return Some(Fill::Pattern { fg, bg, preset });
             }
             "gradFill" => {
                 // Shared parse (ooxml_common::fill). Returns None when there are
                 // no resolvable stops, so we keep scanning sibling fill elements.
-                if let Some(g) = ooxml_common::fill::parse_grad_fill(
-                    c,
-                    &PptxSchemeResolver { theme },
-                    ooxml_common::color::TintMode::PowerPointLinear,
-                ) {
+                if let Some(g) = ooxml_common::fill::parse_grad_fill(c, resolver, tint_mode) {
                     return Some(Fill::Gradient {
                         stops: g.stops,
                         angle: g.angle,
@@ -99,6 +112,60 @@ pub(crate) fn parse_fill(
         }
     }
     None
+}
+
+struct StyleMatrixSchemeResolver<'a> {
+    theme: &'a HashMap<String, String>,
+    placeholder_color: Option<&'a str>,
+}
+
+impl ThemeResolver for StyleMatrixSchemeResolver<'_> {
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        if name == "phClr" {
+            return self.placeholder_color.map(str::to_owned);
+        }
+        PptxSchemeResolver { theme: self.theme }.resolve_scheme_color(name)
+    }
+}
+
+/// Resolve a shape `fillRef` or slide/master `bgRef` through the theme's format
+/// style matrix. `phClr` inside the selected style is substituted with the
+/// reference element's colour before its own transforms are applied.
+///
+/// ECMA-376 Part 1 §19.3.1.3: bgRef 1..999 indexes fillStyleLst, 1001+
+/// indexes bgFillStyleLst (1001 = first); 0 and 1000 mean no background.
+pub(crate) fn parse_style_matrix_fill(
+    style_ref: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+    background: bool,
+) -> Option<Fill> {
+    use ooxml_common::color::TintMode::WordLiteral;
+
+    let idx = attr(&style_ref, "idx")?.parse::<u32>().ok()?;
+    let key = if background {
+        match idx {
+            0 | 1000 => return Some(Fill::None),
+            1..=999 => format!("+fillStyle-{idx}"),
+            _ => format!("+bgFillStyle-{}", idx - 1000),
+        }
+    } else if idx == 0 {
+        return Some(Fill::None);
+    } else {
+        format!("+fillStyle-{idx}")
+    };
+    let fragment = theme.get(&key)?;
+
+    let placeholder_color = parse_color_node_tint(style_ref, theme, WordLiteral);
+
+    let wrapped = format!(
+        r#"<root xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">{fragment}</root>"#
+    );
+    let doc = parse_preflighted_pptx_xml(&wrapped).ok()?;
+    let resolver = StyleMatrixSchemeResolver {
+        theme,
+        placeholder_color: placeholder_color.as_deref(),
+    };
+    parse_fill_with_resolver(doc.root_element(), &resolver, WordLiteral)
 }
 
 /// ECMA-376 §20.1.8.14 `a:blipFill` → `Fill::Image`. The `resolve_blip`
@@ -554,11 +621,12 @@ pub(crate) fn parse_background<F: FnMut(&str) -> Option<String>>(
                 return Some(fill);
             }
         }
-        return parse_fill(bg_pr, theme);
+        return parse_fill_tint(bg_pr, theme, ooxml_common::color::TintMode::WordLiteral);
     }
     // bgRef references a theme background style; its child is a color element
     if let Some(bg_ref) = child(bg, "bgRef") {
-        return parse_color_node(bg_ref, theme).map(|c| Fill::Solid { color: c });
+        return parse_style_matrix_fill(bg_ref, theme, true)
+            .or_else(|| parse_color_node(bg_ref, theme).map(|c| Fill::Solid { color: c }));
     }
     None
 }

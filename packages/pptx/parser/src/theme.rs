@@ -46,12 +46,12 @@ pub(crate) fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
 
     let root = doc.root_element();
 
-    // Parse fmtScheme > lnStyleLst so lnRef idx="N" can resolve to the theme's
-    // canonical stroke width (9525 is wrong; theme defines 12700 / 19050 / 25400).
-    // Stored under "+lnRef-1", "+lnRef-2", "+lnRef-3". Kept local: only entries
-    // that declare an explicit `w` get a key (a bare `<a:ln/>` is skipped, unlike
-    // the shared helper which fills the CT_LineProperties 9525 default), and the
-    // value is the raw `w` string the consumer re-parses.
+    // Parse fmtScheme so style references can resolve against the theme's format
+    // style matrix (ECMA-376 §20.1.4.1.18). Fill entries stay as small owned XML
+    // fragments because phClr is supplied by each individual fillRef/bgRef and
+    // therefore cannot be resolved while the theme is parsed. Only a referenced
+    // fragment is reparsed later; ordinary explicit fills keep their current fast
+    // path. Line widths keep their existing compact string representation.
     if let Some(fmt_scheme) = root
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "fmtScheme")
@@ -64,6 +64,18 @@ pub(crate) fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
             {
                 if let Some(w) = attr(&ln, "w") {
                     map.insert(format!("+lnRef-{}", i + 1), w);
+                }
+            }
+        }
+        for (list_name, key_prefix) in [
+            ("fillStyleLst", "+fillStyle"),
+            ("bgFillStyleLst", "+bgFillStyle"),
+        ] {
+            if let Some(style_list) = child(fmt_scheme, list_name) {
+                for (i, fill) in style_list.children().filter(|n| n.is_element()).enumerate() {
+                    if let Some(fragment) = xml.get(fill.range()) {
+                        map.insert(format!("{key_prefix}-{}", i + 1), fragment.to_owned());
+                    }
                 }
             }
         }
