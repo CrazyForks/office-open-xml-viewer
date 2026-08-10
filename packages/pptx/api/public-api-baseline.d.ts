@@ -43,6 +43,9 @@ type Bullet__emitterCollision1 = {
     numType: string;
     startAt: number | null;
     color: string | null;
+    sizePct: number | null;
+    sizePts?: number;
+    fontFamily: string | null;
 };
 export interface Camera3d {
     prst: string;

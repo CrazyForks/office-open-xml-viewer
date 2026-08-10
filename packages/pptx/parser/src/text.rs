@@ -238,9 +238,9 @@ impl BulletProps {
     ///   (§21.1.2.4.10, absolute points); `FollowText`/inherit → both `None`. The
     ///   two size fields are mutually exclusive (one `xsd:choice`);
     /// - font: `Font(f)` → `Some(f)`; `FollowText`/inherit → `None`.
-    ///   Auto-number and picture markers carry no font/size in the `Bullet`
-    ///   contract (the renderer draws numbers in the run font and pictures as a
-    ///   sized bitmap), so those groups only participate in cascade blocking.
+    ///   Auto-number markers retain both font and size because their glyph
+    ///   metrics determine whether multi-digit labels fit the hanging gutter.
+    ///   Picture markers retain size but have no applicable font.
     pub(crate) fn resolve(&self) -> Bullet {
         let color = match &self.color {
             Some(BuColor::Color(c)) => Some(c.clone()),
@@ -274,6 +274,9 @@ impl BulletProps {
                 num_type: num_type.clone(),
                 start_at: *start_at,
                 color,
+                size_pct,
+                size_pts,
+                font_family,
             },
             Some(BuMarker::Blip {
                 image_path,

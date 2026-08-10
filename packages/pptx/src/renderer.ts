@@ -3124,6 +3124,12 @@ export function renderTextBody(
     const bulletInheritedColor = firstRunColorHex
       ? hexToRgba(firstRunColorHex)
       : paraDefaultColor;
+    const firstRunFontFamily = (() => {
+      for (const r of para.runs) {
+        if (r.type === 'text' && r.fontFamily) return r.fontFamily;
+      }
+      return para.defFontFamily ?? null;
+    })();
 
     let bulletLabel  = '';
     let bulletFont   = buildFont(false, false, bulletBaseSizePx, 'sans-serif', rc);
@@ -3159,7 +3165,19 @@ export function renderTextBody(
       bulletFont  = buildFont(false, false, bSizePx, convertedFamily, rc);
       bulletColor = b.color ? hexToRgba(b.color) : bulletInheritedColor;
     } else if (bullet.type === 'autoNum') {
-      bulletFont  = buildFont(false, false, bulletBaseSizePx, 'sans-serif', rc);
+      const b = bullet;
+      const bSizePx = b.sizePts != null
+        ? b.sizePts * PT_TO_EMU * scale * fontScale
+        : b.sizePct != null
+          ? bulletBaseSizePx * (b.sizePct / 100)
+          : bulletBaseSizePx;
+      bulletFont = buildFont(
+        false,
+        false,
+        bSizePx,
+        normalizeFontFamily(b.fontFamily ?? firstRunFontFamily, rc),
+        rc,
+      );
       // ECMA-376 §21.1.2.4.4 (buClr): an explicit `<a:buClr>` colours the
       // auto-number marker, mirroring the char-bullet branch above. Only when it
       // is absent does the marker fall back to the buClrTx default
