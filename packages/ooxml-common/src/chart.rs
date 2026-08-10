@@ -1746,6 +1746,20 @@ pub fn axis_has_major_gridlines(axis_node: Node) -> bool {
     child(axis_node, "majorGridlines").is_some()
 }
 
+/// Whether declared major gridlines have a paintable line. DrawingML
+/// `<a:noFill>` suppresses the stroke even though `<c:majorGridlines>` remains
+/// present in the chart model. Keep this distinct from
+/// [`axis_has_major_gridlines`], which intentionally reports XML presence.
+fn axis_major_gridlines_visible(axis_node: Node) -> bool {
+    let Some(gridlines) = child(axis_node, "majorGridlines") else {
+        return false;
+    };
+    let no_fill = child(gridlines, "spPr")
+        .and_then(|sp_pr| child(sp_pr, "ln"))
+        .is_some_and(|ln| child(ln, "noFill").is_some());
+    !no_fill
+}
+
 /// `<c:catAx|valAx><c:majorGridlines><c:spPr><a:ln>` gridline style (ECMA-376
 /// §21.2.2.100, `CT_ChartLines` → DrawingML §20.1.2.2.24). The `<c:spPr>` on the
 /// gridlines element styles the gridline stroke exactly like `<c:spPr>` on an
@@ -1754,9 +1768,9 @@ pub fn axis_has_major_gridlines(axis_node: Node) -> bool {
 /// `<a:solidFill>` (e.g. `accent3`), and the `<a:ln w>` width in EMU when
 /// present. `(None, None)` when the axis omits `<c:majorGridlines>` or the
 /// element carries no `<c:spPr><a:ln>` — the renderer then keeps its faint
-/// default gridline. `<a:noFill>` is not exposed here: gridline PRESENCE is
-/// already modeled by [`axis_has_major_gridlines`], so a no-fill gridline only
-/// means "no explicit colour", handled by the `None` colour fallback.
+/// default gridline. Visibility is modeled separately by
+/// [`axis_major_gridlines_visible`] so `<a:noFill>` suppresses the stroke rather
+/// than falling through to a default colour.
 pub fn extract_gridline_style(
     axis_node: Node,
     resolver: &dyn ColorResolver,
@@ -4088,18 +4102,35 @@ pub fn parse_chart_part_with_references(
     // tick labels and `<c:spPr><a:ln>` styles the axis rule. Shared helpers so
     // the gray "2025年3月期" category labels and the light-gray category-axis
     // line in sample-2 slide-16's horizontal bar chart resolve the same way.
+    // `CT_ChartSpace.style` is optional. PowerPoint treats its omission as the
+    // legacy default chart style: black 0.75 pt axes/gridlines and black chart
+    // text. This form is common in charts produced by non-Office generators.
+    // Resolve that implicit Office formatting here so all three host formats
+    // consume the same canonical model; explicit chart styles keep their
+    // existing path until the numbered built-in style table is modeled.
+    let uses_implicit_legacy_style = child(root, "style").is_none();
     let cat_axis_font_color = cat_ax
         .and_then(|n| extract_axis_tick_label_color(n, color_resolver))
-        .or_else(|| chart_text_font_color.clone());
+        .or_else(|| chart_text_font_color.clone())
+        .or_else(|| (uses_implicit_legacy_style && cat_ax.is_some()).then(|| "000000".to_string()));
     let val_axis_font_color = val_ax
         .and_then(|n| extract_axis_tick_label_color(n, color_resolver))
-        .or_else(|| chart_text_font_color.clone());
-    let (cat_axis_line_color, cat_axis_line_width_emu, cat_axis_line_hidden) = cat_ax
+        .or_else(|| chart_text_font_color.clone())
+        .or_else(|| (uses_implicit_legacy_style && val_ax.is_some()).then(|| "000000".to_string()));
+    let (mut cat_axis_line_color, mut cat_axis_line_width_emu, cat_axis_line_hidden) = cat_ax
         .map(|n| extract_axis_line_style(n, color_resolver))
         .unwrap_or((None, None, false));
-    let (val_axis_line_color, val_axis_line_width_emu, val_axis_line_hidden) = val_ax
+    let (mut val_axis_line_color, mut val_axis_line_width_emu, val_axis_line_hidden) = val_ax
         .map(|n| extract_axis_line_style(n, color_resolver))
         .unwrap_or((None, None, false));
+    if uses_implicit_legacy_style && cat_ax.is_some() && !cat_axis_line_hidden {
+        cat_axis_line_color.get_or_insert_with(|| "000000".to_string());
+        cat_axis_line_width_emu.get_or_insert(9_525);
+    }
+    if uses_implicit_legacy_style && val_ax.is_some() && !val_axis_line_hidden {
+        val_axis_line_color.get_or_insert_with(|| "000000".to_string());
+        val_axis_line_width_emu.get_or_insert(9_525);
+    }
 
     // `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
     let val_axis_format_code = val_ax.and_then(extract_axis_format_code);
@@ -4336,17 +4367,25 @@ pub fn parse_chart_part_with_references(
     // `<c:majorGridlines>` presence: Office writes it on the value axis by
     // default (renderer keeps its historical always-on when the field is None),
     // so we only emit `Some(false)` when a value axis EXISTS without the element.
-    let val_axis_major_gridlines = val_ax.map(|ax| axis_has_major_gridlines(ax));
-    let cat_axis_major_gridlines = cat_ax.map(|ax| axis_has_major_gridlines(ax));
+    let val_axis_major_gridlines = val_ax.map(axis_major_gridlines_visible);
+    let cat_axis_major_gridlines = cat_ax.map(axis_major_gridlines_visible);
     // `<c:majorGridlines><c:spPr><a:ln>` colour/width — the explicit gridline
     // style (e.g. sample-1 slide 5's `accent3` 0.25 pt value-axis gridlines).
     // `(None, None)` when absent, so the renderer keeps its faint default.
-    let (val_axis_gridline_color, val_axis_gridline_width_emu) = val_ax
+    let (mut val_axis_gridline_color, mut val_axis_gridline_width_emu) = val_ax
         .map(|ax| extract_gridline_style(ax, color_resolver))
         .unwrap_or((None, None));
-    let (cat_axis_gridline_color, cat_axis_gridline_width_emu) = cat_ax
+    let (mut cat_axis_gridline_color, mut cat_axis_gridline_width_emu) = cat_ax
         .map(|ax| extract_gridline_style(ax, color_resolver))
         .unwrap_or((None, None));
+    if uses_implicit_legacy_style && val_axis_major_gridlines == Some(true) {
+        val_axis_gridline_color.get_or_insert_with(|| "000000".to_string());
+        val_axis_gridline_width_emu.get_or_insert(9_525);
+    }
+    if uses_implicit_legacy_style && cat_axis_major_gridlines == Some(true) {
+        cat_axis_gridline_color.get_or_insert_with(|| "000000".to_string());
+        cat_axis_gridline_width_emu.get_or_insert(9_525);
+    }
     let val_axis_minor_gridlines = val_ax.map(|ax| axis_has_minor_gridlines(ax));
     let val_axis_major_unit = val_ax.and_then(extract_axis_major_unit);
     let val_axis_minor_unit = val_ax.and_then(extract_axis_minor_unit);
@@ -5814,6 +5853,57 @@ mod tests {
         assert_eq!(m.chart_border_width_emu, Some(19050));
         assert!(!m.cat_axis_hidden);
         assert!(!m.val_axis_hidden);
+    }
+
+    /// A chart without `<c:style>` is valid (`CT_ChartSpace.style` is optional).
+    /// PowerPoint opens this legacy/default-style form with black 0.75 pt axes
+    /// and major gridlines. Non-Office generators commonly emit precisely this
+    /// minimal form, so the shared parser must resolve the implicit formatting
+    /// once for DOCX, XLSX, and PPTX rather than leave each renderer to guess.
+    #[test]
+    fn parse_chart_part_resolves_styleless_legacy_axis_defaults() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart>
+                <c:plotArea>
+                  <c:barChart>
+                    <c:barDir val="col"/><c:grouping val="clustered"/>
+                    <c:ser><c:idx val="0"/>
+                      <c:cat><c:strLit><c:pt idx="0"><c:v>T1</c:v></c:pt></c:strLit></c:cat>
+                      <c:val><c:numLit><c:pt idx="0"><c:v>10</c:v></c:pt></c:numLit></c:val>
+                    </c:ser>
+                  </c:barChart>
+                  <c:catAx><c:delete val="0"/><c:majorTickMark val="out"/></c:catAx>
+                  <c:valAx><c:delete val="0"/><c:majorGridlines/><c:majorTickMark val="out"/></c:valAx>
+                </c:plotArea>
+              </c:chart>
+              <c:txPr><a:bodyPr/><a:p><a:pPr><a:defRPr sz="1800"/></a:pPr></a:p></c:txPr>
+            </c:chartSpace>"#
+        );
+        let doc = chart_space_of(&xml);
+        let m = parse_chart_part(doc.root_element(), &FixtureResolver).expect("bar chart parses");
+
+        assert_eq!(m.cat_axis_font_size_hpt, Some(1800));
+        assert_eq!(m.val_axis_font_size_hpt, Some(1800));
+        assert_eq!(m.cat_axis_font_color.as_deref(), Some("000000"));
+        assert_eq!(m.val_axis_font_color.as_deref(), Some("000000"));
+        assert_eq!(m.cat_axis_line_color.as_deref(), Some("000000"));
+        assert_eq!(m.val_axis_line_color.as_deref(), Some("000000"));
+        assert_eq!(m.cat_axis_line_width_emu, Some(9525));
+        assert_eq!(m.val_axis_line_width_emu, Some(9525));
+        assert_eq!(m.val_axis_gridline_color.as_deref(), Some("000000"));
+        assert_eq!(m.val_axis_gridline_width_emu, Some(9525));
+
+        let no_fill_xml = xml.replace(
+            "<c:majorGridlines/>",
+            "<c:majorGridlines><c:spPr><a:ln><a:noFill/></a:ln></c:spPr></c:majorGridlines>",
+        );
+        let no_fill_doc = chart_space_of(&no_fill_xml);
+        let no_fill_model = parse_chart_part(no_fill_doc.root_element(), &FixtureResolver)
+            .expect("no-fill chart parses");
+        assert_eq!(no_fill_model.val_axis_major_gridlines, Some(false));
+        assert_eq!(no_fill_model.val_axis_gridline_color, None);
+        assert_eq!(no_fill_model.val_axis_gridline_width_emu, None);
     }
 
     /// (b) Combo chart: a bar series on the primary value axis plus a line
