@@ -328,6 +328,102 @@ fn parse_style_stroke(
         })
 }
 
+/// The DrawingML shape-property components that affect a picture's composed
+/// bitmap/border silhouette. `p:pic` and a `p:sp` painted by `a:blipFill` both
+/// use `CT_ShapeProperties`; keeping their component cascade in one resolver
+/// prevents the alternate picture construction paths from silently dropping
+/// style-matrix or placeholder-inherited effects.
+#[derive(Default, Clone, serde::Serialize)]
+pub(crate) struct PictureShapeProperties {
+    pub(crate) stroke: Option<Stroke>,
+    pub(crate) shadow: Option<Shadow>,
+    pub(crate) inner_shadow: Option<Shadow>,
+    pub(crate) glow: Option<Glow>,
+    pub(crate) soft_edge: Option<SoftEdge>,
+    pub(crate) reflection: Option<Reflection>,
+    pub(crate) scene3d: Option<Scene3d>,
+    pub(crate) sp3d: Option<Sp3d>,
+}
+
+impl PictureShapeProperties {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.stroke.is_none()
+            && self.shadow.is_none()
+            && self.inner_shadow.is_none()
+            && self.glow.is_none()
+            && self.soft_edge.is_none()
+            && self.reflection.is_none()
+            && self.scene3d.is_none()
+            && self.sp3d.is_none()
+    }
+}
+
+/// Resolve the component cascade for a picture-like shape.
+///
+/// ECMA-376 Part 1, Annex L.3.2.3 defines the slide/layout placeholder
+/// inheritance tier. CT_ShapeStyle's `lnRef`/`effectRef` supplies the next
+/// tier, and local CT_ShapeProperties components override it. In particular,
+/// MS-OI29500 §20.1.2.2.37(b) specifies that an authored local effect component
+/// replaces the referenced style component rather than merging its children.
+pub(crate) fn resolve_picture_shape_properties(
+    sp_pr: Option<roxmltree::Node<'_, '_>>,
+    style_node: Option<roxmltree::Node<'_, '_>>,
+    inherited: Option<PictureShapeProperties>,
+    theme: &HashMap<String, String>,
+) -> PictureShapeProperties {
+    let inherited = inherited.unwrap_or_default();
+
+    // An explicit lnRef (including idx=0) replaces the placeholder tier.
+    // Without an lnRef, the layout placeholder remains the inherited base.
+    let style_stroke = if style_node.and_then(|style| child(style, "lnRef")).is_some() {
+        parse_style_stroke(style_node, theme)
+    } else {
+        inherited.stroke
+    };
+    let stroke = merge_local_stroke(
+        sp_pr.and_then(|node| child(node, "ln")),
+        style_stroke,
+        theme,
+    );
+
+    let effect_ref = style_node.and_then(|style| child(style, "effectRef"));
+    let style_effects = effect_ref
+        .map(|node| parse_style_matrix_effects(node, theme))
+        .unwrap_or_default();
+    let local_effect_node =
+        sp_pr.and_then(|node| child(node, "effectLst").or_else(|| child(node, "effectDag")));
+    let effects = if local_effect_node.is_some() {
+        parse_effect_lst(local_effect_node, theme)
+    } else if effect_ref.is_some() {
+        style_effects.effects
+    } else {
+        EffectLst {
+            shadow: inherited.shadow,
+            inner_shadow: inherited.inner_shadow,
+            glow: inherited.glow,
+            soft_edge: inherited.soft_edge,
+            reflection: inherited.reflection,
+        }
+    };
+
+    PictureShapeProperties {
+        stroke,
+        shadow: effects.shadow,
+        inner_shadow: effects.inner_shadow,
+        glow: effects.glow,
+        soft_edge: effects.soft_edge,
+        reflection: effects.reflection,
+        scene3d: sp_pr
+            .and_then(parse_scene3d)
+            .or(style_effects.scene3d)
+            .or(inherited.scene3d),
+        sp3d: sp_pr
+            .and_then(|node| parse_sp3d(node, theme))
+            .or(style_effects.sp3d)
+            .or(inherited.sp3d),
+    }
+}
+
 pub(crate) fn parse_shape(
     sp_node: roxmltree::Node<'_, '_>,
     lph: &LayoutPlaceholders,
@@ -850,40 +946,17 @@ pub(crate) fn parse_picture(
     let cust_geom = child(sp_pr, "custGeom")
         .map(|geometry| parse_cust_geom(geometry, t.cx as f64, t.cy as f64));
 
-    // A picture has the same CT_ShapeStyle component references as a shape.
-    // Resolve the theme recipe first; a local spPr component then replaces or
-    // overlays it according to MS-OI29500 §20.1.2.2.37(b).
     let style_node = child(pic_node, "style");
-    let style_effects = style_node
-        .and_then(|style| child(style, "effectRef"))
-        .map(|effect_ref| parse_style_matrix_effects(effect_ref, theme))
-        .unwrap_or_default();
-    let style_scene3d = style_effects.scene3d;
-    let style_sp3d = style_effects.sp3d;
-    let local_effect_node = child(sp_pr, "effectLst").or_else(|| child(sp_pr, "effectDag"));
-
-    // §19.3.1.37: p:pic's spPr is CT_ShapeProperties, so effects apply to the
-    // composed bitmap/border silhouette exactly as they do to shapes.
-    let EffectLst {
+    let PictureShapeProperties {
+        stroke,
         shadow,
         inner_shadow,
         glow,
         soft_edge,
         reflection,
-    } = if local_effect_node.is_some() {
-        parse_effect_lst(local_effect_node, theme)
-    } else {
-        style_effects.effects
-    };
-
-    // §20.1.2.2.24 — a `p:pic`'s spPr may carry an `<a:ln>` border (e.g. the
-    // white frame of PowerPoint's picture styles). `parse_stroke` returns None
-    // for `<a:noFill/>`, so an explicitly border-less picture stays None.
-    let stroke = merge_local_stroke(
-        child(sp_pr, "ln"),
-        parse_style_stroke(style_node, theme),
-        theme,
-    );
+        scene3d,
+        sp3d,
+    } = resolve_picture_shape_properties(Some(sp_pr), style_node, None, theme);
 
     let (prst_geom, prst_adjust) = parse_pic_prst_geom(sp_pr);
     Some(PictureElement {
@@ -917,8 +990,8 @@ pub(crate) fn parse_picture(
         glow,
         soft_edge,
         reflection,
-        scene3d: parse_scene3d(sp_pr).or(style_scene3d),
-        sp3d: parse_sp3d(sp_pr, theme).or(style_sp3d),
+        scene3d,
+        sp3d,
     })
 }
 
@@ -1786,23 +1859,21 @@ pub(crate) fn parse_sp_tree_node(
                                         .map(|geometry| {
                                             parse_cust_geom(geometry, t.cx as f64, t.cy as f64)
                                         });
-                                // §20.1.8.16 effectLst applies to a sp painted as
-                                // a picture (blipFill) just like a regular p:pic.
-                                let EffectLst {
+                                let PictureShapeProperties {
+                                    stroke,
                                     shadow,
                                     inner_shadow,
                                     glow,
                                     soft_edge,
                                     reflection,
-                                } = parse_effect_lst(
-                                    sp_pr_node.and_then(|p| child(p, "effectLst")),
+                                    scene3d,
+                                    sp3d,
+                                } = resolve_picture_shape_properties(
+                                    sp_pr_node,
+                                    child(node, "style"),
+                                    None,
                                     theme,
                                 );
-                                // §20.1.2.2.24 — a blipFill-painted sp can carry
-                                // an `<a:ln>` border just like a real p:pic.
-                                let stroke = sp_pr_node
-                                    .and_then(|p| child(p, "ln"))
-                                    .and_then(|n| parse_stroke(n, theme));
                                 out.push(SlideElement::Picture(PictureElement {
                                     x: t.x,
                                     y: t.y,
@@ -1834,8 +1905,8 @@ pub(crate) fn parse_sp_tree_node(
                                     glow,
                                     soft_edge,
                                     reflection,
-                                    scene3d: sp_pr_node.and_then(parse_scene3d),
-                                    sp3d: sp_pr_node.and_then(|node| parse_sp3d(node, theme)),
+                                    scene3d,
+                                    sp3d,
                                 }));
                                 return;
                             }
@@ -1860,13 +1931,21 @@ pub(crate) fn parse_sp_tree_node(
                         let t = slide_xfrm.or_else(|| lph.lookup(&ph_type, ph_idx).cloned());
                         if let Some(t) = t {
                             if t.cx > 0 && t.cy > 0 {
-                                // §20.1.2.2.24 — honour the slide sp's own `<a:ln>`
-                                // border, falling back to the inherited layout
-                                // placeholder stroke when the slide omits one.
-                                let stroke = match sp_pr_node.and_then(|p| child(p, "ln")) {
-                                    Some(ln) => parse_stroke(ln, theme),
-                                    None => lph.lookup_stroke(&ph_type, ph_idx),
-                                };
+                                let PictureShapeProperties {
+                                    stroke,
+                                    shadow,
+                                    inner_shadow,
+                                    glow,
+                                    soft_edge,
+                                    reflection,
+                                    scene3d,
+                                    sp3d,
+                                } = resolve_picture_shape_properties(
+                                    sp_pr_node,
+                                    child(node, "style"),
+                                    lph.lookup_picture_properties(&ph_type, ph_idx),
+                                    theme,
+                                );
                                 out.push(SlideElement::Picture(PictureElement {
                                     x: t.x,
                                     y: t.y,
@@ -1900,13 +1979,13 @@ pub(crate) fn parse_sp_tree_node(
                                     // render applies it via the shared core cache.
                                     duotone: bf.duotone,
                                     cust_geom: None,
-                                    shadow: None,
-                                    inner_shadow: None,
-                                    glow: None,
-                                    soft_edge: None,
-                                    reflection: None,
-                                    scene3d: None,
-                                    sp3d: None,
+                                    shadow,
+                                    inner_shadow,
+                                    glow,
+                                    soft_edge,
+                                    reflection,
+                                    scene3d,
+                                    sp3d,
                                 }));
                                 return;
                             }
@@ -1925,9 +2004,13 @@ pub(crate) fn parse_sp_tree_node(
                 out.push(SlideElement::Picture(pic));
             } else {
                 // Placeholder pic: no xfrm in spPr — position comes from layout by_idx
-                let ph_idx = node
+                let ph_node = node
                     .descendants()
-                    .find(|n| n.is_element() && n.tag_name().name() == "ph")
+                    .find(|n| n.is_element() && n.tag_name().name() == "ph");
+                let ph_type = ph_node
+                    .and_then(|ph| attr(&ph, "type"))
+                    .unwrap_or_else(|| "body".to_owned());
+                let ph_idx = ph_node
                     .and_then(|ph| attr(&ph, "idx"))
                     .and_then(|s| s.parse::<u32>().ok())
                     .filter(|idx| *idx != u32::MAX);
@@ -1950,14 +2033,21 @@ pub(crate) fn parse_sp_tree_node(
                                     // p:pic's blip — prefer the vector original.
                                     let svg_image_path =
                                         blip.and_then(|b| svg_blip_path(b, slide_dir, rels, zip));
-                                    // §20.1.2.2.24 — placeholder pic border: the
-                                    // p:pic's own `<a:ln>`, else the inherited
-                                    // layout placeholder stroke.
-                                    let stroke =
-                                        match child(node, "spPr").and_then(|p| child(p, "ln")) {
-                                            Some(ln) => parse_stroke(ln, theme),
-                                            None => lph.by_idx_stroke.get(&idx).cloned(),
-                                        };
+                                    let PictureShapeProperties {
+                                        stroke,
+                                        shadow,
+                                        inner_shadow,
+                                        glow,
+                                        soft_edge,
+                                        reflection,
+                                        scene3d,
+                                        sp3d,
+                                    } = resolve_picture_shape_properties(
+                                        child(node, "spPr"),
+                                        child(node, "style"),
+                                        lph.lookup_picture_properties(&ph_type, Some(idx)),
+                                        theme,
+                                    );
                                     out.push(SlideElement::Picture(PictureElement {
                                         x: t.x,
                                         y: t.y,
@@ -1984,13 +2074,13 @@ pub(crate) fn parse_sp_tree_node(
                                             )
                                         }),
                                         cust_geom: None,
-                                        shadow: None,
-                                        inner_shadow: None,
-                                        glow: None,
-                                        soft_edge: None,
-                                        reflection: None,
-                                        scene3d: None,
-                                        sp3d: None,
+                                        shadow,
+                                        inner_shadow,
+                                        glow,
+                                        soft_edge,
+                                        reflection,
+                                        scene3d,
+                                        sp3d,
                                     }));
                                 }
                             }
@@ -2724,6 +2814,232 @@ mod style_ref_tests {
             (body.l_ins, body.t_ins, body.r_ins, body.b_ins),
             (100, 200, 300, 400)
         );
+    }
+}
+
+#[cfg(test)]
+mod picture_property_resolution_tests {
+    use super::*;
+    use crate::master::{InheritedBlipFill, LayoutPlaceholders};
+    use std::io::{Cursor, Write};
+
+    fn tiny_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        bytes.extend_from_slice(&[0, 0, 0, 13]);
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes
+    }
+
+    fn image_zip() -> PptxZip {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            writer
+                .start_file(
+                    "ppt/media/image1.png",
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            writer.write_all(&tiny_png()).unwrap();
+            writer.finish().unwrap();
+        }
+        PptxZip::new(Cursor::new(bytes)).unwrap()
+    }
+
+    fn theme_with_picture_style() -> HashMap<String, String> {
+        HashMap::from([
+            ("+lnRef-1".to_owned(), "22222".to_owned()),
+            (
+                "+effectStyle-1".to_owned(),
+                r#"<a:effectStyle>
+                  <a:effectLst><a:outerShdw blurRad="100" dist="200" dir="0">
+                    <a:srgbClr val="112233"/>
+                  </a:outerShdw></a:effectLst>
+                  <a:scene3d><a:camera prst="isometricLeftUp"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>
+                  <a:sp3d prstMaterial="matte"/>
+                </a:effectStyle>"#
+                    .to_owned(),
+            ),
+        ])
+    }
+
+    fn run_tree_child(
+        xml: &str,
+        placeholders: &LayoutPlaceholders,
+        theme: &HashMap<String, String>,
+        zip: &mut PptxZip,
+    ) -> PictureElement {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut out = Vec::new();
+        let rels = HashMap::from([("rIdImg".to_owned(), "../media/image1.png".to_owned())]);
+        parse_sp_tree_node(
+            doc.root_element(),
+            placeholders,
+            "ppt/slides",
+            &rels,
+            &HashMap::new(),
+            zip,
+            theme,
+            &mut out,
+            false,
+            None,
+            DepthGuard::root(),
+        );
+        let SlideElement::Picture(picture) = out.pop().expect("picture output") else {
+            panic!("expected PictureElement")
+        };
+        picture
+    }
+
+    fn assert_theme_properties(picture: &PictureElement) {
+        assert_eq!(
+            picture.stroke.as_ref().map(|stroke| stroke.width),
+            Some(22_222)
+        );
+        assert_eq!(picture.shadow.as_ref().map(|shadow| shadow.dist), Some(200));
+        assert_eq!(
+            picture
+                .scene3d
+                .as_ref()
+                .map(|scene| scene.camera.prst.as_str()),
+            Some("isometricLeftUp")
+        );
+        assert_eq!(
+            picture
+                .sp3d
+                .as_ref()
+                .map(|surface| surface.prst_material.as_str()),
+            Some("matte")
+        );
+    }
+
+    #[test]
+    fn normal_picture_and_blip_filled_shape_share_style_component_resolution() {
+        let theme = theme_with_picture_style();
+        let mut zip = image_zip();
+        let ordinary = run_tree_child(
+            r#"<p:pic xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <p:nvPicPr><p:cNvPr id="1" name="Picture"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+              <p:blipFill><a:blip r:embed="rIdImg"/></p:blipFill>
+              <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm></p:spPr>
+              <p:style><a:lnRef idx="1"><a:srgbClr val="FFFFFF"/></a:lnRef>
+                <a:effectRef idx="1"><a:srgbClr val="FFFFFF"/></a:effectRef></p:style>
+            </p:pic>"#,
+            &LayoutPlaceholders::default(),
+            &theme,
+            &mut zip,
+        );
+        assert_theme_properties(&ordinary);
+
+        let mut zip = image_zip();
+        let blip_shape = run_tree_child(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                           xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <p:nvSpPr><p:cNvPr id="2" name="Blip shape"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+              <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm>
+                <a:blipFill><a:blip r:embed="rIdImg"/></a:blipFill></p:spPr>
+              <p:style><a:lnRef idx="1"><a:srgbClr val="FFFFFF"/></a:lnRef>
+                <a:effectRef idx="1"><a:srgbClr val="FFFFFF"/></a:effectRef></p:style>
+            </p:sp>"#,
+            &LayoutPlaceholders::default(),
+            &theme,
+            &mut zip,
+        );
+        assert_theme_properties(&blip_shape);
+    }
+
+    #[test]
+    fn inherited_blip_shape_and_transformless_picture_retain_layout_effects() {
+        let property_xml = roxmltree::Document::parse(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:spPr><a:ln w="33333"><a:solidFill><a:srgbClr val="445566"/></a:solidFill></a:ln>
+                <a:effectLst><a:outerShdw blurRad="500" dist="700" dir="0"><a:srgbClr val="112233"/></a:outerShdw></a:effectLst>
+                <a:scene3d><a:camera prst="perspectiveFront"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>
+                <a:sp3d prstMaterial="plastic"/>
+              </p:spPr>
+            </p:sp>"#,
+        )
+        .unwrap();
+        let properties = resolve_picture_shape_properties(
+            child(property_xml.root_element(), "spPr"),
+            None,
+            None,
+            &HashMap::new(),
+        );
+        let transform = Transform {
+            cx: 1000,
+            cy: 1000,
+            ..Default::default()
+        };
+        let inherited_blip = InheritedBlipFill {
+            image_path: "ppt/media/image1.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            src_rect: None,
+            alpha: None,
+            duotone: None,
+        };
+        let mut placeholders = LayoutPlaceholders::default();
+        placeholders.by_idx.insert(9, transform);
+        placeholders.by_idx_blip_fill.insert(9, inherited_blip);
+        placeholders.by_idx_picture_properties.insert(9, properties);
+
+        let assert_inherited = |picture: &PictureElement| {
+            assert_eq!(
+                picture.stroke.as_ref().map(|stroke| stroke.width),
+                Some(33_333)
+            );
+            assert_eq!(picture.shadow.as_ref().map(|shadow| shadow.dist), Some(700));
+            assert_eq!(
+                picture
+                    .scene3d
+                    .as_ref()
+                    .map(|scene| scene.camera.prst.as_str()),
+                Some("perspectiveFront")
+            );
+            assert_eq!(
+                picture
+                    .sp3d
+                    .as_ref()
+                    .map(|surface| surface.prst_material.as_str()),
+                Some("plastic")
+            );
+        };
+
+        let mut zip = image_zip();
+        let inherited_shape = run_tree_child(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                           xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:nvSpPr><p:cNvPr id="3" name="Inherited"/><p:cNvSpPr/><p:nvPr><p:ph type="pic" idx="9"/></p:nvPr></p:nvSpPr>
+              <p:spPr/>
+            </p:sp>"#,
+            &placeholders,
+            &HashMap::new(),
+            &mut zip,
+        );
+        assert_inherited(&inherited_shape);
+
+        let mut zip = image_zip();
+        let placeholder_picture = run_tree_child(
+            r#"<p:pic xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <p:nvPicPr><p:cNvPr id="4" name="Placeholder"/><p:cNvPicPr/><p:nvPr><p:ph type="pic" idx="9"/></p:nvPr></p:nvPicPr>
+              <p:blipFill><a:blip r:embed="rIdImg"/></p:blipFill><p:spPr/>
+            </p:pic>"#,
+            &placeholders,
+            &HashMap::new(),
+            &mut zip,
+        );
+        assert_inherited(&placeholder_picture);
     }
 }
 

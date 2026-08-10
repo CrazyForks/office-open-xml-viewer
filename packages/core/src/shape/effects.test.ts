@@ -186,13 +186,14 @@ describe('applyOuterShadow (ECMA-376 §20.1.8.45)', () => {
 
     expect(applyOuterShadow(
       live as never, (() => {}) as never, BBOX, shadow, SCALE, DEVICE_W, DEVICE_H, 90,
+      [75, 75],
     )).toBe(true);
 
     const transforms = live.ops.filter(o =>
       o.op === 'translate' || o.op === 'rotate' || o.op === 'transform');
     expect(transforms[0].args?.[0]).toBeCloseTo(0, 6);
     expect(transforms[0].args?.[1]).toBeCloseTo(1, 6);
-    expect(transforms[1]).toEqual({ op: 'translate', args: [300, 50] });
+    expect(transforms[1]).toEqual({ op: 'translate', args: [75, 75] });
     expect(transforms[2].args?.[0]).toBeCloseTo(Math.PI / 2, 9);
     expect(transforms[3].args).toEqual([
       0.5,
@@ -203,7 +204,7 @@ describe('applyOuterShadow (ECMA-376 §20.1.8.45)', () => {
       0,
     ]);
     expect(transforms[4].args?.[0]).toBeCloseTo(-Math.PI / 2, 9);
-    expect(transforms[5]).toEqual({ op: 'translate', args: [-300, -50] });
+    expect(transforms[5]).toEqual({ op: 'translate', args: [-75, -75] });
   });
 
   it('keeps direction and transform in page space when rotWithShape is false', () => {

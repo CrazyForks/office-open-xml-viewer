@@ -192,6 +192,7 @@ export function applyOuterShadow(
   deviceW: number,
   deviceH: number,
   shapeRotationDegrees = 0,
+  alignmentAnchor?: readonly [number, number],
 ): boolean {
   const blur = Math.max(0, emuToPx(shadow.blur, scale));
   const dist = emuToPx(shadow.dist, scale);
@@ -229,7 +230,13 @@ export function applyOuterShadow(
   // ECMA-376 defines the order as alignment origin, scale/skew, then offset.
   // The source aux is already in absolute device coordinates; compose the
   // page-space offset separately so it is not itself scaled or skewed.
-  const [anchorX, anchorY] = shadowAlignmentPoint(bbox, shadow.algn ?? 'b');
+  // Placement owns the authored shape frame.  In particular, the corner of a
+  // rotated or perspective-projected shape is not the corresponding corner of
+  // its post-transform AABB.  Callers that know that frame pass the exact
+  // device-space anchor; bbox-based placement remains the compatibility
+  // fallback for headless/custom callers that only have a silhouette box.
+  const [anchorX, anchorY] = alignmentAnchor ??
+    shadowAlignmentPoint(bbox, shadow.algn ?? 'b');
   const sx = shadow.sx ?? 1;
   const sy = shadow.sy ?? 1;
   const kx = Math.tan(((shadow.kx ?? 0) * Math.PI) / 180);
