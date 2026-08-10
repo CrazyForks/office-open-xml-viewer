@@ -16,7 +16,7 @@ use crate::text::{
     merge_level_bullets, merge_level_indents, merge_level_sizes, read_level_bullets,
     read_level_font_sizes, read_level_indents, LevelBullets, LevelFontSizes, LevelIndents,
 };
-use crate::theme::{bake_clr_map, parse_theme_colors, resolve_theme_typeface, PptxSchemeResolver};
+use crate::theme::{bake_clr_map, parse_theme_part, resolve_theme_typeface, PptxSchemeResolver};
 use crate::types::*;
 use crate::{
     attr, attr_f64, attr_i64, attr_r, build_smartart_drawings, child, find_rel_target_by_type,
@@ -1820,13 +1820,10 @@ pub(crate) fn build_master_bundle(
     // presentation theme when the master declares no /theme relationship.
     let theme_path: Option<String> =
         find_rel_target_by_type(&master_rels_xml, "/theme").map(|t| resolve_path(&master_dir, &t));
-    let mut theme: HashMap<String, String> = match theme_path
+    let mut theme: HashMap<String, String> = theme_path
         .as_deref()
-        .and_then(|p| read_zip_str(zip, p).ok())
-    {
-        Some(theme_xml) => parse_theme_colors(&theme_xml),
-        None => fallback_theme.clone(),
-    };
+        .map(|path| parse_theme_part(path, zip))
+        .unwrap_or_else(|| fallback_theme.clone());
     // Bake the master's <p:clrMap> logical-name → slot mapping into the theme.
     bake_clr_map(&mut theme, master_xml_opt.as_deref());
 
