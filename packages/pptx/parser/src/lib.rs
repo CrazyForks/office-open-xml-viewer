@@ -3915,6 +3915,36 @@ mod tests {
         }
     }
 
+    /// ECMA-376 §20.1.2.3.34 defines tint as the retained fraction of the
+    /// source colour. SmartArt writes explicit gradient stops that depend on
+    /// that direction: a 15% tint must be much nearer white than a 50% tint.
+    /// PowerPoint performs the blend in linear sRGB before applying satMod.
+    #[test]
+    fn test_parse_smartart_gradient_retains_tint_fraction_in_linear_srgb() {
+        let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <gradFill><gsLst>
+            <gs pos="0"><schemeClr val="accent4"><tint val="50000"/><satMod val="300000"/></schemeClr></gs>
+            <gs pos="35000"><schemeClr val="accent4"><tint val="37000"/><satMod val="300000"/></schemeClr></gs>
+            <gs pos="100000"><schemeClr val="accent4"><tint val="15000"/><satMod val="350000"/></schemeClr></gs>
+          </gsLst><lin ang="16200000" scaled="1"/></gradFill>
+        </spPr>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::from([("accent4".to_owned(), "8064A2".to_owned())]);
+
+        match parse_fill(doc.root_element(), &theme) {
+            Some(Fill::Gradient { stops, .. }) => {
+                assert_eq!(
+                    stops
+                        .iter()
+                        .map(|stop| stop.color.as_str())
+                        .collect::<Vec<_>>(),
+                    ["C9B5E8", "D9CBEE", "F0EAF9"]
+                );
+            }
+            other => panic!("expected SmartArt gradient, got {other:?}"),
+        }
+    }
+
     /// ECMA-376 §21.1.2.3.10 — strike="dblStrike" produces strike_double=true,
     /// while strike="sngStrike" leaves strike_double=false. The plain
     /// `strikethrough` flag is true in both cases.
