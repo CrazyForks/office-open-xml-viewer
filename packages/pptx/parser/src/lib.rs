@@ -1605,31 +1605,38 @@ fn parse_slide(
 
     // ── Layout non-placeholder shapes (rendered BEFORE slide shapes) ──────
     // These are decorative background elements defined in the slide layout
-    // (e.g. coloured bands, logos) that are not placeholder anchors.
-    if let Some(lxml) = layout_xml {
-        note_layout_master_parse();
-        if let Ok(ldoc) = parse_preflighted_pptx_xml(lxml) {
-            let lroot = ldoc.root_element();
-            if let Some(lsp_tree) = child(lroot, "cSld").and_then(|n| child(n, "spTree")) {
-                let empty_lph = LayoutPlaceholders::default();
-                for node in lsp_tree.children().filter(|n| n.is_element()) {
-                    let start = elements.len();
-                    parse_sp_tree_node(
-                        node,
-                        &empty_lph,
-                        layout_dir,
-                        layout_rels,
-                        smartart_drawings,
-                        zip,
-                        theme,
-                        &mut elements,
-                        true, // skip placeholder shapes
-                        None, // no inherited group fill at top level
-                        ooxml_common::depth::DepthGuard::root(),
-                    );
-                    element_sources.extend((start..elements.len()).map(|_| SlideElementSource {
-                        origin: SlideElementOrigin::Layout,
-                    }));
+    // (e.g. coloured bands, logos) that are not placeholder anchors. A slide's
+    // showMasterSp="0" is PowerPoint's Hide Background Graphics switch and
+    // suppresses inherited artwork from the selected layout as well as the
+    // slide master. The layout's own flag only controls its master inheritance.
+    if slide_show_master_sp {
+        if let Some(lxml) = layout_xml {
+            note_layout_master_parse();
+            if let Ok(ldoc) = parse_preflighted_pptx_xml(lxml) {
+                let lroot = ldoc.root_element();
+                if let Some(lsp_tree) = child(lroot, "cSld").and_then(|n| child(n, "spTree")) {
+                    let empty_lph = LayoutPlaceholders::default();
+                    for node in lsp_tree.children().filter(|n| n.is_element()) {
+                        let start = elements.len();
+                        parse_sp_tree_node(
+                            node,
+                            &empty_lph,
+                            layout_dir,
+                            layout_rels,
+                            smartart_drawings,
+                            zip,
+                            theme,
+                            &mut elements,
+                            true, // skip placeholder shapes
+                            None, // no inherited group fill at top level
+                            ooxml_common::depth::DepthGuard::root(),
+                        );
+                        element_sources.extend((start..elements.len()).map(|_| {
+                            SlideElementSource {
+                                origin: SlideElementOrigin::Layout,
+                            }
+                        }));
+                    }
                 }
             }
         }
@@ -6583,6 +6590,7 @@ mod tests {
     /// `showMasterSp` attribute so the test can exercise the suppression path.
     fn build_master_sp_pptx(
         layout_show_master_sp: Option<bool>,
+        slide_show_master_sp: Option<bool>,
         include_layout_and_slide_shapes: bool,
     ) -> Vec<u8> {
         use zip::write::SimpleFileOptions;
@@ -6600,6 +6608,11 @@ mod tests {
             Some(true) => r#" showMasterSp="1""#.to_string(),
             Some(false) => r#" showMasterSp="0""#.to_string(),
             None => String::new(),
+        };
+        let slide_attr = match slide_show_master_sp {
+            Some(true) => r#" showMasterSp="1""#,
+            Some(false) => r#" showMasterSp="0""#,
+            None => "",
         };
         let layout_shape = if include_layout_and_slide_shapes {
             r#"<p:sp><p:nvSpPr><p:cNvPr id="20" name="LayoutBand"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="300000"/><a:ext cx="1000000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:sp>"#
@@ -6698,7 +6711,7 @@ mod tests {
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
   xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"{slide_attr}>
   <p:cSld><p:spTree>
     <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
     <p:grpSpPr/>
@@ -6748,7 +6761,7 @@ mod tests {
     /// and the slide has no elements.
     #[test]
     fn master_sptree_pic_appears_on_slide() {
-        let data = build_master_sp_pptx(None, false);
+        let data = build_master_sp_pptx(None, None, false);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
 
@@ -6785,7 +6798,7 @@ mod tests {
 
     #[test]
     fn element_sources_distinguish_composite_paint_origins() {
-        let data = build_master_sp_pptx(None, true);
+        let data = build_master_sp_pptx(None, None, true);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
 
@@ -6809,7 +6822,7 @@ mod tests {
     /// decorative shapes for slides using that layout.
     #[test]
     fn master_sptree_hidden_when_layout_show_master_sp_false() {
-        let data = build_master_sp_pptx(Some(false), false);
+        let data = build_master_sp_pptx(Some(false), None, false);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
 
@@ -6828,11 +6841,25 @@ mod tests {
         );
     }
 
+    /// PowerPoint's Hide Background Graphics command writes showMasterSp="0"
+    /// on the slide. It suppresses inherited non-placeholder artwork from both
+    /// the master and the selected layout, while preserving slide-local shapes.
+    #[test]
+    fn slide_show_master_sp_false_hides_layout_and_master_decorations() {
+        let data = build_master_sp_pptx(None, Some(false), true);
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
+        let slide = &pres.slides[0];
+
+        assert_eq!(slide.elements.len(), 1);
+        assert_eq!(slide.element_sources.len(), 1);
+        assert_eq!(slide.element_sources[0].origin, SlideElementOrigin::Slide);
+    }
+
     /// showMasterSp="1" (explicit true) on the layout keeps master shapes —
     /// guards against an inverted boolean parse.
     #[test]
     fn master_sptree_shown_when_layout_show_master_sp_true() {
-        let data = build_master_sp_pptx(Some(true), false);
+        let data = build_master_sp_pptx(Some(true), None, false);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
         assert!(
