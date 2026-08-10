@@ -338,7 +338,9 @@ pub(crate) fn parse_shape(
     // shape properties: a placeholder with only a local xfrm can still inherit
     // an ellipse/custom geometry from the matching layout placeholder.
     let shape_geometry = sp_pr
-        .and_then(InheritedShapeGeometry::from_sp_pr)
+        .and_then(|properties| {
+            InheritedShapeGeometry::from_sp_pr(properties, t.cx as f64, t.cy as f64)
+        })
         .or_else(|| {
             if ph_node.is_some() {
                 lph.lookup_geometry(&ph_type, ph_idx)
@@ -795,7 +797,8 @@ pub(crate) fn parse_picture(
     // in which case the bitmap is clipped to that custom path (e.g. a laptop
     // silhouette). Re-use the same parser as for shapes so the renderer can
     // build a Path2D and `ctx.clip()` before drawing the image.
-    let cust_geom = child(sp_pr, "custGeom").map(parse_cust_geom);
+    let cust_geom = child(sp_pr, "custGeom")
+        .map(|geometry| parse_cust_geom(geometry, t.cx as f64, t.cy as f64));
 
     // §19.3.1.37: p:pic's spPr is CT_ShapeProperties, so effectLst (§20.1.8.16)
     // applies to images exactly as it does to shapes.
@@ -1659,9 +1662,12 @@ pub(crate) fn parse_sp_tree_node(
                                 // just roundRect) is the picture's clip silhouette.
                                 let (prst_geom, prst_adjust) =
                                     sp_pr_node.map(parse_pic_prst_geom).unwrap_or((None, None));
-                                let cust_geom = sp_pr_node
-                                    .and_then(|p| child(p, "custGeom"))
-                                    .map(parse_cust_geom);
+                                let cust_geom =
+                                    sp_pr_node
+                                        .and_then(|p| child(p, "custGeom"))
+                                        .map(|geometry| {
+                                            parse_cust_geom(geometry, t.cx as f64, t.cy as f64)
+                                        });
                                 // §20.1.8.16 effectLst applies to a sp painted as
                                 // a picture (blipFill) just like a regular p:pic.
                                 let EffectLst {

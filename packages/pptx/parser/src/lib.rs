@@ -8674,7 +8674,7 @@ mod tests {
   </pathLst>
 </custGeom>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
-        let subpaths = parse_cust_geom(doc.root_element());
+        let subpaths = parse_cust_geom(doc.root_element(), 100.0, 100.0);
         let json = serde_json::to_string(&subpaths).expect("custGeom should serialize");
 
         // The two camelCase keys the TS renderer reads must be present…
@@ -8712,7 +8712,7 @@ mod tests {
   </pathLst>
 </custGeom>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
-        let subpaths = parse_cust_geom(doc.root_element());
+        let subpaths = parse_cust_geom(doc.root_element(), 200.0, 100.0);
         let json = serde_json::to_string(&subpaths).unwrap();
         let back: Vec<Vec<PathCmd>> =
             serde_json::from_str(&json).expect("camelCase JSON must deserialize back");
@@ -8735,6 +8735,87 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    /// ECMA-376 Part 1 §20.1.9.11: custom-geometry path coordinates and arc
+    /// arguments may reference ordered `avLst`/`gdLst` formulas. They are
+    /// evaluated in shape space and then normalized by each path's coordinate
+    /// system before crossing the WASM boundary.
+    #[test]
+    fn custom_geometry_resolves_guides_in_path_commands() {
+        let xml = r#"<custGeom xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <avLst><gd name="adj" fmla="val 100"/></avLst>
+  <gdLst>
+    <gd name="halfW" fmla="*/ w 1 2"/>
+    <gd name="x" fmla="?: adj halfW 0"/>
+    <gd name="radius" fmla="*/ h 1 4"/>
+    <gd name="quarterTurn" fmla="val cd4"/>
+    <gd name="negativeQuarter" fmla="+- 0 0 quarterTurn"/>
+  </gdLst>
+  <pathLst>
+    <path w="200" h="100">
+      <moveTo><pt x="x" y="radius"/></moveTo>
+      <arcTo wR="radius" hR="radius" stAng="quarterTurn" swAng="negativeQuarter"/>
+    </path>
+  </pathLst>
+</custGeom>"#;
+        let doc = roxmltree::Document::parse(xml).expect("valid custom geometry");
+        let subpaths = parse_cust_geom(doc.root_element(), 400.0, 200.0);
+        assert_eq!(subpaths.len(), 1);
+        match &subpaths[0][0] {
+            PathCmd::MoveTo { x, y } => {
+                assert!((*x - 1.0).abs() < 1e-9, "x = {x}");
+                assert!((*y - 0.5).abs() < 1e-9, "y = {y}");
+            }
+            other => panic!("expected resolved moveTo, got {other:?}"),
+        }
+        match &subpaths[0][1] {
+            PathCmd::ArcTo {
+                wr,
+                hr,
+                st_ang,
+                sw_ang,
+            } => {
+                assert!((*wr - 0.25).abs() < 1e-9, "wr = {wr}");
+                assert!((*hr - 0.5).abs() < 1e-9, "hr = {hr}");
+                assert!((*st_ang - 90.0).abs() < 1e-9, "st_ang = {st_ang}");
+                assert!((*sw_ang + 90.0).abs() < 1e-9, "sw_ang = {sw_ang}");
+            }
+            other => panic!("expected resolved arcTo, got {other:?}"),
+        }
+    }
+
+    /// ECMA-376 Part 1 §20.1.9.15: an omitted path coordinate-system size
+    /// has the schema default zero. In that case guide values remain in shape
+    /// coordinates, so normalization must use the shape extents rather than an
+    /// artificial one-unit path.
+    #[test]
+    fn custom_geometry_without_path_size_uses_shape_extents() {
+        let xml = r#"<custGeom xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <gdLst>
+    <gd name="halfW" fmla="*/ w 1 2"/>
+    <gd name="halfH" fmla="*/ h 1 2"/>
+  </gdLst>
+  <pathLst>
+    <path>
+      <moveTo><pt x="halfW" y="halfH"/></moveTo>
+      <lnTo><pt x="r" y="b"/></lnTo>
+    </path>
+  </pathLst>
+</custGeom>"#;
+        let doc = roxmltree::Document::parse(xml).expect("valid custom geometry");
+        let subpaths = parse_cust_geom(doc.root_element(), 400.0, 200.0);
+
+        assert!(matches!(
+            subpaths[0].as_slice(),
+            [
+                PathCmd::MoveTo { x, y },
+                PathCmd::LineTo { x: x2, y: y2 }
+            ] if (*x - 0.5).abs() < 1e-9
+                && (*y - 0.5).abs() < 1e-9
+                && (*x2 - 1.0).abs() < 1e-9
+                && (*y2 - 1.0).abs() < 1e-9
+        ));
     }
 
     /// A line chart whose horizontal axis is a `<c:dateAx>` (§21.2.2.39) — the

@@ -585,23 +585,177 @@ pub(crate) fn parse_sp3d(sppr: roxmltree::Node<'_, '_>) -> Option<Sp3d> {
 //  Custom geometry parsing
 // ===========================
 
+const DRAWINGML_FULL_CIRCLE: f64 = 21_600_000.0;
+const DRAWINGML_ANGLE_TO_RAD: f64 = std::f64::consts::TAU / DRAWINGML_FULL_CIRCLE;
+
+/// Evaluate the ordered guide program carried by `a:custGeom`.
+///
+/// ECMA-376 Part 1 §20.1.9.11 defines 17 prefix operators and requires guides
+/// to be evaluated in document order. Coordinates in `pathLst` may refer to
+/// these names instead of containing numeric literals. Keeping the evaluation
+/// in the parser preserves the compact, normalized `PathCmd` wire model and
+/// avoids repeating formula work on every canvas repaint.
+fn custom_geometry_guides(
+    cust_geom: roxmltree::Node<'_, '_>,
+    shape_w: f64,
+    shape_h: f64,
+) -> HashMap<String, f64> {
+    let first_path = child(cust_geom, "pathLst").and_then(|paths| {
+        paths
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "path")
+    });
+    let w = if shape_w > 0.0 {
+        shape_w
+    } else {
+        first_path
+            .and_then(|path| attr_f64(&path, "w"))
+            .unwrap_or(1.0)
+            .max(1.0)
+    };
+    let h = if shape_h > 0.0 {
+        shape_h
+    } else {
+        first_path
+            .and_then(|path| attr_f64(&path, "h"))
+            .unwrap_or(1.0)
+            .max(1.0)
+    };
+    let ss = w.min(h);
+    let ls = w.max(h);
+    let mut env = HashMap::new();
+
+    macro_rules! builtins {
+        ($($name:expr => $value:expr),* $(,)?) => {
+            $(env.insert($name.to_owned(), $value);)*
+        };
+    }
+    builtins! {
+        "w" => w, "h" => h,
+        "l" => 0.0, "t" => 0.0, "r" => w, "b" => h,
+        "hc" => w / 2.0, "vc" => h / 2.0,
+        "wd2" => w / 2.0, "wd3" => w / 3.0, "wd4" => w / 4.0,
+        "wd5" => w / 5.0, "wd6" => w / 6.0, "wd8" => w / 8.0,
+        "wd10" => w / 10.0, "wd12" => w / 12.0, "wd16" => w / 16.0,
+        "wd32" => w / 32.0,
+        "hd2" => h / 2.0, "hd3" => h / 3.0, "hd4" => h / 4.0,
+        "hd5" => h / 5.0, "hd6" => h / 6.0, "hd8" => h / 8.0,
+        "hd10" => h / 10.0, "hd12" => h / 12.0, "hd16" => h / 16.0,
+        "hd32" => h / 32.0,
+        "ss" => ss, "ssd2" => ss / 2.0, "ssd4" => ss / 4.0,
+        "ssd6" => ss / 6.0, "ssd8" => ss / 8.0, "ssd16" => ss / 16.0,
+        "ssd32" => ss / 32.0,
+        "ls" => ls, "lsd2" => ls / 2.0, "lsd4" => ls / 4.0,
+        "lsd6" => ls / 6.0, "lsd8" => ls / 8.0, "lsd16" => ls / 16.0,
+        "lsd32" => ls / 32.0,
+        "cd" => DRAWINGML_FULL_CIRCLE,
+        "cd2" => DRAWINGML_FULL_CIRCLE / 2.0,
+        "cd4" => DRAWINGML_FULL_CIRCLE / 4.0,
+        "cd8" => DRAWINGML_FULL_CIRCLE / 8.0,
+        "3cd4" => 3.0 * DRAWINGML_FULL_CIRCLE / 4.0,
+        "3cd8" => 3.0 * DRAWINGML_FULL_CIRCLE / 8.0,
+        "5cd8" => 5.0 * DRAWINGML_FULL_CIRCLE / 8.0,
+        "7cd8" => 7.0 * DRAWINGML_FULL_CIRCLE / 8.0,
+    }
+
+    for list_name in ["avLst", "gdLst"] {
+        let Some(list) = child(cust_geom, list_name) else {
+            continue;
+        };
+        for guide in list
+            .children()
+            .filter(|node| node.is_element() && node.tag_name().name() == "gd")
+        {
+            let (Some(name), Some(formula)) = (attr(&guide, "name"), attr(&guide, "fmla")) else {
+                continue;
+            };
+            if let Some(value) = evaluate_geometry_formula(&formula, &env) {
+                env.insert(name, value);
+            }
+        }
+    }
+    env
+}
+
+fn resolve_geometry_value(token: &str, env: &HashMap<String, f64>) -> Option<f64> {
+    env.get(token)
+        .copied()
+        .or_else(|| token.parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+}
+
+fn evaluate_geometry_formula(formula: &str, env: &HashMap<String, f64>) -> Option<f64> {
+    let mut tokens = formula.split_whitespace();
+    let op = tokens.next()?;
+    let args: Vec<f64> = tokens
+        .map(|token| resolve_geometry_value(token, env))
+        .collect::<Option<_>>()?;
+    let arg = |index: usize| args.get(index).copied();
+    let value = match op {
+        "val" => arg(0)?,
+        "*/" => arg(0)? * arg(1)? / arg(2)?,
+        "+-" => arg(0)? + arg(1)? - arg(2)?,
+        "+/" => (arg(0)? + arg(1)?) / arg(2)?,
+        "?:" => {
+            if arg(0)? > 0.0 {
+                arg(1)?
+            } else {
+                arg(2)?
+            }
+        }
+        "abs" => arg(0)?.abs(),
+        "at2" => arg(1)?.atan2(arg(0)?) / DRAWINGML_ANGLE_TO_RAD,
+        "cat2" => arg(0)? * arg(2)?.atan2(arg(1)?).cos(),
+        "cos" => arg(0)? * (arg(1)? * DRAWINGML_ANGLE_TO_RAD).cos(),
+        "max" => arg(0)?.max(arg(1)?),
+        "min" => arg(0)?.min(arg(1)?),
+        "mod" => (arg(0)?.powi(2) + arg(1)?.powi(2) + arg(2)?.powi(2)).sqrt(),
+        "pin" => {
+            let (low, value, high) = (arg(0)?, arg(1)?, arg(2)?);
+            if value < low {
+                low
+            } else if value > high {
+                high
+            } else {
+                value
+            }
+        }
+        "sat2" => arg(0)? * arg(2)?.atan2(arg(1)?).sin(),
+        "sin" => arg(0)? * (arg(1)? * DRAWINGML_ANGLE_TO_RAD).sin(),
+        "sqrt" => arg(0)?.max(0.0).sqrt(),
+        "tan" => arg(0)? * (arg(1)? * DRAWINGML_ANGLE_TO_RAD).tan(),
+        _ => return None,
+    };
+    value.is_finite().then_some(value)
+}
+
+fn geometry_attr(
+    node: &roxmltree::Node<'_, '_>,
+    name: &str,
+    env: &HashMap<String, f64>,
+) -> Option<f64> {
+    let token = attr(node, name)?;
+    resolve_geometry_value(&token, env)
+}
+
 /// Parse a single path command node; coordinates are normalised to [0,1].
 pub(crate) fn parse_path_cmd(
     cmd_node: roxmltree::Node<'_, '_>,
     path_w: f64,
     path_h: f64,
+    env: &HashMap<String, f64>,
 ) -> Option<PathCmd> {
     match cmd_node.tag_name().name() {
         "moveTo" => {
             let pt = child(cmd_node, "pt")?;
-            let x = attr_f64(&pt, "x")? / path_w;
-            let y = attr_f64(&pt, "y")? / path_h;
+            let x = geometry_attr(&pt, "x", env)? / path_w;
+            let y = geometry_attr(&pt, "y", env)? / path_h;
             Some(PathCmd::MoveTo { x, y })
         }
         "lnTo" => {
             let pt = child(cmd_node, "pt")?;
-            let x = attr_f64(&pt, "x")? / path_w;
-            let y = attr_f64(&pt, "y")? / path_h;
+            let x = geometry_attr(&pt, "x", env)? / path_w;
+            let y = geometry_attr(&pt, "y", env)? / path_h;
             Some(PathCmd::LineTo { x, y })
         }
         "cubicBezTo" => {
@@ -609,12 +763,12 @@ pub(crate) fn parse_path_cmd(
             if pts.len() < 3 {
                 return None;
             }
-            let x1 = attr_f64(&pts[0], "x")? / path_w;
-            let y1 = attr_f64(&pts[0], "y")? / path_h;
-            let x2 = attr_f64(&pts[1], "x")? / path_w;
-            let y2 = attr_f64(&pts[1], "y")? / path_h;
-            let x = attr_f64(&pts[2], "x")? / path_w;
-            let y = attr_f64(&pts[2], "y")? / path_h;
+            let x1 = geometry_attr(&pts[0], "x", env)? / path_w;
+            let y1 = geometry_attr(&pts[0], "y", env)? / path_h;
+            let x2 = geometry_attr(&pts[1], "x", env)? / path_w;
+            let y2 = geometry_attr(&pts[1], "y", env)? / path_h;
+            let x = geometry_attr(&pts[2], "x", env)? / path_w;
+            let y = geometry_attr(&pts[2], "y", env)? / path_h;
             Some(PathCmd::CubicBezTo {
                 x1,
                 y1,
@@ -626,10 +780,10 @@ pub(crate) fn parse_path_cmd(
         }
         "arcTo" => {
             // wR/hR are radii in path-local units; stAng/swAng in 60000ths of a degree
-            let wr = attr_f64(&cmd_node, "wR").unwrap_or(0.0) / path_w;
-            let hr = attr_f64(&cmd_node, "hR").unwrap_or(0.0) / path_h;
-            let st_ang = attr_f64(&cmd_node, "stAng").unwrap_or(0.0) / 60000.0;
-            let sw_ang = attr_f64(&cmd_node, "swAng").unwrap_or(0.0) / 60000.0;
+            let wr = geometry_attr(&cmd_node, "wR", env).unwrap_or(0.0) / path_w;
+            let hr = geometry_attr(&cmd_node, "hR", env).unwrap_or(0.0) / path_h;
+            let st_ang = geometry_attr(&cmd_node, "stAng", env).unwrap_or(0.0) / 60000.0;
+            let sw_ang = geometry_attr(&cmd_node, "swAng", env).unwrap_or(0.0) / 60000.0;
             Some(PathCmd::ArcTo {
                 wr,
                 hr,
@@ -643,22 +797,35 @@ pub(crate) fn parse_path_cmd(
 }
 
 /// Parse custGeom > pathLst into a list of sub-paths (one per <a:path> element).
-pub(crate) fn parse_cust_geom(cust_geom: roxmltree::Node<'_, '_>) -> Vec<Vec<PathCmd>> {
+pub(crate) fn parse_cust_geom(
+    cust_geom: roxmltree::Node<'_, '_>,
+    shape_w: f64,
+    shape_h: f64,
+) -> Vec<Vec<PathCmd>> {
     let path_lst = match child(cust_geom, "pathLst") {
         Some(n) => n,
         None => return vec![],
     };
 
+    let env = custom_geometry_guides(cust_geom, shape_w, shape_h);
     path_lst
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "path")
         .map(|path_node| {
-            let path_w = attr_f64(&path_node, "w").unwrap_or(1.0).max(1.0);
-            let path_h = attr_f64(&path_node, "h").unwrap_or(1.0).max(1.0);
+            // CT_Path2D defaults w/h to zero. A zero/omitted coordinate-system
+            // size means the path's guide values are already in shape space;
+            // normalize them by the shape extents. Treating the schema default
+            // as one makes otherwise valid guide-based paths enormous.
+            let path_w = attr_f64(&path_node, "w")
+                .filter(|value| *value > 0.0)
+                .unwrap_or(shape_w.max(1.0));
+            let path_h = attr_f64(&path_node, "h")
+                .filter(|value| *value > 0.0)
+                .unwrap_or(shape_h.max(1.0));
             path_node
                 .children()
                 .filter(|n| n.is_element())
-                .filter_map(|cmd| parse_path_cmd(cmd, path_w, path_h))
+                .filter_map(|cmd| parse_path_cmd(cmd, path_w, path_h, &env))
                 .collect()
         })
         .collect()

@@ -150,13 +150,17 @@ impl InheritedShapeGeometry {
     /// Parse the geometry-bearing portion of `<p:spPr>`. `None` means the shape
     /// did not locally specify geometry and therefore remains eligible for
     /// placeholder inheritance.
-    pub(crate) fn from_sp_pr(sp_pr: roxmltree::Node<'_, '_>) -> Option<Self> {
+    pub(crate) fn from_sp_pr(
+        sp_pr: roxmltree::Node<'_, '_>,
+        shape_w: f64,
+        shape_h: f64,
+    ) -> Option<Self> {
         let cust_geom_node = child(sp_pr, "custGeom");
         let prst_geom_node = child(sp_pr, "prstGeom");
         if let Some(cust_geom_node) = cust_geom_node {
             return Some(Self {
                 geometry: "custGeom".to_owned(),
-                cust_geom: Some(parse_cust_geom(cust_geom_node)),
+                cust_geom: Some(parse_cust_geom(cust_geom_node, shape_w, shape_h)),
                 adjustments: [None; 8],
             });
         }
@@ -1366,7 +1370,9 @@ pub(crate) fn parse_layout_placeholders(
         // slide. We deliberately exclude grpFill here (group inheritance is
         // resolved at slide parse time, not from the layout).
         let layout_fill: Option<Fill> = parse_fill(sp_pr, theme);
-        let layout_geometry = InheritedShapeGeometry::from_sp_pr(sp_pr);
+        let layout_xfrm = child(sp_pr, "xfrm").map(parse_xfrm).unwrap_or_default();
+        let layout_geometry =
+            InheritedShapeGeometry::from_sp_pr(sp_pr, layout_xfrm.cx as f64, layout_xfrm.cy as f64);
 
         // Layout spPr > blipFill → image that bleeds through when the slide's
         // matching placeholder has no own blipFill (picture placeholder inheritance).
