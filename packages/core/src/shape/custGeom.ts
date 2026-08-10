@@ -52,6 +52,12 @@ export function getCustomGeometryBounds(
           penY = command.y;
           include(x + penX * w, y + penY * h);
           break;
+        case 'quadBezTo':
+          include(x + command.x1 * w, y + command.y1 * h);
+          penX = command.x;
+          penY = command.y;
+          include(x + penX * w, y + penY * h);
+          break;
         case 'arcTo': {
           const radiusX = Math.abs(command.wr * w);
           const radiusY = Math.abs(command.hr * h);
@@ -113,6 +119,15 @@ export function buildCustomPath(
             x + cmd.x1 * w, y + cmd.y1 * h,
             x + cmd.x2 * w, y + cmd.y2 * h,
             x + cmd.x  * w, y + cmd.y  * h,
+          );
+          penX = cmd.x; penY = cmd.y;
+          break;
+        case 'quadBezTo':
+          ctx.quadraticCurveTo(
+            x + cmd.x1 * w,
+            y + cmd.y1 * h,
+            x + cmd.x * w,
+            y + cmd.y * h,
           );
           penX = cmd.x; penY = cmd.y;
           break;

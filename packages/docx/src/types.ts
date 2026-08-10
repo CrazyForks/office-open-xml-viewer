@@ -764,6 +764,7 @@ export type PathCmd =
   | { cmd: 'moveTo'; x: number; y: number }
   | { cmd: 'lineTo'; x: number; y: number }
   | { cmd: 'cubicBezTo'; x1: number; y1: number; x2: number; y2: number; x: number; y: number }
+  | { cmd: 'quadBezTo'; x1: number; y1: number; x: number; y: number }
   | { cmd: 'arcTo'; wr: number; hr: number; stAng: number; swAng: number }
   | { cmd: 'close' };
 

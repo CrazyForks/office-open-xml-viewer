@@ -124,10 +124,35 @@ describe('getCustomGeometryBounds', () => {
     });
   });
 
+  it('includes a quadratic control point outside the nominal shape rect', () => {
+    expect(getCustomGeometryBounds([[
+      { cmd: 'moveTo', x: 0, y: 0 },
+      { cmd: 'quadBezTo', x1: 0.5, y1: -1, x: 1, y: 0 },
+    ]], 10, 20, 100, 50)).toEqual({ x: 10, y: -30, w: 100, h: 50 });
+  });
+
   it('conservatively includes the complete ellipse used by arcTo', () => {
     expect(getCustomGeometryBounds([[
       { cmd: 'moveTo', x: 1, y: 0.5 },
       { cmd: 'arcTo', wr: 0.75, hr: 0.5, stAng: 0, swAng: 90 },
     ]], 10, 20, 100, 200)).toEqual({ x: -40, y: 20, w: 150, h: 200 });
+  });
+});
+
+describe('buildCustomPath — quadBezTo', () => {
+  it('maps the control point and endpoint into the shape rectangle', () => {
+    const calls: unknown[][] = [];
+    const ctx = new Proxy({} as CanvasRenderingContext2D, {
+      get(_target, property) {
+        return (...args: unknown[]) => calls.push([property, ...args]);
+      },
+    });
+
+    buildCustomPath(ctx, [[
+      { cmd: 'moveTo', x: 0, y: 0 },
+      { cmd: 'quadBezTo', x1: 0.5, y1: 0.25, x: 1, y: 1 },
+    ]], 10, 20, 100, 200);
+
+    expect(calls).toContainEqual(['quadraticCurveTo', 60, 70, 110, 220]);
   });
 });

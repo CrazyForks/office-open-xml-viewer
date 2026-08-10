@@ -8862,7 +8862,7 @@ fn parse_wsp_shape(
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "custGeom");
     let (subpaths, preset_geometry, adj_values) = if let Some(cg) = cust_geom {
-        (parse_custom_geometry(cg), None, Vec::new())
+        (parse_custom_geometry(cg, cx, cy), None, Vec::new())
     } else {
         // Defer prstGeom rendering to core's buildShapePath. Carry the preset
         // name + adjustment values so the renderer can call into the shared
@@ -11352,101 +11352,67 @@ fn parse_grad_fill_phclr(
 
 /// Parse <a:custGeom><a:pathLst><a:path w="W" h="H">...</a:path></a:pathLst>.
 /// Path coords inside each <a:path> are absolute within W×H; normalize to [0,1].
-fn parse_custom_geometry(cust_geom: roxmltree::Node) -> Vec<Vec<PathCmd>> {
-    let Some(path_lst) = cust_geom
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "pathLst")
-    else {
-        return vec![];
-    };
-    let mut subpaths: Vec<Vec<PathCmd>> = Vec::new();
-    for path in path_lst
-        .children()
-        .filter(|n| n.is_element() && n.tag_name().name() == "path")
-    {
-        let pw = path
-            .attribute("w")
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.0);
-        let ph = path
-            .attribute("h")
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.0);
-        if pw <= 0.0 || ph <= 0.0 {
-            continue;
-        }
-        let mut cmds: Vec<PathCmd> = Vec::new();
-        for cmd in path.children().filter(|n| n.is_element()) {
-            let name = cmd.tag_name().name();
-            let pts: Vec<(f64, f64)> = cmd
-                .children()
-                .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-                .filter_map(|p| {
-                    let x = p.attribute("x").and_then(|v| v.parse::<f64>().ok())?;
-                    let y = p.attribute("y").and_then(|v| v.parse::<f64>().ok())?;
-                    Some((x / pw, y / ph))
-                })
-                .collect();
-            match name {
-                "moveTo" => {
-                    if let Some(p) = pts.first() {
-                        cmds.push(PathCmd::MoveTo { x: p.0, y: p.1 });
-                    }
-                }
-                "lnTo" => {
-                    if let Some(p) = pts.first() {
-                        cmds.push(PathCmd::LineTo { x: p.0, y: p.1 });
-                    }
-                }
-                "cubicBezTo" => {
-                    if pts.len() >= 3 {
-                        cmds.push(PathCmd::CubicBezTo {
-                            x1: pts[0].0,
-                            y1: pts[0].1,
-                            x2: pts[1].0,
-                            y2: pts[1].1,
-                            x: pts[2].0,
-                            y: pts[2].1,
-                        });
-                    }
-                }
-                "arcTo" => {
-                    let wr = cmd
-                        .attribute("wR")
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .unwrap_or(0.0)
-                        / pw;
-                    let hr = cmd
-                        .attribute("hR")
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .unwrap_or(0.0)
-                        / ph;
-                    let st_ang = cmd
-                        .attribute("stAng")
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .unwrap_or(0.0)
-                        / 60000.0;
-                    let sw_ang = cmd
-                        .attribute("swAng")
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .unwrap_or(0.0)
-                        / 60000.0;
-                    cmds.push(PathCmd::ArcTo {
+fn parse_custom_geometry(
+    cust_geom: roxmltree::Node,
+    shape_width: f64,
+    shape_height: f64,
+) -> Vec<Vec<PathCmd>> {
+    use ooxml_common::custom_geometry::{parse_custom_geometry as parse_shared, PathCommand};
+
+    parse_shared(cust_geom, shape_width, shape_height)
+        .paths
+        .into_iter()
+        .filter_map(|path| {
+            let commands: Vec<PathCmd> = path
+                .commands
+                .into_iter()
+                .map(|command| match command {
+                    PathCommand::MoveTo { x, y } => PathCmd::MoveTo {
+                        x: x / path.width,
+                        y: y / path.height,
+                    },
+                    PathCommand::LineTo { x, y } => PathCmd::LineTo {
+                        x: x / path.width,
+                        y: y / path.height,
+                    },
+                    PathCommand::CubicBezierTo {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        x,
+                        y,
+                    } => PathCmd::CubicBezTo {
+                        x1: x1 / path.width,
+                        y1: y1 / path.height,
+                        x2: x2 / path.width,
+                        y2: y2 / path.height,
+                        x: x / path.width,
+                        y: y / path.height,
+                    },
+                    PathCommand::QuadraticBezierTo { x1, y1, x, y } => PathCmd::QuadBezTo {
+                        x1: x1 / path.width,
+                        y1: y1 / path.height,
+                        x: x / path.width,
+                        y: y / path.height,
+                    },
+                    PathCommand::ArcTo {
                         wr,
                         hr,
                         st_ang,
                         sw_ang,
-                    });
-                }
-                "close" => cmds.push(PathCmd::Close),
-                _ => {}
-            }
-        }
-        if !cmds.is_empty() {
-            subpaths.push(cmds);
-        }
-    }
-    subpaths
+                    } => PathCmd::ArcTo {
+                        wr: wr / path.width,
+                        hr: hr / path.height,
+                        st_ang: st_ang / 60000.0,
+                        sw_ang: sw_ang / 60000.0,
+                    },
+                    PathCommand::Close => PathCmd::Close,
+                })
+                .collect();
+            (!commands.is_empty()).then_some(commands)
+        })
+        .collect()
 }
 
 /// Resolve a color container (e.g. <a:solidFill>, <a:gs>) into a hex string by
@@ -18347,7 +18313,7 @@ mod svg_blip_tests {
   </a:pathLst>
 </a:custGeom>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
-        let subpaths = parse_custom_geometry(doc.root_element());
+        let subpaths = parse_custom_geometry(doc.root_element(), 100.0, 100.0);
         let json = serde_json::to_string(&subpaths).expect("custGeom should serialize");
 
         // The two camelCase keys the TS renderer reads must be present…
@@ -18385,7 +18351,7 @@ mod svg_blip_tests {
   </a:pathLst>
 </a:custGeom>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
-        let subpaths = parse_custom_geometry(doc.root_element());
+        let subpaths = parse_custom_geometry(doc.root_element(), 200.0, 100.0);
         let arc = subpaths[0]
             .iter()
             .find(|c| matches!(c, PathCmd::ArcTo { .. }))
@@ -18405,6 +18371,25 @@ mod svg_blip_tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn custom_geometry_resolves_guides_and_quadratic_bezier() {
+        let xml = r#"<a:custGeom xmlns:a="urn:a">
+          <a:gdLst><a:gd name="half" fmla="*/ w 1 2"/></a:gdLst>
+          <a:pathLst><a:path>
+            <a:moveTo><a:pt x="0" y="0"/></a:moveTo>
+            <a:quadBezTo><a:pt x="half" y="b"/><a:pt x="r" y="0"/></a:quadBezTo>
+          </a:path></a:pathLst>
+        </a:custGeom>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let paths = parse_custom_geometry(doc.root_element(), 200.0, 100.0);
+        assert!(matches!(
+            paths[0][1],
+            PathCmd::QuadBezTo { x1, y1, x, y }
+                if (x1 - 0.5).abs() < 1e-9 && (y1 - 1.0).abs() < 1e-9
+                    && (x - 1.0).abs() < 1e-9 && y.abs() < 1e-9
+        ));
     }
 }
 
