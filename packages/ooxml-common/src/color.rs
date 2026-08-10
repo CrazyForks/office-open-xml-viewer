@@ -446,6 +446,35 @@ pub trait ThemeResolver {
     fn resolve_scheme_color(&self, name: &str) -> Option<String>;
 }
 
+/// Resolve colors inside a theme style-matrix recipe. `phClr` is substituted
+/// with the color authored on the corresponding `fillRef`/`lnRef`; every other
+/// scheme color continues through the host resolver. This distinction matters
+/// for recipes that use a fixed theme color: they remain resolvable even when
+/// the reference itself carries no optional color child.
+pub struct StyleMatrixColorResolver<'a, R: ?Sized> {
+    delegate: &'a R,
+    placeholder_color: Option<&'a str>,
+}
+
+impl<'a, R: ThemeResolver + ?Sized> StyleMatrixColorResolver<'a, R> {
+    pub fn new(delegate: &'a R, placeholder_color: Option<&'a str>) -> Self {
+        Self {
+            delegate,
+            placeholder_color,
+        }
+    }
+}
+
+impl<R: ThemeResolver + ?Sized> ThemeResolver for StyleMatrixColorResolver<'_, R> {
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        if name == "phClr" {
+            self.placeholder_color.map(str::to_owned)
+        } else {
+            self.delegate.resolve_scheme_color(name)
+        }
+    }
+}
+
 /// Resolve a located color container to a hex string, sharing the DrawingML
 /// color grammar across the docx/pptx/xlsx parsers. Finds the first color child
 /// ([`extract_color_source`]), resolves it, and applies any color-transform

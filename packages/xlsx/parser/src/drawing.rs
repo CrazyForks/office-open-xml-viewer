@@ -13,6 +13,7 @@ use ooxml_common::blip::{
 use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use ooxml_common::ns::{attr_ns, is_a_ns, is_xdr_ns, relationships};
+use ooxml_common::theme::ThemeFormatScheme;
 use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
 // `Cursor` is only used to build in-memory archives in this module's tests; the
@@ -431,6 +432,165 @@ pub(crate) fn parse_solid_fill(
         ooxml_common::color::TintMode::PowerPointLinear,
     )
     .map(|hex| format!("#{}", hex.to_uppercase()))
+}
+
+/// Resolve an XLSX shape's `a:lnRef` against the complete DrawingML format
+/// scheme. ST_StyleMatrixColumnIndex is one-based and `0` means no style
+/// (§20.1.10.57). The optional reference color substitutes `phClr`; fixed
+/// colors in the recipe remain valid without it (§20.1.4.2.19).
+fn resolve_xlsx_line_ref(
+    line_ref: roxmltree::Node,
+    theme_colors: &[String],
+    format_scheme: &ThemeFormatScheme,
+) -> Option<ooxml_common::line::LineProperties> {
+    use ooxml_common::theme::StyleMatrixLookup;
+
+    let index = line_ref.attribute("idx")?.parse::<usize>().ok()?;
+    let StyleMatrixLookup::Entry(entry) = format_scheme.lookup_line_ref(index) else {
+        return None;
+    };
+    let entry_xml = entry.to_xml();
+    let document = roxmltree::Document::parse(&entry_xml).ok()?;
+    let line = document.root_element().children().find(|node| {
+        node.is_element()
+            && node.tag_name().name() == "ln"
+            && ooxml_common::ns::is_a_ns(node.tag_name().namespace())
+    })?;
+    let base_resolver = XlsxSchemeResolver { theme_colors };
+    let reference_color = ooxml_common::color::parse_color_node(
+        line_ref,
+        &base_resolver,
+        ooxml_common::color::TintMode::PowerPointLinear,
+    );
+    let resolver = ooxml_common::color::StyleMatrixColorResolver::new(
+        &base_resolver,
+        reference_color.as_deref(),
+    );
+    let mut properties = ooxml_common::line::parse_line_properties(
+        line,
+        &resolver,
+        ooxml_common::color::TintMode::PowerPointLinear,
+    );
+    if properties.paint.is_none() {
+        properties.paint = reference_color
+            .map(|color| ooxml_common::line::LinePaint::Solid { color: Some(color) });
+    }
+    Some(properties)
+}
+
+#[derive(Default)]
+struct XlsxLineWireProperties {
+    color: Option<String>,
+    width: i64,
+    fill: Option<ShapeStrokeFill>,
+    dash_style: Option<String>,
+    custom_dash: Vec<ShapeLineDashSegment>,
+    line_cap: Option<String>,
+    line_join: Option<String>,
+    miter_limit: Option<f64>,
+    alignment: Option<String>,
+    cmpd: Option<String>,
+    head_end: Option<ShapeLineEnd>,
+    tail_end: Option<ShapeLineEnd>,
+}
+
+fn xlsx_line_end(end: &ooxml_common::line::LineEnd) -> Option<ShapeLineEnd> {
+    let kind = end.kind.as_deref().unwrap_or("none");
+    (kind != "none").then(|| ShapeLineEnd {
+        r#type: kind.to_owned(),
+        w: end.width.clone().unwrap_or_else(|| "med".to_owned()),
+        len: end.length.clone().unwrap_or_else(|| "med".to_owned()),
+    })
+}
+
+fn xlsx_line_wire_properties(line: &ooxml_common::line::LineProperties) -> XlsxLineWireProperties {
+    let (color, fill) = match line.paint.as_ref() {
+        Some(ooxml_common::line::LinePaint::Solid { color }) => (color.clone(), None),
+        Some(ooxml_common::line::LinePaint::Gradient(Some(gradient))) => {
+            let color = gradient
+                .stops
+                .iter()
+                .rev()
+                .find(|stop| !stop.color.ends_with("00"))
+                .or_else(|| gradient.stops.last())
+                .map(|stop| stop.color.clone());
+            (
+                color,
+                Some(ShapeStrokeFill::Gradient {
+                    stops: gradient.stops.clone(),
+                    angle: gradient.angle,
+                    grad_type: gradient.grad_type.clone(),
+                }),
+            )
+        }
+        Some(ooxml_common::line::LinePaint::Pattern(pattern)) => (
+            Some(pattern.fg.clone()),
+            Some(ShapeStrokeFill::Pattern {
+                fg: pattern.fg.clone(),
+                bg: pattern.bg.clone(),
+                preset: pattern.preset.clone(),
+            }),
+        ),
+        Some(ooxml_common::line::LinePaint::NoFill)
+        | Some(ooxml_common::line::LinePaint::Gradient(None))
+        | None => (None, None),
+    };
+    let color = color.map(|color| format!("#{}", color.trim_start_matches('#').to_uppercase()));
+    let width = color
+        .as_ref()
+        .map(|_| line.width.unwrap_or(9525))
+        .unwrap_or(0);
+    let (dash_style, custom_dash) = match line.dash.as_ref() {
+        Some(ooxml_common::line::LineDash::Preset(Some(value))) if value != "solid" => {
+            (Some(value.clone()), Vec::new())
+        }
+        Some(ooxml_common::line::LineDash::Custom(stops)) => (
+            None,
+            stops
+                .iter()
+                .map(|stop| ShapeLineDashSegment {
+                    dash: stop.dash as f64 / 100_000.0,
+                    space: stop.space as f64 / 100_000.0,
+                })
+                .collect(),
+        ),
+        _ => (None, Vec::new()),
+    };
+    let line_cap = line.cap.as_deref().and_then(|cap| match cap {
+        "rnd" => Some("round".to_owned()),
+        "sq" => Some("square".to_owned()),
+        "flat" => Some("butt".to_owned()),
+        _ => None,
+    });
+    let (line_join, miter_limit) = match line.join.as_ref() {
+        Some(ooxml_common::line::LineJoin::Round) => (Some("round".to_owned()), None),
+        Some(ooxml_common::line::LineJoin::Bevel) => (Some("bevel".to_owned()), None),
+        Some(ooxml_common::line::LineJoin::Miter { limit }) => (
+            Some("miter".to_owned()),
+            limit.map(|value| value as f64 / 100_000.0),
+        ),
+        None => (None, None),
+    };
+    XlsxLineWireProperties {
+        color,
+        width,
+        fill,
+        dash_style,
+        custom_dash,
+        line_cap,
+        line_join,
+        miter_limit,
+        alignment: line
+            .alignment
+            .clone()
+            .filter(|value| matches!(value.as_str(), "ctr" | "in")),
+        cmpd: line
+            .compound
+            .clone()
+            .filter(|value| value.as_str() != "sng"),
+        head_end: line.head_end.as_ref().and_then(xlsx_line_end),
+        tail_end: line.tail_end.as_ref().and_then(xlsx_line_end),
+    }
 }
 
 /// Adapt the shared DrawingML `a:custGeom` grammar to XLSX's existing raw
@@ -896,7 +1056,7 @@ pub(crate) fn collect_shapes(
     // cumulative Annex L transform from current local coords into root coords
     transform: DrawingGroupTransform,
     theme_colors: &[String],
-    theme_ln_widths: &[i64],
+    theme_format_scheme: &ThemeFormatScheme,
     rid_urls: &HashMap<String, String>,
     out: &mut Vec<ShapeInfo>,
     depth: DepthGuard,
@@ -959,7 +1119,7 @@ pub(crate) fn collect_shapes(
                 root_ext_y,
                 child_transform,
                 theme_colors,
-                theme_ln_widths,
+                theme_format_scheme,
                 rid_urls,
                 out,
                 child_depth,
@@ -1029,37 +1189,6 @@ pub(crate) fn collect_shapes(
                 fill_color = None;
             }
 
-            // Stroke (line)
-            let mut stroke_color: Option<String> = None;
-            let mut stroke_width: i64 = 0;
-            // An explicit `<a:ln><a:noFill/>` is a hard "no outline" and must
-            // suppress the theme lnRef fallback below.
-            let mut ln_no_stroke = false;
-            if let Some(ln) = sp_pr
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "ln")
-            {
-                let w_attr = ln.attribute("w");
-                stroke_width = w_attr.and_then(|s| s.parse().ok()).unwrap_or(0);
-                for c in ln.children().filter(|n| n.is_element()) {
-                    if c.tag_name().name() == "solidFill" {
-                        stroke_color = parse_solid_fill(&c, theme_colors);
-                        ln_no_stroke = false;
-                    } else if c.tag_name().name() == "noFill" {
-                        stroke_color = None;
-                        stroke_width = 0;
-                        ln_no_stroke = true;
-                    }
-                }
-                // An `<a:ln>` with a fill but no explicit `w` still draws an
-                // outline — Excel uses a thin default (~0.75pt = 9525 EMU).
-                // Without this the border (e.g. a dark-green outline on a
-                // light-green box) silently disappears.
-                if w_attr.is_none() && stroke_color.is_some() && stroke_width == 0 {
-                    stroke_width = 9525;
-                }
-            }
-
             // <xdr:style> drives fallbacks: <a:fillRef> supplies a fill when
             // <xdr:spPr> didn't, and <a:fontRef> supplies the run-default text
             // color (ECMA-376 §20.5.2.30 `<xdr:style>`). Real-world text boxes
@@ -1088,45 +1217,41 @@ pub(crate) fn collect_shapes(
                 fill_color = style_fill;
             }
 
-            // <a:lnRef> — ECMA-376 §20.1.4.2.19: when `<xdr:spPr>` carries no
-            // explicit `<a:ln>`, the shape's outline comes from the theme's
-            // style matrix: `idx="N"` selects entry N (1-based) of
-            // `fmtScheme > lnStyleLst` for the line WIDTH, and the lnRef's
-            // child color (e.g. `<a:schemeClr val="accent1"/>`) substitutes
-            // the entry's `phClr` placeholder for the line COLOR. This is how
-            // Excel-inserted shapes get their default border, so without it
-            // every default shape renders outline-less. An explicit
-            // `<a:ln>` (including `<a:noFill/>`) always wins.
-            if stroke_color.is_none() && !ln_no_stroke {
-                if let Some(ln_ref) = style_node.as_ref().and_then(|s| {
-                    s.children()
+            // CT_ShapeStyle supplies a complete line recipe. CT_LineProperties
+            // is a component-wise cascade: local `a:ln@w`, paint, dash, cap,
+            // join and ends each override only the corresponding theme value
+            // (ECMA-376 §20.1.4.2.19, §20.1.2.2.24). This matters even for
+            // XLSX's current solid-stroke wire: a local width must not discard
+            // the inherited paint, and a fixed theme color needs no lnRef child.
+            let style_line = style_node
+                .as_ref()
+                .and_then(|style| {
+                    style
+                        .children()
                         .find(|n| n.is_element() && n.tag_name().name() == "lnRef")
-                }) {
-                    let idx: usize = ln_ref
-                        .attribute("idx")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
-                    // ST_StyleMatrixColumnIndex (§20.1.10.57): the style-matrix
-                    // lists (`lnStyleLst` etc.) are 1-based, so `idx="0"`
-                    // references NO entry — the well-known DrawingML encoding for
-                    // "no line". Excel / PowerPoint write it when the shape
-                    // outline is set to "No Line" (e.g. sample-28's inserted
-                    // equation text boxes carry `<a:lnRef idx="0">`). The child
-                    // colour is only the phClr substitution that would apply IF a
-                    // line style were selected; with idx=0 none is, so we must not
-                    // draw an outline. Matches pptx `shape.rs` (idx==0 → None).
-                    // Only idx>=1 resolves a themed stroke.
-                    if idx >= 1 {
-                        if let Some(c) = parse_solid_fill(&ln_ref, theme_colors) {
-                            stroke_color = Some(c);
-                            // Missing/out-of-range entries fall back to the
-                            // CT_LineProperties default width (§20.1.2.2.24,
-                            // 9525 EMU = 0.75 pt).
-                            stroke_width = theme_ln_widths.get(idx - 1).copied().unwrap_or(9525);
-                        }
-                    }
-                }
-            }
+                })
+                .and_then(|line_ref| {
+                    resolve_xlsx_line_ref(line_ref, theme_colors, theme_format_scheme)
+                });
+            let local_line = sp_pr
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "ln")
+                .map(|line| {
+                    ooxml_common::line::parse_line_properties(
+                        line,
+                        &XlsxSchemeResolver { theme_colors },
+                        ooxml_common::color::TintMode::PowerPointLinear,
+                    )
+                });
+            let effective_line = match (local_line, style_line) {
+                (Some(local), Some(style)) => Some(local.with_fallback(&style)),
+                (Some(local), None) => Some(local),
+                (None, style) => style,
+            };
+            let stroke = effective_line
+                .as_ref()
+                .map(xlsx_line_wire_properties)
+                .unwrap_or_default();
 
             // Text body (txBox shapes carry visible text inside
             // `<xdr:txBody>`; non-textbox shapes may also have one).
@@ -1158,8 +1283,18 @@ pub(crate) fn collect_shapes(
                 flip_h: root_rect.flip_h,
                 flip_v: root_rect.flip_v,
                 fill_color,
-                stroke_color,
-                stroke_width,
+                stroke_color: stroke.color,
+                stroke_width: stroke.width,
+                stroke_fill: stroke.fill,
+                stroke_dash_style: stroke.dash_style,
+                stroke_custom_dash: stroke.custom_dash,
+                stroke_line_cap: stroke.line_cap,
+                stroke_line_join: stroke.line_join,
+                stroke_miter_limit: stroke.miter_limit,
+                stroke_alignment: stroke.alignment,
+                stroke_cmpd: stroke.cmpd,
+                stroke_head_end: stroke.head_end,
+                stroke_tail_end: stroke.tail_end,
                 geom,
                 text,
             });
@@ -1256,6 +1391,16 @@ pub(crate) fn collect_shapes(
                 fill_color: None,
                 stroke_color: None,
                 stroke_width: 0,
+                stroke_fill: None,
+                stroke_dash_style: None,
+                stroke_custom_dash: Vec::new(),
+                stroke_line_cap: None,
+                stroke_line_join: None,
+                stroke_miter_limit: None,
+                stroke_alignment: None,
+                stroke_cmpd: None,
+                stroke_head_end: None,
+                stroke_tail_end: None,
                 geom: ShapeGeom::Image {
                     image_path,
                     mime_type,
@@ -1274,7 +1419,7 @@ pub(crate) fn collect_shapes(
 pub(crate) fn parse_shape_anchors(
     drawing_xml: &str,
     theme_colors: &[String],
-    theme_ln_widths: &[i64],
+    theme_format_scheme: &ThemeFormatScheme,
     rid_urls: &HashMap<String, String>,
 ) -> Vec<ShapeAnchor> {
     let Ok(doc) = parse_guarded(drawing_xml) else {
@@ -1419,7 +1564,7 @@ pub(crate) fn parse_shape_anchors(
                 root.ext_y,
                 root_transform,
                 theme_colors,
-                theme_ln_widths,
+                theme_format_scheme,
                 rid_urls,
                 &mut shapes,
                 DepthGuard::root(),
@@ -1478,7 +1623,7 @@ pub(crate) fn parse_shape_anchors(
                 xfrm.ext_y,
                 DrawingGroupTransform::IDENTITY,
                 theme_colors,
-                theme_ln_widths,
+                theme_format_scheme,
                 rid_urls,
                 &mut shapes,
                 DepthGuard::root(),
@@ -1513,9 +1658,8 @@ pub(crate) fn load_sheet_shape_groups(
     archive: &mut crate::XlsxZip,
     sheet_path: &str,
     theme_colors: &[String],
+    theme_format_scheme: &ThemeFormatScheme,
 ) -> Vec<ShapeAnchor> {
-    // Theme line-style widths for <a:lnRef> resolution (§20.1.4.2.19).
-    let theme_ln_widths = crate::parse_theme_ln_widths(archive);
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
         return Vec::new();
     };
@@ -1548,7 +1692,7 @@ pub(crate) fn load_sheet_shape_groups(
         all.extend(parse_shape_anchors(
             &drawing_xml,
             theme_colors,
-            &theme_ln_widths,
+            theme_format_scheme,
             &rid_urls,
         ));
     }
@@ -2518,7 +2662,27 @@ mod style_lnref_tests {
             .collect()
     }
 
+    fn format_scheme() -> ThemeFormatScheme {
+        ThemeFormatScheme::parse(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements><a:fmtScheme name="s"><a:lnStyleLst>
+                <a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+                <a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+                <a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+              </a:lnStyleLst></a:fmtScheme></a:themeElements>
+            </a:theme>"#,
+        )
+    }
+
     fn shape_of(sp_pr_inner: &str, style: &str) -> (Option<String>, i64) {
+        shape_of_with_scheme(sp_pr_inner, style, &format_scheme())
+    }
+
+    fn shape_of_with_scheme(
+        sp_pr_inner: &str,
+        style: &str,
+        scheme: &ThemeFormatScheme,
+    ) -> (Option<String>, i64) {
         let xml = format!(
             r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
               <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
@@ -2535,8 +2699,7 @@ mod style_lnref_tests {
               <xdr:clientData/>
             </xdr:twoCellAnchor></xdr:wsDr>"#
         );
-        let anchors =
-            parse_shape_anchors(&xml, &theme(), &[6_350, 12_700, 19_050], &HashMap::new());
+        let anchors = parse_shape_anchors(&xml, &theme(), scheme, &HashMap::new());
         assert_eq!(anchors.len(), 1, "one anchor expected");
         let s = &anchors[0].shapes[0];
         (s.stroke_color.clone(), s.stroke_width)
@@ -2553,6 +2716,72 @@ mod style_lnref_tests {
         );
         assert_eq!(color.as_deref(), Some("#4472C4"));
         assert_eq!(width, 12_700);
+    }
+
+    #[test]
+    fn lnref_without_color_child_uses_fixed_theme_line_color() {
+        let scheme = ThemeFormatScheme::parse(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements><a:fmtScheme name="s"><a:lnStyleLst>
+                <a:ln w="25400" cap="rnd" cmpd="dbl">
+                  <a:solidFill><a:srgbClr val="112233"/></a:solidFill>
+                  <a:prstDash val="dash"/><a:round/>
+                  <a:tailEnd type="triangle"/>
+                </a:ln>
+              </a:lnStyleLst></a:fmtScheme></a:themeElements>
+            </a:theme>"#,
+        );
+        let (color, width) =
+            shape_of_with_scheme("", r#"<xdr:style><a:lnRef idx="1"/></xdr:style>"#, &scheme);
+        assert_eq!(color.as_deref(), Some("#112233"));
+        assert_eq!(width, 25_400);
+    }
+
+    #[test]
+    fn local_width_overrides_theme_without_discarding_its_paint() {
+        let (color, width) = shape_of(
+            r#"<a:ln w="28575"/>"#,
+            r#"<xdr:style><a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef></xdr:style>"#,
+        );
+        assert_eq!(color.as_deref(), Some("#4472C4"));
+        assert_eq!(width, 28_575);
+    }
+
+    #[test]
+    fn complete_line_properties_map_to_the_additive_shape_wire() {
+        let xml = r#"<a:ln xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          w="25400" cap="rnd" cmpd="dbl" algn="in">
+          <a:gradFill><a:gsLst>
+            <a:gs pos="0"><a:srgbClr val="112233"/></a:gs>
+            <a:gs pos="100000"><a:srgbClr val="AABBCC"/></a:gs>
+          </a:gsLst><a:lin ang="5400000"/></a:gradFill>
+          <a:custDash><a:ds d="125000" sp="75000"/></a:custDash>
+          <a:miter lim="800000"/>
+          <a:headEnd type="triangle" w="lg" len="sm"/>
+        </a:ln>"#;
+        let document = roxmltree::Document::parse(xml).unwrap();
+        let line = ooxml_common::line::parse_line_properties(
+            document.root_element(),
+            &XlsxSchemeResolver {
+                theme_colors: &theme(),
+            },
+            ooxml_common::color::TintMode::PowerPointLinear,
+        );
+        let wire = xlsx_line_wire_properties(&line);
+
+        assert_eq!(wire.color.as_deref(), Some("#AABBCC"));
+        assert_eq!(wire.width, 25_400);
+        assert!(matches!(wire.fill, Some(ShapeStrokeFill::Gradient { .. })));
+        assert_eq!(wire.custom_dash.len(), 1);
+        assert_eq!(wire.line_cap.as_deref(), Some("round"));
+        assert_eq!(wire.line_join.as_deref(), Some("miter"));
+        assert_eq!(wire.miter_limit, Some(8.0));
+        assert_eq!(wire.alignment.as_deref(), Some("in"));
+        assert_eq!(wire.cmpd.as_deref(), Some("dbl"));
+        assert_eq!(
+            wire.head_end.as_ref().map(|end| end.r#type.as_str()),
+            Some("triangle")
+        );
     }
 
     /// An explicit `<a:ln><a:noFill/>` is a hard "no outline" and must beat
@@ -2578,16 +2807,16 @@ mod style_lnref_tests {
         assert_eq!(width, 28_575);
     }
 
-    /// lnRef idx out of range (or theme without lnStyleLst) still draws with
-    /// the CT_LineProperties default width (§20.1.2.2.24).
+    /// A missing style-matrix entry is not an authored line recipe. It remains
+    /// distinct from the CT_LineProperties defaults of a selected entry.
     #[test]
-    fn lnref_out_of_range_uses_default_width() {
+    fn lnref_out_of_range_does_not_fabricate_a_line() {
         let (color, width) = shape_of(
             "",
             r#"<xdr:style><a:lnRef idx="9"><a:schemeClr val="accent1"/></a:lnRef></xdr:style>"#,
         );
-        assert_eq!(color.as_deref(), Some("#4472C4"));
-        assert_eq!(width, 9_525);
+        assert_eq!(color, None);
+        assert_eq!(width, 0);
     }
 
     /// §20.1.4.2.19 + ST_StyleMatrixColumnIndex (§20.1.10.57): the style-matrix
@@ -2630,7 +2859,12 @@ mod style_lnref_tests {
               <xdr:clientData/>
             </xdr:twoCellAnchor></xdr:wsDr>"#
         );
-        let anchors = parse_shape_anchors(&xml, &theme(), &[6_350], &HashMap::new());
+        let anchors = parse_shape_anchors(
+            &xml,
+            &theme(),
+            &ThemeFormatScheme::default(),
+            &HashMap::new(),
+        );
         assert!(
             anchors.is_empty(),
             "twoCellAnchor pic belongs to ws.images, not ws.shape_groups: {anchors:?}"
@@ -2669,7 +2903,7 @@ mod style_lnref_tests {
         );
         let mut rids = HashMap::new();
         rids.insert("rId1".to_string(), "xl/media/image1.png".to_string());
-        let anchors = parse_shape_anchors(&xml, &theme(), &[6_350], &rids);
+        let anchors = parse_shape_anchors(&xml, &theme(), &ThemeFormatScheme::default(), &rids);
         assert_eq!(anchors.len(), 1, "oneCellAnchor pic must still be captured");
         match &anchors[0].shapes[0].geom {
             ShapeGeom::Image { src_rect, .. } => {
@@ -2725,8 +2959,12 @@ mod hidden_tests {
     #[test]
     fn hidden_standalone_shape_is_not_emitted() {
         for attr in [r#" hidden="1""#, r#" hidden="true""#] {
-            let anchors =
-                parse_shape_anchors(&sp_anchor(attr), &theme(), &[6_350], &HashMap::new());
+            let anchors = parse_shape_anchors(
+                &sp_anchor(attr),
+                &theme(),
+                &ThemeFormatScheme::default(),
+                &HashMap::new(),
+            );
             assert!(anchors.is_empty(), "hidden sp emitted (attr={attr})");
         }
     }
@@ -2734,8 +2972,12 @@ mod hidden_tests {
     #[test]
     fn visible_standalone_shape_is_emitted() {
         for attr in ["", r#" hidden="0""#, r#" hidden="false""#] {
-            let anchors =
-                parse_shape_anchors(&sp_anchor(attr), &theme(), &[6_350], &HashMap::new());
+            let anchors = parse_shape_anchors(
+                &sp_anchor(attr),
+                &theme(),
+                &ThemeFormatScheme::default(),
+                &HashMap::new(),
+            );
             assert_eq!(anchors.len(), 1, "visible sp dropped (attr={attr})");
         }
     }
@@ -2791,7 +3033,7 @@ mod hidden_tests {
         let anchors = parse_shape_anchors(
             &alt_content_shape_anchor("unk"),
             &theme(),
-            &[6_350],
+            &ThemeFormatScheme::default(),
             &HashMap::new(),
         );
         assert_eq!(anchors.len(), 1, "one anchor");
@@ -2812,7 +3054,7 @@ mod hidden_tests {
         let anchors = parse_shape_anchors(
             &alt_content_shape_anchor("a14"),
             &theme(),
-            &[6_350],
+            &ThemeFormatScheme::default(),
             &HashMap::new(),
         );
         assert_eq!(anchors.len(), 1, "one anchor");
@@ -2860,7 +3102,7 @@ mod hidden_tests {
         let a = parse_shape_anchors(
             &group("", r#" hidden="1""#),
             &theme(),
-            &[6_350],
+            &ThemeFormatScheme::default(),
             &HashMap::new(),
         );
         assert_eq!(a.len(), 1);
@@ -2870,7 +3112,7 @@ mod hidden_tests {
         let b = parse_shape_anchors(
             &group(r#" hidden="1""#, ""),
             &theme(),
-            &[6_350],
+            &ThemeFormatScheme::default(),
             &HashMap::new(),
         );
         assert!(b.is_empty(), "hidden group leaked");
@@ -2919,7 +3161,7 @@ mod hidden_tests {
                 parse_shape_anchors(
                     &nested_group_anchor(levels),
                     &theme(),
-                    &[6_350],
+                    &ThemeFormatScheme::default(),
                     &HashMap::new(),
                 )
             })
@@ -2974,7 +3216,12 @@ mod hidden_tests {
         xml.push_str("</xdr:wsDr>");
 
         // Must return (not trap); the rejected part yields no anchors.
-        let anchors = parse_shape_anchors(&xml, &theme(), &[6_350], &HashMap::new());
+        let anchors = parse_shape_anchors(
+            &xml,
+            &theme(),
+            &ThemeFormatScheme::default(),
+            &HashMap::new(),
+        );
         assert!(
             anchors.is_empty(),
             "an over-deep drawing XML must be rejected, yielding no anchors"
@@ -4231,7 +4478,7 @@ mod group_transform_contract_tests {
                 flip_v: false,
             }),
             &[],
-            &[],
+            &ThemeFormatScheme::default(),
             &HashMap::new(),
             &mut shapes,
             DepthGuard::root(),

@@ -16,6 +16,7 @@ pub mod depth;
 pub mod drawing;
 pub mod fill;
 pub mod json_measurement;
+pub mod line;
 pub mod math;
 pub mod mce;
 pub mod ns;

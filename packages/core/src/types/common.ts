@@ -200,8 +200,20 @@ export interface Stroke {
   fill?: Exclude<Fill, { fillType: 'image' } | { fillType: 'none' }>;
   /** OOXML prstDash value: "dash", "dot", "dashDot", "lgDash", "lgDashDot", etc. */
   dashStyle?: string;
+  /**
+   * DrawingML `<a:custDash>` segments as line-width multipliers
+   * (`1` = 100% of the rendered line width). When present this takes
+   * precedence over {@link Stroke.dashStyle}.
+   */
+  customDash?: ReadonlyArray<{ dash: number; space: number }>;
   /** Canvas line cap normalized from DrawingML/VML (`flat` → `butt`). */
   lineCap?: 'butt' | 'round' | 'square';
+  /** DrawingML line join (`<a:round>`, `<a:bevel>`, or `<a:miter>`). */
+  lineJoin?: 'round' | 'bevel' | 'miter';
+  /** Miter limit multiplier (`8` means 800%). Only used with `lineJoin: 'miter'`. */
+  miterLimit?: number;
+  /** Authored DrawingML pen alignment. Canvas currently paints `ctr` and retains `in`. */
+  alignment?: 'ctr' | 'in';
   /** Arrow head at the start of the line */
   headEnd?: ArrowEnd;
   /** Arrow head at the end of the line */

@@ -6,22 +6,27 @@
 
 use crate::chart::{parse_chartex, parse_legacy_chart};
 use crate::fill::{
-    parse_arrow_end, parse_blip_alpha, parse_color_node, parse_cust_geom, parse_effect_lst,
-    parse_fill, parse_scene3d, parse_sp3d, parse_stroke, parse_style_matrix_effects,
-    parse_style_matrix_fill, parse_table_style_fill, parse_xfrm, EffectLst,
+    line_properties_to_stroke, parse_blip_alpha, parse_color_node, parse_cust_geom,
+    parse_effect_lst, parse_fill, parse_scene3d, parse_sp3d, parse_stroke,
+    parse_style_matrix_effects, parse_style_matrix_fill_from_source, parse_table_style_fill,
+    parse_xfrm, EffectLst,
 };
 use crate::master::{InheritedShapeGeometry, LayoutPlaceholders};
 use crate::text::{
     empty_level_bullets, parse_text_body, LevelBullets, LevelFontSizes, LevelIndents, ShapeKind,
 };
-use crate::theme::PptxSchemeResolver;
+use crate::theme::{PptxRawSchemeResolver, PptxSchemeResolver, PptxThemeSource};
 use crate::types::*;
 use crate::{
     attr, attr_f64, attr_i64, attr_r, child, find_rel_target_by_type, read_zip_head, read_zip_str,
-    resolve_path, table_style_presets, PptxZip, TableStyleDef, TableTextStyle,
+    resolve_path, table_style_presets, PptxZip, ResolvedTableCellStyle, TableCellBorderStyle,
+    TableLineStyle, TablePartStyle, TableStyleDef, TableStyleFlags, TableTextStyle,
 };
 use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect, svg_blip_rid};
 use ooxml_common::depth::DepthGuard;
+use ooxml_common::line::{
+    parse_line_properties, LineDash, LineEnd, LineJoin, LinePaint, LineProperties,
+};
 use ooxml_common::ns::{is_diagram_uri, is_pml_ole_uri};
 use ooxml_common::rels::relationship_part_path;
 use ooxml_common::units::EMU_PER_PX_96DPI;
@@ -212,33 +217,35 @@ fn merge_local_stroke(
     let Some(ln) = ln_node else {
         return inherited;
     };
-    if child(ln, "noFill").is_some() {
+    let properties = parse_line_properties(
+        ln,
+        &PptxSchemeResolver { theme },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    );
+    if matches!(properties.paint, Some(LinePaint::NoFill)) {
         return None;
     }
 
-    let ln_width = attr_i64(&ln, "w");
-    let parsed = parse_stroke(ln, theme);
-    let has_dash = child(ln, "prstDash").is_some();
-    let ln_dash = child(ln, "prstDash")
-        .and_then(|n| attr(&n, "val"))
-        .filter(|v| v != "solid");
-    let has_cap = attr(&ln, "cap").is_some();
-    let ln_cap = attr(&ln, "cap").and_then(|cap| match cap.as_str() {
-        "rnd" => Some("round".to_owned()),
-        "sq" => Some("square".to_owned()),
-        "flat" => Some("butt".to_owned()),
-        _ => None,
-    });
-    let has_head = child(ln, "headEnd").is_some();
-    let ln_head = child(ln, "headEnd")
-        .map(parse_arrow_end)
-        .filter(|a| a.kind != "none");
-    let has_tail = child(ln, "tailEnd").is_some();
-    let ln_tail = child(ln, "tailEnd")
-        .map(parse_arrow_end)
-        .filter(|a| a.kind != "none");
-    let has_cmpd = attr(&ln, "cmpd").is_some();
-    let ln_cmpd = attr(&ln, "cmpd").filter(|v| v != "sng");
+    let parsed = line_properties_to_stroke(&properties, None);
+    let ln_width = properties.width;
+    let has_dash = properties.dash.is_some();
+    let ln_dash = preset_dash(&properties);
+    let ln_custom_dash = custom_dash(&properties);
+    let has_cap = properties.cap.is_some();
+    let ln_cap = properties.cap.as_deref().and_then(canvas_line_cap);
+    let has_head = properties.head_end.is_some();
+    let ln_head = properties.head_end.as_ref().and_then(to_arrow_end);
+    let has_tail = properties.tail_end.is_some();
+    let ln_tail = properties.tail_end.as_ref().and_then(to_arrow_end);
+    let has_cmpd = properties.compound.is_some();
+    let ln_cmpd = properties.compound.clone().filter(|value| value != "sng");
+    let has_join = properties.join.is_some();
+    let (ln_join, ln_miter_limit) = line_join(&properties);
+    let has_alignment = properties.alignment.is_some();
+    let ln_alignment = properties
+        .alignment
+        .clone()
+        .filter(|value| matches!(value.as_str(), "ctr" | "in"));
 
     match (parsed, inherited) {
         (Some(authored), base) => Some(Stroke {
@@ -252,12 +259,34 @@ fn merge_local_stroke(
                     .dash_style
                     .or_else(|| base.as_ref().and_then(|s| s.dash_style.clone()))
             },
+            custom_dash: if has_dash {
+                ln_custom_dash
+            } else {
+                base.as_ref()
+                    .map(|stroke| stroke.custom_dash.clone())
+                    .unwrap_or_default()
+            },
             line_cap: if has_cap {
                 ln_cap
             } else {
                 authored
                     .line_cap
                     .or_else(|| base.as_ref().and_then(|s| s.line_cap.clone()))
+            },
+            line_join: if has_join {
+                ln_join
+            } else {
+                base.as_ref().and_then(|stroke| stroke.line_join.clone())
+            },
+            miter_limit: if has_join {
+                ln_miter_limit
+            } else {
+                base.as_ref().and_then(|stroke| stroke.miter_limit)
+            },
+            alignment: if has_alignment {
+                ln_alignment
+            } else {
+                base.as_ref().and_then(|stroke| stroke.alignment.clone())
             },
             head_end: if has_head {
                 ln_head
@@ -286,7 +315,23 @@ fn merge_local_stroke(
             width: ln_width.unwrap_or(base.width),
             fill: base.fill,
             dash_style: if has_dash { ln_dash } else { base.dash_style },
+            custom_dash: if has_dash {
+                ln_custom_dash
+            } else {
+                base.custom_dash
+            },
             line_cap: if has_cap { ln_cap } else { base.line_cap },
+            line_join: if has_join { ln_join } else { base.line_join },
+            miter_limit: if has_join {
+                ln_miter_limit
+            } else {
+                base.miter_limit
+            },
+            alignment: if has_alignment {
+                ln_alignment
+            } else {
+                base.alignment
+            },
             head_end: if has_head { ln_head } else { base.head_end },
             tail_end: if has_tail { ln_tail } else { base.tail_end },
             cmpd: if has_cmpd { ln_cmpd } else { base.cmpd },
@@ -301,31 +346,164 @@ fn merge_local_stroke(
 /// from disagreeing about the same CT_ShapeStyle component.
 fn parse_style_stroke(
     style_node: Option<roxmltree::Node<'_, '_>>,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
 ) -> Option<Stroke> {
-    style_node
-        .and_then(|style| child(style, "lnRef"))
-        .and_then(|line_ref| {
-            let idx: u32 = attr(&line_ref, "idx")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(1);
-            if idx == 0 {
-                return None;
-            }
-            parse_color_node(line_ref, theme).map(|color| Stroke {
-                color,
-                width: theme
-                    .get(&format!("+lnRef-{idx}"))
-                    .and_then(|value| value.parse::<i64>().ok())
-                    .unwrap_or(9525),
-                fill: None,
-                dash_style: None,
-                line_cap: None,
-                head_end: None,
-                tail_end: None,
-                cmpd: None,
+    let line_ref = style_node.and_then(|style| child(style, "lnRef"))?;
+    resolve_style_line_ref(line_ref, theme_source)
+}
+
+fn resolve_style_line_ref(
+    line_ref: roxmltree::Node<'_, '_>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
+) -> Option<Stroke> {
+    let theme = theme_source.colors();
+    let index = attr(&line_ref, "idx")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1);
+    let reference_color = parse_color_node(line_ref, theme);
+    let reference_stroke = |color: String| Stroke {
+        color,
+        width: 9525,
+        fill: None,
+        dash_style: None,
+        custom_dash: Vec::new(),
+        line_cap: None,
+        line_join: None,
+        miter_limit: None,
+        alignment: None,
+        head_end: None,
+        tail_end: None,
+        cmpd: None,
+    };
+    let Some(format_scheme) = theme_source.format_scheme() else {
+        return reference_color.map(reference_stroke);
+    };
+    let entry = match format_scheme.lookup_line_ref(index) {
+        ooxml_common::theme::StyleMatrixLookup::NoStyle => return None,
+        ooxml_common::theme::StyleMatrixLookup::Missing => {
+            return reference_color.map(reference_stroke);
+        }
+        ooxml_common::theme::StyleMatrixLookup::Entry(entry) => entry,
+    };
+    let entry_xml = entry.to_xml();
+    let document = roxmltree::Document::parse(&entry_xml).ok()?;
+    let line = document.root_element().children().find(|node| {
+        node.is_element()
+            && node.tag_name().name() == "ln"
+            && ooxml_common::ns::is_a_ns(node.tag_name().namespace())
+    })?;
+    let base_resolver = PptxRawSchemeResolver { theme };
+    let resolver = ooxml_common::color::StyleMatrixColorResolver::new(
+        &base_resolver,
+        reference_color.as_deref(),
+    );
+    let mut properties = parse_line_properties(
+        line,
+        &resolver,
+        ooxml_common::color::TintMode::PowerPointLinear,
+    );
+    if properties.paint.is_none() {
+        properties.paint = reference_color.map(|color| LinePaint::Solid { color: Some(color) });
+    }
+    line_properties_to_stroke(&properties, None)
+}
+
+fn style_line_ref_is_explicit_no_line(
+    line_ref: roxmltree::Node<'_, '_>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
+) -> bool {
+    use ooxml_common::theme::StyleMatrixLookup;
+
+    let index = attr(&line_ref, "idx")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    if index == 0 {
+        return true;
+    }
+    let Some(format_scheme) = theme_source.format_scheme() else {
+        return false;
+    };
+    let StyleMatrixLookup::Entry(entry) = format_scheme.lookup_line_ref(index) else {
+        return false;
+    };
+    let entry_xml = entry.to_xml();
+    let Ok(document) = roxmltree::Document::parse(&entry_xml) else {
+        return false;
+    };
+    let Some(line) = document.root_element().children().find(|node| {
+        node.is_element()
+            && node.tag_name().name() == "ln"
+            && ooxml_common::ns::is_a_ns(node.tag_name().namespace())
+    }) else {
+        return false;
+    };
+    let reference_color = parse_color_node(line_ref, theme_source.colors());
+    let raw_resolver = PptxRawSchemeResolver {
+        theme: theme_source.colors(),
+    };
+    let resolver = ooxml_common::color::StyleMatrixColorResolver::new(
+        &raw_resolver,
+        reference_color.as_deref(),
+    );
+    matches!(
+        parse_line_properties(
+            line,
+            &resolver,
+            ooxml_common::color::TintMode::PowerPointLinear,
+        )
+        .paint,
+        Some(LinePaint::NoFill)
+    )
+}
+
+fn canvas_line_cap(cap: &str) -> Option<String> {
+    match cap {
+        "rnd" => Some("round".to_owned()),
+        "sq" => Some("square".to_owned()),
+        "flat" => Some("butt".to_owned()),
+        _ => None,
+    }
+}
+
+fn preset_dash(line: &LineProperties) -> Option<String> {
+    match line.dash.as_ref() {
+        Some(LineDash::Preset(Some(value))) if value != "solid" => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn custom_dash(line: &LineProperties) -> Vec<StrokeDashSegment> {
+    match line.dash.as_ref() {
+        Some(LineDash::Custom(stops)) => stops
+            .iter()
+            .map(|stop| StrokeDashSegment {
+                dash: stop.dash as f64 / 100_000.0,
+                space: stop.space as f64 / 100_000.0,
             })
-        })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn line_join(line: &LineProperties) -> (Option<String>, Option<f64>) {
+    match line.join.as_ref() {
+        Some(LineJoin::Round) => (Some("round".to_owned()), None),
+        Some(LineJoin::Bevel) => (Some("bevel".to_owned()), None),
+        Some(LineJoin::Miter { limit }) => (
+            Some("miter".to_owned()),
+            limit.map(|value| value as f64 / 100_000.0),
+        ),
+        None => (None, None),
+    }
+}
+
+fn to_arrow_end(end: &LineEnd) -> Option<ArrowEnd> {
+    let kind = end.kind.clone().unwrap_or_else(|| "none".to_owned());
+    (kind != "none").then(|| ArrowEnd {
+        kind,
+        w: end.width.clone().unwrap_or_else(|| "med".to_owned()),
+        len: end.length.clone().unwrap_or_else(|| "med".to_owned()),
+    })
 }
 
 /// The DrawingML shape-property components that affect a picture's composed
@@ -369,14 +547,15 @@ pub(crate) fn resolve_picture_shape_properties(
     sp_pr: Option<roxmltree::Node<'_, '_>>,
     style_node: Option<roxmltree::Node<'_, '_>>,
     inherited: Option<PictureShapeProperties>,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
 ) -> PictureShapeProperties {
+    let theme = theme_source.colors();
     let inherited = inherited.unwrap_or_default();
 
     // An explicit lnRef (including idx=0) replaces the placeholder tier.
     // Without an lnRef, the layout placeholder remains the inherited base.
     let style_stroke = if style_node.and_then(|style| child(style, "lnRef")).is_some() {
-        parse_style_stroke(style_node, theme)
+        parse_style_stroke(style_node, theme_source)
     } else {
         inherited.stroke
     };
@@ -442,12 +621,13 @@ pub(crate) fn resolve_picture_shape_properties(
 pub(crate) fn parse_shape(
     sp_node: roxmltree::Node<'_, '_>,
     lph: &LayoutPlaceholders,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     rels: &HashMap<String, String>,
     source_dir: &str,
     group_fill: Option<&Fill>,
     zip: &mut PptxZip,
 ) -> Option<ShapeElement> {
+    let theme = theme_source.colors();
     // --- Placeholder info (for layout fallback) ---
     let ph_node = sp_node
         .descendants()
@@ -566,16 +746,14 @@ pub(crate) fn parse_shape(
         if idx == 0 {
             Some(Fill::None)
         } else {
-            parse_style_matrix_fill(fr, theme, false)
+            parse_style_matrix_fill_from_source(fr, theme_source)
                 .or_else(|| parse_color_node(fr, theme).map(|c| Fill::Solid { color: c }))
         }
     });
 
-    // lnRef idx=0 → no line; idx>0 → resolve width from theme's fmtScheme >
-    // lnStyleLst (stored as "+lnRef-N") and color from the ref's own solidFill.
-    // Falling back to 9525 under-weights idx>=2 strokes (Office default theme
-    // idx=2 is 19050 EMU = 1.5pt, idx=3 is 25400 EMU = 2pt).
-    let style_stroke = parse_style_stroke(style_node, theme);
+    // lnRef idx=0 → no line; idx>0 → resolve the complete theme fmtScheme >
+    // lnStyleLst recipe, substituting the ref color only for `phClr`.
+    let style_stroke = parse_style_stroke(style_node, theme_source);
 
     // fontRef → default text color for this shape.
     // Fall back to layout/master placeholder inherited color (lstStyle > lvl1pPr > defRPr
@@ -594,9 +772,9 @@ pub(crate) fn parse_shape(
     // spPr fill resolution order (ECMA-376 §19.3.1.36 / §20.1.4.2):
     //   1. spPr `<a:grpFill>` → inherit from parent group
     //   2. spPr explicit fill (`<a:solidFill>`, `<a:noFill>`, gradient, pattern, blip)
-    //   3. layout placeholder fill (only when the slide-level shape has no fill
-    //      element of its own and is bound to a placeholder)
-    //   4. `<p:style><a:fillRef>` falls through last
+    //   3. the slide shape's `<p:style><a:fillRef>`
+    //   4. layout/master placeholder fill only when this shape did not author
+    //      a style component
     // Some(Fill::None) (noFill in spPr) is treated as an explicit choice and
     // must NOT be overridden by step 3 or 4.
     let sp_pr_has_grp_fill = sp_pr.and_then(|p| child(p, "grpFill")).is_some();
@@ -604,20 +782,25 @@ pub(crate) fn parse_shape(
         group_fill.cloned()
     } else {
         let own = sp_pr.and_then(|p| parse_fill(p, theme));
-        let inherited = if own.is_none() && ph_node.is_some() {
+        let inherited = if own.is_none() && style_fill.is_none() && ph_node.is_some() {
             lph.lookup_fill(&ph_type, ph_idx)
         } else {
             None
         };
-        own.or(inherited).or(style_fill)
+        own.or(style_fill).or(inherited)
     };
 
     // A local line is a field-wise override over layout/style inheritance;
     // explicit noFill still suppresses the inherited line entirely.
-    let inherited_stroke = if ph_node.is_some() {
-        lph.lookup_stroke(&ph_type, ph_idx).or(style_stroke)
-    } else {
+    let has_style_line_ref = style_node.and_then(|style| child(style, "lnRef")).is_some();
+    let inherited_stroke = if has_style_line_ref {
+        // Presence is authoritative even when idx=0 or the selected theme
+        // recipe is noFill. Do not resurrect a layout/master outline.
         style_stroke
+    } else if ph_node.is_some() {
+        lph.lookup_stroke(&ph_type, ph_idx)
+    } else {
+        None
     };
     let stroke = merge_local_stroke(sp_pr.and_then(|p| child(p, "ln")), inherited_stroke, theme);
 
@@ -933,9 +1116,10 @@ pub(crate) fn parse_picture(
     pic_node: roxmltree::Node<'_, '_>,
     slide_dir: &str,
     rels: &HashMap<String, String>,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     zip: &mut PptxZip,
 ) -> Option<PictureElement> {
+    let theme = theme_source.colors();
     let sp_pr = child(pic_node, "spPr")?;
     let xfrm_node = child(sp_pr, "xfrm")?;
     let t = parse_xfrm(xfrm_node);
@@ -971,7 +1155,7 @@ pub(crate) fn parse_picture(
         reflection,
         scene3d,
         sp3d,
-    } = resolve_picture_shape_properties(Some(sp_pr), style_node, None, theme);
+    } = resolve_picture_shape_properties(Some(sp_pr), style_node, None, theme_source);
 
     let (prst_geom, prst_adjust) = parse_pic_prst_geom(sp_pr);
     Some(PictureElement {
@@ -1202,8 +1386,9 @@ pub(crate) fn parse_media(
 /// Parse ppt/tableStyles.xml into a map of styleId → TableStyleDef.
 pub(crate) fn parse_table_styles_xml(
     xml: &str,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
 ) -> HashMap<String, TableStyleDef> {
+    let theme = theme_source.colors();
     let mut map = HashMap::new();
     let Ok(doc) = crate::parse_preflighted_pptx_xml(xml) else {
         return map;
@@ -1218,78 +1403,6 @@ pub(crate) fn parse_table_styles_xml(
         };
         let style_id = style_id.to_string();
         let mut def = TableStyleDef::default();
-
-        // (fill, inside-horizontal, inside-vertical, diagonal/unused, outer-horizontal,
-        // outer-vertical) borders for one table-style role (ECMA-376 §20.1.4.2.27).
-        type TcStyle = (
-            Option<Fill>,
-            Option<Stroke>,
-            Option<Stroke>,
-            Option<Stroke>,
-            Option<Stroke>,
-            Option<Stroke>,
-        );
-        let parse_tc_style = |role: roxmltree::Node<'_, '_>| -> TcStyle {
-            let tc_style = match child(role, "tcStyle") {
-                Some(n) => n,
-                None => return (None, None, None, None, None, None),
-            };
-            // ECMA-376 §20.1.4.2.27 — the cell fill is wrapped in `<a:fill>`
-            // (CT_FillProperties), so descend into it before reading the actual
-            // solidFill/gradFill. Fall back to `<a:fillRef>` (theme style reference).
-            let fill = child(tc_style, "fill")
-                .and_then(|f| parse_table_style_fill(f, theme))
-                .or_else(|| {
-                    child(tc_style, "fillRef").and_then(|fr| {
-                        let idx: u32 = attr(&fr, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
-                        if idx == 0 {
-                            Some(Fill::None)
-                        } else {
-                            parse_color_node(fr, theme).map(|c| Fill::Solid { color: c })
-                        }
-                    })
-                });
-            let tc_bdr = child(tc_style, "tcBdr");
-            let parse_side = |side: &str| -> Option<Stroke> {
-                let side_node = tc_bdr.and_then(|b| child(b, side))?;
-                // Explicit <a:ln>
-                if let Some(ln) = child(side_node, "ln") {
-                    return parse_stroke(ln, theme);
-                }
-                // <a:lnRef idx="N">: use standard themed width + provided color
-                if let Some(ln_ref) = child(side_node, "lnRef") {
-                    let idx: u32 = attr(&ln_ref, "idx")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
-                    if idx == 0 {
-                        return None;
-                    }
-                    let color = parse_color_node(ln_ref, theme)?;
-                    let width: i64 = match idx {
-                        1 => 6350,
-                        2 => 12700,
-                        _ => 19050,
-                    };
-                    return Some(Stroke {
-                        color,
-                        width,
-                        fill: None,
-                        dash_style: None,
-                        line_cap: None,
-                        head_end: None,
-                        tail_end: None,
-                        cmpd: None,
-                    });
-                }
-                None
-            };
-            let inside_h = parse_side("insideH");
-            let inside_v = parse_side("insideV");
-            let border_b = parse_side("bottom");
-            let outer_h = parse_side("top");
-            let outer_v = parse_side("left");
-            (fill, inside_h, inside_v, border_b, outer_h, outer_v)
-        };
 
         let parse_on_off_default = |value: Option<String>| -> Option<bool> {
             match value.as_deref() {
@@ -1311,76 +1424,333 @@ pub(crate) fn parse_table_styles_xml(
             }
         };
 
-        if let Some(whole) = child(style_node, "wholeTbl") {
-            let (fill, ih, iv, _, oh, ov) = parse_tc_style(whole);
-            def.whole_fill = fill;
-            def.whole_inside_h = ih;
-            def.whole_inside_v = iv;
-            def.whole_outer_h = oh;
-            def.whole_outer_v = ov;
-            def.whole_text = parse_tc_text(whole);
-        }
-        if let Some(band) = child(style_node, "band1H") {
-            let (fill, _, _, _, _, _) = parse_tc_style(band);
-            def.band1h_fill = fill;
-            def.band1h_text = parse_tc_text(band);
-        }
-        if let Some(band) = child(style_node, "band2H") {
-            let (fill, _, _, _, _, _) = parse_tc_style(band);
-            def.band2h_fill = fill;
-            def.band2h_text = parse_tc_text(band);
-        }
-        if let Some(band) = child(style_node, "band1V") {
-            def.band1v_text = parse_tc_text(band);
-        }
-        if let Some(band) = child(style_node, "band2V") {
-            def.band2v_text = parse_tc_text(band);
-        }
-        if let Some(first) = child(style_node, "firstRow") {
-            let (fill, _, _, border_b, _, _) = parse_tc_style(first);
-            def.first_row_fill = fill;
-            def.first_row_border_b = border_b;
-            def.first_row_text = parse_tc_text(first);
-        }
-        if let Some(last) = child(style_node, "lastRow") {
-            let (fill, _, _, _, _, _) = parse_tc_style(last);
-            def.last_row_fill = fill;
-            def.last_row_text = parse_tc_text(last);
-        }
-        if let Some(first) = child(style_node, "firstCol") {
-            let (fill, _, _, _, _, _) = parse_tc_style(first);
-            def.first_col_fill = fill;
-            def.first_col_text = parse_tc_text(first);
-        }
-        if let Some(last) = child(style_node, "lastCol") {
-            let (fill, _, _, _, _, _) = parse_tc_style(last);
-            def.last_col_fill = fill;
-            def.last_col_text = parse_tc_text(last);
-        }
-        for (role_name, target) in [
-            ("nwCell", &mut def.nw_cell_text),
-            ("neCell", &mut def.ne_cell_text),
-            ("swCell", &mut def.sw_cell_text),
-            ("seCell", &mut def.se_cell_text),
-        ] {
-            if let Some(role) = child(style_node, role_name) {
-                *target = parse_tc_text(role);
+        // ECMA-376 §20.1.4.2.4 `CT_TableCellBorderStyle` declares left,
+        // right, top, bottom, insideH, and insideV independently. A role's
+        // explicit no-fill line is retained as `NoLine`; absence inherits.
+        let parse_part = |role: roxmltree::Node<'_, '_>| -> TablePartStyle {
+            let Some(tc_style) = child(role, "tcStyle") else {
+                return TablePartStyle {
+                    text: parse_tc_text(role),
+                    ..Default::default()
+                };
+            };
+            // §20.1.4.2.27: the role fill is `fill` or `fillRef`, never a fill
+            // child directly on `tcStyle`.
+            let fill = child(tc_style, "fill")
+                .and_then(|fill| parse_table_style_fill(fill, theme))
+                .or_else(|| {
+                    child(tc_style, "fillRef").and_then(|fill_ref| {
+                        let index = attr(&fill_ref, "idx")
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .unwrap_or(0);
+                        if index == 0 {
+                            Some(Fill::None)
+                        } else {
+                            parse_style_matrix_fill_from_source(fill_ref, theme_source).or_else(
+                                || {
+                                    parse_color_node(fill_ref, theme)
+                                        .map(|color| Fill::Solid { color })
+                                },
+                            )
+                        }
+                    })
+                });
+            let tc_bdr = child(tc_style, "tcBdr");
+            let parse_side = |side: &str| -> TableLineStyle {
+                let Some(side_node) = tc_bdr.and_then(|borders| child(borders, side)) else {
+                    return TableLineStyle::Unspecified;
+                };
+                if let Some(line) = child(side_node, "ln") {
+                    if child(line, "noFill").is_some() {
+                        return TableLineStyle::NoLine;
+                    }
+                    return TableLineStyle::from_stroke(parse_stroke(line, theme));
+                }
+                if let Some(line_ref) = child(side_node, "lnRef") {
+                    let index = attr(&line_ref, "idx")
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(0);
+                    if index == 0 {
+                        return TableLineStyle::NoLine;
+                    }
+                    if style_line_ref_is_explicit_no_line(line_ref, theme_source) {
+                        return TableLineStyle::NoLine;
+                    }
+                    return TableLineStyle::from_stroke(resolve_style_line_ref(
+                        line_ref,
+                        theme_source,
+                    ));
+                }
+                TableLineStyle::Unspecified
+            };
+            TablePartStyle {
+                fill,
+                text: parse_tc_text(role),
+                borders: TableCellBorderStyle {
+                    left: parse_side("left"),
+                    right: parse_side("right"),
+                    top: parse_side("top"),
+                    bottom: parse_side("bottom"),
+                    inside_h: parse_side("insideH"),
+                    inside_v: parse_side("insideV"),
+                    diagonal_tl: parse_side("tl2br"),
+                    diagonal_tr: parse_side("tr2bl"),
+                },
             }
+        };
+
+        macro_rules! parse_role {
+            ($xml_name:literal, $field:ident) => {
+                if let Some(role) = child(style_node, $xml_name) {
+                    def.$field = parse_part(role);
+                }
+            };
         }
+        parse_role!("wholeTbl", whole_tbl);
+        parse_role!("band1H", band1_h);
+        parse_role!("band2H", band2_h);
+        parse_role!("band1V", band1_v);
+        parse_role!("band2V", band2_v);
+        parse_role!("firstRow", first_row);
+        parse_role!("lastRow", last_row);
+        parse_role!("firstCol", first_col);
+        parse_role!("lastCol", last_col);
+        parse_role!("nwCell", nw_cell);
+        parse_role!("neCell", ne_cell);
+        parse_role!("swCell", sw_cell);
+        parse_role!("seCell", se_cell);
 
         map.insert(style_id, def);
     }
     map
 }
 
+#[derive(Clone, Copy)]
+enum TablePartRegion {
+    Whole,
+    Row,
+    Column,
+    Cell,
+}
+
+/// Resolve the table-style cascade for one physical cell. ECMA-376 §21.1.3.11
+/// defines thirteen `CT_TablePartStyle` components. PowerPoint applies the
+/// general table role first, then banding, edge roles, and finally the corner
+/// intersection. A role only replaces fields it actually declares.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_table_cell_style(
+    style: &TableStyleDef,
+    flags: TableStyleFlags,
+    row: usize,
+    col: usize,
+    row_count: usize,
+    col_count: usize,
+) -> ResolvedTableCellStyle {
+    let last_row = row_count.saturating_sub(1);
+    let last_col = col_count.saturating_sub(1);
+    let mut resolved = ResolvedTableCellStyle::default();
+
+    let overlay =
+        |resolved: &mut ResolvedTableCellStyle, role: &TablePartStyle, region: TablePartRegion| {
+            if role.fill.is_some() {
+                resolved.fill = role.fill.clone();
+            }
+            resolved.text.overlay(&role.text);
+
+            resolved.diagonal_tl.overlay(&role.borders.diagonal_tl);
+            resolved.diagonal_tr.overlay(&role.borders.diagonal_tr);
+
+            let overlay_line = |target: &mut TableLineStyle, source: &TableLineStyle| {
+                target.overlay(source);
+            };
+            match region {
+                TablePartRegion::Whole => {
+                    overlay_line(
+                        &mut resolved.border_l,
+                        if col == 0 {
+                            &role.borders.left
+                        } else {
+                            &role.borders.inside_v
+                        },
+                    );
+                    overlay_line(
+                        &mut resolved.border_r,
+                        if col == last_col {
+                            &role.borders.right
+                        } else {
+                            &role.borders.inside_v
+                        },
+                    );
+                    overlay_line(
+                        &mut resolved.border_t,
+                        if row == 0 {
+                            &role.borders.top
+                        } else {
+                            &role.borders.inside_h
+                        },
+                    );
+                    overlay_line(
+                        &mut resolved.border_b,
+                        if row == last_row {
+                            &role.borders.bottom
+                        } else {
+                            &role.borders.inside_h
+                        },
+                    );
+                }
+                TablePartRegion::Row => {
+                    overlay_line(
+                        &mut resolved.border_l,
+                        if col == 0 {
+                            &role.borders.left
+                        } else {
+                            &role.borders.inside_v
+                        },
+                    );
+                    overlay_line(
+                        &mut resolved.border_r,
+                        if col == last_col {
+                            &role.borders.right
+                        } else {
+                            &role.borders.inside_v
+                        },
+                    );
+                    overlay_line(&mut resolved.border_t, &role.borders.top);
+                    overlay_line(&mut resolved.border_b, &role.borders.bottom);
+                }
+                TablePartRegion::Column => {
+                    overlay_line(&mut resolved.border_l, &role.borders.left);
+                    overlay_line(&mut resolved.border_r, &role.borders.right);
+                    overlay_line(
+                        &mut resolved.border_t,
+                        if row == 0 {
+                            &role.borders.top
+                        } else {
+                            &role.borders.inside_h
+                        },
+                    );
+                    overlay_line(
+                        &mut resolved.border_b,
+                        if row == last_row {
+                            &role.borders.bottom
+                        } else {
+                            &role.borders.inside_h
+                        },
+                    );
+                }
+                TablePartRegion::Cell => {
+                    overlay_line(&mut resolved.border_l, &role.borders.left);
+                    overlay_line(&mut resolved.border_r, &role.borders.right);
+                    overlay_line(&mut resolved.border_t, &role.borders.top);
+                    overlay_line(&mut resolved.border_b, &role.borders.bottom);
+                }
+            }
+        };
+
+    overlay(&mut resolved, &style.whole_tbl, TablePartRegion::Whole);
+    if flags.band_row {
+        let band_row = row.saturating_sub(usize::from(flags.first_row));
+        overlay(
+            &mut resolved,
+            if band_row % 2 == 0 {
+                &style.band1_h
+            } else {
+                &style.band2_h
+            },
+            TablePartRegion::Row,
+        );
+    }
+    if flags.band_col {
+        let band_col = col.saturating_sub(usize::from(flags.first_col));
+        overlay(
+            &mut resolved,
+            if band_col % 2 == 0 {
+                &style.band1_v
+            } else {
+                &style.band2_v
+            },
+            TablePartRegion::Column,
+        );
+    }
+    if flags.first_row && row == 0 {
+        overlay(&mut resolved, &style.first_row, TablePartRegion::Row);
+    }
+    if flags.last_row && row == last_row {
+        overlay(&mut resolved, &style.last_row, TablePartRegion::Row);
+    }
+    if flags.first_col && col == 0 {
+        overlay(&mut resolved, &style.first_col, TablePartRegion::Column);
+    }
+    if flags.last_col && col == last_col {
+        overlay(&mut resolved, &style.last_col, TablePartRegion::Column);
+    }
+    if flags.first_row && row == 0 && flags.first_col && col == 0 {
+        overlay(&mut resolved, &style.nw_cell, TablePartRegion::Cell);
+    }
+    if flags.first_row && row == 0 && flags.last_col && col == last_col {
+        overlay(&mut resolved, &style.ne_cell, TablePartRegion::Cell);
+    }
+    if flags.last_row && row == last_row && flags.first_col && col == 0 {
+        overlay(&mut resolved, &style.sw_cell, TablePartRegion::Cell);
+    }
+    if flags.last_row && row == last_row && flags.last_col && col == last_col {
+        overlay(&mut resolved, &style.se_cell, TablePartRegion::Cell);
+    }
+
+    resolved
+}
+
+/// Apply the resolved style below direct `tcPr` formatting. This separate step
+/// makes the precedence rule testable without constructing a complete package.
+pub(crate) fn apply_resolved_table_cell_style(
+    cell: &mut TableCell,
+    effective: ResolvedTableCellStyle,
+) {
+    if !cell.has_direct_fill {
+        cell.fill = effective.fill;
+    }
+    if cell.text_color.is_none() {
+        cell.text_color = effective.text.color;
+    }
+    if let (Some(b), Some(tb)) = (effective.text.bold, cell.text_body.as_mut()) {
+        if tb.default_bold.is_none() {
+            tb.default_bold = Some(b);
+        }
+    }
+    if let (Some(i), Some(tb)) = (effective.text.italic, cell.text_body.as_mut()) {
+        if tb.default_italic.is_none() {
+            tb.default_italic = Some(i);
+        }
+    }
+    if !cell.has_direct_border_l {
+        effective.border_l.apply_to(&mut cell.border_l);
+    }
+    if !cell.has_direct_border_r {
+        effective.border_r.apply_to(&mut cell.border_r);
+    }
+    if !cell.has_direct_border_t {
+        effective.border_t.apply_to(&mut cell.border_t);
+    }
+    if !cell.has_direct_border_b {
+        effective.border_b.apply_to(&mut cell.border_b);
+    }
+    if !cell.has_direct_diagonal_tl {
+        effective.diagonal_tl.apply_to(&mut cell.diagonal_tl);
+    }
+    if !cell.has_direct_diagonal_tr {
+        effective.diagonal_tr.apply_to(&mut cell.diagonal_tr);
+    }
+}
+
 pub(crate) fn parse_table(
     tbl: roxmltree::Node<'_, '_>,
     t: &Transform,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     rels: &HashMap<String, String>,
     source_dir: &str,
     zip: &mut PptxZip,
 ) -> Option<TableElement> {
+    let theme = theme_source.colors();
     // Parse tblPr attributes and look up table style
     let tbl_pr = child(tbl, "tblPr");
     let style_id = tbl_pr
@@ -1406,7 +1776,7 @@ pub(crate) fn parse_table(
     let table_styles_xml = read_zip_str(zip, "ppt/tableStyles.xml").ok();
     let table_styles = table_styles_xml
         .as_deref()
-        .map(|xml| parse_table_styles_xml(xml, theme))
+        .map(|xml| parse_table_styles_xml(xml, theme_source))
         .unwrap_or_default();
     let style_owned: Option<TableStyleDef> = style_id.as_deref().and_then(|id| {
         table_styles
@@ -1442,152 +1812,26 @@ pub(crate) fn parse_table(
 
     let row_count = rows.len();
     let last_row_idx = row_count.saturating_sub(1);
+    let style_flags = TableStyleFlags {
+        first_row,
+        last_row,
+        first_col,
+        last_col,
+        band_row,
+        band_col,
+    };
 
     // Apply table style fills and borders to each cell
     for (ri, row) in rows.iter_mut().enumerate() {
         for (ci, cell) in row.cells.iter_mut().enumerate() {
             if let Some(s) = style {
-                // ── Fill cascade ────────────────────────────────────────────
-                let mut effective_fill = s.whole_fill.clone();
+                let effective =
+                    resolve_table_cell_style(s, style_flags, ri, ci, row_count, col_count);
 
-                if band_row {
-                    // Determine band index excluding firstRow header if present
-                    let band_ri = ri.saturating_sub(if first_row { 1 } else { 0 });
-                    if !(first_row && ri == 0) {
-                        if band_ri % 2 == 0 {
-                            if let Some(f) = s.band1h_fill.clone() {
-                                effective_fill = Some(f);
-                            }
-                        } else if let Some(f) = s.band2h_fill.clone() {
-                            effective_fill = Some(f);
-                        }
-                    }
-                }
-                if first_row && ri == 0 {
-                    if let Some(f) = s.first_row_fill.clone() {
-                        effective_fill = Some(f);
-                    }
-                }
-                if last_row && ri == last_row_idx {
-                    if let Some(f) = s.last_row_fill.clone() {
-                        effective_fill = Some(f);
-                    }
-                }
-                if first_col && ci == 0 {
-                    if let Some(f) = s.first_col_fill.clone() {
-                        effective_fill = Some(f);
-                    }
-                }
-                if last_col && ci == last_col_idx {
-                    if let Some(f) = s.last_col_fill.clone() {
-                        effective_fill = Some(f);
-                    }
-                }
-                // Cell's own tcPr fill wins
-                if cell.fill.is_none() {
-                    cell.fill = effective_fill;
-                }
-
-                // ── Text-colour cascade (style `<a:tcTxStyle>`, role-keyed) ──
-                // Mirrors the fill cascade ordering. The header (firstRow) typically
-                // overrides wholeTbl (e.g. white-on-accent header). A run's own
-                // explicit colour still wins later, at render time.
-                let mut effective_text = s.whole_text.clone();
-                if band_row && !(first_row && ri == 0) {
-                    let band_ri = ri.saturating_sub(if first_row { 1 } else { 0 });
-                    effective_text.overlay(if band_ri % 2 == 0 {
-                        &s.band1h_text
-                    } else {
-                        &s.band2h_text
-                    });
-                }
-                if band_col && !(first_col && ci == 0) {
-                    let band_ci = ci.saturating_sub(if first_col { 1 } else { 0 });
-                    effective_text.overlay(if band_ci % 2 == 0 {
-                        &s.band1v_text
-                    } else {
-                        &s.band2v_text
-                    });
-                }
-                if first_row && ri == 0 {
-                    effective_text.overlay(&s.first_row_text);
-                }
-                if last_row && ri == last_row_idx {
-                    effective_text.overlay(&s.last_row_text);
-                }
-                if first_col && ci == 0 {
-                    effective_text.overlay(&s.first_col_text);
-                }
-                if last_col && ci == last_col_idx {
-                    effective_text.overlay(&s.last_col_text);
-                }
-                if first_row && ri == 0 && first_col && ci == 0 {
-                    effective_text.overlay(&s.nw_cell_text);
-                }
-                if first_row && ri == 0 && last_col && ci == last_col_idx {
-                    effective_text.overlay(&s.ne_cell_text);
-                }
-                if last_row && ri == last_row_idx && first_col && ci == 0 {
-                    effective_text.overlay(&s.sw_cell_text);
-                }
-                if last_row && ri == last_row_idx && last_col && ci == last_col_idx {
-                    effective_text.overlay(&s.se_cell_text);
-                }
-                if cell.text_color.is_none() {
-                    cell.text_color = effective_text.color.clone();
-                }
-
-                if let (Some(b), Some(tb)) = (effective_text.bold, cell.text_body.as_mut()) {
-                    if tb.default_bold.is_none() {
-                        tb.default_bold = Some(b);
-                    }
-                }
-                if let (Some(i), Some(tb)) = (effective_text.italic, cell.text_body.as_mut()) {
-                    if tb.default_italic.is_none() {
-                        tb.default_italic = Some(i);
-                    }
-                }
-
-                // ── Border cascade (style provides inside and outer borders) ──
-                // Outer top edge
-                if cell.border_t.is_none() && ri == 0 {
-                    cell.border_t = s.whole_outer_h.clone();
-                }
-                // Inner horizontal separator between rows
-                if cell.border_t.is_none() && ri > 0 {
-                    cell.border_t = s.whole_inside_h.clone();
-                }
-                // Outer bottom edge
-                if cell.border_b.is_none() && ri == last_row_idx {
-                    cell.border_b = s.whole_outer_h.clone();
-                }
-                // Inner bottom separator; firstRow gets its own bottom definition
-                if cell.border_b.is_none() {
-                    if first_row && ri == 0 {
-                        cell.border_b = s
-                            .first_row_border_b
-                            .clone()
-                            .or_else(|| s.whole_inside_h.clone());
-                    } else if ri < last_row_idx {
-                        cell.border_b = s.whole_inside_h.clone();
-                    }
-                }
-                // Outer left edge
-                if cell.border_l.is_none() && ci == 0 {
-                    cell.border_l = s.whole_outer_v.clone();
-                }
-                // Inner vertical separator between cols
-                if cell.border_l.is_none() && ci > 0 {
-                    cell.border_l = s.whole_inside_v.clone();
-                }
-                // Outer right edge
-                if cell.border_r.is_none() && ci == last_col_idx {
-                    cell.border_r = s.whole_outer_v.clone();
-                }
-                // Inner right separator
-                if cell.border_r.is_none() && ci < last_col_idx {
-                    cell.border_r = s.whole_inside_v.clone();
-                }
+                // Direct `tcPr` formatting is the final tier. The presence flags
+                // preserve an authored noFill/no-line, which is not equivalent to
+                // an omitted property inheriting the table style.
+                apply_resolved_table_cell_style(cell, effective);
             } else {
                 // ── Fallback for built-in styles not defined in tableStyles.xml ──
                 // Approximate "Medium Style 2": accent1 header fill + thin outer box + row separators.
@@ -1596,12 +1840,16 @@ pub(crate) fn parse_table(
                     width: 9525,
                     fill: None,
                     dash_style: None,
+                    custom_dash: Vec::new(),
                     line_cap: None,
+                    line_join: None,
+                    miter_limit: None,
+                    alignment: None,
                     head_end: None,
                     tail_end: None,
                     cmpd: None,
                 };
-                if cell.fill.is_none() && first_row && ri == 0 {
+                if !cell.has_direct_fill && cell.fill.is_none() && first_row && ri == 0 {
                     if let Some(color) = theme.get("accent1") {
                         cell.fill = Some(Fill::Solid {
                             color: color.clone(),
@@ -1609,23 +1857,23 @@ pub(crate) fn parse_table(
                     }
                 }
                 // Outer top
-                if cell.border_t.is_none() && ri == 0 {
+                if !cell.has_direct_border_t && cell.border_t.is_none() && ri == 0 {
                     cell.border_t = Some(thin.clone());
                 }
                 // Inner horizontal separators
-                if cell.border_t.is_none() && ri > 0 {
+                if !cell.has_direct_border_t && cell.border_t.is_none() && ri > 0 {
                     cell.border_t = Some(thin.clone());
                 }
                 // Outer bottom
-                if cell.border_b.is_none() && ri == last_row_idx {
+                if !cell.has_direct_border_b && cell.border_b.is_none() && ri == last_row_idx {
                     cell.border_b = Some(thin.clone());
                 }
                 // Outer left edge
-                if cell.border_l.is_none() && ci == 0 {
+                if !cell.has_direct_border_l && cell.border_l.is_none() && ci == 0 {
                     cell.border_l = Some(thin.clone());
                 }
                 // Outer right edge
-                if cell.border_r.is_none() && ci == last_col_idx {
+                if !cell.has_direct_border_r && cell.border_r.is_none() && ci == last_col_idx {
                     cell.border_r = Some(thin.clone());
                 }
             }
@@ -1718,6 +1966,28 @@ pub(crate) fn parse_table_cell(
 
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
 
+    // ECMA-376 §21.1.3.17 (`CT_TableCellProperties`) makes direct formatting
+    // the final cascade tier. Presence must be tracked separately because
+    // direct `noFill`/no-line legitimately parse to no painted stroke.
+    let has_direct_fill = tc_pr.is_some_and(|n| {
+        [
+            "noFill",
+            "solidFill",
+            "gradFill",
+            "blipFill",
+            "pattFill",
+            "grpFill",
+        ]
+        .iter()
+        .any(|name| child(n, name).is_some())
+    });
+    let has_direct_border_l = tc_pr.is_some_and(|n| child(n, "lnL").is_some());
+    let has_direct_border_r = tc_pr.is_some_and(|n| child(n, "lnR").is_some());
+    let has_direct_border_t = tc_pr.is_some_and(|n| child(n, "lnT").is_some());
+    let has_direct_border_b = tc_pr.is_some_and(|n| child(n, "lnB").is_some());
+    let has_direct_diagonal_tl = tc_pr.is_some_and(|n| child(n, "lnTlToBr").is_some());
+    let has_direct_diagonal_tr = tc_pr.is_some_and(|n| child(n, "lnBlToTr").is_some());
+
     let border_l = tc_pr
         .and_then(|n| child(n, "lnL"))
         .and_then(|n| parse_stroke(n, theme));
@@ -1755,11 +2025,18 @@ pub(crate) fn parse_table_cell(
     TableCell {
         text_body,
         fill,
+        has_direct_fill,
         text_color: None,
         border_l,
         border_r,
         border_t,
         border_b,
+        has_direct_border_l,
+        has_direct_border_r,
+        has_direct_border_t,
+        has_direct_border_b,
+        has_direct_diagonal_tl,
+        has_direct_diagonal_tr,
         diagonal_tl,
         diagonal_tr,
         grid_span,
@@ -1781,7 +2058,7 @@ pub(crate) fn extract_decorative_shapes(
     part_dir: &str,
     rels: &HashMap<String, String>,
     smartart_drawings: &HashMap<String, String>,
-    theme: &HashMap<String, String>,
+    theme: &(impl PptxThemeSource + ?Sized),
     zip: &mut PptxZip,
     out: &mut Vec<SlideElement>,
 ) {
@@ -1820,12 +2097,13 @@ pub(crate) fn parse_sp_tree_node(
     rels: &HashMap<String, String>,
     smartart_drawings: &HashMap<String, String>,
     zip: &mut PptxZip,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     out: &mut Vec<SlideElement>,
     skip_placeholders: bool,
     group_fill: Option<&Fill>,
     depth: DepthGuard,
 ) {
+    let theme = theme_source.colors();
     // §20.1.2.2.8 — a shape/pic/graphicFrame/cxnSp/grpSp whose own
     // `<p:cNvPr hidden="1">` marks it hidden is not rendered. Skip at parse
     // time (no viewer-side "show hidden" mode is meaningful for a shape, unlike
@@ -1887,7 +2165,7 @@ pub(crate) fn parse_sp_tree_node(
                                     sp_pr_node,
                                     child(node, "style"),
                                     None,
-                                    theme,
+                                    theme_source,
                                 );
                                 out.push(SlideElement::Picture(PictureElement {
                                     x: t.x,
@@ -1959,7 +2237,7 @@ pub(crate) fn parse_sp_tree_node(
                                     sp_pr_node,
                                     child(node, "style"),
                                     lph.lookup_picture_properties(&ph_type, ph_idx),
-                                    theme,
+                                    theme_source,
                                 );
                                 out.push(SlideElement::Picture(PictureElement {
                                     x: t.x,
@@ -2008,14 +2286,16 @@ pub(crate) fn parse_sp_tree_node(
                     }
                 }
             }
-            if let Some(shape) = parse_shape(node, lph, theme, rels, slide_dir, group_fill, zip) {
+            if let Some(shape) =
+                parse_shape(node, lph, theme_source, rels, slide_dir, group_fill, zip)
+            {
                 out.push(SlideElement::Shape(shape));
             }
         }
         "pic" => {
             if let Some(media) = parse_media(node, slide_dir, rels) {
                 out.push(SlideElement::Media(media));
-            } else if let Some(pic) = parse_picture(node, slide_dir, rels, theme, zip) {
+            } else if let Some(pic) = parse_picture(node, slide_dir, rels, theme_source, zip) {
                 out.push(SlideElement::Picture(pic));
             } else {
                 // Placeholder pic: no xfrm in spPr — position comes from layout by_idx
@@ -2061,7 +2341,7 @@ pub(crate) fn parse_sp_tree_node(
                                         child(node, "spPr"),
                                         child(node, "style"),
                                         lph.lookup_picture_properties(&ph_type, Some(idx)),
-                                        theme,
+                                        theme_source,
                                     );
                                     out.push(SlideElement::Picture(PictureElement {
                                         x: t.x,
@@ -2133,7 +2413,7 @@ pub(crate) fn parse_sp_tree_node(
                         rels,
                         smartart_drawings,
                         zip,
-                        theme,
+                        theme_source,
                         out,
                         skip_placeholders,
                         group_fill,
@@ -2174,7 +2454,7 @@ pub(crate) fn parse_sp_tree_node(
                 .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "tbl");
             if let Some(tbl_node) = tbl_node {
-                if let Some(table) = parse_table(tbl_node, &t, theme, rels, slide_dir, zip) {
+                if let Some(table) = parse_table(tbl_node, &t, theme_source, rels, slide_dir, zip) {
                     out.push(SlideElement::Table(table));
                 }
                 return;
@@ -2287,7 +2567,8 @@ pub(crate) fn parse_sp_tree_node(
                         // The preview pic's own `<a:xfrm>` is 0,0-relative (or
                         // absent), so the graphicFrame's `<p:xfrm>` is authoritative
                         // for placement. Parse the blip, then stamp gf geometry.
-                        if let Some(mut pic) = parse_picture(pic_node, slide_dir, rels, theme, zip)
+                        if let Some(mut pic) =
+                            parse_picture(pic_node, slide_dir, rels, theme_source, zip)
                         {
                             pic.x = t.x;
                             pic.y = t.y;
@@ -2360,7 +2641,7 @@ pub(crate) fn parse_sp_tree_node(
                         rels,
                         smartart_drawings,
                         zip,
-                        theme,
+                        theme_source,
                         out,
                         skip_placeholders,
                         child_group_fill.as_ref(),
@@ -2379,7 +2660,7 @@ pub(crate) fn parse_sp_tree_node(
             if skip_placeholders && is_placeholder(node) {
                 return;
             }
-            if let Some(shape) = parse_connector(node, theme, rels) {
+            if let Some(shape) = parse_connector(node, theme_source, rels) {
                 out.push(SlideElement::Shape(shape));
             }
         }
@@ -2568,9 +2849,10 @@ fn offset_slide_element(el: &mut SlideElement, dx: i64, dy: i64) {
 /// Parse a connector shape (p:cxnSp) as a ShapeElement with line geometry.
 fn parse_connector(
     node: roxmltree::Node<'_, '_>,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     rels: &HashMap<String, String>,
 ) -> Option<ShapeElement> {
+    let theme = theme_source.colors();
     let sp_pr = child(node, "spPr")?;
     let xfrm = child(sp_pr, "xfrm")?;
     let t = parse_xfrm(xfrm);
@@ -2580,10 +2862,9 @@ fn parse_connector(
     let cnv = read_cnv_pr(node, rels);
 
     // Style-based stroke fallback. `p:style > a:lnRef idx="N"` references the
-    // theme fmtScheme lnStyleLst entry N (1-based). We look up the canonical
-    // width from the theme map ("+lnRef-N") rather than hardcoding 9525.
+    // complete theme fmtScheme lnStyleLst entry N (1-based).
     let style_node = child(node, "style");
-    let style_stroke = parse_style_stroke(style_node, theme);
+    let style_stroke = parse_style_stroke(style_node, theme_source);
 
     let stroke = merge_local_stroke(child(sp_pr, "ln"), style_stroke, theme);
 
@@ -2694,7 +2975,7 @@ fn parse_connector(
 mod style_ref_tests {
     use super::*;
     use crate::master::LayoutPlaceholders;
-    use crate::theme::parse_theme_colors;
+    use crate::theme::PptxTheme;
     use std::io::Cursor;
 
     fn empty_zip() -> PptxZip {
@@ -2708,7 +2989,7 @@ mod style_ref_tests {
 
     #[test]
     fn partial_shape_line_and_effect_refs_inherit_theme_styles() {
-        let theme = parse_theme_colors(
+        let theme = PptxTheme::from_xml(
             r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
               <a:themeElements>
                 <a:clrScheme name="Regression">
@@ -2746,7 +3027,7 @@ mod style_ref_tests {
                 <a:xfrm><a:off x="0" y="0"/><a:ext cx="100000" cy="100000"/></a:xfrm>
                 <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
                 <a:solidFill><a:schemeClr val="accent1"/></a:solidFill>
-                <a:ln cmpd="sng"><a:prstDash val="solid"/><a:headEnd type="none"/><a:tailEnd type="none"/></a:ln>
+                <a:ln w="44444" cmpd="sng"><a:prstDash val="solid"/><a:headEnd type="none"/><a:tailEnd type="none"/></a:ln>
                 <a:effectLst/>
               </p:spPr>
               <p:style>
@@ -2773,7 +3054,7 @@ mod style_ref_tests {
 
         let stroke = shape.stroke.expect("theme line must survive partial a:ln");
         assert_eq!(stroke.color, "FFFFFF");
-        assert_eq!(stroke.width, 38100);
+        assert_eq!(stroke.width, 44444, "local width overrides styled paint");
         assert_eq!(stroke.dash_style, None, "explicit solid clears theme dash");
         assert!(
             stroke.head_end.is_none(),
@@ -2803,6 +3084,89 @@ mod style_ref_tests {
             Some("matte"),
             "effectRef retains the theme sp3d component"
         );
+    }
+
+    #[test]
+    fn fixed_theme_line_color_does_not_require_a_color_on_ln_ref() {
+        let theme = PptxTheme::from_xml(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements>
+                <a:clrScheme name="Test"><a:accent1><a:srgbClr val="123456"/></a:accent1></a:clrScheme>
+                <a:fmtScheme name="Test"><a:fillStyleLst/><a:lnStyleLst>
+                  <a:ln w="19050" cap="rnd" algn="in"><a:solidFill><a:schemeClr val="accent1"/></a:solidFill>
+                    <a:custDash><a:ds d="125000" sp="75000"/></a:custDash><a:miter lim="800000"/>
+                  </a:ln>
+                </a:lnStyleLst><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+              </a:themeElements>
+            </a:theme>"#,
+        );
+        let style = roxmltree::Document::parse(
+            r#"<p:style xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                  <a:lnRef idx="1"/>
+                </p:style>"#,
+        )
+        .unwrap();
+
+        let stroke = parse_style_stroke(Some(style.root_element()), &theme)
+            .expect("fixed recipe color should resolve");
+        assert_eq!(stroke.color, "123456");
+        assert_eq!(stroke.width, 19050);
+        assert_eq!(stroke.line_cap.as_deref(), Some("round"));
+        assert_eq!(stroke.dash_style, None);
+        assert_eq!(stroke.custom_dash.len(), 1);
+        assert!((stroke.custom_dash[0].dash - 1.25).abs() < f64::EPSILON);
+        assert!((stroke.custom_dash[0].space - 0.75).abs() < f64::EPSILON);
+        assert_eq!(stroke.line_join.as_deref(), Some("miter"));
+        assert_eq!(stroke.miter_limit, Some(8.0));
+        assert_eq!(stroke.alignment.as_deref(), Some("in"));
+    }
+
+    #[test]
+    fn slide_style_presence_replaces_placeholder_fill_and_line_including_no_style() {
+        let theme = PptxTheme::default();
+        let mut placeholders = LayoutPlaceholders::default();
+        placeholders.by_idx_fill.insert(
+            7,
+            Fill::Solid {
+                color: "AABBCC".to_owned(),
+            },
+        );
+        placeholders.by_idx_stroke.insert(
+            7,
+            Stroke {
+                color: "DDEEFF".to_owned(),
+                width: 12700,
+                fill: None,
+                dash_style: None,
+                custom_dash: Vec::new(),
+                line_cap: None,
+                line_join: None,
+                miter_limit: None,
+                alignment: None,
+                head_end: None,
+                tail_end: None,
+                cmpd: None,
+            },
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:nvSpPr><p:cNvPr id="1" name="Placeholder"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="7"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:style><a:lnRef idx="0"/><a:fillRef idx="0"/><a:effectRef idx="0"/><a:fontRef idx="minor"/></p:style></p:sp>"#,
+        )
+        .unwrap();
+        let mut zip = empty_zip();
+        let shape = parse_shape(
+            doc.root_element(),
+            &placeholders,
+            &theme,
+            &HashMap::new(),
+            "ppt/slides",
+            None,
+            &mut zip,
+        )
+        .expect("shape");
+
+        assert!(shape.stroke.is_none());
+        assert!(matches!(shape.fill, Some(Fill::None)));
     }
 
     #[test]
@@ -2866,27 +3230,30 @@ mod picture_property_resolution_tests {
         PptxZip::new(Cursor::new(bytes)).unwrap()
     }
 
-    fn theme_with_picture_style() -> HashMap<String, String> {
-        HashMap::from([
-            ("+lnRef-1".to_owned(), "22222".to_owned()),
-            (
-                "+effectStyle-1".to_owned(),
-                r#"<a:effectStyle>
-                  <a:effectLst><a:outerShdw blurRad="100" dist="200" dir="0">
-                    <a:srgbClr val="112233"/>
-                  </a:outerShdw></a:effectLst>
-                  <a:scene3d><a:camera prst="isometricLeftUp"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>
-                  <a:sp3d prstMaterial="matte"/>
-                </a:effectStyle>"#
-                    .to_owned(),
-            ),
-        ])
+    fn theme_with_picture_style() -> crate::theme::PptxTheme {
+        crate::theme::PptxTheme::from_xml(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements>
+                <a:clrScheme name="Test"><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1></a:clrScheme>
+                <a:fmtScheme name="Test">
+                  <a:fillStyleLst/>
+                  <a:lnStyleLst><a:ln w="22222"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst>
+                  <a:effectStyleLst><a:effectStyle>
+                    <a:effectLst><a:outerShdw blurRad="100" dist="200" dir="0"><a:srgbClr val="112233"/></a:outerShdw></a:effectLst>
+                    <a:scene3d><a:camera prst="isometricLeftUp"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>
+                    <a:sp3d prstMaterial="matte"/>
+                  </a:effectStyle></a:effectStyleLst>
+                  <a:bgFillStyleLst/>
+                </a:fmtScheme>
+              </a:themeElements>
+            </a:theme>"#,
+        )
     }
 
     fn run_tree_child(
         xml: &str,
         placeholders: &LayoutPlaceholders,
-        theme: &HashMap<String, String>,
+        theme: &(impl PptxThemeSource + ?Sized),
         zip: &mut PptxZip,
     ) -> PictureElement {
         let doc = roxmltree::Document::parse(xml).unwrap();

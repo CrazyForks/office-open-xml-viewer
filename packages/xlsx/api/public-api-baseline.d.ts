@@ -3,6 +3,11 @@
 // Do not edit by hand.
 
 // --- file: xlsx.d.ts ---
+export interface ArrowEnd {
+    type: string;
+    w: string;
+    len: string;
+}
 export function autoResize(render: (width: number, height: number) => void | Promise<void>, element: Element, opts?: AutoResizeOptions): () => void;
 export interface AutoResizeOptions {
     pauseWhenHidden?: boolean;
@@ -413,6 +418,10 @@ export interface Duotone {
     clr1: string;
     clr2: string;
 }
+interface Duotone__emitterCollision1 {
+    clr1: string;
+    clr2: string;
+}
 export interface Dxf {
     font: CellFont | null;
     fill: CellFill | null;
@@ -420,6 +429,13 @@ export interface Dxf {
     numFmt?: NumFmt | null;
 }
 type ExtensibleLiteral<Known extends string> = Known | (string & Record<never, never>);
+type Fill = SolidFill | NoFill | GradientFill | PatternFill | ImageFill;
+interface FillRect {
+    l?: number;
+    t?: number;
+    r?: number;
+    b?: number;
+}
 export interface FindHighlightColors {
     match?: string;
     active?: string;
@@ -432,6 +448,12 @@ export interface FindMatch<Loc = unknown> {
 export interface FindMatchesOptions {
     caseSensitive?: boolean;
 }
+export interface GradientFill {
+    fillType: 'gradient';
+    stops: GradientStop[];
+    angle: number;
+    gradType: string;
+}
 export interface GradientFillSpec {
     gradientType: string;
     degree: number;
@@ -443,6 +465,10 @@ export interface GradientFillSpec {
         position: number;
         color: string;
     }[];
+}
+export interface GradientStop {
+    position: number;
+    color: string;
 }
 export type HiddenSheetMode = 'show' | 'skip' | 'dim';
 export interface Hyperlink {
@@ -483,6 +509,15 @@ export interface ImageAnchor {
     };
     alpha?: number;
     duotone?: Duotone;
+}
+interface ImageFill {
+    fillType: 'image';
+    imagePath: string;
+    mimeType: string;
+    fillRect?: FillRect;
+    tile?: TileInfo;
+    alpha?: number;
+    duotone?: Duotone__emitterCollision1;
 }
 export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
 export interface LegendManualLayout {
@@ -630,6 +665,9 @@ export interface MergeCell {
     bottom: number;
     right: number;
 }
+interface NoFill {
+    fillType: 'none';
+}
 export interface NumFmt {
     numFmtId: number;
     formatCode: string;
@@ -758,6 +796,12 @@ export interface PathInfo {
     w: number;
     h: number;
     commands: PathCmd[];
+}
+export interface PatternFill {
+    fillType: 'pattern';
+    fg: string;
+    bg: string;
+    preset: string;
 }
 export type PhoneticAlignment = 'left' | 'center' | 'distributed' | 'noControl';
 export interface PhoneticProperties {
@@ -965,6 +1009,23 @@ export interface ShapeInfo {
     fillColor?: string;
     strokeColor?: string;
     strokeWidth: number;
+    strokeFill?: Exclude<Fill, {
+        fillType: 'image';
+    } | {
+        fillType: 'none';
+    }>;
+    strokeDashStyle?: string;
+    strokeCustomDash?: Array<{
+        dash: number;
+        space: number;
+    }>;
+    strokeLineCap?: 'butt' | 'round' | 'square';
+    strokeLineJoin?: 'round' | 'bevel' | 'miter';
+    strokeMiterLimit?: number;
+    strokeAlignment?: 'ctr' | 'in';
+    strokeCmpd?: string;
+    strokeHeadEnd?: ArrowEnd;
+    strokeTailEnd?: ArrowEnd;
     geom: ShapeGeom;
     text?: ShapeText;
 }
@@ -1053,6 +1114,10 @@ export interface SlicerStyle {
     selectedItemWithData?: SlicerElementStyle;
     unselectedItemWithData?: SlicerElementStyle;
 }
+export interface SolidFill {
+    fillType: 'solid';
+    color: string;
+}
 export type SpaceLine = {
     type: 'pct';
     val: number;
@@ -1122,6 +1187,14 @@ export interface TableInfo {
     band1HorizontalDxf?: number;
     band2HorizontalDxf?: number;
     columns: TableColumnInfo[];
+}
+interface TileInfo {
+    tx: number;
+    ty: number;
+    sx: number;
+    sy: number;
+    flip: string;
+    algn?: string;
 }
 export interface ViewerContextMenuEvent<TContext> {
     readonly originalEvent: MouseEvent;

@@ -1784,6 +1784,11 @@ pub struct ThemeColors {
     /// Re-parsing per shape is fine — the cover usually has only a handful of
     /// shapes that take a fillRef, and theme XML is small.
     theme_xml: Option<String>,
+    /// Lossless DrawingML style matrix used by WPS `lnRef`. Unlike the legacy
+    /// width-only lookup this retains the complete CT_LineProperties recipe so
+    /// each omitted local line property can inherit independently (ECMA-376
+    /// §20.1.4.1.30 and §20.1.2.2.24).
+    format_scheme: ooxml_common::theme::ThemeFormatScheme,
     /// ECMA-376 §17.7.2 `docDefaults`/`rPrDefault` (folded with the default
     /// paragraph style) — the document's default run fonts, kept as RAW refs
     /// (may be `@theme:…`, resolved via [`resolve_font_ref`]). Threaded onto the
@@ -1800,6 +1805,7 @@ impl ThemeColors {
         let mut fonts: HashMap<String, String> = HashMap::new();
         let mut script_fonts: HashMap<String, String> = HashMap::new();
         let theme_xml = Some(xml.to_string());
+        let format_scheme = ooxml_common::theme::ThemeFormatScheme::parse(xml);
 
         // Color slots: shared clrScheme parse; docx uppercases each hex and keys
         // by slot name. prstClr now resolves through the shared preset table
@@ -1853,6 +1859,7 @@ impl ThemeColors {
             fonts,
             script_fonts,
             theme_xml,
+            format_scheme,
             ..Default::default()
         }
     }
@@ -8904,78 +8911,34 @@ fn parse_wsp_shape(
             })
             .and_then(|fr| resolve_fill_ref(fr, theme)),
     };
-    let style_stroke: Option<(String, f64)> = style_node
+    let style_line = style_node
         .and_then(|st| {
             st.children()
                 .find(|n| n.is_element() && n.tag_name().name() == "lnRef")
         })
-        .and_then(|lr| {
-            let idx = lr.attribute("idx")?.parse::<usize>().ok()?;
-            if idx == 0 {
-                return None;
-            }
-            let color = resolve_color_element(lr, theme)?;
-            let width_emu = theme
-                .theme_xml
-                .as_deref()
-                .map(ooxml_common::theme::parse_ln_style_widths)
-                .and_then(|widths| widths.get(idx - 1).copied())
-                .unwrap_or(9525);
-            Some((color, width_emu as f64 / 12700.0))
-        });
+        .and_then(|line_ref| resolve_wps_line_ref(line_ref, theme));
     let ln_node = sp_pr
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "ln");
-    let (stroke, stroke_width) = match ln_node {
-        Some(ln) => {
-            let has_no_fill = ln
-                .children()
-                .any(|n| n.is_element() && n.tag_name().name() == "noFill");
-            if has_no_fill {
-                (None, 0.0)
-            } else {
-                let color = ln
-                    .children()
-                    .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
-                    .and_then(|sf| resolve_color_element(sf, theme));
-                let direct_w = ln.attribute("w").and_then(|v| v.parse::<f64>().ok());
-                match (color, style_stroke) {
-                    (Some(c), _) => (Some(c), direct_w.unwrap_or(9525.0) / 12700.0),
-                    (None, Some((c, style_w))) => {
-                        (Some(c), direct_w.map(|w| w / 12700.0).unwrap_or(style_w))
-                    }
-                    (None, None) => (None, 0.0),
-                }
-            }
-        }
-        None => style_stroke.map_or((None, 0.0), |(c, w)| (Some(c), w)),
-    };
-    // ECMA-376 §20.1.8.48 prstDash and §20.1.8.3 head/tail line-end decorations.
-    let stroke_dash = ln_node.and_then(|ln| {
-        ln.children()
-            .find(|n| n.is_element() && n.tag_name().name() == "prstDash")
-            .and_then(|d| d.attribute("val"))
-            .map(|v| v.to_string())
-    });
-    let parse_line_end = |name: &str| -> Option<LineEnd> {
-        let ln = ln_node?;
-        let end = ln
-            .children()
-            .find(|n| n.is_element() && n.tag_name().name() == name)?;
-        // CT_LineEndProperties: type defaults to "none"; w/len default to "med"
-        // (ECMA-376 §20.1.8.3 — absent w/len means the medium step).
-        let ty = end.attribute("type").unwrap_or("none");
-        if ty == "none" {
-            return None;
-        }
-        Some(LineEnd {
-            r#type: ty.to_string(),
-            w: end.attribute("w").unwrap_or("med").to_string(),
-            len: end.attribute("len").unwrap_or("med").to_string(),
+    let effective_line = ln_node
+        .map(|line| {
+            let local = ooxml_common::line::parse_line_properties(
+                line,
+                &DocxSchemeResolver {
+                    theme,
+                    placeholder_color: None,
+                },
+                ooxml_common::color::TintMode::WordLiteral,
+            );
+            style_line
+                .as_ref()
+                .map_or_else(|| local.clone(), |style| local.with_fallback(style))
         })
-    };
-    let head_end = parse_line_end("headEnd");
-    let tail_end = parse_line_end("tailEnd");
+        .or(style_line);
+    let line_wire = effective_line
+        .as_ref()
+        .map(docx_line_wire_properties)
+        .unwrap_or_default();
 
     // ECMA-376 §20.1.4.1.17 `<wps:style><a:fontRef>` → the shape's DEFAULT text
     // color. A `<wps:txbx>` run that sets no explicit `<w:color>` inherits this
@@ -9026,11 +8989,18 @@ fn parse_wsp_shape(
         preset_geometry,
         adj_values,
         fill,
-        stroke,
-        stroke_width,
-        stroke_dash,
-        head_end,
-        tail_end,
+        stroke: line_wire.stroke,
+        stroke_width: line_wire.width,
+        stroke_fill: line_wire.fill,
+        stroke_dash: line_wire.dash,
+        stroke_custom_dash: line_wire.custom_dash,
+        stroke_cap: line_wire.cap,
+        stroke_join: line_wire.join,
+        stroke_miter_limit: line_wire.miter_limit,
+        stroke_alignment: line_wire.alignment,
+        stroke_compound: line_wire.compound,
+        head_end: line_wire.head_end,
+        tail_end: line_wire.tail_end,
         rotation,
         flip_h,
         flip_v,
@@ -11241,6 +11211,176 @@ fn parse_shape_fill(
         }
     }
     FillSpec::Absent
+}
+
+/// Resolve WPS `a:lnRef` through the complete DrawingML style-matrix entry.
+/// `idx` is one-based and zero is the explicit no-style sentinel
+/// (ECMA-376 §20.1.4.1.30, §20.1.10.57). The reference color substitutes
+/// only `phClr`; a recipe with a concrete color remains valid when the optional
+/// color child is absent.
+fn resolve_wps_line_ref(
+    line_ref: roxmltree::Node,
+    theme: &ThemeColors,
+) -> Option<ooxml_common::line::LineProperties> {
+    use ooxml_common::theme::StyleMatrixLookup;
+
+    let index = line_ref.attribute("idx")?.parse::<usize>().ok()?;
+    let StyleMatrixLookup::Entry(entry) = theme.format_scheme.lookup_line_ref(index) else {
+        return None;
+    };
+    let entry_xml = entry.to_xml();
+    let document = roxmltree::Document::parse(&entry_xml).ok()?;
+    let line = document.root_element().children().find(|node| {
+        node.is_element()
+            && node.tag_name().name() == "ln"
+            && ooxml_common::ns::is_a_ns(node.tag_name().namespace())
+    })?;
+    let reference_color = resolve_color_element(line_ref, theme);
+    let base_resolver = DocxSchemeResolver {
+        theme,
+        placeholder_color: None,
+    };
+    let resolver = ooxml_common::color::StyleMatrixColorResolver::new(
+        &base_resolver,
+        reference_color.as_deref(),
+    );
+    let mut properties = ooxml_common::line::parse_line_properties(
+        line,
+        &resolver,
+        ooxml_common::color::TintMode::WordLiteral,
+    );
+    if properties.paint.is_none() {
+        properties.paint = reference_color
+            .map(|color| ooxml_common::line::LinePaint::Solid { color: Some(color) });
+    }
+    Some(properties)
+}
+
+fn docx_line_end(end: &ooxml_common::line::LineEnd) -> Option<LineEnd> {
+    let kind = end.kind.as_deref().unwrap_or("none");
+    (kind != "none").then(|| LineEnd {
+        r#type: kind.to_owned(),
+        w: end.width.clone().unwrap_or_else(|| "med".to_owned()),
+        len: end.length.clone().unwrap_or_else(|| "med".to_owned()),
+    })
+}
+
+fn docx_line_dash(dash: &ooxml_common::line::LineDash) -> Option<String> {
+    match dash {
+        ooxml_common::line::LineDash::Preset(value) => value
+            .as_ref()
+            .filter(|value| value.as_str() != "solid")
+            .cloned(),
+        ooxml_common::line::LineDash::Custom(_) => None,
+    }
+}
+
+#[derive(Default)]
+struct DocxLineWireProperties {
+    stroke: Option<String>,
+    width: f64,
+    fill: Option<ShapeStrokeFill>,
+    dash: Option<String>,
+    custom_dash: Vec<ShapeLineDashSegment>,
+    cap: Option<String>,
+    join: Option<String>,
+    miter_limit: Option<f64>,
+    alignment: Option<String>,
+    compound: Option<String>,
+    head_end: Option<LineEnd>,
+    tail_end: Option<LineEnd>,
+}
+
+fn docx_line_wire_properties(line: &ooxml_common::line::LineProperties) -> DocxLineWireProperties {
+    let (stroke, fill) = match line.paint.as_ref() {
+        Some(ooxml_common::line::LinePaint::Solid { color }) => (color.clone(), None),
+        Some(ooxml_common::line::LinePaint::Gradient(Some(gradient))) => {
+            let color = gradient
+                .stops
+                .iter()
+                .rev()
+                .find(|stop| !stop.color.ends_with("00"))
+                .or_else(|| gradient.stops.last())
+                .map(|stop| stop.color.clone());
+            (
+                color,
+                Some(ShapeStrokeFill::Gradient {
+                    stops: gradient
+                        .stops
+                        .iter()
+                        .map(|stop| GradientStop {
+                            position: stop.position,
+                            color: stop.color.clone(),
+                        })
+                        .collect(),
+                    angle: gradient.angle,
+                    grad_type: gradient.grad_type.clone(),
+                }),
+            )
+        }
+        Some(ooxml_common::line::LinePaint::Pattern(pattern)) => (
+            Some(pattern.fg.clone()),
+            Some(ShapeStrokeFill::Pattern {
+                fg: pattern.fg.clone(),
+                bg: pattern.bg.clone(),
+                preset: pattern.preset.clone(),
+            }),
+        ),
+        Some(ooxml_common::line::LinePaint::NoFill)
+        | Some(ooxml_common::line::LinePaint::Gradient(None))
+        | None => (None, None),
+    };
+    let width = stroke
+        .as_ref()
+        .map(|_| line.width.unwrap_or(9525) as f64 / 12700.0)
+        .unwrap_or(0.0);
+    let cap = line.cap.as_deref().and_then(|cap| match cap {
+        "rnd" => Some("round".to_owned()),
+        "sq" => Some("square".to_owned()),
+        "flat" => Some("butt".to_owned()),
+        _ => None,
+    });
+    let (join, miter_limit) = match line.join.as_ref() {
+        Some(ooxml_common::line::LineJoin::Round) => (Some("round".to_owned()), None),
+        Some(ooxml_common::line::LineJoin::Bevel) => (Some("bevel".to_owned()), None),
+        Some(ooxml_common::line::LineJoin::Miter { limit }) => (
+            Some("miter".to_owned()),
+            limit.map(|value| value as f64 / 100_000.0),
+        ),
+        None => (None, None),
+    };
+    let custom_dash = match line.dash.as_ref() {
+        Some(ooxml_common::line::LineDash::Custom(stops)) => stops
+            .iter()
+            .map(|stop| ShapeLineDashSegment {
+                // CT_DashStop values are percentages of the line width
+                // (§20.1.8.17-.18); core uses the same relative unit.
+                dash: stop.dash as f64 / 100_000.0,
+                space: stop.space as f64 / 100_000.0,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    DocxLineWireProperties {
+        stroke,
+        width,
+        fill,
+        dash: line.dash.as_ref().and_then(docx_line_dash),
+        custom_dash,
+        cap,
+        join,
+        miter_limit,
+        alignment: line
+            .alignment
+            .clone()
+            .filter(|value| matches!(value.as_str(), "ctr" | "in")),
+        compound: line
+            .compound
+            .clone()
+            .filter(|value| value.as_str() != "sng"),
+        head_end: line.head_end.as_ref().and_then(docx_line_end),
+        tail_end: line.tail_end.as_ref().and_then(docx_line_end),
+    }
 }
 
 /// Resolve a wps:style/a:fillRef into a concrete ShapeFill using the theme's
@@ -22887,6 +23027,32 @@ mod shape_preset_geometry_tests {
         )
     }
 
+    fn theme_with_complete_line_style() -> ThemeColors {
+        ThemeColors::parse(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <a:themeElements>
+                   <a:clrScheme name="t">
+                     <a:dk1><a:srgbClr val="000000"/></a:dk1>
+                     <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+                   </a:clrScheme>
+                   <a:fmtScheme name="s">
+                     <a:fillStyleLst/>
+                     <a:lnStyleLst>
+                       <a:ln w="25400" cap="rnd" cmpd="dbl" algn="in">
+                         <a:solidFill><a:srgbClr val="112233"/></a:solidFill>
+                         <a:prstDash val="lgDashDot"/>
+                         <a:miter lim="800000"/>
+                         <a:tailEnd type="triangle" w="lg" len="sm"/>
+                       </a:ln>
+                     </a:lnStyleLst>
+                     <a:effectStyleLst/>
+                     <a:bgFillStyleLst/>
+                   </a:fmtScheme>
+                 </a:themeElements>
+               </a:theme>"#,
+        )
+    }
+
     fn theme_with_concrete_fills() -> ThemeColors {
         ThemeColors::parse(
             r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
@@ -23037,6 +23203,82 @@ mod shape_preset_geometry_tests {
 
         assert_eq!(shape.stroke.as_deref(), Some("4472C4"));
         assert!((shape.stroke_width - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lnref_without_color_uses_fixed_theme_line_and_inherits_supported_properties() {
+        let shape = shape_with_sppr_and_style(
+            r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#,
+            r#"<wps:style><a:lnRef idx="1"/></wps:style>"#,
+            &theme_with_complete_line_style(),
+        );
+
+        assert_eq!(shape.stroke.as_deref(), Some("112233"));
+        assert!((shape.stroke_width - 2.0).abs() < 1e-6);
+        assert_eq!(shape.stroke_dash.as_deref(), Some("lgDashDot"));
+        assert_eq!(shape.stroke_cap.as_deref(), Some("round"));
+        assert_eq!(shape.stroke_join.as_deref(), Some("miter"));
+        assert_eq!(shape.stroke_miter_limit, Some(8.0));
+        assert_eq!(shape.stroke_alignment.as_deref(), Some("in"));
+        assert_eq!(shape.stroke_compound.as_deref(), Some("dbl"));
+        assert_eq!(
+            shape.tail_end.as_ref().map(|end| (
+                end.r#type.as_str(),
+                end.w.as_str(),
+                end.len.as_str()
+            )),
+            Some(("triangle", "lg", "sm")),
+        );
+    }
+
+    #[test]
+    fn local_line_width_overrides_theme_without_discarding_theme_paint_or_dash() {
+        let shape = shape_with_sppr_and_style(
+            r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+               <a:ln w="38100"><a:custDash><a:ds d="125000" sp="75000"/></a:custDash></a:ln>"#,
+            r#"<wps:style><a:lnRef idx="1"/></wps:style>"#,
+            &theme_with_complete_line_style(),
+        );
+
+        assert_eq!(shape.stroke.as_deref(), Some("112233"));
+        assert!((shape.stroke_width - 3.0).abs() < 1e-6);
+        assert_eq!(shape.stroke_dash, None);
+        assert_eq!(shape.stroke_custom_dash.len(), 1);
+        assert!((shape.stroke_custom_dash[0].dash - 1.25).abs() < 1e-6);
+        assert!((shape.stroke_custom_dash[0].space - 0.75).abs() < 1e-6);
+        assert_eq!(shape.stroke_cap.as_deref(), Some("round"));
+        assert_eq!(shape.stroke_join.as_deref(), Some("miter"));
+    }
+
+    #[test]
+    fn lnref_idx_zero_is_no_style_even_when_it_has_a_color_child() {
+        let shape = shape_with_sppr_and_style(
+            r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#,
+            r#"<wps:style><a:lnRef idx="0"><a:srgbClr val="FF0000"/></a:lnRef></wps:style>"#,
+            &theme_with_complete_line_style(),
+        );
+
+        assert_eq!(shape.stroke, None);
+        assert_eq!(shape.stroke_width, 0.0);
+    }
+
+    #[test]
+    fn local_gradient_line_paint_is_preserved_for_core_stroke_rendering() {
+        let shape = shape_with_sppr_and_style(
+            r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+               <a:ln w="12700"><a:gradFill><a:gsLst>
+                 <a:gs pos="0"><a:srgbClr val="112233"/></a:gs>
+                 <a:gs pos="100000"><a:srgbClr val="AABBCC"/></a:gs>
+               </a:gsLst><a:lin ang="5400000"/></a:gradFill></a:ln>"#,
+            "",
+            &ThemeColors::default(),
+        );
+
+        assert_eq!(shape.stroke.as_deref(), Some("AABBCC"));
+        assert!(matches!(
+            shape.stroke_fill,
+            Some(ShapeStrokeFill::Gradient { .. })
+        ));
     }
 
     #[test]

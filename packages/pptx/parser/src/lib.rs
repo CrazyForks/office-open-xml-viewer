@@ -1166,7 +1166,7 @@ pub(crate) fn read_zip_head(
 //  Table style data model
 // ===========================
 
-/// Resolved fills and borders extracted from a single <a:tblStyle> definition.
+/// Text component of one DrawingML `CT_TablePartStyle` (§21.1.3.11).
 #[derive(Debug, Clone, Default)]
 struct TableTextStyle {
     color: Option<String>,
@@ -1188,37 +1188,98 @@ impl TableTextStyle {
     }
 }
 
+/// Presence-preserving table-style line. `NoLine` is an authored
+/// `<a:ln><a:noFill/></a:ln>` or `<a:lnRef idx="0">`; it must clear a lower
+/// precedence role, while `Unspecified` inherits it.
+#[derive(Debug, Clone, Default)]
+enum TableLineStyle {
+    #[default]
+    Unspecified,
+    NoLine,
+    Stroke(Box<Stroke>),
+}
+
+impl TableLineStyle {
+    fn from_stroke(stroke: Option<Stroke>) -> Self {
+        stroke.map(Box::new).map(Self::Stroke).unwrap_or_default()
+    }
+
+    fn overlay(&mut self, role: &Self) {
+        if !matches!(role, Self::Unspecified) {
+            *self = role.clone();
+        }
+    }
+
+    fn apply_to(&self, target: &mut Option<Stroke>) {
+        match self {
+            Self::Unspecified => {}
+            Self::NoLine => *target = None,
+            Self::Stroke(stroke) => *target = Some((**stroke).clone()),
+        }
+    }
+}
+
+/// ECMA-376 `CT_TableCellBorderStyle` (§20.1.4.2.4): all six orthogonal and
+/// both diagonal members are retained on every one of the thirteen roles.
+#[derive(Debug, Clone, Default)]
+struct TableCellBorderStyle {
+    left: TableLineStyle,
+    right: TableLineStyle,
+    top: TableLineStyle,
+    bottom: TableLineStyle,
+    inside_h: TableLineStyle,
+    inside_v: TableLineStyle,
+    diagonal_tl: TableLineStyle,
+    diagonal_tr: TableLineStyle,
+}
+
+/// One of the thirteen `CT_TablePartStyle` roles in `CT_TableStyle`. Keeping
+/// fill, text, and borders together prevents vertical bands and corner roles
+/// from silently supporting only text while row roles support paint.
+#[derive(Debug, Clone, Default)]
+struct TablePartStyle {
+    fill: Option<Fill>,
+    text: TableTextStyle,
+    borders: TableCellBorderStyle,
+}
+
 #[derive(Debug, Clone, Default)]
 struct TableStyleDef {
-    whole_fill: Option<Fill>,
-    whole_inside_h: Option<Stroke>,
-    whole_inside_v: Option<Stroke>,
-    /// Outer top/bottom edge border (from wholeTbl tcBdr top/bottom)
-    whole_outer_h: Option<Stroke>,
-    /// Outer left/right edge border (from wholeTbl tcBdr left/right)
-    whole_outer_v: Option<Stroke>,
-    band1h_fill: Option<Fill>,
-    band2h_fill: Option<Fill>,
-    first_row_fill: Option<Fill>,
-    first_row_border_b: Option<Stroke>,
-    last_row_fill: Option<Fill>,
-    first_col_fill: Option<Fill>,
-    last_col_fill: Option<Fill>,
-    /// Conditional table text roles from `<a:tcTxStyle>`. `None` for bold/
-    /// italic means inherit (`def`), while explicit `off` is `Some(false)`.
-    whole_text: TableTextStyle,
-    band1h_text: TableTextStyle,
-    band2h_text: TableTextStyle,
-    band1v_text: TableTextStyle,
-    band2v_text: TableTextStyle,
-    first_row_text: TableTextStyle,
-    last_row_text: TableTextStyle,
-    first_col_text: TableTextStyle,
-    last_col_text: TableTextStyle,
-    nw_cell_text: TableTextStyle,
-    ne_cell_text: TableTextStyle,
-    sw_cell_text: TableTextStyle,
-    se_cell_text: TableTextStyle,
+    whole_tbl: TablePartStyle,
+    band1_h: TablePartStyle,
+    band2_h: TablePartStyle,
+    band1_v: TablePartStyle,
+    band2_v: TablePartStyle,
+    first_row: TablePartStyle,
+    last_row: TablePartStyle,
+    first_col: TablePartStyle,
+    last_col: TablePartStyle,
+    nw_cell: TablePartStyle,
+    ne_cell: TablePartStyle,
+    sw_cell: TablePartStyle,
+    se_cell: TablePartStyle,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TableStyleFlags {
+    first_row: bool,
+    last_row: bool,
+    first_col: bool,
+    last_col: bool,
+    band_row: bool,
+    band_col: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResolvedTableCellStyle {
+    fill: Option<Fill>,
+    text: TableTextStyle,
+    border_l: TableLineStyle,
+    border_r: TableLineStyle,
+    border_t: TableLineStyle,
+    border_b: TableLineStyle,
+    diagonal_tl: TableLineStyle,
+    diagonal_tr: TableLineStyle,
 }
 
 // ===========================
@@ -1494,7 +1555,7 @@ fn parse_slide(
     // placeholder colors) resolve against the override mapping (§20.1.6.8).
     // Otherwise fall back to the master bundle's values. (Master bullet colors
     // flow through `parsed_layout`, already override-adjusted by the caller.)
-    let theme: &HashMap<String, String> = eff.map(|e| &e.theme).unwrap_or(theme);
+    let theme: &PptxTheme = eff.map(|e| &e.theme).unwrap_or(theme);
     let master_xml: Option<&str> = master_xml.as_deref();
     let master_dir: &str = master_dir.as_str();
     let master_bg: Option<Fill> = match eff {
@@ -2113,7 +2174,7 @@ struct PresentationShared {
     slide_height: i64,
     slide_descriptors: Vec<SlideDescriptor>,
     pres_rels: HashMap<String, String>,
-    theme: HashMap<String, String>,
+    theme: PptxTheme,
     comment_authors: Option<HashMap<String, String>>,
     pres_master_path: Option<String>,
     master_cache: HashMap<String, ParsedMaster>,
@@ -2598,13 +2659,11 @@ fn produce_slide_unit_with_journal(
         // a clrMapOvr slide passes the OVERRIDE-adjusted pair so its layout colors
         // flip with the override (mirrors the master theme-dependent recompute
         // above), everything else is the frozen bundle maps.
-        let (layout_theme, layout_master_bullets): (
-            &HashMap<String, String>,
-            &HashMap<String, LevelBullets>,
-        ) = match effective_master.as_ref() {
-            Some(e) => (&e.theme, &e.master_level_bullets),
-            None => (&bundle.theme, &bundle.master_level_bullets),
-        };
+        let (layout_theme, layout_master_bullets): (&PptxTheme, &HashMap<String, LevelBullets>) =
+            match effective_master.as_ref() {
+                Some(e) => (&e.theme, &e.master_level_bullets),
+                None => (&bundle.theme, &bundle.master_level_bullets),
+            };
         // Build a `ParsedLayout` from a layout XML string with the resolved
         // theme/bullets and this bundle's remaining (theme-independent) maps.
         let build_parsed_layout = |lx: &str, zip: &mut PptxZip| -> ParsedLayout {
@@ -5981,12 +6040,12 @@ mod tests {
             _ => None,
         };
         assert_eq!(
-            solid(&def.whole_fill).as_deref(),
+            solid(&def.whole_tbl.fill).as_deref(),
             Some("FFFFFF"),
             "wholeTbl fill should be lt1 white"
         );
         assert_eq!(
-            solid(&def.first_row_fill).as_deref(),
+            solid(&def.first_row.fill).as_deref(),
             Some("B83903"),
             "firstRow header fill should be accent2 orange"
         );
@@ -5994,37 +6053,318 @@ mod tests {
         // ECMA-376 tint (val·input + (1-val)·white), giving a near-white wash —
         // NOT the saturated linear-lerp. 0.2·B83903 + 0.8·white = F1D7CD.
         assert_eq!(
-            solid(&def.band1h_fill).as_deref(),
+            solid(&def.band1_h.fill).as_deref(),
             Some("F1D7CD"),
             "band1H tint should be the literal near-white wash, not a saturated lerp"
         );
 
         // Text colours from tcTxStyle.
         assert_eq!(
-            def.whole_text.color.as_deref(),
+            def.whole_tbl.text.color.as_deref(),
             Some("000000"),
             "wholeTbl text colour should be dk1 black"
         );
         assert_eq!(
-            def.first_row_text.color.as_deref(),
+            def.first_row.text.color.as_deref(),
             Some("FFFFFF"),
             "firstRow header text colour should be lt1 white"
         );
 
         // firstRow `<a:tcTxStyle b="on">` → bold header.
         assert_eq!(
-            def.first_row_text.bold,
+            def.first_row.text.bold,
             Some(true),
             "firstRow header should be bold from tcTxStyle b=on"
         );
         assert_eq!(
-            def.whole_text.bold, None,
+            def.whole_tbl.text.bold, None,
             "b=def inherits instead of forcing off"
         );
-        assert_eq!(def.whole_text.italic, Some(true));
-        assert_eq!(def.band1h_text.color.as_deref(), Some("B83903"));
-        assert_eq!(def.band1h_text.bold, Some(true));
-        assert_eq!(def.nw_cell_text.bold, Some(false));
+        assert_eq!(def.whole_tbl.text.italic, Some(true));
+        assert_eq!(def.band1_h.text.color.as_deref(), Some("B83903"));
+        assert_eq!(def.band1_h.text.bold, Some(true));
+        assert_eq!(def.nw_cell.text.bold, Some(false));
+    }
+
+    #[test]
+    fn table_style_preserves_vertical_bands_corners_and_all_eight_border_roles() {
+        let theme = HashMap::new();
+        let xml = r#"<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:tblStyle styleId="{FULL}" styleName="Full">
+            <a:wholeTbl><a:tcStyle><a:tcBdr>
+              <a:left><a:ln w="100"><a:solidFill><a:srgbClr val="110000"/></a:solidFill></a:ln></a:left>
+              <a:right><a:ln w="200"><a:solidFill><a:srgbClr val="220000"/></a:solidFill></a:ln></a:right>
+              <a:top><a:ln w="300"><a:solidFill><a:srgbClr val="330000"/></a:solidFill></a:ln></a:top>
+              <a:bottom><a:ln w="400"><a:solidFill><a:srgbClr val="440000"/></a:solidFill></a:ln></a:bottom>
+              <a:insideH><a:ln w="500"><a:solidFill><a:srgbClr val="550000"/></a:solidFill></a:ln></a:insideH>
+              <a:insideV><a:ln w="600"><a:solidFill><a:srgbClr val="660000"/></a:solidFill></a:ln></a:insideV>
+              <a:tl2br><a:ln w="700"><a:solidFill><a:srgbClr val="770000"/></a:solidFill></a:ln></a:tl2br>
+              <a:tr2bl><a:ln w="800"><a:solidFill><a:srgbClr val="880000"/></a:solidFill></a:ln></a:tr2bl>
+            </a:tcBdr></a:tcStyle></a:wholeTbl>
+            <a:band1V><a:tcStyle><a:fill><a:solidFill><a:srgbClr val="00AA00"/></a:solidFill></a:fill></a:tcStyle></a:band1V>
+            <a:band2V><a:tcStyle><a:fill><a:solidFill><a:srgbClr val="00BB00"/></a:solidFill></a:fill></a:tcStyle></a:band2V>
+            <a:nwCell><a:tcStyle><a:tcBdr><a:bottom><a:ln><a:noFill/></a:ln></a:bottom></a:tcBdr>
+              <a:fill><a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill></a:fill></a:tcStyle></a:nwCell>
+          </a:tblStyle>
+        </a:tblStyleLst>"#;
+        let style = parse_table_styles_xml(xml, &theme)
+            .remove("{FULL}")
+            .expect("style parsed");
+        let solid_color = |fill: &Option<Fill>| match fill {
+            Some(Fill::Solid { color }) => Some(color.clone()),
+            _ => None,
+        };
+        assert_eq!(solid_color(&style.band1_v.fill).as_deref(), Some("00AA00"));
+        assert_eq!(solid_color(&style.band2_v.fill).as_deref(), Some("00BB00"));
+        assert_eq!(solid_color(&style.nw_cell.fill).as_deref(), Some("ABCDEF"));
+        assert!(matches!(
+            style.nw_cell.borders.bottom,
+            TableLineStyle::NoLine
+        ));
+        for border in [
+            &style.whole_tbl.borders.left,
+            &style.whole_tbl.borders.right,
+            &style.whole_tbl.borders.top,
+            &style.whole_tbl.borders.bottom,
+            &style.whole_tbl.borders.inside_h,
+            &style.whole_tbl.borders.inside_v,
+            &style.whole_tbl.borders.diagonal_tl,
+            &style.whole_tbl.borders.diagonal_tr,
+        ] {
+            assert!(matches!(border, TableLineStyle::Stroke(_)));
+        }
+    }
+
+    #[test]
+    fn table_style_refs_use_complete_theme_fill_and_line_recipes() {
+        let theme = crate::theme::PptxTheme::from_xml(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements>
+                <a:clrScheme name="table"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:accent1><a:srgbClr val="112233"/></a:accent1></a:clrScheme>
+                <a:fontScheme name="table"><a:majorFont/><a:minorFont/></a:fontScheme>
+                <a:fmtScheme name="table">
+                  <a:fillStyleLst><a:gradFill><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"/></a:gs><a:gs pos="100000"><a:srgbClr val="ABCDEF"/></a:gs></a:gsLst><a:lin ang="5400000"/></a:gradFill></a:fillStyleLst>
+                  <a:lnStyleLst><a:ln w="25400" cap="rnd"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="dash"/><a:round/></a:ln><a:ln><a:noFill/></a:ln></a:lnStyleLst>
+                  <a:effectStyleLst/><a:bgFillStyleLst/>
+                </a:fmtScheme>
+              </a:themeElements>
+            </a:theme>"#,
+        );
+        let styles = parse_table_styles_xml(
+            r#"<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:tblStyle styleId="{REF}"><a:wholeTbl><a:tcStyle><a:tcBdr><a:left><a:lnRef idx="1"><a:srgbClr val="445566"/></a:lnRef></a:left></a:tcBdr><a:fillRef idx="1"><a:srgbClr val="778899"/></a:fillRef></a:tcStyle></a:wholeTbl><a:firstRow><a:tcStyle><a:tcBdr><a:left><a:lnRef idx="2"/></a:left></a:tcBdr></a:tcStyle></a:firstRow></a:tblStyle></a:tblStyleLst>"#,
+            &theme,
+        );
+        let style = styles.get("{REF}").expect("table style");
+        assert!(
+            matches!(style.whole_tbl.fill, Some(Fill::Gradient { ref stops, angle, .. }) if stops[0].color == "778899" && angle == 90.0)
+        );
+        assert!(
+            matches!(style.whole_tbl.borders.left, TableLineStyle::Stroke(ref stroke) if stroke.color == "445566" && stroke.width == 25400 && stroke.dash_style.as_deref() == Some("dash") && stroke.line_cap.as_deref() == Some("round"))
+        );
+        assert!(matches!(
+            style.first_row.borders.left,
+            TableLineStyle::NoLine
+        ));
+        let resolved = resolve_table_cell_style(
+            style,
+            TableStyleFlags {
+                first_row: true,
+                ..Default::default()
+            },
+            0,
+            0,
+            2,
+            2,
+        );
+        assert!(matches!(resolved.border_l, TableLineStyle::NoLine));
+    }
+
+    #[test]
+    fn table_style_cascade_orders_bands_conditionals_and_corner_and_keeps_asymmetric_edges() {
+        let mut style = TableStyleDef::default();
+        let solid_color = |fill: &Option<Fill>| match fill {
+            Some(Fill::Solid { color }) => Some(color.clone()),
+            _ => None,
+        };
+        let fill = |color: &str| {
+            Some(Fill::Solid {
+                color: color.to_owned(),
+            })
+        };
+        let line = |color: &str| {
+            TableLineStyle::Stroke(Box::new(Stroke {
+                color: color.to_owned(),
+                width: 100,
+                fill: None,
+                dash_style: None,
+                custom_dash: Vec::new(),
+                line_cap: None,
+                line_join: None,
+                miter_limit: None,
+                alignment: None,
+                head_end: None,
+                tail_end: None,
+                cmpd: None,
+            }))
+        };
+        style.whole_tbl.fill = fill("WHOLE");
+        style.whole_tbl.borders.left = line("LEFT");
+        style.whole_tbl.borders.right = line("RIGHT");
+        style.whole_tbl.borders.top = line("TOP");
+        style.whole_tbl.borders.bottom = line("BOTTOM");
+        style.whole_tbl.borders.inside_h = line("INSIDE-H");
+        style.whole_tbl.borders.inside_v = line("INSIDE-V");
+        style.band1_h.fill = fill("BAND-ROW");
+        style.band1_v.fill = fill("BAND-COL");
+        style.first_row.fill = fill("FIRST-ROW");
+        style.first_col.fill = fill("FIRST-COL");
+        style.nw_cell.fill = fill("CORNER");
+        style.nw_cell.borders.bottom = TableLineStyle::NoLine;
+
+        let resolved = resolve_table_cell_style(
+            &style,
+            TableStyleFlags {
+                first_row: true,
+                first_col: true,
+                band_row: true,
+                band_col: true,
+                ..Default::default()
+            },
+            0,
+            0,
+            3,
+            3,
+        );
+        assert_eq!(solid_color(&resolved.fill).as_deref(), Some("CORNER"));
+        assert!(matches!(resolved.border_b, TableLineStyle::NoLine));
+        assert!(
+            matches!(resolved.border_l, TableLineStyle::Stroke(ref stroke) if stroke.color == "LEFT")
+        );
+        assert!(
+            matches!(resolved.border_t, TableLineStyle::Stroke(ref stroke) if stroke.color == "TOP")
+        );
+
+        let bottom_right = resolve_table_cell_style(&style, TableStyleFlags::default(), 2, 2, 3, 3);
+        assert!(
+            matches!(bottom_right.border_r, TableLineStyle::Stroke(ref stroke) if stroke.color == "RIGHT")
+        );
+        assert!(
+            matches!(bottom_right.border_b, TableLineStyle::Stroke(ref stroke) if stroke.color == "BOTTOM")
+        );
+
+        let first_vertical_band = resolve_table_cell_style(
+            &style,
+            TableStyleFlags {
+                band_col: true,
+                ..Default::default()
+            },
+            1,
+            0,
+            3,
+            3,
+        );
+        assert_eq!(
+            solid_color(&first_vertical_band.fill).as_deref(),
+            Some("BAND-COL")
+        );
+        let second_vertical_band = resolve_table_cell_style(
+            &style,
+            TableStyleFlags {
+                band_col: true,
+                ..Default::default()
+            },
+            1,
+            1,
+            3,
+            3,
+        );
+        assert_eq!(
+            solid_color(&second_vertical_band.fill).as_deref(),
+            Some("WHOLE"),
+            "an unspecified band2V inherits wholeTbl"
+        );
+    }
+
+    /// ECMA-376 §21.1.3.17 (`CT_TableCellProperties`) — direct cell fill and
+    /// line choices are the final formatting tier. Explicit noFill/no-line must
+    /// suppress, rather than inherit, a lower-precedence table-style value.
+    #[test]
+    fn table_cell_direct_formatting_overrides_style_including_explicit_no_line() {
+        let xml = r#"<a:tc xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:tcPr>
+            <a:lnL><a:noFill/></a:lnL>
+            <a:lnR w="250"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:lnR>
+            <a:lnTlToBr><a:noFill/></a:lnTlToBr>
+            <a:noFill/>
+          </a:tcPr>
+        </a:tc>"#;
+        let doc = roxmltree::Document::parse(xml).expect("valid table cell");
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let mut zip = PptxZip::new(Cursor::new(empty_zip_bytes())).expect("empty OOXML zip");
+        let mut cell = parse_table_cell(doc.root_element(), &theme, &rels, "ppt/slides", &mut zip);
+
+        assert!(cell.has_direct_fill);
+        assert!(cell.has_direct_border_l);
+        assert!(cell.has_direct_border_r);
+        assert!(cell.has_direct_diagonal_tl);
+        assert!(matches!(cell.fill, Some(Fill::None)));
+        assert!(cell.border_l.is_none(), "direct no-line paints no stroke");
+        assert_eq!(
+            cell.border_r.as_ref().map(|line| line.color.as_str()),
+            Some("0000FF")
+        );
+
+        let style_line = |color: &str| {
+            TableLineStyle::Stroke(Box::new(Stroke {
+                color: color.to_owned(),
+                width: 100,
+                fill: None,
+                dash_style: None,
+                custom_dash: Vec::new(),
+                line_cap: None,
+                line_join: None,
+                miter_limit: None,
+                alignment: None,
+                head_end: None,
+                tail_end: None,
+                cmpd: None,
+            }))
+        };
+        let effective = ResolvedTableCellStyle {
+            fill: Some(Fill::Solid {
+                color: "FF0000".to_owned(),
+            }),
+            border_l: style_line("STYLE-LEFT"),
+            border_r: style_line("STYLE-RIGHT"),
+            border_t: style_line("STYLE-TOP"),
+            border_b: style_line("STYLE-BOTTOM"),
+            diagonal_tl: style_line("STYLE-DIAGONAL"),
+            ..Default::default()
+        };
+        apply_resolved_table_cell_style(&mut cell, effective);
+
+        assert!(matches!(cell.fill, Some(Fill::None)));
+        assert!(
+            cell.border_l.is_none(),
+            "direct no-line suppresses style line"
+        );
+        assert_eq!(
+            cell.border_r.as_ref().map(|line| line.color.as_str()),
+            Some("0000FF")
+        );
+        assert!(
+            cell.diagonal_tl.is_none(),
+            "direct diagonal no-line suppresses style line"
+        );
+        assert_eq!(
+            cell.border_t.as_ref().map(|line| line.color.as_str()),
+            Some("STYLE-TOP")
+        );
+        assert_eq!(
+            cell.border_b.as_ref().map(|line| line.color.as_str()),
+            Some("STYLE-BOTTOM")
+        );
     }
 
     /// ECMA-376 §21.1.2.1.1 — `<a:bodyPr rtlCol="1">` lays out a multi-column
@@ -7525,18 +7865,28 @@ mod tests {
         let doc = roxmltree::Document::parse(pic_xml).unwrap();
         let mut rels = HashMap::new();
         rels.insert("rIdPng".to_owned(), "../media/image1.png".to_owned());
-        let mut theme = HashMap::from([
-            ("accent1".to_owned(), "112233".to_owned()),
-            ("accent2".to_owned(), "445566".to_owned()),
-            ("+lnRef-2".to_owned(), "19050".to_owned()),
-        ]);
-        theme.insert(
-            "+effectStyle-1".to_owned(),
-            r#"<a:effectStyle>
-              <a:effectLst><a:outerShdw blurRad="12700"><a:schemeClr val="phClr"/></a:outerShdw></a:effectLst>
-              <a:scene3d><a:camera prst="orthographicFront"/></a:scene3d>
-              <a:sp3d extrusionH="25400"><a:extrusionClr><a:schemeClr val="phClr"/></a:extrusionClr></a:sp3d>
-            </a:effectStyle>"#.to_owned(),
+        let theme = PptxTheme::from_xml(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements>
+                <a:clrScheme name="Test">
+                  <a:accent1><a:srgbClr val="112233"/></a:accent1>
+                  <a:accent2><a:srgbClr val="445566"/></a:accent2>
+                </a:clrScheme>
+                <a:fmtScheme name="Test">
+                  <a:fillStyleLst/>
+                  <a:lnStyleLst>
+                    <a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+                    <a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+                  </a:lnStyleLst>
+                  <a:effectStyleLst><a:effectStyle>
+                    <a:effectLst><a:outerShdw blurRad="12700"><a:schemeClr val="phClr"/></a:outerShdw></a:effectLst>
+                    <a:scene3d><a:camera prst="orthographicFront"/></a:scene3d>
+                    <a:sp3d extrusionH="25400"><a:extrusionClr><a:schemeClr val="phClr"/></a:extrusionClr></a:sp3d>
+                  </a:effectStyle></a:effectStyleLst>
+                  <a:bgFillStyleLst/>
+                </a:fmtScheme>
+              </a:themeElements>
+            </a:theme>"#,
         );
         let data = build_blip_media_zip(b"png", b"<svg/>");
         let mut zip = PptxZip::new(Cursor::new(data)).unwrap();

@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Fill, Stroke, TableStyleDef, TableTextStyle};
+use crate::{Fill, Stroke, TableLineStyle, TableStyleDef, TableTextStyle};
 use ooxml_common::color::{apply_tint_channels, TintMode};
 
 // ── Color helpers ────────────────────────────────────────────────────────────
@@ -154,11 +154,84 @@ fn stroke(color: &str) -> Stroke {
         width: 12700,
         fill: None,
         dash_style: None,
+        custom_dash: Vec::new(),
         line_cap: None,
+        line_join: None,
+        miter_limit: None,
+        alignment: None,
         head_end: None,
         tail_end: None,
         cmpd: None,
     }
+}
+
+// Built-in presets predate the lossless thirteen-role model. Keep their
+// declarative definitions compact while mapping each legacy shorthand onto the
+// exact CT_TablePartStyle member now used by XML-backed styles.
+macro_rules! set_table_style_field {
+    ($style:ident, whole_fill, $value:expr) => {
+        $style.whole_tbl.fill = $value
+    };
+    ($style:ident, band1h_fill, $value:expr) => {
+        $style.band1_h.fill = $value
+    };
+    ($style:ident, band2h_fill, $value:expr) => {
+        $style.band2_h.fill = $value
+    };
+    ($style:ident, first_row_fill, $value:expr) => {
+        $style.first_row.fill = $value
+    };
+    ($style:ident, last_row_fill, $value:expr) => {
+        $style.last_row.fill = $value
+    };
+    ($style:ident, first_col_fill, $value:expr) => {
+        $style.first_col.fill = $value
+    };
+    ($style:ident, last_col_fill, $value:expr) => {
+        $style.last_col.fill = $value
+    };
+    ($style:ident, whole_inside_h, $value:expr) => {
+        $style.whole_tbl.borders.inside_h = TableLineStyle::from_stroke($value)
+    };
+    ($style:ident, whole_inside_v, $value:expr) => {
+        $style.whole_tbl.borders.inside_v = TableLineStyle::from_stroke($value)
+    };
+    ($style:ident, whole_outer_h, $value:expr) => {{
+        let line = TableLineStyle::from_stroke($value);
+        $style.whole_tbl.borders.top = line.clone();
+        $style.whole_tbl.borders.bottom = line;
+    }};
+    ($style:ident, whole_outer_v, $value:expr) => {{
+        let line = TableLineStyle::from_stroke($value);
+        $style.whole_tbl.borders.left = line.clone();
+        $style.whole_tbl.borders.right = line;
+    }};
+    ($style:ident, first_row_border_b, $value:expr) => {
+        $style.first_row.borders.bottom = TableLineStyle::from_stroke($value)
+    };
+    ($style:ident, whole_text, $value:expr) => {
+        $style.whole_tbl.text = $value
+    };
+    ($style:ident, first_row_text, $value:expr) => {
+        $style.first_row.text = $value
+    };
+    ($style:ident, last_row_text, $value:expr) => {
+        $style.last_row.text = $value
+    };
+    ($style:ident, first_col_text, $value:expr) => {
+        $style.first_col.text = $value
+    };
+    ($style:ident, last_col_text, $value:expr) => {
+        $style.last_col.text = $value
+    };
+}
+
+macro_rules! table_style {
+    ($($field:ident: $value:expr),* $(,)?) => {{
+        let mut style = TableStyleDef::default();
+        $(set_table_style_field!(style, $field, $value);)*
+        style
+    }};
 }
 
 // ── Family generators ────────────────────────────────────────────────────────
@@ -172,15 +245,14 @@ fn themed_style_1(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
     let first_row_fill = Some(solid(&a));
     let band1h_color = apply_transforms(&a, &[("alpha", 40000)]);
     let band1h_fill = Some(solid(&band1h_color));
-    TableStyleDef {
-        first_row_fill,
-        band1h_fill,
+    table_style! {
+        first_row_fill: first_row_fill,
+        band1h_fill: band1h_fill,
         whole_outer_h: border.clone(),
         whole_outer_v: border.clone(),
         whole_inside_h: border.clone(),
         whole_inside_v: border,
         first_row_border_b: Some(stroke(&lt)),
-        ..Default::default()
     }
 }
 
@@ -189,24 +261,22 @@ fn themed_style_2(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
         let lt = lt1(theme).unwrap_or_else(|| "FFFFFF".into());
         let outer_color = apply_transforms(&a, &[("tint", 50000)]);
         let outer = Some(stroke(&outer_color));
-        TableStyleDef {
+        table_style! {
             whole_fill: Some(solid(&a)),
             whole_outer_h: outer.clone(),
             whole_outer_v: outer,
             first_row_border_b: Some(stroke(&lt)),
-            ..Default::default()
         }
     } else {
         let tx = dk1(theme).unwrap_or_else(|| "000000".into());
         let outer_color = apply_transforms(&tx, &[("tint", 50000)]);
         let outer = Some(stroke(&outer_color));
         let inside = Some(stroke(&tx));
-        TableStyleDef {
+        table_style! {
             whole_outer_h: outer.clone(),
             whole_outer_v: outer,
             whole_inside_h: inside.clone(),
             whole_inside_v: inside,
-            ..Default::default()
         }
     }
 }
@@ -216,11 +286,10 @@ fn light_style_1(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Tab
         .or_else(|| dk1(theme))
         .unwrap_or_else(|| "000000".into());
     let band1h_color = apply_transforms(&a, &[("alpha", 20000)]);
-    TableStyleDef {
+    table_style! {
         band1h_fill: Some(solid(&band1h_color)),
         whole_outer_h: Some(stroke(&a)),
         first_row_border_b: Some(stroke(&a)),
-        ..Default::default()
     }
 }
 
@@ -229,11 +298,10 @@ fn light_style_2(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Tab
         .or_else(|| dk1(theme))
         .unwrap_or_else(|| "000000".into());
     let outer = Some(stroke(&a));
-    TableStyleDef {
+    table_style! {
         first_row_fill: Some(solid(&a)),
         whole_outer_h: outer.clone(),
         whole_outer_v: outer,
-        ..Default::default()
     }
 }
 
@@ -243,14 +311,13 @@ fn light_style_3(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Tab
         .unwrap_or_else(|| "000000".into());
     let border = Some(stroke(&a));
     let band1h_color = apply_transforms(&a, &[("alpha", 20000)]);
-    TableStyleDef {
+    table_style! {
         band1h_fill: Some(solid(&band1h_color)),
         whole_outer_h: border.clone(),
         whole_outer_v: border.clone(),
         whole_inside_h: border.clone(),
         whole_inside_v: border,
         first_row_border_b: Some(stroke(&a)),
-        ..Default::default()
     }
 }
 
@@ -261,7 +328,7 @@ fn medium_style_1(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
     let lt = lt1(theme).unwrap_or_else(|| "FFFFFF".into());
     let border = Some(stroke(&a));
     let band1h_color = apply_transforms(&a, &[("tint", 20000)]);
-    TableStyleDef {
+    table_style! {
         whole_fill: Some(solid(&lt)),
         first_row_fill: Some(solid(&a)),
         last_row_fill: Some(solid(&lt)),
@@ -269,7 +336,6 @@ fn medium_style_1(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
         whole_outer_h: border.clone(),
         whole_outer_v: border,
         whole_inside_h: Some(stroke(&a)),
-        ..Default::default()
     }
 }
 
@@ -282,7 +348,7 @@ fn medium_style_2(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
     let border = Some(stroke(&lt));
     let whole_color = apply_transforms(&a, &[("tint", 20000)]);
     let band1h_color = apply_transforms(&a, &[("tint", 40000)]);
-    TableStyleDef {
+    table_style! {
         whole_fill: Some(solid(&whole_color)),
         first_row_fill: Some(solid(&a)),
         last_row_fill: Some(solid(&a)),
@@ -318,7 +384,6 @@ fn medium_style_2(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
             bold: Some(true),
             ..Default::default()
         },
-        ..Default::default()
     }
 }
 
@@ -329,7 +394,7 @@ fn medium_style_3(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
     let dk = dk1(theme).unwrap_or_else(|| "000000".into());
     let lt = lt1(theme).unwrap_or_else(|| "FFFFFF".into());
     let band1h_color = apply_transforms(&dk, &[("tint", 20000)]);
-    TableStyleDef {
+    table_style! {
         whole_fill: Some(solid(&lt)),
         first_row_fill: Some(solid(&a)),
         last_row_fill: Some(solid(&lt)),
@@ -338,7 +403,6 @@ fn medium_style_3(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
         band1h_fill: Some(solid(&band1h_color)),
         whole_outer_h: Some(stroke(&dk)),
         first_row_border_b: Some(stroke(&dk)),
-        ..Default::default()
     }
 }
 
@@ -352,7 +416,7 @@ fn medium_style_4(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
     let first_row_color = apply_transforms(&a, &[("tint", 20000)]);
     let last_row_color = apply_transforms(&dk, &[("tint", 20000)]);
     let band1h_color = apply_transforms(&a, &[("tint", 40000)]);
-    TableStyleDef {
+    table_style! {
         whole_fill: Some(solid(&whole_color)),
         first_row_fill: Some(solid(&first_row_color)),
         last_row_fill: Some(solid(&last_row_color)),
@@ -361,7 +425,6 @@ fn medium_style_4(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
         whole_outer_v: border.clone(),
         whole_inside_h: border.clone(),
         whole_inside_v: border,
-        ..Default::default()
     }
 }
 
@@ -372,7 +435,7 @@ fn dark_style_1(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Tabl
         let whole_color = apply_transforms(&a, &[("shade", 20000)]);
         let band1h_color = apply_transforms(&a, &[("shade", 40000)]);
         let col_color = apply_transforms(&a, &[("shade", 60000)]);
-        TableStyleDef {
+        table_style! {
             whole_fill: Some(solid(&whole_color)),
             first_row_fill: Some(solid(&dk)),
             last_row_fill: Some(solid(&col_color)),
@@ -380,7 +443,6 @@ fn dark_style_1(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Tabl
             last_col_fill: Some(solid(&col_color)),
             band1h_fill: Some(solid(&band1h_color)),
             first_row_border_b: Some(stroke(&lt)),
-            ..Default::default()
         }
     } else {
         let dk = dk1(theme).unwrap_or_else(|| "000000".into());
@@ -388,7 +450,7 @@ fn dark_style_1(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Tabl
         let whole_color = apply_transforms(&dk, &[("tint", 20000)]);
         let band1h_color = apply_transforms(&dk, &[("tint", 40000)]);
         let col_color = apply_transforms(&dk, &[("tint", 60000)]);
-        TableStyleDef {
+        table_style! {
             whole_fill: Some(solid(&whole_color)),
             first_row_fill: Some(solid(&dk)),
             last_row_fill: Some(solid(&col_color)),
@@ -396,7 +458,6 @@ fn dark_style_1(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Tabl
             last_col_fill: Some(solid(&col_color)),
             band1h_fill: Some(solid(&band1h_color)),
             first_row_border_b: Some(stroke(&lt)),
-            ..Default::default()
         }
     }
 }
@@ -420,12 +481,11 @@ fn dark_style_2(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Tabl
     let whole_color = apply_transforms(&a, &[("tint", 20000)]);
     let band1h_color = apply_transforms(&a, &[("tint", 40000)]);
     let last_row_color = apply_transforms(&a, &[("tint", 20000)]);
-    TableStyleDef {
+    table_style! {
         whole_fill: Some(solid(&whole_color)),
         first_row_fill: Some(solid(&first_row_hex)),
         last_row_fill: Some(solid(&last_row_color)),
         band1h_fill: Some(solid(&band1h_color)),
-        ..Default::default()
     }
 }
 
@@ -883,17 +943,17 @@ mod tests {
         let style = lookup_builtin_table_style("{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}", &theme)
             .expect("known PowerPoint table style");
 
-        assert_eq!(solid_color(&style.first_row_fill), Some("4F81BD"));
-        assert_eq!(solid_color(&style.whole_fill), Some("DCE6F2"));
-        assert_eq!(solid_color(&style.band1h_fill), Some("B9CDE5"));
-        assert_eq!(style.first_row_text.color.as_deref(), Some("FFFFFF"));
-        assert_eq!(style.first_row_text.bold, Some(true));
-        assert_eq!(style.whole_text.color.as_deref(), Some("000000"));
-        assert_eq!(style.last_row_text.color.as_deref(), Some("FFFFFF"));
-        assert_eq!(style.first_col_text.color.as_deref(), Some("FFFFFF"));
-        assert_eq!(style.last_col_text.color.as_deref(), Some("FFFFFF"));
-        assert_eq!(style.last_row_text.bold, Some(true));
-        assert_eq!(style.first_col_text.bold, Some(true));
-        assert_eq!(style.last_col_text.bold, Some(true));
+        assert_eq!(solid_color(&style.first_row.fill), Some("4F81BD"));
+        assert_eq!(solid_color(&style.whole_tbl.fill), Some("DCE6F2"));
+        assert_eq!(solid_color(&style.band1_h.fill), Some("B9CDE5"));
+        assert_eq!(style.first_row.text.color.as_deref(), Some("FFFFFF"));
+        assert_eq!(style.first_row.text.bold, Some(true));
+        assert_eq!(style.whole_tbl.text.color.as_deref(), Some("000000"));
+        assert_eq!(style.last_row.text.color.as_deref(), Some("FFFFFF"));
+        assert_eq!(style.first_col.text.color.as_deref(), Some("FFFFFF"));
+        assert_eq!(style.last_col.text.color.as_deref(), Some("FFFFFF"));
+        assert_eq!(style.last_row.text.bold, Some(true));
+        assert_eq!(style.first_col.text.bold, Some(true));
+        assert_eq!(style.last_col.text.bold, Some(true));
     }
 }

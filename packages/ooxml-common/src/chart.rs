@@ -791,6 +791,25 @@ pub trait ColorResolver {
     /// and applies the surrounding lumMod/lumOff/tint/shade transforms.
     fn resolve_solid_fill(&self, node: Node) -> Option<String>;
 
+    /// Resolve a theme scheme slot to its base color (no leading `#`). Chart
+    /// parts can carry their own `<c:clrMapOvr>` (§21.2.2.30), whose
+    /// `CT_ColorMapping` attributes remap logical names such as `accent1` to a
+    /// scheme slot such as `accent2`. The shared chart parser performs that
+    /// logical-name remapping; the host still owns the theme storage lookup.
+    ///
+    /// Resolvers that do not expose a theme palette may keep the default. The
+    /// chart-local wrapper then falls back to their ordinary fill resolver.
+    fn resolve_scheme_color(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    /// Color-transform behavior used after resolving a chart-local mapped
+    /// scheme color. Charts use the PowerPoint/Excel DrawingML behavior by
+    /// default; a host with different semantics can override it.
+    fn tint_mode(&self) -> crate::color::TintMode {
+        crate::color::TintMode::PowerPointLinear
+    }
+
     /// Resolve the first `<a:solidFill>` among `parent`'s **direct children** to
     /// a hex string (no leading `#`) using the full DrawingML color grammar,
     /// including `lumMod`/`lumOff`/`tint`/`shade` transforms.
@@ -847,6 +866,95 @@ pub trait ColorResolver {
     /// a solid hex or `noFill` → `None` — regardless of this default.)
     fn default_chart_bg(&self) -> Option<String> {
         None
+    }
+}
+
+/// The direct `CT_ColorMapping` carried by `<c:chartSpace><c:clrMapOvr>`
+/// (ECMA-376 §21.2.2.30; `dml-chart.xsd::CT_ChartSpace`). Unlike PresentationML
+/// `<p:clrMapOvr>`, this element is not a `CT_ColorMappingOverride` choice: its
+/// twelve logical-to-scheme attributes live directly on the chart element.
+#[derive(Debug)]
+struct ChartColorMapping {
+    entries: Vec<(String, String)>,
+}
+
+impl ChartColorMapping {
+    fn from_chart_space(chart_root: Node) -> Option<Self> {
+        let node = child(chart_root, "clrMapOvr")?;
+        let entries = crate::color::SCHEME_DEFAULT_SLOTS
+            .iter()
+            .filter_map(|(logical, _)| {
+                node.attribute(*logical)
+                    .map(|slot| ((*logical).to_owned(), slot.to_owned()))
+            })
+            .collect();
+        Some(Self { entries })
+    }
+
+    fn map<'a>(&'a self, logical: &'a str) -> &'a str {
+        self.entries
+            .iter()
+            .find(|(name, _)| name == logical)
+            .map(|(_, slot)| slot.as_str())
+            .unwrap_or(logical)
+    }
+}
+
+/// Chart-scoped resolver that applies `c:clrMapOvr` before delegating theme
+/// slot lookup to the pptx/xlsx host resolver. Keeping this wrapper here makes
+/// the mapping behavior identical for both package formats.
+struct ChartMappedColorResolver<'a> {
+    base: &'a dyn ColorResolver,
+    mapping: ChartColorMapping,
+}
+
+impl crate::color::ThemeResolver for ChartMappedColorResolver<'_> {
+    fn resolve_scheme_color(&self, logical: &str) -> Option<String> {
+        let mapped = self.mapping.map(logical);
+        self.base.resolve_scheme_color(mapped)
+    }
+}
+
+impl ColorResolver for ChartMappedColorResolver<'_> {
+    fn resolve_solid_fill(&self, node: Node) -> Option<String> {
+        crate::color::parse_color_node(node, self, self.base.tint_mode())
+            .or_else(|| self.base.resolve_solid_fill(node))
+    }
+
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        crate::color::ThemeResolver::resolve_scheme_color(self, name)
+    }
+
+    fn tint_mode(&self) -> crate::color::TintMode {
+        self.base.tint_mode()
+    }
+
+    fn resolve_shape_fill(&self, parent: Node) -> Option<String> {
+        parent
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+            .and_then(|fill| self.resolve_solid_fill(fill))
+            .or_else(|| self.base.resolve_shape_fill(parent))
+    }
+
+    fn theme_major_font_latin(&self) -> Option<String> {
+        self.base.theme_major_font_latin()
+    }
+
+    fn theme_minor_font_latin(&self) -> Option<String> {
+        self.base.theme_minor_font_latin()
+    }
+
+    fn resolve_series_accent(&self, idx: usize) -> Option<String> {
+        let logical = format!("accent{}", idx % 6 + 1);
+        let mapped = self.mapping.map(&logical);
+        self.base
+            .resolve_scheme_color(mapped)
+            .or_else(|| self.base.resolve_series_accent(idx))
+    }
+
+    fn default_chart_bg(&self) -> Option<String> {
+        self.base.default_chart_bg()
     }
 }
 
@@ -3329,6 +3437,15 @@ pub fn parse_chart_part_with_references(
     references: &mut dyn ChartReferenceResolver,
 ) -> Option<ChartModel> {
     let root = chart_root;
+    let mapped_resolver =
+        ChartColorMapping::from_chart_space(chart_root).map(|mapping| ChartMappedColorResolver {
+            base: color_resolver,
+            mapping,
+        });
+    let color_resolver: &dyn ColorResolver = mapped_resolver
+        .as_ref()
+        .map(|resolver| resolver as &dyn ColorResolver)
+        .unwrap_or(color_resolver);
 
     // Determine chart type by finding the first recognized chart element
     let find_chart = |name: &str| {
@@ -5665,6 +5782,17 @@ mod tests {
             }
         }
 
+        fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+            match name {
+                "accent1" => Some("4472C4".to_string()),
+                "accent2" => Some("ED7D31".to_string()),
+                "accent3" => Some("A5A5A5".to_string()),
+                "tx1" | "dk1" => Some("000000".to_string()),
+                "bg1" | "lt1" => Some("FFFFFF".to_string()),
+                _ => None,
+            }
+        }
+
         fn theme_major_font_latin(&self) -> Option<String> {
             Some("Calibri Light".to_string())
         }
@@ -5683,6 +5811,39 @@ mod tests {
 
     fn chart_space_of(xml: &str) -> Document<'_> {
         Document::parse(xml).expect("parse chartSpace fixture")
+    }
+
+    /// §21.2.2.30 / `CT_ChartSpace`: chart-local `clrMapOvr` is a direct
+    /// `CT_ColorMapping`. It replaces the application's logical color mapping,
+    /// so an authored `schemeClr accent1` resolves through the declared
+    /// `accent1=accent2` slot mapping for both pptx and xlsx callers.
+    #[test]
+    fn chart_color_map_override_remaps_explicit_and_default_series_accents() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:clrMapOvr bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2"
+                accent1="accent2" accent2="accent2" accent3="accent3"
+                accent4="accent4" accent5="accent5" accent6="accent6"
+                hlink="hlink" folHlink="folHlink"/>
+              <c:chart><c:plotArea><c:barChart>
+                <c:barDir val="col"/><c:grouping val="clustered"/>
+                <c:ser><c:idx val="0"/><c:order val="0"/>
+                  <c:spPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></c:spPr>
+                  <c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+                  <c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>
+                </c:ser>
+                <c:ser><c:idx val="6"/><c:order val="1"/>
+                  <c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+                  <c:val><c:numLit><c:pt idx="0"><c:v>2</c:v></c:pt></c:numLit></c:val>
+                </c:ser>
+              </c:barChart></c:plotArea></c:chart>
+            </c:chartSpace>"#
+        );
+        let doc = chart_space_of(&xml);
+        let chart = parse_chart_part(doc.root_element(), &FixtureResolver).expect("chart parses");
+
+        assert_eq!(chart.series[0].color.as_deref(), Some("ED7D31"));
+        assert_eq!(chart.series[1].color.as_deref(), Some("ED7D31"));
     }
 
     #[test]

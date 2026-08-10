@@ -18,7 +18,10 @@ use crate::text::{
     merge_level_bullets, merge_level_indents, merge_level_sizes, read_level_bullets,
     read_level_font_sizes, read_level_indents, LevelBullets, LevelFontSizes, LevelIndents,
 };
-use crate::theme::{bake_clr_map, parse_theme_part, resolve_theme_typeface, PptxSchemeResolver};
+use crate::theme::{
+    bake_clr_map, parse_theme_part, resolve_theme_typeface, PptxSchemeResolver, PptxTheme,
+    PptxThemeSource,
+};
 use crate::types::*;
 use crate::{
     attr, attr_f64, attr_i64, attr_r, build_smartart_drawings, child, find_rel_target_by_type,
@@ -1311,11 +1314,12 @@ pub(crate) fn parse_layout_placeholders(
     master_space_before: &HashMap<String, i64>,
     master_space_after: &HashMap<String, i64>,
     master_line_spacing: &HashMap<String, f64>,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     layout_dir: &str,
     layout_rels: &HashMap<String, String>,
     zip: &mut PptxZip,
 ) -> LayoutPlaceholders {
+    let theme = theme_source.colors();
     let mut lph = LayoutPlaceholders {
         master_by_type: master_transforms.clone(),
         by_type_master_alignment: master_alignments.clone(),
@@ -1441,7 +1445,7 @@ pub(crate) fn parse_layout_placeholders(
         // cascade as an ordinary picture. Resolve the layout's local/style
         // tiers once, then retain that bundle alongside its blipFill.
         let layout_picture_properties =
-            resolve_picture_shape_properties(Some(sp_pr), child(sp, "style"), None, theme);
+            resolve_picture_shape_properties(Some(sp_pr), child(sp, "style"), None, theme_source);
         let layout_stroke = layout_picture_properties.stroke.clone();
 
         // Layout spPr fill (solidFill / noFill / gradFill / pattFill). The
@@ -1789,7 +1793,7 @@ pub(crate) fn parse_layout(
     master_space_before: &HashMap<String, i64>,
     master_space_after: &HashMap<String, i64>,
     master_line_spacing: &HashMap<String, f64>,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     layout_dir: &str,
     layout_rels: &HashMap<String, String>,
     zip: &mut PptxZip,
@@ -1817,7 +1821,7 @@ pub(crate) fn parse_layout(
         master_space_before,
         master_space_after,
         master_line_spacing,
-        theme,
+        theme_source,
         layout_dir,
         layout_rels,
         zip,
@@ -1834,7 +1838,7 @@ pub(crate) fn parse_layout(
             zip.index_for_name(&path)?;
             Some(path)
         };
-        parse_background(n, theme, &mut resolve)
+        parse_background(n, theme_source, &mut resolve)
     });
 
     let show_master_sp = read_show_master_sp(root);
@@ -1857,7 +1861,7 @@ pub(crate) struct ParsedMaster {
     /// The master's effective theme palette, with the master's `<p:clrMap>`
     /// pre-baked (logical names → slot hex). Includes font/line/objectDefault
     /// keys exactly as `parse_theme_colors` produced them.
-    pub(crate) theme: HashMap<String, String>,
+    pub(crate) theme: PptxTheme,
     pub(crate) master_xml: Option<String>,
     pub(crate) master_rels: HashMap<String, String>,
     pub(crate) master_dir: String,
@@ -1900,7 +1904,7 @@ pub(crate) struct ParsedMaster {
 /// holds no `zip` borrow, so it can be built before `parse_slide(zip)` is called.
 pub(crate) struct EffectiveMaster {
     /// `bundle.theme` clone with the override mapping applied (logical → slot hex).
-    pub(crate) theme: HashMap<String, String>,
+    pub(crate) theme: PptxTheme,
     /// Master `<p:bg>` re-resolved against `theme` (replaces `ParsedMaster.master_bg`).
     pub(crate) master_bg: Option<Fill>,
     /// Master txStyles placeholder colors re-resolved against `theme`.
@@ -1923,7 +1927,7 @@ pub(crate) struct EffectiveMaster {
 /// master theme. Out of scope for per-slide master resolution.
 pub(crate) fn build_master_bundle(
     master_path: &str,
-    fallback_theme: &HashMap<String, String>,
+    fallback_theme: &PptxTheme,
     zip: &mut PptxZip,
 ) -> ParsedMaster {
     let master_xml_opt: Option<String> = if master_path.is_empty() {
@@ -1953,7 +1957,7 @@ pub(crate) fn build_master_bundle(
     // presentation theme when the master declares no /theme relationship.
     let theme_path: Option<String> =
         find_rel_target_by_type(&master_rels_xml, "/theme").map(|t| resolve_path(&master_dir, &t));
-    let mut theme: HashMap<String, String> = theme_path
+    let mut theme = theme_path
         .as_deref()
         .map(|path| parse_theme_part(path, zip))
         .unwrap_or_else(|| fallback_theme.clone());
