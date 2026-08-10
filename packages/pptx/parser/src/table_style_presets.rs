@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use crate::{Fill, Stroke, TableStyleDef};
+use ooxml_common::color::{apply_tint_channels, TintMode};
 
 // ── Color helpers ────────────────────────────────────────────────────────────
 
@@ -66,22 +67,6 @@ fn hls_to_rgb(h: f64, l: f64, s: f64) -> (f64, f64, f64) {
     )
 }
 
-fn srgb_to_linear(c: f64) -> f64 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-fn linear_to_srgb(c: f64) -> f64 {
-    if c <= 0.0031308 {
-        12.92 * c
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
-}
-
 /// Apply a sequence of (name, val) color transforms to a hex color.
 /// val uses OOXML units (100_000 = 100%).
 pub(crate) fn apply_transforms(hex: &str, transforms: &[(&str, i64)]) -> String {
@@ -118,12 +103,10 @@ pub(crate) fn apply_transforms(hex: &str, transforms: &[(&str, i64)]) -> String 
                 bf *= v;
             }
             "tint" => {
-                let lr = srgb_to_linear(rf);
-                let lg = srgb_to_linear(gf);
-                let lb = srgb_to_linear(bf);
-                rf = linear_to_srgb((lr + (1.0 - lr) * v).clamp(0.0, 1.0));
-                gf = linear_to_srgb((lg + (1.0 - lg) * v).clamp(0.0, 1.0));
-                bf = linear_to_srgb((lb + (1.0 - lb) * v).clamp(0.0, 1.0));
+                // Built-in PowerPoint table styles use the same literal tint
+                // semantics as XML-backed table styles: val is the retained
+                // input fraction in encoded sRGB, not a white amount.
+                (rf, gf, bf) = apply_tint_channels((rf, gf, bf), v, TintMode::WordLiteral);
             }
             "alpha" => {
                 alpha = v;
@@ -848,4 +831,35 @@ pub fn lookup_builtin_table_style(
         Family::DarkStyle1 => dark_style_1(theme, accent_idx),
         Family::DarkStyle2 => dark_style_2(theme, accent_idx),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn solid_color(fill: &Option<Fill>) -> Option<&str> {
+        match fill {
+            Some(Fill::Solid { color }) => Some(color),
+            _ => None,
+        }
+    }
+
+    /// The built-in Medium Style 2 / Accent 1 table is the default produced by
+    /// python-pptx and many Office generators. ECMA-376 §20.1.2.3.34 tint values
+    /// retain the stated fraction of the source colour; table styles apply the
+    /// literal encoded-sRGB blend used by PowerPoint's preset definitions.
+    #[test]
+    fn medium_style_2_accent_1_uses_literal_table_tints() {
+        let theme = HashMap::from([
+            ("accent1".to_owned(), "4F81BD".to_owned()),
+            ("lt1".to_owned(), "FFFFFF".to_owned()),
+            ("dk1".to_owned(), "000000".to_owned()),
+        ]);
+        let style = lookup_builtin_table_style("{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}", &theme)
+            .expect("known PowerPoint table style");
+
+        assert_eq!(solid_color(&style.first_row_fill), Some("4F81BD"));
+        assert_eq!(solid_color(&style.whole_fill), Some("DCE6F2"));
+        assert_eq!(solid_color(&style.band1h_fill), Some("B9CDE5"));
+    }
 }
