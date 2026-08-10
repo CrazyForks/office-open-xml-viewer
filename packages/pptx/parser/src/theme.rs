@@ -79,6 +79,17 @@ pub(crate) fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
                 }
             }
         }
+        if let Some(effect_style_lst) = child(fmt_scheme, "effectStyleLst") {
+            for (i, effect_style) in effect_style_lst
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "effectStyle")
+                .enumerate()
+            {
+                if let Some(fragment) = xml.get(effect_style.range()) {
+                    map.insert(format!("+effectStyle-{}", i + 1), fragment.to_owned());
+                }
+            }
+        }
     }
 
     // Parse <a:objectDefaults> per ECMA-376 §20.1.6.7. PowerPoint stores

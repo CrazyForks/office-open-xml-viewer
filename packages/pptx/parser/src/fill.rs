@@ -307,6 +307,7 @@ pub(crate) fn parse_shadow(
 /// Parse spPr > effectLst > innerShdw into a Shadow. ECMA-376 §20.1.8.21
 /// (CT_InnerShadowEffect) — same field shape as outerShdw, semantics differ
 /// at render time (cast inward).
+#[cfg(test)]
 pub(crate) fn parse_inner_shadow(
     effect_lst: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
@@ -320,11 +321,24 @@ pub(crate) fn parse_shadow_node(
     n: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> Option<Shadow> {
+    parse_shadow_node_with_resolver(
+        n,
+        &PptxSchemeResolver { theme },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    )
+}
+
+fn parse_shadow_node_with_resolver<R: ThemeResolver + ?Sized>(
+    n: roxmltree::Node<'_, '_>,
+    resolver: &R,
+    tint_mode: ooxml_common::color::TintMode,
+) -> Option<Shadow> {
     let blur = attr_i64(&n, "blurRad").unwrap_or(0);
     let dist = attr_i64(&n, "dist").unwrap_or(0);
     let dir = attr_f64(&n, "dir").unwrap_or(0.0) / 60_000.0;
 
-    let color_str = parse_color_node(n, theme).unwrap_or_else(|| "000000".to_owned());
+    let color_str = ooxml_common::color::parse_color_node(n, resolver, tint_mode)
+        .unwrap_or_else(|| "000000".to_owned());
     let (color, alpha) = if color_str.len() >= 8 {
         let a = u8::from_str_radix(&color_str[6..8], 16).unwrap_or(255) as f64 / 255.0;
         (color_str[..6].to_owned(), a)
@@ -343,13 +357,27 @@ pub(crate) fn parse_shadow_node(
 
 /// Parse spPr > effectLst > glow into a Glow effect — ECMA-376 §20.1.8.17
 /// (CT_GlowEffect): a coloured halo with a blur radius, no offset.
+#[cfg(test)]
 pub(crate) fn parse_glow(
     effect_lst: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> Option<Glow> {
     let g = child(effect_lst, "glow")?;
+    parse_glow_node_with_resolver(
+        g,
+        &PptxSchemeResolver { theme },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    )
+}
+
+fn parse_glow_node_with_resolver<R: ThemeResolver + ?Sized>(
+    g: roxmltree::Node<'_, '_>,
+    resolver: &R,
+    tint_mode: ooxml_common::color::TintMode,
+) -> Option<Glow> {
     let radius = attr_i64(&g, "rad").unwrap_or(0);
-    let color_str = parse_color_node(g, theme).unwrap_or_else(|| "000000".to_owned());
+    let color_str = ooxml_common::color::parse_color_node(g, resolver, tint_mode)
+        .unwrap_or_else(|| "000000".to_owned());
     let (color, alpha) = if color_str.len() >= 8 {
         let a = u8::from_str_radix(&color_str[6..8], 16).unwrap_or(255) as f64 / 255.0;
         (color_str[..6].to_owned(), a)
@@ -395,6 +423,7 @@ pub(crate) fn parse_reflection(effect_lst: roxmltree::Node<'_, '_>) -> Option<Re
 /// siblings inside `CT_EffectList` — ECMA-376 §20.1.8.16. Used by both shapes
 /// (`p:sp`) and pictures (`p:pic`): `p:spPr` is `CT_ShapeProperties` in both
 /// cases (§19.3.1.37), so `effectLst` applies equally to images.
+#[derive(Default)]
 pub(crate) struct EffectLst {
     pub(crate) shadow: Option<Shadow>,
     pub(crate) inner_shadow: Option<Shadow>,
@@ -409,13 +438,76 @@ pub(crate) fn parse_effect_lst(
     effect_lst: Option<roxmltree::Node<'_, '_>>,
     theme: &HashMap<String, String>,
 ) -> EffectLst {
+    parse_effect_lst_with_resolver(
+        effect_lst,
+        &PptxSchemeResolver { theme },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    )
+}
+
+fn parse_effect_lst_with_resolver<R: ThemeResolver + ?Sized>(
+    effect_lst: Option<roxmltree::Node<'_, '_>>,
+    resolver: &R,
+    tint_mode: ooxml_common::color::TintMode,
+) -> EffectLst {
     EffectLst {
-        shadow: effect_lst.and_then(|n| parse_shadow(n, theme)),
-        inner_shadow: effect_lst.and_then(|n| parse_inner_shadow(n, theme)),
-        glow: effect_lst.and_then(|n| parse_glow(n, theme)),
+        shadow: effect_lst
+            .and_then(|node| child(node, "outerShdw"))
+            .and_then(|node| parse_shadow_node_with_resolver(node, resolver, tint_mode)),
+        inner_shadow: effect_lst
+            .and_then(|node| child(node, "innerShdw"))
+            .and_then(|node| parse_shadow_node_with_resolver(node, resolver, tint_mode)),
+        glow: effect_lst
+            .and_then(|node| child(node, "glow"))
+            .and_then(|node| parse_glow_node_with_resolver(node, resolver, tint_mode)),
         soft_edge: effect_lst.and_then(parse_soft_edge),
         reflection: effect_lst.and_then(parse_reflection),
     }
+}
+
+/// Resolve `p:style/a:effectRef` through the theme format matrix.
+///
+/// `effectRef@idx` is one-based into `a:effectStyleLst`. Any `phClr` inside
+/// that effect style is supplied by the color child of the reference before
+/// the ordinary DrawingML transforms are applied.
+pub(crate) fn parse_style_matrix_effects(
+    effect_ref: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> EffectLst {
+    let Some(idx) = attr(&effect_ref, "idx").and_then(|value| value.parse::<u32>().ok()) else {
+        return EffectLst::default();
+    };
+    if idx == 0 {
+        return EffectLst::default();
+    }
+    let Some(fragment) = theme.get(&format!("+effectStyle-{idx}")) else {
+        return EffectLst::default();
+    };
+
+    let placeholder_color = parse_color_node_tint(
+        effect_ref,
+        theme,
+        ooxml_common::color::TintMode::WordLiteral,
+    );
+    let wrapped = format!(
+        r#"<root xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">{fragment}</root>"#
+    );
+    let Ok(doc) = parse_preflighted_pptx_xml(&wrapped) else {
+        return EffectLst::default();
+    };
+    let effect_lst = doc
+        .root_element()
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "effectLst");
+    let resolver = StyleMatrixSchemeResolver {
+        theme,
+        placeholder_color: placeholder_color.as_deref(),
+    };
+    parse_effect_lst_with_resolver(
+        effect_lst,
+        &resolver,
+        ooxml_common::color::TintMode::WordLiteral,
+    )
 }
 
 // ===========================
