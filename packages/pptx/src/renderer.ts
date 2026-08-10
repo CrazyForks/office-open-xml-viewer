@@ -39,6 +39,7 @@ import {
   hasPreset,
   buildPresetGeometryPath,
   buildPresetGeometryFillPath,
+  getPresetGeometryBounds,
   getConnectorAnchors,
   getCustGeomEndpoints,
   drawArrowHead,
@@ -2780,7 +2781,31 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const liveTransform = ctx.getTransform();
   const det = Math.abs(liveTransform.a * liveTransform.d - liveTransform.b * liveTransform.c);
   const devScale = det > 0 ? Math.sqrt(det) : 1;
-  const effBBox = transformedEffectBounds(liveTransform, x, y, w, h);
+  // Preset adjustments may place painted vertices outside the nominal xfrm
+  // rectangle (for example, a wedge callout's tail). Crop effects to the
+  // geometry bounds so those protrusions participate in the shadow/reflection
+  // instead of being clipped before compositing.
+  const needsRasterEffectBounds = Boolean(
+    el.shadow || el.reflection || el.softEdge || el.innerShadow,
+  );
+  const adjustedGeometryBounds = usePresetEngine && needsRasterEffectBounds
+    ? getPresetGeometryBounds(
+        geom,
+        x,
+        y,
+        w,
+        h,
+        [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
+      )
+    : null;
+  const effectBounds = adjustedGeometryBounds ?? { x, y, w, h };
+  const effBBox = transformedEffectBounds(
+    liveTransform,
+    effectBounds.x,
+    effectBounds.y,
+    effectBounds.w,
+    effectBounds.h,
+  );
   const effScale = scale * devScale; // EMU → device px
   // A face-on camera does not need a homography, but sp3d bevels still alter
   // the front surface. Pictures already take this flat offscreen path; shapes

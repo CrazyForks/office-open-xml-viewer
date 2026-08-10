@@ -128,10 +128,12 @@ describe('applyOuterShadow (ECMA-376 §20.1.8.45)', () => {
   beforeEach(() => { fake = installFakeCanvas(); });
   afterEach(() => vi.unstubAllGlobals());
 
-  it('recolours one composed silhouette, blurs locally, then offsets it once', () => {
+  it('resets the crop transform before recolouring, then blurs/offsets once', () => {
     const live = new RecordingCtx();
     const paint = vi.fn((c: unknown) => {
-      (c as RecordingCtx).ops.push({ op: 'paintShape' });
+      const target = c as RecordingCtx;
+      target.setTransform({ a: 2, b: 0, c: 0, d: 2, e: 400, f: 200 } as never);
+      target.ops.push({ op: 'paintShape' });
     });
     const shadow: Shadow = {
       color: '000000', alpha: 0.38, blur: 38_100, dist: 19_050, dir: 90,
@@ -142,12 +144,15 @@ describe('applyOuterShadow (ECMA-376 §20.1.8.45)', () => {
     )).toBe(true);
 
     expect(paint).toHaveBeenCalledTimes(1);
-    expect(fake.auxCtxs).toHaveLength(2);
+    expect(fake.auxCtxs).toHaveLength(1);
     expect(fake.auxCtxs[0].usedCompositeOps).toContain('source-in');
-    expect(fake.auxCtxs[0].ops.some(o => o.op === 'fillRect')).toBe(true);
-    expect(fake.auxCtxs[1].usedBlurFilters).toEqual(['blur(4px)']);
-    expect(fake.auxCtxs[1].ops.filter(o => o.op === 'drawImage')).toHaveLength(1);
-    expect(live.usedBlurFilters).toEqual([]);
+    const recolour = fake.auxCtxs[0].ops.findIndex(o => o.op === 'fillRect');
+    expect(recolour).toBeGreaterThan(0);
+    expect(fake.auxCtxs[0].ops[recolour - 1]).toMatchObject({
+      op: 'setTransform',
+      args: [1, 0, 0, 1, 0, 0],
+    });
+    expect(live.usedBlurFilters).toEqual(['blur(4px)']);
     const finalBlit = live.ops.filter(o => o.op === 'drawImage');
     expect(finalBlit).toHaveLength(1);
     expect(finalBlit[0].args?.slice(1)).toEqual([84, 36]);

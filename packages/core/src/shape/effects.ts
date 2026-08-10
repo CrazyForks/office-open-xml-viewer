@@ -194,30 +194,20 @@ export function applyOuterShadow(
 
   paintShape(offsetPaintCtx(c, crop));
   c.save();
+  // The paint callback installs the live absolute-device transform (shifted by
+  // the crop origin). Recolouring is a crop-local full-surface operation, so it
+  // must not inherit that transform. Otherwise the source-in rectangle moves
+  // away from silhouettes positioned farther across/down the slide, producing
+  // position-dependent partial or entirely missing shadows.
+  c.setTransform(1, 0, 0, 1, 0, 0);
   c.globalCompositeOperation = 'source-in';
   c.fillStyle = hexToRgba(shadow.color, shadow.alpha);
   c.fillRect(0, 0, crop.w, crop.h);
   c.restore();
 
-  // Blur in crop-local coordinates before placing the result on the live
-  // canvas. Applying `filter` to the final device-coordinate draw is unreliable
-  // on high-DPI canvases in Chromium: the filter's logical-pixel clip can drop
-  // shadows whose device-space destination lies beyond the CSS canvas width.
-  // Keeping the filtered draw at (0,0) also confines all filter work to the
-  // bounded auxiliary surface. The final device-space blit is unfiltered.
-  let shadowCanvas = aux;
-  if (blur > 0) {
-    const blurred = createAuxCanvas(crop.w, crop.h);
-    if (!blurred) return false;
-    const blurredCtx = get2d(blurred);
-    if (!blurredCtx) return false;
-    blurredCtx.filter = `blur(${blur}px)`;
-    blurredCtx.drawImage(aux as CanvasImageSource, 0, 0);
-    shadowCanvas = blurred;
-  }
-
   liveCtx.save();
-  liveCtx.drawImage(shadowCanvas as CanvasImageSource, crop.x + dx, crop.y + dy);
+  if (blur > 0) liveCtx.filter = `blur(${blur}px)`;
+  liveCtx.drawImage(aux as CanvasImageSource, crop.x + dx, crop.y + dy);
   liveCtx.restore();
   return true;
 }

@@ -261,6 +261,7 @@ export {
   hasPreset,
   buildPresetGeometryPath,
   buildPresetGeometryFillPath,
+  getPresetGeometryBounds,
   getConnectorAnchors,
 } from './shape/preset-geometry';
 export { type PresetPath } from './shape/preset-geometry/path-executor';
