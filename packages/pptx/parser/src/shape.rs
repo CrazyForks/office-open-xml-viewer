@@ -7,8 +7,8 @@
 use crate::chart::{parse_chartex, parse_legacy_chart};
 use crate::fill::{
     parse_arrow_end, parse_blip_alpha, parse_color_node, parse_cust_geom, parse_effect_lst,
-    parse_fill, parse_scene3d, parse_shadow, parse_sp3d, parse_stroke, parse_style_matrix_fill,
-    parse_table_style_fill, parse_xfrm, EffectLst,
+    parse_fill, parse_scene3d, parse_sp3d, parse_stroke, parse_style_matrix_effects,
+    parse_style_matrix_fill, parse_table_style_fill, parse_xfrm, EffectLst,
 };
 use crate::master::{InheritedShapeGeometry, LayoutPlaceholders};
 use crate::text::{
@@ -196,6 +196,78 @@ pub(crate) fn node_is_hidden(node: roxmltree::Node<'_, '_>) -> bool {
     own_cnv_pr(node)
         .map(ooxml_common::drawing::nv_props_hidden)
         .unwrap_or(false)
+}
+
+/// Merge an optional local `<a:ln>` over the inherited line style.
+///
+/// CT_LineProperties is field-wise: PowerPoint commonly writes a local line
+/// containing only head/tail-end defaults while the paint and width remain in
+/// `p:style/a:lnRef`. Treating the mere presence of that partial node as a
+/// replacement drops the visible theme outline.
+fn merge_local_stroke(
+    ln_node: Option<roxmltree::Node<'_, '_>>,
+    inherited: Option<Stroke>,
+    theme: &HashMap<String, String>,
+) -> Option<Stroke> {
+    let Some(ln) = ln_node else {
+        return inherited;
+    };
+    if child(ln, "noFill").is_some() {
+        return None;
+    }
+
+    let ln_width = attr_i64(&ln, "w");
+    let parsed = parse_stroke(ln, theme);
+    let ln_dash = child(ln, "prstDash")
+        .and_then(|n| attr(&n, "val"))
+        .filter(|v| v != "solid");
+    let ln_cap = attr(&ln, "cap").and_then(|cap| match cap.as_str() {
+        "rnd" => Some("round".to_owned()),
+        "sq" => Some("square".to_owned()),
+        "flat" => Some("butt".to_owned()),
+        _ => None,
+    });
+    let ln_head = child(ln, "headEnd")
+        .map(parse_arrow_end)
+        .filter(|a| a.kind != "none");
+    let ln_tail = child(ln, "tailEnd")
+        .map(parse_arrow_end)
+        .filter(|a| a.kind != "none");
+    let ln_cmpd = attr(&ln, "cmpd").filter(|v| v != "sng");
+
+    match (parsed, inherited) {
+        (Some(authored), base) => Some(Stroke {
+            color: authored.color,
+            width: ln_width.unwrap_or_else(|| base.as_ref().map(|s| s.width).unwrap_or(9525)),
+            fill: authored.fill,
+            dash_style: authored
+                .dash_style
+                .or_else(|| base.as_ref().and_then(|s| s.dash_style.clone())),
+            line_cap: authored
+                .line_cap
+                .or_else(|| base.as_ref().and_then(|s| s.line_cap.clone())),
+            head_end: authored
+                .head_end
+                .or_else(|| base.as_ref().and_then(|s| s.head_end.clone())),
+            tail_end: authored
+                .tail_end
+                .or_else(|| base.as_ref().and_then(|s| s.tail_end.clone())),
+            cmpd: authored
+                .cmpd
+                .or_else(|| base.as_ref().and_then(|s| s.cmpd.clone())),
+        }),
+        (None, Some(base)) => Some(Stroke {
+            color: base.color,
+            width: ln_width.unwrap_or(base.width),
+            fill: base.fill,
+            dash_style: ln_dash.or(base.dash_style),
+            line_cap: ln_cap.or(base.line_cap),
+            head_end: ln_head.or(base.head_end),
+            tail_end: ln_tail.or(base.tail_end),
+            cmpd: ln_cmpd.or(base.cmpd),
+        }),
+        (None, None) => None,
+    }
 }
 
 pub(crate) fn parse_shape(
@@ -387,17 +459,14 @@ pub(crate) fn parse_shape(
         own.or(inherited).or(style_fill)
     };
 
-    // spPr stroke: if ln element is present, respect it (even if noFill → None);
-    // otherwise fall back to layout placeholder stroke, then style stroke.
-    let stroke = if sp_pr.and_then(|p| child(p, "ln")).is_some() {
-        sp_pr
-            .and_then(|p| child(p, "ln"))
-            .and_then(|n| parse_stroke(n, theme))
-    } else if ph_node.is_some() {
+    // A local line is a field-wise override over layout/style inheritance;
+    // explicit noFill still suppresses the inherited line entirely.
+    let inherited_stroke = if ph_node.is_some() {
         lph.lookup_stroke(&ph_type, ph_idx).or(style_stroke)
     } else {
         style_stroke
     };
+    let stroke = merge_local_stroke(sp_pr.and_then(|p| child(p, "ln")), inherited_stroke, theme);
 
     // Inherited defaults from layout/master for this placeholder type/idx
     let (
@@ -494,6 +563,10 @@ pub(crate) fn parse_shape(
 
     // Effects from spPr > effectLst (outerShdw / innerShdw / glow / softEdge /
     // reflection are independent siblings — ECMA-376 §20.1.8.16). Pull each.
+    let style_effects = style_node
+        .and_then(|style| child(style, "effectRef"))
+        .map(|effect_ref| parse_style_matrix_effects(effect_ref, theme))
+        .unwrap_or_default();
     let EffectLst {
         shadow,
         inner_shadow,
@@ -501,6 +574,11 @@ pub(crate) fn parse_shape(
         soft_edge,
         reflection,
     } = parse_effect_lst(sp_pr.and_then(|p| child(p, "effectLst")), theme);
+    let shadow = shadow.or(style_effects.shadow);
+    let inner_shadow = inner_shadow.or(style_effects.inner_shadow);
+    let glow = glow.or(style_effects.glow);
+    let soft_edge = soft_edge.or(style_effects.soft_edge);
+    let reflection = reflection.or(style_effects.reflection);
 
     Some(ShapeElement {
         x: t.x,
@@ -2297,72 +2375,24 @@ fn parse_connector(
         }
     });
 
-    // Merge <a:ln> attributes onto style_stroke: <a:ln> commonly contains only
-    // arrow ends (headEnd/tailEnd) while the paint/width come from lnRef.
-    let ln_node = child(sp_pr, "ln");
-    let stroke: Option<Stroke> = match ln_node {
-        None => style_stroke,
-        Some(ln) => {
-            if child(ln, "noFill").is_some() {
-                None
-            } else {
-                let ln_width = attr_i64(&ln, "w");
-                let parsed = parse_stroke(ln, theme);
-                let ln_dash = child(ln, "prstDash")
-                    .and_then(|n| attr(&n, "val"))
-                    .filter(|v| v != "solid");
-                let ln_cap = attr(&ln, "cap").and_then(|cap| match cap.as_str() {
-                    "rnd" => Some("round".to_owned()),
-                    "sq" => Some("square".to_owned()),
-                    "flat" => Some("butt".to_owned()),
-                    _ => None,
-                });
-                let ln_head = child(ln, "headEnd")
-                    .map(parse_arrow_end)
-                    .filter(|a| a.kind != "none");
-                let ln_tail = child(ln, "tailEnd")
-                    .map(parse_arrow_end)
-                    .filter(|a| a.kind != "none");
-                let ln_cmpd = attr(&ln, "cmpd").filter(|v| v != "sng");
-                match (parsed, style_stroke) {
-                    (Some(authored), base) => Some(Stroke {
-                        color: authored.color,
-                        width: ln_width
-                            .unwrap_or_else(|| base.as_ref().map(|s| s.width).unwrap_or(9525)),
-                        fill: authored.fill,
-                        dash_style: authored
-                            .dash_style
-                            .or_else(|| base.as_ref().and_then(|s| s.dash_style.clone())),
-                        line_cap: authored
-                            .line_cap
-                            .or_else(|| base.as_ref().and_then(|s| s.line_cap.clone())),
-                        head_end: authored
-                            .head_end
-                            .or_else(|| base.as_ref().and_then(|s| s.head_end.clone())),
-                        tail_end: authored
-                            .tail_end
-                            .or_else(|| base.as_ref().and_then(|s| s.tail_end.clone())),
-                        cmpd: authored
-                            .cmpd
-                            .or_else(|| base.as_ref().and_then(|s| s.cmpd.clone())),
-                    }),
-                    (None, Some(base)) => Some(Stroke {
-                        color: base.color,
-                        width: ln_width.unwrap_or(base.width),
-                        fill: base.fill,
-                        dash_style: ln_dash.or(base.dash_style),
-                        line_cap: ln_cap.or(base.line_cap),
-                        head_end: ln_head.or(base.head_end),
-                        tail_end: ln_tail.or(base.tail_end),
-                        cmpd: ln_cmpd.or(base.cmpd),
-                    }),
-                    (None, None) => None,
-                }
-            }
-        }
-    };
+    let stroke = merge_local_stroke(child(sp_pr, "ln"), style_stroke, theme);
 
-    let shadow = child(sp_pr, "effectLst").and_then(|n| parse_shadow(n, theme));
+    let style_effects = style_node
+        .and_then(|style| child(style, "effectRef"))
+        .map(|effect_ref| parse_style_matrix_effects(effect_ref, theme))
+        .unwrap_or_default();
+    let EffectLst {
+        shadow,
+        inner_shadow,
+        glow,
+        soft_edge,
+        reflection,
+    } = parse_effect_lst(child(sp_pr, "effectLst"), theme);
+    let shadow = shadow.or(style_effects.shadow);
+    let inner_shadow = inner_shadow.or(style_effects.inner_shadow);
+    let glow = glow.or(style_effects.glow);
+    let soft_edge = soft_edge.or(style_effects.soft_edge);
+    let reflection = reflection.or(style_effects.reflection);
 
     let cy = if t.cy == 0 { 1 } else { t.cy };
 
@@ -2432,10 +2462,10 @@ fn parse_connector(
         adj7: None,
         adj8: None,
         shadow,
-        inner_shadow: None,
-        glow: None,
-        soft_edge: None,
-        reflection: None,
+        inner_shadow,
+        glow,
+        soft_edge,
+        reflection,
         id: cnv.id,
         name: cnv.name,
         hyperlink: cnv.hyperlink,
@@ -2446,6 +2476,94 @@ fn parse_connector(
         scene3d: parse_scene3d(sp_pr),
         sp3d: parse_sp3d(sp_pr),
     })
+}
+
+#[cfg(test)]
+mod style_ref_tests {
+    use super::*;
+    use crate::master::LayoutPlaceholders;
+    use crate::theme::parse_theme_colors;
+    use std::io::Cursor;
+
+    fn empty_zip() -> PptxZip {
+        let mut bytes = Vec::new();
+        {
+            let writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            writer.finish().unwrap();
+        }
+        PptxZip::new(Cursor::new(bytes)).unwrap()
+    }
+
+    #[test]
+    fn partial_shape_line_and_effect_refs_inherit_theme_styles() {
+        let theme = parse_theme_colors(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements>
+                <a:clrScheme name="Regression">
+                  <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+                  <a:accent1><a:srgbClr val="4F81BD"/></a:accent1>
+                </a:clrScheme>
+                <a:fmtScheme name="Regression">
+                  <a:fillStyleLst/>
+                  <a:lnStyleLst>
+                    <a:ln w="9525"/><a:ln w="25400"/>
+                    <a:ln w="38100"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+                  </a:lnStyleLst>
+                  <a:effectStyleLst>
+                    <a:effectStyle><a:effectLst>
+                      <a:outerShdw blurRad="40000" dist="23000" dir="5400000">
+                        <a:schemeClr val="phClr"><a:alpha val="35000"/></a:schemeClr>
+                      </a:outerShdw>
+                    </a:effectLst></a:effectStyle>
+                  </a:effectStyleLst>
+                  <a:bgFillStyleLst/>
+                </a:fmtScheme>
+              </a:themeElements>
+            </a:theme>"#,
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                     xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:nvSpPr><p:cNvPr id="1" name="Styled"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+              <p:spPr>
+                <a:xfrm><a:off x="0" y="0"/><a:ext cx="100000" cy="100000"/></a:xfrm>
+                <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                <a:solidFill><a:schemeClr val="accent1"/></a:solidFill>
+                <a:ln><a:headEnd type="none"/><a:tailEnd type="none"/></a:ln>
+                <a:effectLst/>
+              </p:spPr>
+              <p:style>
+                <a:lnRef idx="3"><a:schemeClr val="lt1"/></a:lnRef>
+                <a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>
+                <a:effectRef idx="1"><a:schemeClr val="accent1"/></a:effectRef>
+                <a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef>
+              </p:style>
+            </p:sp>"#,
+        )
+        .unwrap();
+        let mut zip = empty_zip();
+
+        let shape = parse_shape(
+            doc.root_element(),
+            &LayoutPlaceholders::default(),
+            &theme,
+            &HashMap::new(),
+            "ppt/slides",
+            None,
+            &mut zip,
+        )
+        .unwrap();
+
+        let stroke = shape.stroke.expect("theme line must survive partial a:ln");
+        assert_eq!(stroke.color, "FFFFFF");
+        assert_eq!(stroke.width, 38100);
+        let shadow = shape
+            .shadow
+            .expect("effectRef must resolve the theme effect");
+        assert_eq!(shadow.color, "4F81BD");
+        assert!((shadow.alpha - 0.35).abs() < 0.01);
+        assert_eq!(shadow.blur, 40000);
+    }
 }
 
 #[cfg(test)]

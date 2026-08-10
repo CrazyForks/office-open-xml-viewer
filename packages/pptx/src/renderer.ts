@@ -2625,7 +2625,10 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
 
   // innerShdw casts inward, ON TOP of the fill. §20.1.8.40. Composite after the
   // body. The silhouette callback paints a flat opaque mask.
-  if (el.innerShadow && deviceW > 0 && deviceH > 0) {
+  // Inner shadow is cast by the filled surface. A no-fill shape has no interior
+  // to shade; synthesizing an opaque mask here invents an effect Office does
+  // not paint (a stroke, if present, remains independently visible).
+  if (el.innerShadow && fillStyle && deviceW > 0 && deviceH > 0) {
     ctx.save();
     ctx.setTransform(new DOMMatrix());
     applyInnerShadow(
