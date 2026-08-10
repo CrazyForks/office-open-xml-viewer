@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { drawArrowHead, lineEndRetract, retractLineEndpoint } from './arrow';
+import {
+  drawArrowHead,
+  lineEndPaintExtent,
+  lineEndRetract,
+  retractLineEndpoint,
+} from './arrow';
 import type { ArrowEnd, Stroke } from '../types/common';
 
 const stroke: Stroke = { color: '#000000', width: 10 };
@@ -27,6 +32,16 @@ describe('lineEndRetract — how far to pull the leader line back from the tip',
     expect(lineEndRetract(end('triangle', 'med', 'sm'), stroke, 1)).toBeCloseTo(40, 5);
     // width 5, scale 2 → lw = 10 → same as above
     expect(lineEndRetract(end('triangle'), { color: '#000', width: 5 }, 2)).toBeCloseTo(60, 5);
+  });
+});
+
+describe('lineEndPaintExtent', () => {
+  it('covers the decoration and its centered outline around the tip', () => {
+    // med length = 60, centered outline adds 5.
+    expect(lineEndPaintExtent(end('triangle'), stroke, 1)).toBe(65);
+    // large width has half-span 40; small length is 40, plus 5 outline.
+    expect(lineEndPaintExtent(end('arrow', 'lg', 'sm'), stroke, 1)).toBe(45);
+    expect(lineEndPaintExtent(end('none'), stroke, 1)).toBe(0);
   });
 });
 
