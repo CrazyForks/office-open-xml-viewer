@@ -5,7 +5,7 @@
 //! Shared XML helpers (`child`, `children_vec`, `attr`, `attr_r`, `attr_i64`,
 //! `attr_f64`) stay in `lib.rs` and are imported here.
 
-use crate::theme::PptxSchemeResolver;
+use crate::theme::{theme_relationship_path, PptxSchemeResolver};
 use crate::types::*;
 use crate::{attr, attr_f64, attr_i64, attr_r, child, children_vec, parse_preflighted_pptx_xml};
 use ooxml_common::blip::{mime_from_ext, parse_blip_duotone};
@@ -62,9 +62,8 @@ pub(crate) fn parse_fill(
 }
 
 /// Parse DrawingML fill properties with the caller-selected tint semantics.
-/// Normal presentation backgrounds and theme style-matrix fills use the
-/// literal ECMA-376 retained-input definition. The historical generic path
-/// keeps PowerPointLinear for SmartArt compatibility.
+/// Presentation fills use PowerPoint's linear-light tint interpolation. A few
+/// specialized callers, such as table styles, select their own tint semantics.
 fn parse_fill_tint(
     node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
@@ -165,6 +164,16 @@ pub(crate) fn parse_style_matrix_fill(
         theme,
         placeholder_color: placeholder_color.as_deref(),
     };
+    if let Some(blip_fill) = child(doc.root_element(), "blipFill") {
+        let mut resolve_blip = |relationship_id: &str| {
+            theme_relationship_path(theme, relationship_id).map(str::to_owned)
+        };
+        if let Some(fill) =
+            parse_blip_fill_with_color_resolver(blip_fill, &resolver, &mut resolve_blip)
+        {
+            return Some(fill);
+        }
+    }
     parse_fill_with_resolver(doc.root_element(), &resolver, PowerPointLinear)
 }
 
@@ -191,6 +200,17 @@ pub(crate) fn parse_blip_fill<F: FnMut(&str) -> Option<String>>(
     theme: &HashMap<String, String>,
     resolve_blip: &mut F,
 ) -> Option<Fill> {
+    parse_blip_fill_with_color_resolver(blip_fill, &PptxSchemeResolver { theme }, resolve_blip)
+}
+
+fn parse_blip_fill_with_color_resolver<
+    R: ThemeResolver + ?Sized,
+    F: FnMut(&str) -> Option<String>,
+>(
+    blip_fill: roxmltree::Node<'_, '_>,
+    color_resolver: &R,
+    resolve_blip: &mut F,
+) -> Option<Fill> {
     let r_id = child(blip_fill, "blip").and_then(|b| attr_r(&b, "embed"))?;
     let image_path = resolve_blip(&r_id)?;
     let mime_type = mime_from_ext(&image_path).to_owned();
@@ -199,7 +219,7 @@ pub(crate) fn parse_blip_fill<F: FnMut(&str) -> Option<String>>(
     // linear tint (same call the `<p:pic>` paths use). `None` ⇒ no effect.
     let duotone = parse_blip_duotone(
         blip_fill,
-        &PptxSchemeResolver { theme },
+        color_resolver,
         ooxml_common::color::TintMode::PowerPointLinear,
     );
     // §20.1.8.58 tile takes precedence when present (stretch/tile are an

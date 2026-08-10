@@ -2164,11 +2164,12 @@ fn bootstrap_presentation(
     // Used for the deck-wide defaults on `Presentation` (default text color,
     // major/minor fonts, hyperlink colors) and as the fallback theme for any
     // master that declares no /theme relationship of its own.
-    let theme_xml = find_rel_target_by_type(&pres_rels_xml, "/theme")
-        .map(|t| resolve_path("ppt", &t))
-        .and_then(|path| read_zip_str(zip, &path).ok())
+    let theme_path = find_rel_target_by_type(&pres_rels_xml, "/theme")
+        .map(|target| resolve_path("ppt", &target));
+    let theme = theme_path
+        .as_deref()
+        .map(|path| parse_theme_part(path, zip))
         .unwrap_or_default();
-    let theme = parse_theme_colors(&theme_xml);
 
     // --- Presentation-level fallback master ---
     // The first slide master referenced by the presentation. Used for slides
@@ -4163,6 +4164,53 @@ mod tests {
                 );
             }
             other => panic!("expected theme gradient, got {other:?}"),
+        }
+    }
+
+    /// A style-matrix blipFill owns its relationship in the theme part. The
+    /// slide/master relationship resolver must not be used for that embedded
+    /// image when a bgRef selects the style.
+    #[test]
+    fn test_parse_background_bg_ref_resolves_theme_owned_image() {
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="T">
+          <a:themeElements><a:clrScheme name="C"/>
+            <a:fontScheme name="F"><a:majorFont/><a:minorFont/></a:fontScheme>
+            <a:fmtScheme name="S"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/>
+              <a:bgFillStyleLst><a:blipFill><a:blip r:embed="rIdImage"><a:duotone>
+                <a:schemeClr val="phClr"/><a:srgbClr val="FFFFFF"/>
+              </a:duotone></a:blip>
+                <a:tile sx="95000" sy="95000" algn="t"/></a:blipFill></a:bgFillStyleLst>
+            </a:fmtScheme>
+          </a:themeElements>
+        </a:theme>"#;
+        let mut theme = parse_theme_colors(theme_xml);
+        theme.insert(
+            "+themeRel-rIdImage".to_owned(),
+            "ppt/media/theme-background.jpeg".to_owned(),
+        );
+        theme.insert("bg2".to_owned(), "F0C000".to_owned());
+        let background_xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:bg><p:bgRef idx="1001"><a:schemeClr val="bg2"/></p:bgRef></p:bg>
+        </p:cSld>"#;
+        let doc = roxmltree::Document::parse(background_xml).unwrap();
+        let mut wrong_part_resolver = |_rid: &str| -> Option<String> { None };
+
+        match parse_background(doc.root_element(), &theme, &mut wrong_part_resolver) {
+            Some(Fill::Image {
+                image_path,
+                tile,
+                duotone,
+                ..
+            }) => {
+                assert_eq!(image_path, "ppt/media/theme-background.jpeg");
+                assert_eq!(tile.expect("tile descriptor").algn.as_deref(), Some("t"));
+                let duotone = duotone.expect("placeholder-aware duotone");
+                assert_eq!(duotone.clr1, "F0C000");
+                assert_eq!(duotone.clr2, "FFFFFF");
+            }
+            other => panic!("expected theme-owned image fill, got {other:?}"),
         }
     }
 

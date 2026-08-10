@@ -5,8 +5,80 @@
 //! (`child`, `attr`) stay in `lib.rs` and are imported here.
 
 use crate::parse_preflighted_pptx_xml;
-use crate::{attr, child};
+use crate::{attr, child, parse_rels, read_zip_str, resolve_path, PptxZip};
+use ooxml_common::rels::relationship_part_path;
 use std::collections::HashMap;
+
+const THEME_REL_PREFIX: &str = "+themeRel-";
+
+pub(crate) fn theme_relationship_path<'a>(
+    theme: &'a HashMap<String, String>,
+    relationship_id: &str,
+) -> Option<&'a str> {
+    theme
+        .get(&format!("{THEME_REL_PREFIX}{relationship_id}"))
+        .map(String::as_str)
+}
+
+/// Parse a theme part together with relationships owned by that theme.
+///
+/// DrawingML style-matrix fills can embed images. Their relationship IDs are
+/// scoped to the theme part, not to the slide, layout, or master that later
+/// references the style. Retain the resolved package paths beside the existing
+/// flat theme map so deferred `fillRef` / `bgRef` resolution uses the correct
+/// OPC source part.
+pub(crate) fn parse_theme_part(theme_path: &str, zip: &mut PptxZip) -> HashMap<String, String> {
+    let theme_xml = read_zip_str(zip, theme_path).unwrap_or_default();
+    let mut theme = parse_theme_colors(&theme_xml);
+    let rels_xml = read_zip_str(zip, &relationship_part_path(theme_path)).unwrap_or_default();
+    let theme_dir = theme_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+
+    for (relationship_id, target) in parse_rels(&rels_xml) {
+        let path = resolve_path(theme_dir, &target);
+        if zip.index_for_name(&path).is_some() {
+            theme.insert(format!("{THEME_REL_PREFIX}{relationship_id}"), path);
+        }
+    }
+    theme
+}
+
+#[cfg(test)]
+mod relationship_tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn theme_part_relationships_are_resolved_from_the_theme_directory() {
+        let mut bytes = Vec::new();
+        {
+            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = SimpleFileOptions::default();
+            archive.start_file("ppt/theme/theme1.xml", options).unwrap();
+            archive
+                .write_all(
+                    b"<a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"/>",
+                )
+                .unwrap();
+            archive
+                .start_file("ppt/theme/_rels/theme1.xml.rels", options)
+                .unwrap();
+            archive.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/background.png"/></Relationships>"#).unwrap();
+            archive
+                .start_file("ppt/media/background.png", options)
+                .unwrap();
+            archive.write_all(b"png").unwrap();
+            archive.finish().unwrap();
+        }
+
+        let mut zip = PptxZip::new(Cursor::new(bytes)).expect("open package");
+        let theme = parse_theme_part("ppt/theme/theme1.xml", &mut zip);
+        assert_eq!(
+            theme_relationship_path(&theme, "rId1"),
+            Some("ppt/media/background.png")
+        );
+    }
+}
 
 /// Parse the color scheme from a theme XML file.
 /// Returns a map: scheme slot name (e.g. "dk1", "lt1", "acc1") → hex string.
