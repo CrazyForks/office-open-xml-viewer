@@ -434,6 +434,89 @@ pub(crate) fn parse_solid_fill(
     .map(|hex| format!("#{}", hex.to_uppercase()))
 }
 
+fn parse_xlsx_drawingml_fill(
+    fill: roxmltree::Node,
+    resolver: &(impl ooxml_common::color::ThemeResolver + ?Sized),
+) -> Option<ShapeFill> {
+    let tint_mode = ooxml_common::color::TintMode::PowerPointLinear;
+    match fill.tag_name().name() {
+        "solidFill" => {
+            ooxml_common::color::parse_color_node(fill, resolver, tint_mode).map(|color| {
+                ShapeFill::Solid {
+                    color: format!("#{}", color.to_uppercase()),
+                }
+            })
+        }
+        "gradFill" => {
+            let gradient = ooxml_common::fill::parse_grad_fill(fill, resolver, tint_mode)?;
+            Some(ShapeFill::Gradient {
+                stops: gradient.stops,
+                angle: gradient.angle,
+                grad_type: gradient.grad_type,
+                scaled: gradient.scaled,
+                path: gradient.path,
+                fill_to_rect: gradient.fill_to_rect,
+                tile_rect: gradient.tile_rect,
+                flip: gradient.flip,
+                rot_with_shape: gradient.rot_with_shape,
+            })
+        }
+        "pattFill" => {
+            let pattern = ooxml_common::fill::parse_patt_fill(fill, resolver, tint_mode);
+            Some(ShapeFill::Pattern {
+                fg: pattern.fg,
+                bg: pattern.bg,
+                preset: pattern.preset,
+            })
+        }
+        "noFill" => None,
+        _ => None,
+    }
+}
+
+fn xlsx_fill_fallback_color(fill: &ShapeFill) -> Option<String> {
+    match fill {
+        ShapeFill::Solid { color } => Some(color.clone()),
+        ShapeFill::Gradient { stops, .. } => stops
+            .iter()
+            .rev()
+            .find(|stop| !stop.color.ends_with("00"))
+            .or_else(|| stops.last())
+            .map(|stop| format!("#{}", stop.color.to_uppercase())),
+        ShapeFill::Pattern { fg, .. } => Some(format!("#{}", fg.to_uppercase())),
+    }
+}
+
+fn resolve_xlsx_fill_ref(
+    fill_ref: roxmltree::Node,
+    theme_colors: &[String],
+    format_scheme: &ThemeFormatScheme,
+) -> Option<ShapeFill> {
+    use ooxml_common::theme::StyleMatrixLookup;
+
+    let index = fill_ref.attribute("idx")?.parse::<usize>().ok()?;
+    let StyleMatrixLookup::Entry(entry) = format_scheme.lookup_fill_ref(index) else {
+        return None;
+    };
+    let entry_xml = entry.to_xml();
+    let document = roxmltree::Document::parse(&entry_xml).ok()?;
+    let fill = document
+        .root_element()
+        .children()
+        .find(|node| node.is_element())?;
+    let base_resolver = XlsxSchemeResolver { theme_colors };
+    let reference_color = ooxml_common::color::parse_color_node(
+        fill_ref,
+        &base_resolver,
+        ooxml_common::color::TintMode::PowerPointLinear,
+    );
+    let resolver = ooxml_common::color::StyleMatrixColorResolver::new(
+        &base_resolver,
+        reference_color.as_deref(),
+    );
+    parse_xlsx_drawingml_fill(fill, &resolver)
+}
+
 /// Resolve an XLSX shape's `a:lnRef` against the complete DrawingML format
 /// scheme. ST_StyleMatrixColumnIndex is one-based and `0` means no style
 /// (§20.1.10.57). The optional reference color substitutes `phClr`; fixed
@@ -520,6 +603,12 @@ fn xlsx_line_wire_properties(line: &ooxml_common::line::LineProperties) -> XlsxL
                     stops: gradient.stops.clone(),
                     angle: gradient.angle,
                     grad_type: gradient.grad_type.clone(),
+                    scaled: gradient.scaled,
+                    path: gradient.path.clone(),
+                    fill_to_rect: gradient.fill_to_rect.clone(),
+                    tile_rect: gradient.tile_rect.clone(),
+                    flip: gradient.flip.clone(),
+                    rot_with_shape: gradient.rot_with_shape,
                 }),
             )
         }
@@ -1172,21 +1261,23 @@ pub(crate) fn collect_shapes(
             };
 
             // Fill
-            let mut fill_color: Option<String> = None;
+            let mut fill: Option<ShapeFill> = None;
+            let mut has_direct_fill = false;
             let mut has_no_fill = false;
+            let fill_resolver = XlsxSchemeResolver { theme_colors };
             for c in sp_pr.children().filter(|n| n.is_element()) {
                 match c.tag_name().name() {
-                    "solidFill" => {
-                        fill_color = parse_solid_fill(&c, theme_colors);
+                    "solidFill" | "gradFill" | "pattFill" => {
+                        has_direct_fill = true;
+                        fill = parse_xlsx_drawingml_fill(c, &fill_resolver);
                     }
                     "noFill" => {
+                        has_direct_fill = true;
                         has_no_fill = true;
+                        fill = None;
                     }
                     _ => {}
                 }
-            }
-            if has_no_fill {
-                fill_color = None;
             }
 
             // <xdr:style> drives fallbacks: <a:fillRef> supplies a fill when
@@ -1205,7 +1296,7 @@ pub(crate) fn collect_shapes(
                     s.children()
                         .find(|n| n.is_element() && n.tag_name().name() == "fillRef")
                 })
-                .and_then(|n| parse_solid_fill(&n, theme_colors));
+                .and_then(|n| resolve_xlsx_fill_ref(n, theme_colors, theme_format_scheme));
             let style_text_color = style_node
                 .as_ref()
                 .and_then(|s| {
@@ -1213,9 +1304,10 @@ pub(crate) fn collect_shapes(
                         .find(|n| n.is_element() && n.tag_name().name() == "fontRef")
                 })
                 .and_then(|n| parse_solid_fill(&n, theme_colors));
-            if fill_color.is_none() && !has_no_fill {
-                fill_color = style_fill;
+            if !has_direct_fill && !has_no_fill {
+                fill = style_fill;
             }
+            let fill_color = fill.as_ref().and_then(xlsx_fill_fallback_color);
 
             // CT_ShapeStyle supplies a complete line recipe. CT_LineProperties
             // is a component-wise cascade: local `a:ln@w`, paint, dash, cap,
@@ -1283,6 +1375,7 @@ pub(crate) fn collect_shapes(
                 flip_h: root_rect.flip_h,
                 flip_v: root_rect.flip_v,
                 fill_color,
+                fill,
                 stroke_color: stroke.color,
                 stroke_width: stroke.width,
                 stroke_fill: stroke.fill,
@@ -1389,6 +1482,7 @@ pub(crate) fn collect_shapes(
                 flip_h: root_rect.flip_h,
                 flip_v: root_rect.flip_v,
                 fill_color: None,
+                fill: None,
                 stroke_color: None,
                 stroke_width: 0,
                 stroke_fill: None,
@@ -2675,7 +2769,8 @@ mod style_lnref_tests {
     }
 
     fn shape_of(sp_pr_inner: &str, style: &str) -> (Option<String>, i64) {
-        shape_of_with_scheme(sp_pr_inner, style, &format_scheme())
+        let shape = shape_info_with_scheme(sp_pr_inner, style, &format_scheme());
+        (shape.stroke_color, shape.stroke_width)
     }
 
     fn shape_of_with_scheme(
@@ -2683,6 +2778,15 @@ mod style_lnref_tests {
         style: &str,
         scheme: &ThemeFormatScheme,
     ) -> (Option<String>, i64) {
+        let shape = shape_info_with_scheme(sp_pr_inner, style, scheme);
+        (shape.stroke_color, shape.stroke_width)
+    }
+
+    fn shape_info_with_scheme(
+        sp_pr_inner: &str,
+        style: &str,
+        scheme: &ThemeFormatScheme,
+    ) -> ShapeInfo {
         let xml = format!(
             r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
               <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
@@ -2699,10 +2803,9 @@ mod style_lnref_tests {
               <xdr:clientData/>
             </xdr:twoCellAnchor></xdr:wsDr>"#
         );
-        let anchors = parse_shape_anchors(&xml, &theme(), scheme, &HashMap::new());
+        let mut anchors = parse_shape_anchors(&xml, &theme(), scheme, &HashMap::new());
         assert_eq!(anchors.len(), 1, "one anchor expected");
-        let s = &anchors[0].shapes[0];
-        (s.stroke_color.clone(), s.stroke_width)
+        anchors.remove(0).shapes.remove(0)
     }
 
     /// §20.1.4.2.19 — with no explicit `<a:ln>`, the outline comes from the
@@ -2837,6 +2940,61 @@ mod style_lnref_tests {
         );
         assert!(color.is_none(), "lnRef idx=0 → no outline");
         assert_eq!(width, 0);
+    }
+
+    #[test]
+    fn direct_gradient_fill_preserves_shared_geometry() {
+        let shape = shape_info_with_scheme(
+            r#"<a:gradFill flip="y" rotWithShape="0"><a:gsLst>
+                 <a:gs pos="0"><a:srgbClr val="112233"/></a:gs>
+                 <a:gs pos="100000"><a:srgbClr val="AABBCC"/></a:gs>
+               </a:gsLst><a:path path="circle"><a:fillToRect l="25000"/></a:path>
+               <a:tileRect t="50000"/></a:gradFill>"#,
+            "",
+            &format_scheme(),
+        );
+
+        let Some(ShapeFill::Gradient {
+            path,
+            fill_to_rect,
+            tile_rect,
+            flip,
+            rot_with_shape,
+            ..
+        }) = shape.fill
+        else {
+            panic!("expected gradient fill");
+        };
+        assert_eq!(path.as_deref(), Some("circle"));
+        assert_eq!(fill_to_rect.as_ref().map(|rect| rect.l), Some(0.25));
+        assert_eq!(tile_rect.as_ref().map(|rect| rect.t), Some(0.5));
+        assert_eq!(flip.as_deref(), Some("y"));
+        assert_eq!(rot_with_shape, Some(false));
+    }
+
+    #[test]
+    fn fillref_resolves_pattern_recipe_instead_of_flattening_reference_color() {
+        let scheme = ThemeFormatScheme::parse(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements><a:fmtScheme name="s"><a:fillStyleLst>
+                <a:pattFill prst="diagCross">
+                  <a:fgClr><a:schemeClr val="phClr"/></a:fgClr>
+                  <a:bgClr><a:srgbClr val="F0E0D0"/></a:bgClr>
+                </a:pattFill>
+              </a:fillStyleLst></a:fmtScheme></a:themeElements>
+            </a:theme>"#,
+        );
+        let shape = shape_info_with_scheme(
+            "",
+            r#"<xdr:style><a:fillRef idx="1"><a:srgbClr val="102030"/></a:fillRef></xdr:style>"#,
+            &scheme,
+        );
+
+        assert!(matches!(
+            shape.fill,
+            Some(ShapeFill::Pattern { fg, bg, preset })
+                if fg == "102030" && bg == "F0E0D0" && preset == "diagCross"
+        ));
     }
 
     /// A standalone `<xdr:pic>` directly under a `twoCellAnchor` is a plain image

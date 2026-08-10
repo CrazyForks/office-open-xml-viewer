@@ -246,12 +246,13 @@ function resolveFill(fill: Fill | null): string | null {
 
 /** Context-aware fill resolver that creates a CanvasGradient for gradient
  * fills and a CanvasPattern for preset pattern fills. */
-function resolveShapeFill(
+export function resolveShapeFill(
   fill: Fill | null,
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
+  shapeRotationDeg = 0,
 ): string | CanvasGradient | CanvasPattern | null {
-  return resolveFillCore(fill, ctx, x, y, w, h);
+  return resolveFillCore(fill, ctx, x, y, w, h, shapeRotationDeg);
 }
 
 // ===== Text layout helpers =====
@@ -2735,7 +2736,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   if (h === 0 && el.textBody?.verticalAnchor === 'b') {
     if (el.stroke) {
       ctx.save();
-      applyStroke(ctx, el.stroke, scale);
+      applyStroke(ctx, el.stroke, scale, { x, y, w, h: 1 }, el.rotation);
       ctx.beginPath();
       ctx.moveTo(x, y);
       ctx.lineTo(x + w, y);
@@ -2921,7 +2922,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   }
 
   const geom = el.geometry.toLowerCase();
-  const fillStyle = resolveShapeFill(el.fill, ctx, x, y, w, h);
+  const fillStyle = resolveShapeFill(el.fill, ctx, x, y, w, h, el.rotation);
 
   // The Canvas API exposes a single shadow slot, so when both an outer shadow
   // and a glow are configured we let the outer shadow win (visually dominant)
@@ -2988,12 +2989,12 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     const tFill = silhouette ??
       (target === ctx && bx === x && by === y && bw === w && bh === h
         ? fillStyle
-        : resolveShapeFill(el.fill, target, bx, by, bw, bh));
+        : resolveShapeFill(el.fill, target, bx, by, bw, bh, el.rotation));
     const tStroke = silhouette
       ? null
       : el.stroke
         ? () => {
-            applyStroke(target, el.stroke!, scale);
+            applyStroke(target, el.stroke!, scale, { x: bx, y: by, w: bw, h: bh }, el.rotation);
             target.stroke();
           }
         : null;
@@ -3114,6 +3115,9 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     : [];
   const flatBevelEdgePadCss = (el.stroke ? (el.stroke.width * scale) / 2 : 0) + 2;
   const paintLineDecorations = (target: CanvasRenderingContext2D): void => {
+    const effectivePaint = el.stroke?.fill
+      ? resolveShapeFill(el.stroke.fill, target, x, y, w, h, el.rotation) ?? undefined
+      : undefined;
     if (el.stroke && (CONNECTOR_GEOMS.has(geom) || CALLOUT_GEOMS.has(geom))) {
       // The preset body deliberately suppresses retractable leader strokes. Paint
       // the shortened leader and its line ends into the same target as the body
@@ -3143,14 +3147,22 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
           const retract = lineEndRetract(el.stroke.headEnd, el.stroke, scale);
           pts[0] = retractLineEndpoint(pts[0], pts[1], retract);
         }
-        applyStroke(target, el.stroke, scale);
+        applyStroke(target, el.stroke, scale, { x, y, w, h }, el.rotation);
         target.beginPath();
         target.moveTo(pts[0].x, pts[0].y);
         for (let i = 1; i < pts.length; i++) target.lineTo(pts[i].x, pts[i].y);
         target.stroke();
       }
       if (cmpd && isStraight) {
-        drawCompoundLine(target, anchors.start, anchors.end, el.stroke, cmpd, scale);
+        drawCompoundLine(
+          target,
+          anchors.start,
+          anchors.end,
+          el.stroke,
+          cmpd,
+          scale,
+          el.rotation,
+        );
       }
       if (el.stroke.tailEnd) {
         drawArrowHead(
@@ -3161,6 +3173,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
           el.stroke.tailEnd,
           el.stroke,
           scale,
+          effectivePaint,
         );
       }
       if (el.stroke.headEnd) {
@@ -3172,6 +3185,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
           el.stroke.headEnd,
           el.stroke,
           scale,
+          effectivePaint,
         );
       }
       return;
@@ -3195,6 +3209,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
         el.stroke.headEnd,
         el.stroke,
         scale,
+        effectivePaint,
       );
     }
     if (end && el.stroke.tailEnd && el.stroke.tailEnd.type !== 'none') {
@@ -3206,6 +3221,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
         el.stroke.tailEnd,
         el.stroke,
         scale,
+        effectivePaint,
       );
     }
   };
@@ -5123,7 +5139,7 @@ async function renderPicture(
       // the silhouette edge.
       if (el.stroke) {
         target.save();
-        applyStroke(target, el.stroke, scale);
+        applyStroke(target, el.stroke, scale, { x: ox, y: oy, w: ow, h: oh }, el.rotation);
         tracePictureSilhouette(target, ox, oy, ow, oh);
         target.stroke();
         target.restore();
@@ -5478,6 +5494,7 @@ function drawCompoundLine(
   stroke: Stroke,
   cmpd: string,
   scale: number,
+  shapeRotationDeg: number,
 ): void {
   const totalW = Math.max(0.5, emuToPx(stroke.width, scale));
   const dx = end.x - start.x;
@@ -5533,7 +5550,18 @@ function drawCompoundLine(
 
   // 2. Paint each sub-line.
   ctx.globalCompositeOperation = 'source-over';
-  ctx.strokeStyle = hexToRgba(stroke.color);
+  const strokePaint = stroke.fill
+    ? resolveShapeFill(
+        stroke.fill,
+        ctx,
+        Math.min(start.x, end.x),
+        Math.min(start.y, end.y),
+        Math.max(1, Math.abs(end.x - start.x)),
+        Math.max(1, Math.abs(end.y - start.y)),
+        shapeRotationDeg,
+      )
+    : null;
+  ctx.strokeStyle = strokePaint ?? hexToRgba(stroke.color);
   for (const sub of subs) {
     const ox = px * (totalW * sub.offset);
     const oy = py * (totalW * sub.offset);
@@ -5546,9 +5574,27 @@ function drawCompoundLine(
   ctx.restore();
 }
 
-function applyStroke(ctx: CanvasRenderingContext2D, stroke: Stroke | null, scale: number) {
+export function applyStroke(
+  ctx: CanvasRenderingContext2D,
+  stroke: Stroke | null,
+  scale: number,
+  bounds?: { x: number; y: number; w: number; h: number },
+  shapeRotationDeg = 0,
+) {
   // `scale` is EMU → px factor (canvasWidthPx / slideWidthEMU).
   applyStrokeCore(ctx, stroke, scale);
+  if (stroke?.fill && bounds) {
+    const paint = resolveShapeFill(
+      stroke.fill,
+      ctx,
+      bounds.x,
+      bounds.y,
+      bounds.w,
+      bounds.h,
+      shapeRotationDeg,
+    );
+    if (paint) ctx.strokeStyle = paint;
+  }
 }
 
 // ─── Chart rendering ────────────────────────────────────────────────────────
@@ -5723,9 +5769,17 @@ export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, sca
 
   // Pass 1: fills + text bodies.
   for (const { cell, colX, rowY, cellW, cellH } of jobs) {
-    const fillColor = resolveFill(cell.fill);
-    if (fillColor) {
-      ctx.fillStyle = fillColor;
+    const fillPaint = resolveShapeFill(
+      cell.fill,
+      ctx,
+      colX,
+      rowY,
+      cellW,
+      cellH,
+      el.rotation,
+    );
+    if (fillPaint) {
+      ctx.fillStyle = fillPaint;
       ctx.fillRect(colX, rowY, cellW, cellH);
     }
     // Text body — default run colour comes from the table style's tcTxStyle
@@ -5778,7 +5832,12 @@ export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, sca
     stroke: Stroke,
     x1: number, y1: number, x2: number, y2: number,
   ) => {
-    applyStroke(ctx, stroke, scale);
+    applyStroke(ctx, stroke, scale, {
+      x: Math.min(x1, x2),
+      y: Math.min(y1, y2),
+      w: Math.max(1, Math.abs(x2 - x1)),
+      h: Math.max(1, Math.abs(y2 - y1)),
+    }, el.rotation);
     // Vertical edge (x1===x2) nudges X; horizontal edge (y1===y2) nudges Y.
     const dx = x1 === x2 ? crispOffset(x1, ctx.lineWidth, dpr) : 0;
     const dy = y1 === y2 ? crispOffset(y1, ctx.lineWidth, dpr) : 0;
@@ -5881,14 +5940,18 @@ export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, sca
     // are never shared between cells, so they are always drawn per-cell (and are
     // not pixel-aligned).
     if (cell.diagonalTL) {
-      applyStroke(ctx, cell.diagonalTL, scale);
+      applyStroke(ctx, cell.diagonalTL, scale, {
+        x: colX, y: rowY, w: cellW, h: cellH,
+      }, el.rotation);
       ctx.beginPath();
       ctx.moveTo(colX, rowY);
       ctx.lineTo(colX + cellW, rowY + cellH);
       ctx.stroke();
     }
     if (cell.diagonalTR) {
-      applyStroke(ctx, cell.diagonalTR, scale);
+      applyStroke(ctx, cell.diagonalTR, scale, {
+        x: colX, y: rowY, w: cellW, h: cellH,
+      }, el.rotation);
       ctx.beginPath();
       ctx.moveTo(colX + cellW, rowY);
       ctx.lineTo(colX, rowY + cellH);

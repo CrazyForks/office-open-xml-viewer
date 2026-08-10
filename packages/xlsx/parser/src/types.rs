@@ -670,6 +670,8 @@ pub struct ShapeInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fill_color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<ShapeFill>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stroke_color: Option<String>,
     /// Stroke width in EMU (914400 = 1 inch). 0 = no stroke.
     pub stroke_width: i64,
@@ -709,6 +711,48 @@ pub enum ShapeStrokeFill {
         stops: Vec<ooxml_common::fill::GradStop>,
         angle: f64,
         grad_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scaled: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fill_to_rect: Option<ooxml_common::fill::FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tile_rect: Option<ooxml_common::fill::FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flip: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rot_with_shape: Option<bool>,
+    },
+    Pattern {
+        fg: String,
+        bg: String,
+        preset: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "fillType", rename_all = "camelCase")]
+pub enum ShapeFill {
+    Solid {
+        color: String,
+    },
+    Gradient {
+        stops: Vec<ooxml_common::fill::GradStop>,
+        angle: f64,
+        grad_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scaled: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fill_to_rect: Option<ooxml_common::fill::FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tile_rect: Option<ooxml_common::fill::FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flip: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rot_with_shape: Option<bool>,
     },
     Pattern {
         fg: String,

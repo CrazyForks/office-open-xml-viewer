@@ -693,6 +693,18 @@ pub(crate) enum Fill {
         angle: f64,
         /// "linear" | "radial"
         grad_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scaled: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fill_to_rect: Option<FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tile_rect: Option<FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flip: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rot_with_shape: Option<bool>,
     },
     /// Preset pattern fill — ECMA-376 §20.1.8.40 / §20.1.10.59 (ST_PresetPatternVal).
     #[serde(rename_all = "camelCase")]

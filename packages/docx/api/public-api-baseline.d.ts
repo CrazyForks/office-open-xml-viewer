@@ -1237,6 +1237,17 @@ export type ShapeFill = {
     stops: GradientStop[];
     angle: number;
     gradType: string;
+    scaled?: boolean;
+    path?: string;
+    fillToRect?: FillRect;
+    tileRect?: FillRect;
+    flip?: string;
+    rotWithShape?: boolean;
+} | {
+    fillType: 'pattern';
+    fg: string;
+    bg: string;
+    preset: string;
 } | {
     fillType: 'image';
     imagePath: string;
@@ -1320,6 +1331,12 @@ export type ShapeStrokeFill = {
     stops: GradientStop[];
     angle: number;
     gradType: string;
+    scaled?: boolean;
+    path?: string;
+    fillToRect?: FillRect;
+    tileRect?: FillRect;
+    flip?: string;
+    rotWithShape?: boolean;
 } | {
     fillType: 'pattern';
     fg: string;

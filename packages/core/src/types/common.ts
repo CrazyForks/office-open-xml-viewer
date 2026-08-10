@@ -35,6 +35,18 @@ export interface GradientFill {
   angle: number;
   /** 'linear' | 'radial' */
   gradType: string;
+  /** ECMA-376 §20.1.8.41: scale the gradient vector by the fill width/height. */
+  scaled?: boolean;
+  /** ECMA-376 §20.1.8.46 path shade geometry. */
+  path?: 'shape' | 'circle' | 'rect' | string;
+  /** Path-gradient focus rectangle, relative to the gradient tile. */
+  fillToRect?: FillRect;
+  /** Gradient tile rectangle, relative to the shape bounds. */
+  tileRect?: FillRect;
+  /** Gradient tile mirroring. */
+  flip?: 'none' | 'x' | 'y' | 'xy' | string;
+  /** Whether the gradient rotates with the containing shape. */
+  rotWithShape?: boolean;
 }
 
 /**

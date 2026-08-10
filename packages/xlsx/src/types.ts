@@ -6,6 +6,8 @@ import type {
   Fill,
   ArrowEnd,
 } from '@silurus/ooxml-core';
+
+export type ShapeFill = Exclude<Fill, { fillType: 'image' } | { fillType: 'none' }>;
 import type {
   NormalizedOoxmlResourcePolicy,
   PullSessionIdentity,
@@ -475,6 +477,8 @@ export interface ShapeInfo {
   flipH?: boolean;
   flipV?: boolean;
   fillColor?: string;
+  /** Complete authored DrawingML fill; `fillColor` remains a compatibility fallback. */
+  fill?: ShapeFill;
   strokeColor?: string;
   /** Stroke width in EMU. 0 = no stroke. */
   strokeWidth: number;

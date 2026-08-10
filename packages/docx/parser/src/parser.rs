@@ -1779,11 +1779,6 @@ pub struct ThemeColors {
     /// w:themeFontLang languages to these script fonts for major/minor theme
     /// references before falling back to the generic latin/ea/cs elements.
     script_fonts: HashMap<String, String>,
-    /// Raw theme XML, retained so wps:style/fillRef → fillStyleLst /
-    /// bgFillStyleLst lookups (ECMA-376 §20.1.4.1.7) can be resolved on demand.
-    /// Re-parsing per shape is fine — the cover usually has only a handful of
-    /// shapes that take a fillRef, and theme XML is small.
-    theme_xml: Option<String>,
     /// Lossless DrawingML style matrix used by WPS `lnRef`. Unlike the legacy
     /// width-only lookup this retains the complete CT_LineProperties recipe so
     /// each omitted local line property can inherit independently (ECMA-376
@@ -1804,7 +1799,6 @@ impl ThemeColors {
         let mut map: HashMap<String, String> = HashMap::new();
         let mut fonts: HashMap<String, String> = HashMap::new();
         let mut script_fonts: HashMap<String, String> = HashMap::new();
-        let theme_xml = Some(xml.to_string());
         let format_scheme = ooxml_common::theme::ThemeFormatScheme::parse(xml);
 
         // Color slots: shared clrScheme parse; docx uppercases each hex and keys
@@ -1858,7 +1852,6 @@ impl ThemeColors {
             map,
             fonts,
             script_fonts,
-            theme_xml,
             format_scheme,
             ..Default::default()
         }
@@ -11166,6 +11159,16 @@ fn parse_shape_fill(
                     None => FillSpec::NoFill,
                 };
             }
+            "pattFill" => {
+                let resolver = DocxSchemeResolver {
+                    theme,
+                    placeholder_color: None,
+                };
+                return match parse_docx_drawingml_fill(child, &resolver) {
+                    Some(fill) => FillSpec::Explicit(Box::new(fill)),
+                    None => FillSpec::NoFill,
+                };
+            }
             "blipFill" => {
                 // §20.1.8.14: a direct picture fill is an authored fill even
                 // when its relationship cannot be resolved. Never fall back to
@@ -11315,6 +11318,12 @@ fn docx_line_wire_properties(line: &ooxml_common::line::LineProperties) -> DocxL
                         .collect(),
                     angle: gradient.angle,
                     grad_type: gradient.grad_type.clone(),
+                    scaled: gradient.scaled,
+                    path: gradient.path.clone(),
+                    fill_to_rect: gradient.fill_to_rect.clone(),
+                    tile_rect: gradient.tile_rect.clone(),
+                    flip: gradient.flip.clone(),
+                    rot_with_shape: gradient.rot_with_shape,
                 }),
             )
         }
@@ -11393,101 +11402,87 @@ fn docx_line_wire_properties(line: &ooxml_common::line::LineProperties) -> DocxL
 /// parameters living in the theme part. Without this lookup, the shape ends
 /// up with no fill and the cover panel renders blank.
 fn resolve_fill_ref(fill_ref: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeFill> {
-    let idx: u32 = fill_ref.attribute("idx")?.parse().ok()?;
-    if idx == 0 {
-        return None;
-    }
+    use ooxml_common::theme::StyleMatrixLookup;
+
+    let idx: usize = fill_ref.attribute("idx")?.parse().ok()?;
     // CT_StyleMatrixReference carries the full EG_ColorChoice, not only
     // schemeClr. Resolve srgbClr/sysClr/prstClr/etc. (and their transforms)
     // before substituting the result for the theme recipe's phClr.
     let placeholder_color = resolve_color_element(fill_ref, theme);
-
-    let xml = theme.theme_xml.as_ref()?;
-    let doc = parse_guarded(xml).ok()?;
-    let fmt = doc
-        .root_element()
-        .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "fmtScheme")?;
-    // ECMA-376 §20.1.4.1.30: fillRef idx is 1-indexed.
-    //   idx 1..999  → fillStyleLst[idx - 1]
-    //   idx 1001+   → bgFillStyleLst[idx - 1001]
-    let (lst_name, local_idx) = if idx >= 1001 {
-        ("bgFillStyleLst", (idx - 1001) as usize)
-    } else {
-        ("fillStyleLst", (idx - 1) as usize)
+    let StyleMatrixLookup::Entry(entry) = theme.format_scheme.lookup_fill_ref(idx) else {
+        return None;
     };
-    let lst = fmt
+    let entry_xml = entry.to_xml();
+    let doc = parse_guarded(&entry_xml).ok()?;
+    let fill = doc
+        .root_element()
         .children()
-        .find(|n| n.is_element() && n.tag_name().name() == lst_name)?;
-    let entry = lst.children().filter(|n| n.is_element()).nth(local_idx)?;
-
-    match entry.tag_name().name() {
-        "solidFill" => resolve_color_element_with_phclr(entry, theme, placeholder_color.as_deref())
-            .map(|c| ShapeFill::Solid { color: c }),
-        "gradFill" => parse_grad_fill_phclr(entry, theme, placeholder_color.as_deref()),
-        // blipFill / pattFill recipes aren't supported yet — fall back to no fill.
-        _ => None,
-    }
+        .find(|node| node.is_element())?;
+    let base_resolver = DocxSchemeResolver {
+        theme,
+        placeholder_color: None,
+    };
+    let resolver = ooxml_common::color::StyleMatrixColorResolver::new(
+        &base_resolver,
+        placeholder_color.as_deref(),
+    );
+    parse_docx_drawingml_fill(fill, &resolver)
 }
 
 fn parse_grad_fill(node: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeFill> {
-    parse_grad_fill_phclr(node, theme, None)
+    let resolver = DocxSchemeResolver {
+        theme,
+        placeholder_color: None,
+    };
+    ooxml_common::fill::parse_grad_fill(node, &resolver, ooxml_common::color::TintMode::WordLiteral)
+        .map(docx_gradient_fill)
 }
 
-fn parse_grad_fill_phclr(
-    node: roxmltree::Node,
-    theme: &ThemeColors,
-    placeholder_color: Option<&str>,
+fn docx_gradient_fill(gradient: ooxml_common::fill::GradientFill) -> ShapeFill {
+    ShapeFill::Gradient {
+        stops: gradient
+            .stops
+            .into_iter()
+            .map(|stop| GradientStop {
+                position: stop.position,
+                color: stop.color,
+            })
+            .collect(),
+        angle: gradient.angle,
+        grad_type: gradient.grad_type,
+        scaled: gradient.scaled,
+        path: gradient.path,
+        fill_to_rect: gradient.fill_to_rect,
+        tile_rect: gradient.tile_rect,
+        flip: gradient.flip,
+        rot_with_shape: gradient.rot_with_shape,
+    }
+}
+
+fn parse_docx_drawingml_fill(
+    fill: roxmltree::Node,
+    resolver: &(impl ooxml_common::color::ThemeResolver + ?Sized),
 ) -> Option<ShapeFill> {
-    let gs_lst = node
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "gsLst")?;
-    let mut stops: Vec<GradientStop> = Vec::new();
-    for gs in gs_lst
-        .children()
-        .filter(|n| n.is_element() && n.tag_name().name() == "gs")
-    {
-        let pos = gs
-            .attribute("pos")
-            .and_then(|v| v.parse::<f64>().ok())
-            .map(|p| p / 100000.0)
-            .unwrap_or(0.0);
-        if let Some(color) = resolve_color_element_with_phclr(gs, theme, placeholder_color) {
-            stops.push(GradientStop {
-                position: pos,
-                color,
-            });
+    let tint_mode = ooxml_common::color::TintMode::WordLiteral;
+    match fill.tag_name().name() {
+        "solidFill" => ooxml_common::color::parse_color_node(fill, resolver, tint_mode)
+            .map(|color| ShapeFill::Solid { color }),
+        "gradFill" => {
+            ooxml_common::fill::parse_grad_fill(fill, resolver, tint_mode).map(docx_gradient_fill)
         }
+        "pattFill" => {
+            let pattern = ooxml_common::fill::parse_patt_fill(fill, resolver, tint_mode);
+            Some(ShapeFill::Pattern {
+                fg: pattern.fg,
+                bg: pattern.bg,
+                preset: pattern.preset,
+            })
+        }
+        "noFill" => None,
+        // Theme-owned blip relationships require the theme part's relationship
+        // table and therefore remain a host resource-resolution concern.
+        _ => None,
     }
-    if stops.is_empty() {
-        return None;
-    }
-
-    // Linear direction (a:lin ang = "60000"ths of a degree)
-    let (angle, grad_type) = if let Some(lin) = node
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "lin")
-    {
-        let ang = lin
-            .attribute("ang")
-            .and_then(|v| v.parse::<f64>().ok())
-            .map(|a| a / 60000.0)
-            .unwrap_or(0.0);
-        (ang, "linear".to_string())
-    } else if node
-        .children()
-        .any(|n| n.is_element() && n.tag_name().name() == "path")
-    {
-        (0.0, "radial".to_string())
-    } else {
-        (0.0, "linear".to_string())
-    };
-
-    Some(ShapeFill::Gradient {
-        stops,
-        angle,
-        grad_type,
-    })
 }
 
 /// Parse <a:custGeom><a:pathLst><a:path w="W" h="H">...</a:path></a:pathLst>.
@@ -23068,6 +23063,10 @@ mod shape_preset_geometry_tests {
                          <a:gs pos="0"><a:srgbClr val="123456"/></a:gs>
                          <a:gs pos="100000"><a:srgbClr val="ABCDEF"/></a:gs>
                        </a:gsLst><a:lin ang="5400000"/></a:gradFill>
+                       <a:pattFill prst="diagCross">
+                         <a:fgClr><a:srgbClr val="102030"/></a:fgClr>
+                         <a:bgClr><a:srgbClr val="F0E0D0"/></a:bgClr>
+                       </a:pattFill>
                      </a:fillStyleLst>
                      <a:lnStyleLst/>
                      <a:effectStyleLst/>
@@ -23330,6 +23329,7 @@ mod shape_preset_geometry_tests {
             stops,
             angle,
             grad_type,
+            ..
         } = shape
             .fill
             .as_ref()
@@ -23346,6 +23346,52 @@ mod shape_preset_geometry_tests {
         );
         assert_eq!(*angle, 90.0);
         assert_eq!(grad_type, "linear");
+    }
+
+    #[test]
+    fn fillref_preserves_pattern_recipe() {
+        let shape = shape_with_sppr_and_style(
+            r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#,
+            r#"<wps:style><a:fillRef idx="3"/></wps:style>"#,
+            &theme_with_concrete_fills(),
+        );
+
+        assert!(matches!(
+            shape.fill.as_ref(),
+            Some(ShapeFill::Pattern { fg, bg, preset })
+                if fg == "102030" && bg == "F0E0D0" && preset == "diagCross"
+        ));
+    }
+
+    #[test]
+    fn direct_gradient_preserves_path_focus_tile_and_rotation() {
+        let shape = shape_with_sppr_and_style(
+            r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+               <a:gradFill flip="x" rotWithShape="0"><a:gsLst>
+                 <a:gs pos="0"><a:srgbClr val="123456"/></a:gs>
+                 <a:gs pos="100000"><a:srgbClr val="ABCDEF"/></a:gs>
+               </a:gsLst><a:path path="rect"><a:fillToRect l="25000"/></a:path>
+               <a:tileRect l="50000"/></a:gradFill>"#,
+            "",
+            &ThemeColors::default(),
+        );
+
+        let Some(ShapeFill::Gradient {
+            path,
+            fill_to_rect,
+            tile_rect,
+            flip,
+            rot_with_shape,
+            ..
+        }) = shape.fill.as_ref()
+        else {
+            panic!("expected gradient fill");
+        };
+        assert_eq!(path.as_deref(), Some("rect"));
+        assert_eq!(fill_to_rect.as_ref().map(|rect| rect.l), Some(0.25));
+        assert_eq!(tile_rect.as_ref().map(|rect| rect.l), Some(0.5));
+        assert_eq!(flip.as_deref(), Some("x"));
+        assert_eq!(*rot_with_shape, Some(false));
     }
 
     #[test]

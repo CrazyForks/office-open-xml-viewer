@@ -106,6 +106,12 @@ fn parse_fill_with_resolver<R: ThemeResolver + ?Sized>(
                         stops: g.stops,
                         angle: g.angle,
                         grad_type: g.grad_type,
+                        scaled: g.scaled,
+                        path: g.path,
+                        fill_to_rect: g.fill_to_rect,
+                        tile_rect: g.tile_rect,
+                        flip: g.flip,
+                        rot_with_shape: g.rot_with_shape,
                     });
                 }
             }
@@ -317,6 +323,12 @@ pub(crate) fn line_properties_to_stroke(
                     stops: gradient.stops.clone(),
                     angle: gradient.angle,
                     grad_type: gradient.grad_type.clone(),
+                    scaled: gradient.scaled,
+                    path: gradient.path.clone(),
+                    fill_to_rect: gradient.fill_to_rect.clone(),
+                    tile_rect: gradient.tile_rect.clone(),
+                    flip: gradient.flip.clone(),
+                    rot_with_shape: gradient.rot_with_shape,
                 }),
             )
         }
