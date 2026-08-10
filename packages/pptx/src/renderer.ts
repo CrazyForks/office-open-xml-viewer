@@ -2515,8 +2515,13 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const paintShapeBody = (
     target: CanvasRenderingContext2D,
     silhouette?: string,
+    bounds: { x: number; y: number; w: number; h: number } = { x, y, w, h },
   ): void => {
-    const tFill = silhouette ?? fillStyle;
+    const { x: bx, y: by, w: bw, h: bh } = bounds;
+    const tFill = silhouette ??
+      (target === ctx && bx === x && by === y && bw === w && bh === h
+        ? fillStyle
+        : resolveShapeFill(el.fill, target, bx, by, bw, bh));
     const tStroke = silhouette
       ? null
       : el.stroke
@@ -2529,7 +2534,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
 
     if (usePresetEngine && !silhouette) {
       renderPresetShape(
-        target, geom, x, y, w, h,
+        target, geom, bx, by, bw, bh,
         [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
         tFill, tStroke, tClearShadow,
         // A retractable leader (callout / straight / bent connector) is
@@ -2543,14 +2548,14 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
 
     target.beginPath();
     if (el.custGeom && el.custGeom.length > 0) {
-      buildCustomPath(target, el.custGeom, x, y, w, h);
+      buildCustomPath(target, el.custGeom, bx, by, bw, bh);
     } else if (usePresetEngine) {
       // Silhouette of a preset shape: build a single filled outline. Preset
       // path 0 is the body outline (secondary paths are highlights), so the
       // legacy buildShapePath gives a faithful silhouette of the body.
-      buildShapePath(target, geom, x, y, w, h, el.adj, el.adj2, el.adj3, el.adj4);
+      buildShapePath(target, geom, bx, by, bw, bh, el.adj, el.adj2, el.adj3, el.adj4);
     } else {
-      buildShapePath(target, geom, x, y, w, h, el.adj, el.adj2, el.adj3, el.adj4);
+      buildShapePath(target, geom, bx, by, bw, bh, el.adj, el.adj2, el.adj3, el.adj4);
     }
     // Normal arc bodies render through the preset engine above; this legacy
     // path is only reached for an arc as a custGeom/effect silhouette built by
@@ -2586,6 +2591,40 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const devScale = det > 0 ? Math.sqrt(det) : 1;
   const effBBox = { x: x * devScale, y: y * devScale, w: w * devScale, h: h * devScale };
   const effScale = scale * devScale; // EMU → device px
+  // A face-on camera does not need a homography, but sp3d bevels still alter
+  // the front surface. Pictures already take this flat offscreen path; shapes
+  // must do the same instead of treating an identity camera as "no 3-D".
+  const flatBevels = !spScene3d
+    ? buildBevelInputs(
+        el.sp3d as Sp3dLike | undefined,
+        el.scene3d?.lightRig as LightRigLike | undefined,
+        el.sp3d?.prstMaterial,
+        scale,
+        devScale,
+      )
+    : [];
+  const flatBevelEdgePadCss = (el.stroke ? (el.stroke.width * scale) / 2 : 0) + 2;
+  const paintVisibleShapeBody = (target: CanvasRenderingContext2D): void => {
+    if (flatBevels.length > 0) {
+      const ok = paintBeveledFlat(
+        target,
+        x,
+        y,
+        w,
+        h,
+        flatBevels,
+        (octx, ox, oy, ow, oh) =>
+          paintShapeBody(octx, undefined, { x: ox, y: oy, w: ow, h: oh }),
+        undefined,
+        flatBevelEdgePadCss,
+      );
+      if (ok) {
+        clearShadow(target);
+        return;
+      }
+    }
+    paintShapeBody(target);
+  };
   const applyLiveTransform = (c: CanvasRenderingContext2D) => {
     c.setTransform(liveTransform);
   };
@@ -2598,7 +2637,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     ctx.save();
     ctx.setTransform(new DOMMatrix());
     applyReflection(
-      ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D); },
+      ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintVisibleShapeBody(c as CanvasRenderingContext2D); },
       effBBox, el.reflection, effScale, deviceW, deviceH,
     );
     ctx.restore();
@@ -2613,14 +2652,14 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     ctx.save();
     ctx.setTransform(new DOMMatrix());
     applySoftEdge(
-      ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D); },
+      ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintVisibleShapeBody(c as CanvasRenderingContext2D); },
       effBBox, el.softEdge, effScale, deviceW, deviceH,
       // Mask is the flat filled silhouette (no stroke) — see applySoftEdge.
       (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D, '#000'); },
     );
     ctx.restore();
   } else {
-    paintShapeBody(ctx);
+    paintVisibleShapeBody(ctx);
   }
 
   // innerShdw casts inward, ON TOP of the fill. §20.1.8.40. Composite after the
