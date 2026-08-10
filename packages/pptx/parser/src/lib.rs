@@ -1168,6 +1168,27 @@ pub(crate) fn read_zip_head(
 
 /// Resolved fills and borders extracted from a single <a:tblStyle> definition.
 #[derive(Debug, Clone, Default)]
+struct TableTextStyle {
+    color: Option<String>,
+    bold: Option<bool>,
+    italic: Option<bool>,
+}
+
+impl TableTextStyle {
+    fn overlay(&mut self, role: &Self) {
+        if role.color.is_some() {
+            self.color = role.color.clone();
+        }
+        if role.bold.is_some() {
+            self.bold = role.bold;
+        }
+        if role.italic.is_some() {
+            self.italic = role.italic;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 struct TableStyleDef {
     whole_fill: Option<Fill>,
     whole_inside_h: Option<Stroke>,
@@ -1183,19 +1204,21 @@ struct TableStyleDef {
     last_row_fill: Option<Fill>,
     first_col_fill: Option<Fill>,
     last_col_fill: Option<Fill>,
-    /// Default text colour per role, from `<a:tcTxStyle>` (schemeClr/srgbClr).
-    /// e.g. wholeTbl → dk1, firstRow header → lt1 (white). Hex, no `#`.
-    whole_text_color: Option<String>,
-    first_row_text_color: Option<String>,
-    last_row_text_color: Option<String>,
-    first_col_text_color: Option<String>,
-    last_col_text_color: Option<String>,
-    /// Default bold per role, from `<a:tcTxStyle b="on">` (ECMA-376 §20.1.4.2.28).
-    /// e.g. a firstRow header is commonly bold.
-    first_row_bold: Option<bool>,
-    last_row_bold: Option<bool>,
-    first_col_bold: Option<bool>,
-    last_col_bold: Option<bool>,
+    /// Conditional table text roles from `<a:tcTxStyle>`. `None` for bold/
+    /// italic means inherit (`def`), while explicit `off` is `Some(false)`.
+    whole_text: TableTextStyle,
+    band1h_text: TableTextStyle,
+    band2h_text: TableTextStyle,
+    band1v_text: TableTextStyle,
+    band2v_text: TableTextStyle,
+    first_row_text: TableTextStyle,
+    last_row_text: TableTextStyle,
+    first_col_text: TableTextStyle,
+    last_col_text: TableTextStyle,
+    nw_cell_text: TableTextStyle,
+    ne_cell_text: TableTextStyle,
+    sw_cell_text: TableTextStyle,
+    se_cell_text: TableTextStyle,
 }
 
 // ===========================
@@ -1459,6 +1482,7 @@ fn parse_slide(
         master_bold,
         master_italic,
         master_caps,
+        master_reflection,
         master_color,
         ..
     } = bundle;
@@ -1497,6 +1521,11 @@ fn parse_slide(
     }
     for (t, c) in master_caps.iter() {
         lph.by_type_caps.entry(t.clone()).or_insert(c.clone());
+    }
+    for (t, reflection) in master_reflection.iter() {
+        lph.by_type_reflection
+            .entry(t.clone())
+            .or_insert_with(|| reflection.clone());
     }
     for (t, c) in master_color.iter() {
         lph.by_type_master_color
@@ -1605,11 +1634,10 @@ fn parse_slide(
 
     // ── Layout non-placeholder shapes (rendered BEFORE slide shapes) ──────
     // These are decorative background elements defined in the slide layout
-    // (e.g. coloured bands, logos) that are not placeholder anchors. A slide's
-    // showMasterSp="0" is PowerPoint's Hide Background Graphics switch and
-    // suppresses inherited artwork from the selected layout as well as the
-    // slide master. The layout's own flag only controls its master inheritance.
-    if slide_show_master_sp {
+    // (e.g. coloured bands, logos) that are not placeholder anchors. ECMA-376
+    // §19.3.1.38 scopes showMasterSp to shapes on the master slide, so the
+    // selected layout's own shapes remain visible.
+    {
         if let Some(lxml) = layout_xml {
             note_layout_master_parse();
             if let Ok(ldoc) = parse_preflighted_pptx_xml(lxml) {
@@ -3600,12 +3628,10 @@ mod tests {
         assert!(BulletProps::default().is_inherit());
     }
 
-    /// PowerPoint treats `buChar` as a single marker even when a producer writes
-    /// more than one Unicode scalar into the schema's string-valued attribute.
-    /// Keep the first scalar so malformed SmartArt caches do not paint doubled
-    /// bullets, while supplementary-plane markers remain intact.
+    /// ECMA-376 §21.1.2.4.3 defines buChar@char as xsd:string. Preserve the
+    /// complete authored value, including multi-scalar grapheme clusters.
     #[test]
-    fn character_bullet_uses_one_unicode_scalar() {
+    fn character_bullet_preserves_the_authored_string() {
         let doc = roxmltree::Document::parse(
             r#"<a:pPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:buChar char="••"/></a:pPr>"#,
         )
@@ -3613,7 +3639,7 @@ mod tests {
         let theme = HashMap::new();
         let mut resolve_blip = |_: &str| None;
         match parse_bullet(Some(doc.root_element()), &theme, &mut resolve_blip) {
-            Bullet::Char { ch, .. } => assert_eq!(ch, "•"),
+            Bullet::Char { ch, .. } => assert_eq!(ch, "••"),
             other => panic!("expected Char, got {other:?}"),
         }
 
@@ -3622,7 +3648,7 @@ mod tests {
         )
         .expect("valid supplementary-plane marker");
         match parse_bullet(Some(emoji_doc.root_element()), &theme, &mut resolve_blip) {
-            Bullet::Char { ch, .. } => assert_eq!(ch, "🡆"),
+            Bullet::Char { ch, .. } => assert_eq!(ch, "🡆x"),
             other => panic!("expected Char, got {other:?}"),
         }
     }
@@ -4292,6 +4318,38 @@ mod tests {
             }
             other => panic!("expected style-matrix gradient, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_shape_fill_ref_uses_the_normative_background_style_index_range() {
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:themeElements><a:clrScheme name="C"/><a:fontScheme name="F"><a:majorFont/><a:minorFont/></a:fontScheme>
+          <a:fmtScheme name="S"><a:fillStyleLst>
+            <a:solidFill><a:srgbClr val="112233"/></a:solidFill>
+          </a:fillStyleLst><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst>
+            <a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill>
+          </a:bgFillStyleLst></a:fmtScheme></a:themeElements>
+        </a:theme>"#;
+        let theme = parse_theme_colors(theme_xml);
+        let refs = roxmltree::Document::parse(
+            r#"<root xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:fillRef idx="1000"/><a:fillRef idx="1001"/>
+            </root>"#,
+        )
+        .unwrap();
+        let mut refs = refs
+            .root_element()
+            .children()
+            .filter(|node| node.is_element());
+
+        assert!(matches!(
+            parse_style_matrix_fill(refs.next().unwrap(), &theme, false),
+            Some(Fill::None)
+        ));
+        assert!(matches!(
+            parse_style_matrix_fill(refs.next().unwrap(), &theme, false),
+            Some(Fill::Solid { color }) if color == "ABCDEF"
+        ));
     }
 
     /// ECMA-376 §19.3.1.52 / §21.1.2.3.7: a title with no local Latin
@@ -5315,6 +5373,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 ShapeKind::Sp,
                 &mut zip,
             );
@@ -5853,7 +5912,7 @@ mod tests {
         let xml = r#"<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
           <a:tblStyle styleId="{TEST}" styleName="Medium Style 1 - Accent 2">
             <a:wholeTbl>
-              <a:tcTxStyle>
+              <a:tcTxStyle b="def" i="on">
                 <a:fontRef idx="minor"><a:scrgbClr r="0" g="0" b="0"/></a:fontRef>
                 <a:schemeClr val="dk1"/>
               </a:tcTxStyle>
@@ -5865,6 +5924,7 @@ mod tests {
               </a:tcStyle>
             </a:wholeTbl>
             <a:band1H>
+              <a:tcTxStyle b="on"><a:fontRef idx="minor"/><a:schemeClr val="accent2"/></a:tcTxStyle>
               <a:tcStyle>
                 <a:tcBdr/>
                 <a:fill><a:solidFill><a:schemeClr val="accent2"><a:tint val="20000"/></a:schemeClr></a:solidFill></a:fill>
@@ -5880,6 +5940,7 @@ mod tests {
                 <a:fill><a:solidFill><a:schemeClr val="accent2"/></a:solidFill></a:fill>
               </a:tcStyle>
             </a:firstRow>
+            <a:nwCell><a:tcTxStyle b="off"><a:fontRef idx="minor"/><a:schemeClr val="dk1"/></a:tcTxStyle></a:nwCell>
           </a:tblStyle>
         </a:tblStyleLst>"#;
 
@@ -5912,22 +5973,30 @@ mod tests {
 
         // Text colours from tcTxStyle.
         assert_eq!(
-            def.whole_text_color.as_deref(),
+            def.whole_text.color.as_deref(),
             Some("000000"),
             "wholeTbl text colour should be dk1 black"
         );
         assert_eq!(
-            def.first_row_text_color.as_deref(),
+            def.first_row_text.color.as_deref(),
             Some("FFFFFF"),
             "firstRow header text colour should be lt1 white"
         );
 
         // firstRow `<a:tcTxStyle b="on">` → bold header.
         assert_eq!(
-            def.first_row_bold,
+            def.first_row_text.bold,
             Some(true),
             "firstRow header should be bold from tcTxStyle b=on"
         );
+        assert_eq!(
+            def.whole_text.bold, None,
+            "b=def inherits instead of forcing off"
+        );
+        assert_eq!(def.whole_text.italic, Some(true));
+        assert_eq!(def.band1h_text.color.as_deref(), Some("B83903"));
+        assert_eq!(def.band1h_text.bold, Some(true));
+        assert_eq!(def.nw_cell_text.bold, Some(false));
     }
 
     /// ECMA-376 §21.1.2.1.1 — `<a:bodyPr rtlCol="1">` lays out a multi-column
@@ -5961,6 +6030,7 @@ mod tests {
                 None, // inherited_bold
                 None, // inherited_italic
                 None, // inherited_caps
+                None, // inherited_reflection
                 None, // inherited_anchor
                 None, // inherited_text_insets
                 None, // inherited_alignment
@@ -6030,6 +6100,7 @@ mod tests {
                 [None; 9],
                 Default::default(),
                 &empty_level_bullets(),
+                None,
                 None,
                 None,
                 None,
@@ -6124,6 +6195,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 ShapeKind::Sp,
                 &mut zip,
             );
@@ -6202,6 +6274,7 @@ mod tests {
                 [None; 9],
                 Default::default(),
                 &empty_level_bullets(),
+                None,
                 None,
                 None,
                 None,
@@ -6889,18 +6962,18 @@ mod tests {
         );
     }
 
-    /// PowerPoint's Hide Background Graphics command writes showMasterSp="0"
-    /// on the slide. It suppresses inherited non-placeholder artwork from both
-    /// the master and the selected layout, while preserving slide-local shapes.
+    /// ECMA-376 §19.3.1.38 scopes showMasterSp to shapes on the master slide.
+    /// Layout-local decorations remain part of the selected layout.
     #[test]
-    fn slide_show_master_sp_false_hides_layout_and_master_decorations() {
+    fn slide_show_master_sp_false_hides_master_but_keeps_layout_decorations() {
         let data = build_master_sp_pptx(None, Some(false), true);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
 
-        assert_eq!(slide.elements.len(), 1);
-        assert_eq!(slide.element_sources.len(), 1);
-        assert_eq!(slide.element_sources[0].origin, SlideElementOrigin::Slide);
+        assert_eq!(slide.elements.len(), 2);
+        assert_eq!(slide.element_sources.len(), 2);
+        assert_eq!(slide.element_sources[0].origin, SlideElementOrigin::Layout);
+        assert_eq!(slide.element_sources[1].origin, SlideElementOrigin::Slide);
     }
 
     /// showMasterSp="1" (explicit true) on the layout keeps master shapes —

@@ -31,6 +31,7 @@ import {
   EMU_PER_PT as PT_TO_EMU,
   mathToMathML,
   recolorSvg,
+  applyOuterShadow,
   applyInnerShadow,
   applySoftEdge,
   applyReflection,
@@ -404,6 +405,8 @@ type LayoutSegment = {
   baseline?: number;
   /** Run-level glyph drop shadow (rPr > effectLst > outerShdw). */
   shadow?: import('@silurus/ooxml-core').Shadow;
+  /** Run-level mirrored glyph reflection (rPr > effectLst > reflection). */
+  reflection?: import('@silurus/ooxml-core').Reflection;
   /** Run-level glyph outline (rPr > a:ln). Width in EMU; renderer scales. */
   outline?: import('@silurus/ooxml-core').TextOutline;
   /**
@@ -487,6 +490,8 @@ const OFFICE_FONT_SUBSTITUTE: Record<string, string> = {
   'calibri light': 'Carlito',
   'cambria': 'Caladea',
   'cambria math': 'Caladea',
+  'franklin gothic book': 'Libre Franklin',
+  'franklin gothic medium': 'Libre Franklin',
   // Common Arabic-script faces that hosts rarely ship. Map them to Noto
   // substitutes so RTL slides (e.g. sample-10, which requests Sakkal Majalla /
   // Univers Next Arabic) render with a real web font instead of an oversized
@@ -570,10 +575,134 @@ function hyperlinkKey(t: HyperlinkTarget | undefined): string {
   return t.kind === 'external' ? `e:${t.url}` : `i:${t.ref}`;
 }
 
-function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string, rc: RenderContext): string {
+/**
+ * Preserve a weight encoded in a specific Office face name when that face is
+ * unavailable and the canvas falls through to a generic/substitute family.
+ * PowerPoint themes commonly name faces such as "Franklin Gothic Medium" with
+ * no separate `b` attribute; treating the missing face as weight 400 makes the
+ * fallback visibly lighter than the authored face.
+ */
+function namedFaceWeight(family: string): number | null {
+  const name = family.toLowerCase();
+  if (/\b(thin|hairline)\b/.test(name)) return 100;
+  if (/\b(extra[- ]?light|ultra[- ]?light)\b/.test(name)) return 200;
+  if (/\blight\b/.test(name)) return 300;
+  if (/\b(black|heavy)\b/.test(name)) return 900;
+  if (/\b(extra[- ]?bold|ultra[- ]?bold)\b/.test(name)) return 800;
+  if (/\b(semi[- ]?bold|demi[- ]?bold)\b/.test(name)) return 600;
+  if (/\bbold\b/.test(name)) return 700;
+  // Office face names such as Franklin Gothic Medium refer to a distinct,
+  // visibly heavier cut. Libre Franklin 600 is the closest web substitute;
+  // 500 makes both the glyphs and their authored reflections too thin.
+  if (/\bmedium\b/.test(name)) return 600;
+  return null;
+}
+
+/**
+ * Paint one text segment's DrawingML reflection in a bbox-sized device-pixel
+ * surface. Shape/picture reflections deliberately use the full-canvas core
+ * helper for long-standing VRT stability, but doing that once per text segment
+ * would allocate a slide-sized canvas for every reflected run. Text reflection
+ * is new, so keep its working set proportional to the glyph bounds.
+ *
+ * The callback paints in absolute device coordinates after the crop offset has
+ * been folded into its transform. The final mirror is therefore composited at
+ * identity, exactly like the shape effect pipeline.
+ */
+function applyTextRunReflection(
+  liveCtx: CanvasRenderingContext2D,
+  paintText: (ctx: CanvasRenderingContext2D) => void,
+  bbox: { x: number; y: number; w: number; h: number },
+  reflection: import('@silurus/ooxml-core').Reflection,
+  effectScale: number,
+  liveTransform: DOMMatrix,
+  deviceW: number,
+  deviceH: number,
+): void {
+  const blur = Math.max(0, reflection.blur * effectScale);
+  const margin = Math.ceil(blur * 3) + 2;
+  const cropX = Math.max(0, Math.floor(bbox.x - margin));
+  const cropY = Math.max(0, Math.floor(bbox.y - margin));
+  const cropRight = Math.min(deviceW, Math.ceil(bbox.x + bbox.w + margin));
+  const cropBottom = Math.min(deviceH, Math.ceil(bbox.y + bbox.h + margin));
+  const cropW = Math.max(1, cropRight - cropX);
+  const cropH = Math.max(1, cropBottom - cropY);
+  const aux = createAuxCanvas(cropW, cropH);
+  const auxCtx = aux?.getContext('2d') as CanvasRenderingContext2D | null;
+  if (!aux || !auxCtx) return;
+
+  auxCtx.save();
+  if (blur > 0) auxCtx.filter = `blur(${blur}px)`;
+  auxCtx.setTransform(
+    liveTransform.a,
+    liveTransform.b,
+    liveTransform.c,
+    liveTransform.d,
+    liveTransform.e - cropX,
+    liveTransform.f - cropY,
+  );
+  paintText(auxCtx);
+  auxCtx.restore();
+
+  const localTop = bbox.y - cropY;
+  const localBottom = localTop + bbox.h;
+  const stPos = Math.max(0, Math.min(1, reflection.stPos));
+  const endPos = Math.max(0, Math.min(1, reflection.endPos));
+  // Chromium's OffscreenCanvas clears the destination for a gradient-filled
+  // `destination-in` pass (the equivalent HTMLCanvas path works), making
+  // worker-rendered reflections disappear. This surface contains only freshly
+  // rasterized text, so it is origin-clean: apply the alpha ramp directly to
+  // its pixel alpha. The work is bounded to the cropped glyph box, not the
+  // entire slide.
+  const span = Math.max(1, localBottom - localTop);
+  try {
+    const pixels = auxCtx.getImageData(0, 0, cropW, cropH);
+    for (let row = 0; row < cropH; row++) {
+      const position = Math.max(0, Math.min(1, (localBottom - (row + 0.5)) / span));
+      let alpha: number;
+      if (position <= stPos) alpha = reflection.stA;
+      else if (position >= endPos || endPos <= stPos) alpha = reflection.endA;
+      else {
+        const t = (position - stPos) / (endPos - stPos);
+        alpha = reflection.stA + (reflection.endA - reflection.stA) * t;
+      }
+      const factor = Math.max(0, Math.min(1, alpha));
+      for (let offset = row * cropW * 4 + 3; offset < (row + 1) * cropW * 4; offset += 4) {
+        pixels.data[offset] = Math.round(pixels.data[offset] * factor);
+      }
+    }
+    auxCtx.putImageData(pixels, 0, 0);
+  } catch {
+    // Text surfaces should remain origin-clean. If a host canvas implementation
+    // cannot expose pixels, keep a uniformly faded reflection instead of
+    // dropping the authored effect entirely.
+    auxCtx.save();
+    auxCtx.globalCompositeOperation = 'destination-in';
+    auxCtx.fillStyle = `rgba(0,0,0,${Math.max(0, Math.min(1, reflection.stA))})`;
+    auxCtx.fillRect(0, 0, cropW, cropH);
+    auxCtx.restore();
+  }
+
+  const dist = reflection.dist * effectScale;
+  const dirRad = (reflection.dir * Math.PI) / 180;
+  const bottom = bbox.y + bbox.h;
+  liveCtx.save();
+  liveCtx.setTransform(1, 0, 0, 1, 0, 0);
+  liveCtx.translate(
+    bbox.x + Math.cos(dirRad) * dist,
+    bottom + Math.sin(dirRad) * dist,
+  );
+  liveCtx.scale(reflection.sx, reflection.sy);
+  liveCtx.translate(-bbox.x, -bottom);
+  liveCtx.drawImage(aux as CanvasImageSource, cropX, cropY);
+  liveCtx.restore();
+}
+
+export function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string, rc: RenderContext): string {
   const style  = italic ? 'italic ' : '';
-  const weight = bold   ? 'bold '   : '';
   const normalized = normalizeFontFamily(family, rc);
+  const inferredWeight = namedFaceWeight(normalized);
+  const weight = bold ? 'bold ' : inferredWeight ? `${inferredWeight} ` : '';
   if (CSS_GENERIC_FAMILIES.has(normalized)) {
     return `${style}${weight}${sizePx}px ${normalized}`;
   }
@@ -726,7 +855,9 @@ export function layoutParagraph(
     const run = para.runs[i];
     if (run.type === 'break') continue;
     if (run.type === 'math') break;
-    const trimmed = run.text.trimEnd();
+    // Only ordinary U+0020 spaces participate in the observed PowerPoint
+    // terminal-space compatibility rule. Non-breaking spaces remain visible.
+    const trimmed = run.text.replace(/ +$/u, '');
     if (trimmed !== run.text) terminalText.set(run, trimmed);
     if (trimmed.length > 0 || run.fieldType != null) scanningTerminalWhitespace = false;
   }
@@ -844,6 +975,7 @@ export function layoutParagraph(
       underlineStyle?: string;
       underlineColor?: string;
       shadow?: import('@silurus/ooxml-core').Shadow;
+      reflection?: import('@silurus/ooxml-core').Reflection;
       outline?: import('@silurus/ooxml-core').TextOutline;
       highlight?: string;
       /** Raw normalized family for the design-line-height floor (see LayoutSegment). */
@@ -865,6 +997,7 @@ export function layoutParagraph(
     const underlineStyle = extras?.underlineStyle;
     const underlineColor = extras?.underlineColor;
     const shadow = extras?.shadow;
+    const reflection = extras?.reflection;
     const outline = extras?.outline;
     const highlight = extras?.highlight;
     const fontFamily = extras?.fontFamily;
@@ -885,6 +1018,7 @@ export function layoutParagraph(
       (a.letterSpacingPx ?? 0) === lsPx &&
       a.baseline === baseline &&
       a.shadow === shadow &&
+      a.reflection === reflection &&
       a.outline === outline &&
       (a.highlight ?? '') === (highlight ?? '') &&
       (a.fontFamily ?? '') === (fontFamily ?? '') &&
@@ -898,7 +1032,7 @@ export function layoutParagraph(
     if (last && sameMeta(last)) {
       last.text += text;
     } else {
-      currentLine.segments.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight, hyperlink });
+      currentLine.segments.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, reflection, outline, highlight, hyperlink });
     }
   };
 
@@ -937,6 +1071,7 @@ export function layoutParagraph(
       underlineStyle: seg.underlineStyle,
       underlineColor: seg.underlineColor,
       shadow: seg.shadow,
+      reflection: seg.reflection,
       outline: seg.outline,
       highlight: seg.highlight,
       fontFamily: seg.fontFamily,
@@ -1041,6 +1176,7 @@ export function layoutParagraph(
       underlineStyle: run.underlineStyle,
       underlineColor: run.underlineColor ? hexToRgba(run.underlineColor) : undefined,
       shadow: run.shadow,
+      reflection: run.reflection,
       outline: run.outline,
       // Raw latin/primary family for the design-line-height floor. CJK per-char
       // pushes below override this to `familyEa` when they draw with `fontEa`,
@@ -1565,7 +1701,7 @@ function applyShadow(ctx: CanvasRenderingContext2D, shadow: Shadow | null, scale
   const dirRad = (shadow.dir * Math.PI) / 180;
   const dist = emuToPx(shadow.dist, scale);
   ctx.shadowColor = hexToRgba(shadow.color, shadow.alpha);
-  ctx.shadowBlur = emuToPx(shadow.blur, scale);
+  ctx.shadowBlur = 0;
   ctx.shadowOffsetX = Math.cos(dirRad) * dist;
   ctx.shadowOffsetY = Math.sin(dirRad) * dist;
 }
@@ -2422,6 +2558,9 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       flipH: sceneTransform.localFlipH,
       flipV: sceneTransform.localFlipV,
       scene3d: undefined,
+      // The outer projection owns bevel and extrusion. Retaining sp3d here
+      // would shade the recursive flat body and then shade it again outside.
+      sp3d: undefined,
     };
     const ok = projectScene3dPaint(
       ctx,
@@ -2470,12 +2609,11 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const geom = el.geometry.toLowerCase();
   const fillStyle = resolveShapeFill(el.fill, ctx, x, y, w, h);
 
-  // Apply shadow before fill/stroke drawing; ctx.restore() will clear it.
   // The Canvas API exposes a single shadow slot, so when both an outer shadow
   // and a glow are configured we let the outer shadow win (visually dominant)
-  // and fall back to the glow only when no outer shadow is present. This is
-  // a common — and conservative — interpretation of layered effectLst.
-  applyShadow(ctx, el.shadow ?? null, scale);
+  // and fall back to the glow only when no outer shadow is present. The outer
+  // shadow itself is composited from the complete fill+stroke silhouette below;
+  // applying native shadow state here makes each path cast a separate shadow.
   if (!el.shadow) applyGlow(ctx, el.glow ?? null, scale);
 
   const CONNECTOR_GEOMS = new Set([
@@ -2643,6 +2781,33 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const applyLiveTransform = (c: CanvasRenderingContext2D) => {
     c.setTransform(liveTransform);
   };
+
+  // outerShdw applies to the composed shape, including its outline. Drawing it
+  // from the fill alone lets a thick outline cover the dense part of the shadow
+  // (common for title bars); drawing fill and stroke with native shadow state
+  // stacks two shadows. Rasterise the complete body once and shadow that union.
+  let nativeShadowFallback = false;
+  if (el.shadow && deviceW > 0 && deviceH > 0) {
+    ctx.save();
+    ctx.setTransform(new DOMMatrix());
+    const painted = applyOuterShadow(
+      ctx,
+      (c) => {
+        applyLiveTransform(c as CanvasRenderingContext2D);
+        paintVisibleShapeBody(c as CanvasRenderingContext2D);
+      },
+      effBBox,
+      el.shadow,
+      effScale,
+      deviceW,
+      deviceH,
+    );
+    ctx.restore();
+    nativeShadowFallback = !painted;
+  } else if (el.shadow) {
+    nativeShadowFallback = true;
+  }
+  if (nativeShadowFallback) applyShadow(ctx, el.shadow ?? null, scale);
 
   // Reflection sits BEHIND/below the shape — draw it first so the body paints
   // on top. §20.1.8.50. The aux silhouette bakes in the live rotation/flip via
@@ -3796,27 +3961,18 @@ export function renderTextBody(
         paintHighlight(ctx, penX, segBaseline, hlW, seg.sizePx, seg.highlight, seg.color);
       }
 
-      // Run-level text shadow (rPr > effectLst > outerShdw). Set on the
-      // context so the fillText below picks it up, then cleared after so
-      // the outline / underline / strikethrough don't get shadowed too.
-      // ECMA-376 §20.1.8.45 dir is degrees clockwise from east; the same
-      // formula used by the shape-level shadow renderer above.
       const segShadow = seg.shadow;
-      if (segShadow) {
-        const dirRad = (segShadow.dir * Math.PI) / 180;
-        const dist = emuToPx(segShadow.dist, scale);
-        ctx.save();
-        ctx.shadowColor = hexToRgba(segShadow.color, segShadow.alpha);
-        ctx.shadowBlur = emuToPx(segShadow.blur, scale);
-        ctx.shadowOffsetX = Math.cos(dirRad) * dist;
-        ctx.shadowOffsetY = Math.sin(dirRad) * dist;
-      }
 
       // Draw `text` at `atX` honouring this segment's letter-spacing / RTL
       // semantics. Lifted into a closure so the fill and stroke (outline) paths
       // share it, and so the split-CJK branch below can call it per piece.
-      const drawWithFont = (text: string, atX: number, op: 'fill' | 'stroke'): void => {
-        const paint = op === 'fill' ? ctx.fillText.bind(ctx) : ctx.strokeText.bind(ctx);
+      const drawWithFont = (
+        target: CanvasRenderingContext2D,
+        text: string,
+        atX: number,
+        op: 'fill' | 'stroke',
+      ): void => {
+        const paint = op === 'fill' ? target.fillText.bind(target) : target.strokeText.bind(target);
         if (ls > 0 && text.length > 1) {
           // rPr @spc (§21.1.2.3.x): distribute the per-glyph advance via canvas
           // letterSpacing and draw the whole CONTEXTUALLY-shaped string in ONE
@@ -3829,7 +3985,7 @@ export function renderTextBody(
           // punctuation.) Chromium's measureText adds letterSpacing after every
           // glyph incl. the trailing one (= natural + n·ls), matching
           // codePointCount(seg.text)·ls used by the layout's segW.
-          const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
+          const lctx = target as CanvasRenderingContext2D & { letterSpacing: string };
           const prev = lctx.letterSpacing;
           try { lctx.letterSpacing = `${ls}px`; } catch { /* older engines */ }
           paint(text, atX, segBaseline);
@@ -3869,7 +4025,7 @@ export function renderTextBody(
       const cps = [...seg.text];
       const fullyDistributed =
         !!splitBefore && splitBefore.length === cps.length - 1 && cps.length > 1;
-      const drawRun = (op: 'fill' | 'stroke'): void => {
+      const drawRun = (target: CanvasRenderingContext2D, op: 'fill' | 'stroke'): void => {
         if (eaVertUpright) {
           // ECMA-376 §20.1.10.83 eaVert: paint each glyph with its UAX#50 vertical
           // orientation (CJK/kana upright, Latin sideways, brackets/comma
@@ -3883,27 +4039,100 @@ export function renderTextBody(
           // Partial `just` distribution (mixed Latin/CJK pieces) is a rare eaVert
           // edge and is not redistributed here.
           const eaPitch = fullyDistributed ? ls + segPerGap : ls;
-          drawEaVertRun(ctx, seg.text, penX, segBaseline, seg.sizePx, eaPitch, op);
+          drawEaVertRun(target, seg.text, penX, segBaseline, seg.sizePx, eaPitch, op);
           return;
         }
         if (fullyDistributed) {
-          const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
+          const lctx = target as CanvasRenderingContext2D & { letterSpacing: string };
           const prev = lctx.letterSpacing;
           try { lctx.letterSpacing = `${ls + segPerGap}px`; } catch { /* older engines */ }
-          (op === 'fill' ? ctx.fillText.bind(ctx) : ctx.strokeText.bind(ctx))(
+          (op === 'fill' ? target.fillText.bind(target) : target.strokeText.bind(target))(
             seg.text,
             penX,
             segBaseline,
           );
           try { lctx.letterSpacing = prev; } catch { /* ignore */ }
         } else if (pieces) {
-          for (const { text: pieceText, dx } of pieces) drawWithFont(pieceText, penX + dx, op);
+          for (const { text: pieceText, dx } of pieces) {
+            drawWithFont(target, pieceText, penX + dx, op);
+          }
         } else {
-          drawWithFont(seg.text, penX, op);
+          drawWithFont(target, seg.text, penX, op);
         }
       };
 
-      drawRun('fill');
+      // A run-level reflection is painted before the glyphs themselves, using
+      // the same device-space effect pipeline as shape reflections. Keeping the
+      // draw closure target-agnostic preserves letter spacing, justification,
+      // vertical glyph orientation, and outlines without rasterizing the whole
+      // text body as one effect image.
+      const segReflection = seg.reflection;
+      if (segReflection && seg.text) {
+        const deviceW = (ctx.canvas as { width: number }).width || 0;
+        const deviceH = (ctx.canvas as { height: number }).height || 0;
+        if (deviceW > 0 && deviceH > 0) {
+          ctx.font = seg.font;
+          const metrics = ctx.measureText(seg.text);
+          const ascent = Number.isFinite(metrics.actualBoundingBoxAscent)
+            ? metrics.actualBoundingBoxAscent
+            : seg.sizePx * 0.8;
+          // Zero is a valid descent for all-uppercase runs. Treating it as
+          // "missing" inserts a synthetic 0.2em blank band below the glyph;
+          // the reflection's strongest stA region then lands on transparency
+          // and the visible strokes are almost fully faded.
+          const descent = Number.isFinite(metrics.actualBoundingBoxDescent)
+            ? metrics.actualBoundingBoxDescent
+            : seg.sizePx * 0.2;
+          const left = Number.isFinite(metrics.actualBoundingBoxLeft)
+            ? metrics.actualBoundingBoxLeft
+            : 0;
+          const right = Number.isFinite(metrics.actualBoundingBoxRight)
+            ? metrics.actualBoundingBoxRight
+            : metrics.width;
+          const liveTransform = ctx.getTransform();
+          const det = Math.abs(
+            liveTransform.a * liveTransform.d - liveTransform.b * liveTransform.c,
+          );
+          const devScale = det > 0 ? Math.sqrt(det) : 1;
+          const bbox = {
+            x: (penX - left) * devScale,
+            y: (segBaseline - ascent) * devScale,
+            w: Math.max(1, left + right) * devScale,
+            h: Math.max(1, ascent + descent) * devScale,
+          };
+          applyTextRunReflection(
+            ctx,
+            (target) => {
+              target.font = seg.font;
+              target.fillStyle = seg.color;
+              drawRun(target, 'fill');
+            },
+            bbox,
+            segReflection,
+            scale * devScale,
+            liveTransform,
+            deviceW,
+            deviceH,
+          );
+          ctx.font = seg.font;
+          ctx.fillStyle = seg.color;
+        }
+      }
+
+      // Run-level text shadow (rPr > effectLst > outerShdw). Apply it only to
+      // the primary glyph paint; the reflection above must not cast a second
+      // shadow of its already-mirrored pixels.
+      if (segShadow) {
+        const dirRad = (segShadow.dir * Math.PI) / 180;
+        const dist = emuToPx(segShadow.dist, scale);
+        ctx.save();
+        ctx.shadowColor = hexToRgba(segShadow.color, segShadow.alpha);
+        ctx.shadowBlur = emuToPx(segShadow.blur, scale);
+        ctx.shadowOffsetX = Math.cos(dirRad) * dist;
+        ctx.shadowOffsetY = Math.sin(dirRad) * dist;
+      }
+
+      drawRun(ctx, 'fill');
 
       if (segShadow) ctx.restore();
 
@@ -3919,7 +4148,7 @@ export function renderTextBody(
         ctx.lineWidth = Math.max(0.5, emuToPx(segOutline.width, scale));
         ctx.strokeStyle = segOutline.color ? `#${segOutline.color}` : seg.color;
         ctx.lineJoin = 'round';
-        drawRun('stroke');
+        drawRun(ctx, 'stroke');
         ctx.restore();
       }
 

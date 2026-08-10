@@ -280,6 +280,7 @@ export {
   type Polyline,
 } from './shape/text-warp';
 export {
+  applyOuterShadow,
   applyInnerShadow,
   applySoftEdge,
   applyReflection,

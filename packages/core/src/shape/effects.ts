@@ -8,9 +8,10 @@ import { createAuxCanvas, type AuxCanvas, type AuxContext } from '../canvas/aux-
 export { createAuxCanvas };
 
 /**
- * Canvas 2D rendering of the three DrawingML edge/blur effects that the
+ * Canvas 2D rendering of the four DrawingML edge/blur effects that the
  * Canvas shadow primitive (a single offset+blur slot) cannot express:
  *
+ *   - outerShdw — ECMA-376 §20.1.8.45 (CT_OuterShadowEffect)
  *   - innerShdw  — ECMA-376 §20.1.8.40 (CT_InnerShadowEffect)
  *   - softEdge   — ECMA-376 §20.1.8.53 (CT_SoftEdgesEffect)
  *   - reflection — ECMA-376 §20.1.8.50 (CT_ReflectionEffect)
@@ -153,6 +154,56 @@ function offsetPaintCtx(real: AuxContext, crop: EffectCrop): AuxContext {
       return true;
     },
   }) as unknown as AuxContext;
+}
+
+/**
+ * outerShdw — ECMA-376 §20.1.8.45. Build the shadow from the alpha of the
+ * COMPOSED shape (fill + stroke) rather than putting Canvas's shadow state on
+ * each individual fill/stroke call. The latter is observably wrong for a
+ * stroked shape: clearing after the fill lets the outline cover the shadow's
+ * dense edge, while leaving it enabled makes every path cast another shadow.
+ *
+ * The cropped aux keeps the cost proportional to the affected shape. Its
+ * pixels are recoloured through `source-in`, then the one resulting silhouette
+ * is blurred and offset as a single draw operation behind the live shape.
+ * Returns false when the host cannot allocate an auxiliary surface so callers
+ * may retain a native Canvas-shadow fallback.
+ */
+export function applyOuterShadow(
+  liveCtx: AuxContext,
+  paintShape: PaintShape,
+  bbox: EffectBBox,
+  shadow: Shadow,
+  scale: number,
+  deviceW: number,
+  deviceH: number,
+): boolean {
+  const blur = Math.max(0, emuToPx(shadow.blur, scale));
+  const dist = emuToPx(shadow.dist, scale);
+  const dirRad = (shadow.dir * Math.PI) / 180;
+  const dx = Math.cos(dirRad) * dist;
+  const dy = Math.sin(dirRad) * dist;
+  // CSS blur has an unbounded Gaussian tail. Three radii cover the visible
+  // contribution while the extra offset/safety band prevents crop-edge cuts.
+  const margin = Math.ceil(blur * 3 + Math.max(Math.abs(dx), Math.abs(dy))) + 2;
+  const crop = computeCrop(bbox, margin, deviceW, deviceH);
+  const aux = createAuxCanvas(crop.w, crop.h);
+  if (!aux) return false;
+  const c = get2d(aux);
+  if (!c) return false;
+
+  paintShape(offsetPaintCtx(c, crop));
+  c.save();
+  c.globalCompositeOperation = 'source-in';
+  c.fillStyle = hexToRgba(shadow.color, shadow.alpha);
+  c.fillRect(0, 0, crop.w, crop.h);
+  c.restore();
+
+  liveCtx.save();
+  if (blur > 0) liveCtx.filter = `blur(${blur}px)`;
+  liveCtx.drawImage(aux as CanvasImageSource, crop.x + dx, crop.y + dy);
+  liveCtx.restore();
+  return true;
 }
 
 /**

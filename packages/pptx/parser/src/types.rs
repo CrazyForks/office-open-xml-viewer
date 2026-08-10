@@ -1095,6 +1095,10 @@ pub(crate) struct TextRunData {
     /// shape-level shadow on `spPr`. None = no shadow on the run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) shadow: Option<Shadow>,
+    /// ECMA-376 §20.1.8.50 (CT_ReflectionEffect) — mirrored reflection of this
+    /// run's glyphs from `<a:rPr><a:effectLst><a:reflection>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reflection: Option<Reflection>,
     /// ECMA-376 §20.1.2.2.24 (CT_TextOutlineEffect) — text glyph outline from
     /// `<a:rPr><a:ln w="EMU"><a:solidFill>...`. None = no outline; renderer
     /// just fillText. When set the renderer also strokeText with the given

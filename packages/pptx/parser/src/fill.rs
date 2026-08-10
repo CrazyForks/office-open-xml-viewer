@@ -136,21 +136,16 @@ impl ThemeResolver for StyleMatrixSchemeResolver<'_> {
 pub(crate) fn parse_style_matrix_fill(
     style_ref: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
-    background: bool,
+    _background: bool,
 ) -> Option<Fill> {
     use ooxml_common::color::TintMode::PowerPointLinear;
 
     let idx = attr(&style_ref, "idx")?.parse::<u32>().ok()?;
-    let key = if background {
-        match idx {
-            0 | 1000 => return Some(Fill::None),
-            1..=999 => format!("+fillStyle-{idx}"),
-            _ => format!("+bgFillStyle-{}", idx - 1000),
-        }
-    } else if idx == 0 {
-        return Some(Fill::None);
-    } else {
-        format!("+fillStyle-{idx}")
+    // ECMA-376 §20.1.4.2.10 and §19.3.1.3 share one index space.
+    let key = match idx {
+        0 | 1000 => return Some(Fill::None),
+        1..=999 => format!("+fillStyle-{idx}"),
+        _ => format!("+bgFillStyle-{}", idx - 1000),
     };
     let fragment = theme.get(&key)?;
 
@@ -452,6 +447,16 @@ pub(crate) struct EffectLst {
     pub(crate) reflection: Option<Reflection>,
 }
 
+/// One entry in theme `effectStyleLst` (ECMA-376 §20.1.4.1.11).
+/// `scene3d` and `sp3d` are peers of the effect property choice and must not be
+/// discarded when a shape resolves `effectRef`.
+#[derive(Default)]
+pub(crate) struct StyleMatrixEffects {
+    pub(crate) effects: EffectLst,
+    pub(crate) scene3d: Option<Scene3d>,
+    pub(crate) sp3d: Option<Sp3d>,
+}
+
 /// Read every `effectLst` child shapes and pictures share. `effect_lst` is the
 /// optional `<a:effectLst>` node; missing nodes yield an all-`None` result.
 pub(crate) fn parse_effect_lst(
@@ -493,41 +498,47 @@ fn parse_effect_lst_with_resolver<R: ThemeResolver + ?Sized>(
 pub(crate) fn parse_style_matrix_effects(
     effect_ref: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
-) -> EffectLst {
+) -> StyleMatrixEffects {
     let Some(idx) = attr(&effect_ref, "idx").and_then(|value| value.parse::<u32>().ok()) else {
-        return EffectLst::default();
+        return StyleMatrixEffects::default();
     };
     if idx == 0 {
-        return EffectLst::default();
+        return StyleMatrixEffects::default();
     }
     let Some(fragment) = theme.get(&format!("+effectStyle-{idx}")) else {
-        return EffectLst::default();
+        return StyleMatrixEffects::default();
     };
 
     let placeholder_color = parse_color_node_tint(
         effect_ref,
         theme,
-        ooxml_common::color::TintMode::WordLiteral,
+        ooxml_common::color::TintMode::PowerPointLinear,
     );
     let wrapped = format!(
         r#"<root xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">{fragment}</root>"#
     );
     let Ok(doc) = parse_preflighted_pptx_xml(&wrapped) else {
-        return EffectLst::default();
+        return StyleMatrixEffects::default();
     };
-    let effect_lst = doc
+    let effect_style = doc
         .root_element()
         .descendants()
-        .find(|node| node.is_element() && node.tag_name().name() == "effectLst");
+        .find(|node| node.is_element() && node.tag_name().name() == "effectStyle");
+    let effect_properties =
+        effect_style.and_then(|node| child(node, "effectLst").or_else(|| child(node, "effectDag")));
     let resolver = StyleMatrixSchemeResolver {
         theme,
         placeholder_color: placeholder_color.as_deref(),
     };
-    parse_effect_lst_with_resolver(
-        effect_lst,
-        &resolver,
-        ooxml_common::color::TintMode::WordLiteral,
-    )
+    StyleMatrixEffects {
+        effects: parse_effect_lst_with_resolver(
+            effect_properties,
+            &resolver,
+            ooxml_common::color::TintMode::PowerPointLinear,
+        ),
+        scene3d: effect_style.and_then(parse_scene3d),
+        sp3d: effect_style.and_then(parse_sp3d),
+    }
 }
 
 // ===========================

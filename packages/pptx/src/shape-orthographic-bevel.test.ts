@@ -77,6 +77,17 @@ function orthographicBeveledShape(): ShapeElement {
   };
 }
 
+function projectedBeveledShape(): ShapeElement {
+  const shape = orthographicBeveledShape();
+  return {
+    ...shape,
+    scene3d: {
+      camera: { prst: 'isometricLeftUp' },
+      lightRig: { rig: 'chilly', dir: 't' },
+    },
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -112,5 +123,34 @@ describe('shape orthographic bevel', () => {
     expect(created).toHaveLength(1);
     expect(drawImages).toHaveLength(1);
     expect(drawImages[0]?.[0]).toBe(created[0]);
+  });
+
+  it('applies a projected bevel once instead of shading the recursive flat body', async () => {
+    const created: TestOffscreenCanvas[] = [];
+    vi.stubGlobal('OffscreenCanvas', class extends TestOffscreenCanvas {
+      constructor(width: number, height: number) {
+        super(width, height);
+        created.push(this);
+      }
+    });
+
+    const canvas = {
+      width: 960,
+      height: 540,
+      style: {} as CSSStyleDeclaration,
+      offsetWidth: 960,
+    } as HTMLCanvasElement;
+    const ctx = contextFor(canvas);
+    canvas.getContext = (() => ctx) as unknown as HTMLCanvasElement['getContext'];
+    const slide: Slide = {
+      index: 0,
+      slideNumber: 1,
+      background: null,
+      elements: [projectedBeveledShape()],
+    };
+
+    await renderSlide(canvas, slide, 9_144_000, 6_858_000, { width: 960, dpr: 1 });
+
+    expect(created).toHaveLength(1);
   });
 });

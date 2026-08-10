@@ -320,6 +320,7 @@ fn append_point_paragraphs(
         None,
         None,
         None,
+        None,
         ShapeKind::Sp,
         zip,
     );
@@ -480,6 +481,7 @@ fn default_run() -> TextRunData {
         hyperlink: None,
         hyperlink_action: None,
         shadow: None,
+        reflection: None,
         outline: None,
         highlight: None,
     }
