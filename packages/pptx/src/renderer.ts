@@ -2590,12 +2590,24 @@ export function cacheDevicePaint(
   paint: EffectPaint,
   liveTransform: EffectTransform,
   bbox: { x: number; y: number; w: number; h: number },
+  viewport?: { w: number; h: number },
 ): EffectPaint {
   const x = Math.floor(bbox.x) - 1;
   const y = Math.floor(bbox.y) - 1;
   const w = Math.max(1, Math.ceil(bbox.x + bbox.w) - x + 1);
   const h = Math.max(1, Math.ceil(bbox.y + bbox.h) - y + 1);
-  const canvas = createAuxCanvas(w, h);
+  // This cache is an optimization, not a rendering dependency. Do not allocate
+  // a viewport-external or oversized projected surface: replaying the source
+  // projection is slower but preserves both effect reach and the shared canvas
+  // safety limits without risking an OOM/DOMException.
+  if (viewport && (x < 0 || y < 0 || x + w > viewport.w || y + h > viewport.h)) return paint;
+  if (clampCanvasSize(w, h).clamped) return paint;
+  let canvas: ReturnType<typeof createAuxCanvas> = null;
+  try {
+    canvas = createAuxCanvas(w, h);
+  } catch {
+    return paint;
+  }
   const cache = canvas?.getContext('2d') as CanvasRenderingContext2D | null;
   if (!canvas || !cache) return paint;
   cache.setTransform(
@@ -2802,12 +2814,22 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       softEdge: undefined,
       reflection: undefined,
     };
+    const localBodyEl: ShapeElement = { ...localEl, textBody: null };
+    const localTextEl: ShapeElement = {
+      ...localEl,
+      fill: null,
+      stroke: null,
+    };
     const edgePadCss =
       (el.stroke ? (el.stroke.width * scale) / 2 : 0) +
       (el.sp3d?.contourW ? el.sp3d.contourW * scale : 0) +
       (extrusion ? Math.hypot(extrusion.offsetX, extrusion.offsetY) / ctxDevScale : 0) +
       2;
-    const paintProjectedBody = (target: CanvasRenderingContext2D): boolean =>
+    const paintProjectedElement = (
+      target: CanvasRenderingContext2D,
+      projectedElement: ShapeElement,
+      padded: boolean,
+    ): boolean =>
       projectScene3dPaint(
         target,
         spScene3d.camera,
@@ -2819,10 +2841,16 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
         // localEl is at the origin (x=y=0) with the element's own EMU size, so
         // the recursive render fills the (0,0,w,h) offscreen at the same scale.
         // No onTextRun → the projected text is not selectable (see the note).
-          renderShape(octx, localEl, scale, themeDefaultColor, slideNumber, rc, undefined);
+          renderShape(octx, projectedElement, scale, themeDefaultColor, slideNumber, rc, undefined);
         },
-        { bevels, extrusion: extrusion ?? undefined, edgePadCss },
+        padded
+          ? { bevels, extrusion: extrusion ?? undefined, edgePadCss }
+          : {},
       );
+    const paintProjectedBody = (target: CanvasRenderingContext2D): boolean =>
+      paintProjectedElement(target, localBodyEl, true);
+    const paintProjectedText = (target: CanvasRenderingContext2D): boolean =>
+      !el.textBody || paintProjectedElement(target, localTextEl, false);
     const hasRasterEffects = Boolean(
       el.shadow || el.innerShadow || el.glow || el.softEdge || el.reflection,
     );
@@ -2844,7 +2872,15 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       const rawPaint: EffectPaint = (target) => {
         projectionSucceeded = paintProjectedBody(target) || projectionSucceeded;
       };
-      const cachedPaint = cacheDevicePaint(rawPaint, liveTransform, projectedGeometry.bbox);
+      const cachedPaint = cacheDevicePaint(
+        rawPaint,
+        liveTransform,
+        projectedGeometry.bbox,
+        {
+          w: (ctx.canvas as { width: number }).width || 0,
+          h: (ctx.canvas as { height: number }).height || 0,
+        },
+      );
       if (projectionSucceeded) {
         paintWithRasterEffects(
           ctx,
@@ -2856,11 +2892,13 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
           scale,
           scale * devScale,
           liveTransform,
+          Boolean(el.fill),
         );
+        paintProjectedText(ctx);
         ctx.restore();
         return;
       }
-    } else if (paintProjectedBody(ctx)) {
+    } else if (paintProjectedElement(ctx, localEl, true)) {
       ctx.restore();
       return;
     }
@@ -5290,6 +5328,19 @@ async function renderPicture(
     );
     const devScale = det > 0 ? Math.sqrt(det) : 1;
     const paintedPad = strokeHalfCss + contourCss;
+    const clipGeometryBounds = el.custGeom && el.custGeom.length > 0
+      ? getCustomGeometryBounds(el.custGeom, x, y, w, h)
+      : el.prstGeom && hasPreset(el.prstGeom.toLowerCase())
+        ? getPresetGeometryBounds(
+            el.prstGeom.toLowerCase(),
+            x,
+            y,
+            w,
+            h,
+            el.prstAdjust ?? [],
+          )
+        : null;
+    const flatGeometryBounds = clipGeometryBounds ?? { x, y, w, h };
     const projectedGeometry = scene3d
       ? projectedEffectGeometry(
           scene3d.camera,
@@ -5304,10 +5355,10 @@ async function renderPicture(
       : {
           bbox: transformedEffectBounds(
             liveTransform,
-            x - paintedPad,
-            y - paintedPad,
-            w + paintedPad * 2,
-            h + paintedPad * 2,
+            flatGeometryBounds.x - paintedPad,
+            flatGeometryBounds.y - paintedPad,
+            flatGeometryBounds.w + paintedPad * 2,
+            flatGeometryBounds.h + paintedPad * 2,
           ),
           anchor: authoredAlignmentAnchor(
             liveTransform,
@@ -5324,10 +5375,16 @@ async function renderPicture(
     );
     const rawMask: EffectPaint = (target) => paintMask(target, '#000');
     const effectBody = scene3d && hasRasterEffects
-      ? cacheDevicePaint(paintImage, liveTransform, projectedGeometry.bbox)
+      ? cacheDevicePaint(paintImage, liveTransform, projectedGeometry.bbox, {
+          w: (ctx.canvas as { width: number }).width || 0,
+          h: (ctx.canvas as { height: number }).height || 0,
+        })
       : paintImage;
     const effectMask = scene3d && hasRasterEffects
-      ? cacheDevicePaint(rawMask, liveTransform, projectedGeometry.bbox)
+      ? cacheDevicePaint(rawMask, liveTransform, projectedGeometry.bbox, {
+          w: (ctx.canvas as { width: number }).width || 0,
+          h: (ctx.canvas as { height: number }).height || 0,
+        })
       : rawMask;
     paintWithRasterEffects(
       ctx,

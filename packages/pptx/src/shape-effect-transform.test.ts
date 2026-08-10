@@ -63,4 +63,20 @@ describe('shape effect bounds', () => {
     expect(expensiveProjection).toHaveBeenCalledTimes(1);
     expect(replayContext.drawImage).toHaveBeenCalledTimes(2);
   });
+
+  it('declines an oversized projection cache and safely replays the source', () => {
+    const constructor = vi.fn();
+    vi.stubGlobal('OffscreenCanvas', constructor);
+    const projection = vi.fn();
+    const replay = cacheDevicePaint(
+      projection,
+      { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      { x: 0, y: 0, w: 100_000, h: 100_000 },
+      { w: 960, h: 540 },
+    );
+    replay({} as CanvasRenderingContext2D);
+    replay({} as CanvasRenderingContext2D);
+    expect(constructor).not.toHaveBeenCalled();
+    expect(projection).toHaveBeenCalledTimes(2);
+  });
 });

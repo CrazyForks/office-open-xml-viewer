@@ -406,6 +406,21 @@ pub(crate) fn resolve_picture_shape_properties(
         }
     };
 
+    // An explicit effectRef replaces the inherited CT_EffectStyleItem as a
+    // whole.  Its absence may inherit layout 3-D; its presence with idx=0 or
+    // an item without scene3d/sp3d must clear the older layout components just
+    // as it clears/replaces the raster effects above.
+    let inherited_scene3d = if effect_ref.is_some() {
+        None
+    } else {
+        inherited.scene3d
+    };
+    let inherited_sp3d = if effect_ref.is_some() {
+        None
+    } else {
+        inherited.sp3d
+    };
+
     PictureShapeProperties {
         stroke,
         shadow: effects.shadow,
@@ -416,11 +431,11 @@ pub(crate) fn resolve_picture_shape_properties(
         scene3d: sp_pr
             .and_then(parse_scene3d)
             .or(style_effects.scene3d)
-            .or(inherited.scene3d),
+            .or(inherited_scene3d),
         sp3d: sp_pr
             .and_then(|node| parse_sp3d(node, theme))
             .or(style_effects.sp3d)
-            .or(inherited.sp3d),
+            .or(inherited_sp3d),
     }
 }
 
@@ -3040,6 +3055,39 @@ mod picture_property_resolution_tests {
             &mut zip,
         );
         assert_inherited(&placeholder_picture);
+    }
+
+    #[test]
+    fn explicit_effect_ref_clears_inherited_3d_components() {
+        let inherited_xml = roxmltree::Document::parse(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:spPr><a:scene3d><a:camera prst="perspectiveFront"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>
+                <a:sp3d prstMaterial="plastic"/></p:spPr>
+            </p:sp>"#,
+        )
+        .unwrap();
+        let inherited = resolve_picture_shape_properties(
+            child(inherited_xml.root_element(), "spPr"),
+            None,
+            None,
+            &HashMap::new(),
+        );
+        let slide_xml = roxmltree::Document::parse(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:spPr/><p:style><a:effectRef idx="0"/></p:style>
+            </p:sp>"#,
+        )
+        .unwrap();
+        let resolved = resolve_picture_shape_properties(
+            child(slide_xml.root_element(), "spPr"),
+            child(slide_xml.root_element(), "style"),
+            Some(inherited),
+            &HashMap::new(),
+        );
+        assert!(resolved.scene3d.is_none());
+        assert!(resolved.sp3d.is_none());
     }
 }
 
