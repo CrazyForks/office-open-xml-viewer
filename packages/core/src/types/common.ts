@@ -257,7 +257,7 @@ export type Bullet =
   | { type: 'none' }
   | { type: 'inherit' }
   | { type: 'char'; char: string; color: string | null; sizePct: number | null; sizePts?: number; fontFamily: string | null }
-  | { type: 'autoNum'; numType: string; startAt: number | null; color: string | null; sizePct: number | null; sizePts?: number; fontFamily: string | null };
+  | { type: 'autoNum'; numType: string; startAt: number | null; color: string | null; sizePct?: number | null; sizePts?: number; fontFamily?: string | null };
 
 export interface TabStop {
   /** Position in EMU from the LEADING text-inset edge of the text area —
@@ -401,6 +401,12 @@ export interface TextRunData {
    * Absent means no run-level shadow.
    */
   shadow?: Shadow;
+  /**
+   * Mirrored reflection on this run's glyphs
+   * (`<a:rPr><a:effectLst><a:reflection>`), ECMA-376 §20.1.8.50.
+   * This is independent of a shape-level reflection on `spPr`.
+   */
+  reflection?: Reflection;
   /**
    * Run-level glyph outline (`<a:rPr><a:ln w="..">`), ECMA-376 §20.1.2.2.24
    * (CT_TextOutlineEffect). Renderer strokes each glyph with the given

@@ -79,4 +79,21 @@ describe('PowerPoint paragraph-terminal whitespace', () => {
     expect(lines).toHaveLength(1);
     expect(lineText(lines[0])).toBe('aaaa bbbb');
   });
+
+  it.each(['\u00a0', '\u2007', '\u202f'])(
+    'preserves visible non-breaking terminal whitespace %j',
+    (space) => {
+      const lines = layoutParagraph(
+        mockCtx(),
+        paragraph([textRun(`aaaa${space}`)]),
+        200,
+        20,
+        '#000000',
+        1,
+        0,
+      );
+
+      expect(lineText(lines[0])).toBe(`aaaa${space}`);
+    },
+  );
 });

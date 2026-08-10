@@ -18,7 +18,7 @@ use crate::theme::PptxSchemeResolver;
 use crate::types::*;
 use crate::{
     attr, attr_f64, attr_i64, attr_r, child, find_rel_target_by_type, read_zip_head, read_zip_str,
-    resolve_path, table_style_presets, PptxZip, TableStyleDef,
+    resolve_path, table_style_presets, PptxZip, TableStyleDef, TableTextStyle,
 };
 use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect, svg_blip_rid};
 use ooxml_common::depth::DepthGuard;
@@ -218,21 +218,26 @@ fn merge_local_stroke(
 
     let ln_width = attr_i64(&ln, "w");
     let parsed = parse_stroke(ln, theme);
+    let has_dash = child(ln, "prstDash").is_some();
     let ln_dash = child(ln, "prstDash")
         .and_then(|n| attr(&n, "val"))
         .filter(|v| v != "solid");
+    let has_cap = attr(&ln, "cap").is_some();
     let ln_cap = attr(&ln, "cap").and_then(|cap| match cap.as_str() {
         "rnd" => Some("round".to_owned()),
         "sq" => Some("square".to_owned()),
         "flat" => Some("butt".to_owned()),
         _ => None,
     });
+    let has_head = child(ln, "headEnd").is_some();
     let ln_head = child(ln, "headEnd")
         .map(parse_arrow_end)
         .filter(|a| a.kind != "none");
+    let has_tail = child(ln, "tailEnd").is_some();
     let ln_tail = child(ln, "tailEnd")
         .map(parse_arrow_end)
         .filter(|a| a.kind != "none");
+    let has_cmpd = attr(&ln, "cmpd").is_some();
     let ln_cmpd = attr(&ln, "cmpd").filter(|v| v != "sng");
 
     match (parsed, inherited) {
@@ -240,31 +245,51 @@ fn merge_local_stroke(
             color: authored.color,
             width: ln_width.unwrap_or_else(|| base.as_ref().map(|s| s.width).unwrap_or(9525)),
             fill: authored.fill,
-            dash_style: authored
-                .dash_style
-                .or_else(|| base.as_ref().and_then(|s| s.dash_style.clone())),
-            line_cap: authored
-                .line_cap
-                .or_else(|| base.as_ref().and_then(|s| s.line_cap.clone())),
-            head_end: authored
-                .head_end
-                .or_else(|| base.as_ref().and_then(|s| s.head_end.clone())),
-            tail_end: authored
-                .tail_end
-                .or_else(|| base.as_ref().and_then(|s| s.tail_end.clone())),
-            cmpd: authored
-                .cmpd
-                .or_else(|| base.as_ref().and_then(|s| s.cmpd.clone())),
+            dash_style: if has_dash {
+                ln_dash
+            } else {
+                authored
+                    .dash_style
+                    .or_else(|| base.as_ref().and_then(|s| s.dash_style.clone()))
+            },
+            line_cap: if has_cap {
+                ln_cap
+            } else {
+                authored
+                    .line_cap
+                    .or_else(|| base.as_ref().and_then(|s| s.line_cap.clone()))
+            },
+            head_end: if has_head {
+                ln_head
+            } else {
+                authored
+                    .head_end
+                    .or_else(|| base.as_ref().and_then(|s| s.head_end.clone()))
+            },
+            tail_end: if has_tail {
+                ln_tail
+            } else {
+                authored
+                    .tail_end
+                    .or_else(|| base.as_ref().and_then(|s| s.tail_end.clone()))
+            },
+            cmpd: if has_cmpd {
+                ln_cmpd
+            } else {
+                authored
+                    .cmpd
+                    .or_else(|| base.as_ref().and_then(|s| s.cmpd.clone()))
+            },
         }),
         (None, Some(base)) => Some(Stroke {
             color: base.color,
             width: ln_width.unwrap_or(base.width),
             fill: base.fill,
-            dash_style: ln_dash.or(base.dash_style),
-            line_cap: ln_cap.or(base.line_cap),
-            head_end: ln_head.or(base.head_end),
-            tail_end: ln_tail.or(base.tail_end),
-            cmpd: ln_cmpd.or(base.cmpd),
+            dash_style: if has_dash { ln_dash } else { base.dash_style },
+            line_cap: if has_cap { ln_cap } else { base.line_cap },
+            head_end: if has_head { ln_head } else { base.head_end },
+            tail_end: if has_tail { ln_tail } else { base.tail_end },
+            cmpd: if has_cmpd { ln_cmpd } else { base.cmpd },
         }),
         (None, None) => None,
     }
@@ -477,6 +502,7 @@ pub(crate) fn parse_shape(
         inherited_bold,
         inherited_italic,
         inherited_caps,
+        inherited_reflection,
         inherited_anchor,
         inherited_text_insets,
         inherited_alignment,
@@ -491,6 +517,7 @@ pub(crate) fn parse_shape(
             lph.lookup_bold(&ph_type),
             lph.lookup_italic(&ph_type),
             lph.lookup_caps(&ph_type),
+            lph.lookup_reflection(&ph_type),
             lph.lookup_anchor(&ph_type),
             lph.lookup_text_insets(&ph_type, ph_idx),
             lph.lookup_alignment(&ph_type, ph_idx),
@@ -501,7 +528,7 @@ pub(crate) fn parse_shape(
         )
     } else {
         (
-            None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None, None,
         )
     };
     let inherited_level_font_sizes: LevelFontSizes = if ph_node.is_some() {
@@ -551,6 +578,7 @@ pub(crate) fn parse_shape(
             inherited_bold,
             inherited_italic,
             inherited_caps.clone(),
+            inherited_reflection.clone(),
             inherited_anchor,
             inherited_text_insets,
             inherited_alignment,
@@ -569,18 +597,23 @@ pub(crate) fn parse_shape(
         .and_then(|style| child(style, "effectRef"))
         .map(|effect_ref| parse_style_matrix_effects(effect_ref, theme))
         .unwrap_or_default();
+    let style_scene3d = style_effects.scene3d;
+    let style_sp3d = style_effects.sp3d;
+    let local_effect_node =
+        sp_pr.and_then(|p| child(p, "effectLst").or_else(|| child(p, "effectDag")));
     let EffectLst {
         shadow,
         inner_shadow,
         glow,
         soft_edge,
         reflection,
-    } = parse_effect_lst(sp_pr.and_then(|p| child(p, "effectLst")), theme);
-    let shadow = shadow.or(style_effects.shadow);
-    let inner_shadow = inner_shadow.or(style_effects.inner_shadow);
-    let glow = glow.or(style_effects.glow);
-    let soft_edge = soft_edge.or(style_effects.soft_edge);
-    let reflection = reflection.or(style_effects.reflection);
+    } = if local_effect_node.is_some() {
+        // MS-OI29500 §20.1.2.2.37(b): a local effect component replaces the
+        // style component rather than merging missing fields from effectRef.
+        parse_effect_lst(local_effect_node, theme)
+    } else {
+        style_effects.effects
+    };
 
     Some(ShapeElement {
         x: t.x,
@@ -616,8 +649,8 @@ pub(crate) fn parse_shape(
         placeholder_type: placeholder_type_out,
         placeholder_idx: ph_idx,
         text_rect: None,
-        scene3d: sp_pr.and_then(parse_scene3d),
-        sp3d: sp_pr.and_then(parse_sp3d),
+        scene3d: sp_pr.and_then(parse_scene3d).or(style_scene3d),
+        sp3d: sp_pr.and_then(parse_sp3d).or(style_sp3d),
     })
 }
 
@@ -1133,17 +1166,24 @@ pub(crate) fn parse_table_styles_xml(
             (fill, inside_h, inside_v, border_b, outer_h, outer_v)
         };
 
-        // Default text colour for a role: `<a:tcTxStyle>` holds a `<a:fontRef>`
-        // followed by a colour child (schemeClr/srgbClr). parse_color_node scans
-        // direct children and skips fontRef, picking up the colour.
-        let parse_tc_tx_color = |role: roxmltree::Node<'_, '_>| -> Option<String> {
-            child(role, "tcTxStyle").and_then(|t| parse_color_node(t, theme))
+        let parse_on_off_default = |value: Option<String>| -> Option<bool> {
+            match value.as_deref() {
+                Some("on" | "1" | "true") => Some(true),
+                Some("off" | "0" | "false") => Some(false),
+                // ST_OnOffStyleType `def` inherits; it is not explicit off.
+                Some("def") | None => None,
+                _ => None,
+            }
         };
-        // `<a:tcTxStyle b="on">` → bold for this role (e.g. a bold header row).
-        let parse_tc_tx_bold = |role: roxmltree::Node<'_, '_>| -> Option<bool> {
-            child(role, "tcTxStyle")
-                .and_then(|t| attr(&t, "b"))
-                .map(|v| v == "on" || v == "1" || v == "true")
+        let parse_tc_text = |role: roxmltree::Node<'_, '_>| -> TableTextStyle {
+            let Some(text) = child(role, "tcTxStyle") else {
+                return TableTextStyle::default();
+            };
+            TableTextStyle {
+                color: parse_color_node(text, theme),
+                bold: parse_on_off_default(attr(&text, "b")),
+                italic: parse_on_off_default(attr(&text, "i")),
+            }
         };
 
         if let Some(whole) = child(style_node, "wholeTbl") {
@@ -1153,40 +1193,54 @@ pub(crate) fn parse_table_styles_xml(
             def.whole_inside_v = iv;
             def.whole_outer_h = oh;
             def.whole_outer_v = ov;
-            def.whole_text_color = parse_tc_tx_color(whole);
+            def.whole_text = parse_tc_text(whole);
         }
         if let Some(band) = child(style_node, "band1H") {
             let (fill, _, _, _, _, _) = parse_tc_style(band);
             def.band1h_fill = fill;
+            def.band1h_text = parse_tc_text(band);
         }
         if let Some(band) = child(style_node, "band2H") {
             let (fill, _, _, _, _, _) = parse_tc_style(band);
             def.band2h_fill = fill;
+            def.band2h_text = parse_tc_text(band);
+        }
+        if let Some(band) = child(style_node, "band1V") {
+            def.band1v_text = parse_tc_text(band);
+        }
+        if let Some(band) = child(style_node, "band2V") {
+            def.band2v_text = parse_tc_text(band);
         }
         if let Some(first) = child(style_node, "firstRow") {
             let (fill, _, _, border_b, _, _) = parse_tc_style(first);
             def.first_row_fill = fill;
             def.first_row_border_b = border_b;
-            def.first_row_text_color = parse_tc_tx_color(first);
-            def.first_row_bold = parse_tc_tx_bold(first);
+            def.first_row_text = parse_tc_text(first);
         }
         if let Some(last) = child(style_node, "lastRow") {
             let (fill, _, _, _, _, _) = parse_tc_style(last);
             def.last_row_fill = fill;
-            def.last_row_text_color = parse_tc_tx_color(last);
-            def.last_row_bold = parse_tc_tx_bold(last);
+            def.last_row_text = parse_tc_text(last);
         }
         if let Some(first) = child(style_node, "firstCol") {
             let (fill, _, _, _, _, _) = parse_tc_style(first);
             def.first_col_fill = fill;
-            def.first_col_text_color = parse_tc_tx_color(first);
-            def.first_col_bold = parse_tc_tx_bold(first);
+            def.first_col_text = parse_tc_text(first);
         }
         if let Some(last) = child(style_node, "lastCol") {
             let (fill, _, _, _, _, _) = parse_tc_style(last);
             def.last_col_fill = fill;
-            def.last_col_text_color = parse_tc_tx_color(last);
-            def.last_col_bold = parse_tc_tx_bold(last);
+            def.last_col_text = parse_tc_text(last);
+        }
+        for (role_name, target) in [
+            ("nwCell", &mut def.nw_cell_text),
+            ("neCell", &mut def.ne_cell_text),
+            ("swCell", &mut def.sw_cell_text),
+            ("seCell", &mut def.se_cell_text),
+        ] {
+            if let Some(role) = child(style_node, role_name) {
+                *target = parse_tc_text(role);
+            }
         }
 
         map.insert(style_id, def);
@@ -1219,6 +1273,7 @@ pub(crate) fn parse_table(
     // ECMA-376 §21.1.3.13 (a:tblPr@rtl): right-to-left table layout.
     let rtl = flag("rtl");
     let band_row = flag("bandRow");
+    let band_col = flag("bandCol");
     let first_col = flag("firstCol");
     let last_col = flag("lastCol");
 
@@ -1312,49 +1367,59 @@ pub(crate) fn parse_table(
                 // Mirrors the fill cascade ordering. The header (firstRow) typically
                 // overrides wholeTbl (e.g. white-on-accent header). A run's own
                 // explicit colour still wins later, at render time.
-                let mut effective_text = s.whole_text_color.clone();
+                let mut effective_text = s.whole_text.clone();
+                if band_row && !(first_row && ri == 0) {
+                    let band_ri = ri.saturating_sub(if first_row { 1 } else { 0 });
+                    effective_text.overlay(if band_ri % 2 == 0 {
+                        &s.band1h_text
+                    } else {
+                        &s.band2h_text
+                    });
+                }
+                if band_col && !(first_col && ci == 0) {
+                    let band_ci = ci.saturating_sub(if first_col { 1 } else { 0 });
+                    effective_text.overlay(if band_ci % 2 == 0 {
+                        &s.band1v_text
+                    } else {
+                        &s.band2v_text
+                    });
+                }
                 if first_row && ri == 0 {
-                    if let Some(c) = s.first_row_text_color.clone() {
-                        effective_text = Some(c);
-                    }
+                    effective_text.overlay(&s.first_row_text);
                 }
                 if last_row && ri == last_row_idx {
-                    if let Some(c) = s.last_row_text_color.clone() {
-                        effective_text = Some(c);
-                    }
+                    effective_text.overlay(&s.last_row_text);
                 }
                 if first_col && ci == 0 {
-                    if let Some(c) = s.first_col_text_color.clone() {
-                        effective_text = Some(c);
-                    }
+                    effective_text.overlay(&s.first_col_text);
                 }
                 if last_col && ci == last_col_idx {
-                    if let Some(c) = s.last_col_text_color.clone() {
-                        effective_text = Some(c);
-                    }
+                    effective_text.overlay(&s.last_col_text);
+                }
+                if first_row && ri == 0 && first_col && ci == 0 {
+                    effective_text.overlay(&s.nw_cell_text);
+                }
+                if first_row && ri == 0 && last_col && ci == last_col_idx {
+                    effective_text.overlay(&s.ne_cell_text);
+                }
+                if last_row && ri == last_row_idx && first_col && ci == 0 {
+                    effective_text.overlay(&s.sw_cell_text);
+                }
+                if last_row && ri == last_row_idx && last_col && ci == last_col_idx {
+                    effective_text.overlay(&s.se_cell_text);
                 }
                 if cell.text_color.is_none() {
-                    cell.text_color = effective_text;
+                    cell.text_color = effective_text.color.clone();
                 }
 
-                // ── Bold cascade (style `<a:tcTxStyle b="on">`, role-keyed) ──
-                // Applied as the cell text body's default bold; a run's own @b wins.
-                let mut effective_bold: Option<bool> = None;
-                if first_row && ri == 0 {
-                    effective_bold = effective_bold.or(s.first_row_bold);
-                }
-                if last_row && ri == last_row_idx {
-                    effective_bold = effective_bold.or(s.last_row_bold);
-                }
-                if first_col && ci == 0 {
-                    effective_bold = effective_bold.or(s.first_col_bold);
-                }
-                if last_col && ci == last_col_idx {
-                    effective_bold = effective_bold.or(s.last_col_bold);
-                }
-                if let (Some(b), Some(tb)) = (effective_bold, cell.text_body.as_mut()) {
+                if let (Some(b), Some(tb)) = (effective_text.bold, cell.text_body.as_mut()) {
                     if tb.default_bold.is_none() {
                         tb.default_bold = Some(b);
+                    }
+                }
+                if let (Some(i), Some(tb)) = (effective_text.italic, cell.text_body.as_mut()) {
+                    if tb.default_italic.is_none() {
+                        tb.default_italic = Some(i);
                     }
                 }
 
@@ -1484,8 +1549,17 @@ pub(crate) fn parse_table_cell(
     let anchor = tc_pr
         .and_then(|n| attr(&n, "anchor"))
         .map(|a| a.to_string());
+    let text_direction = tc_pr.and_then(|n| attr(&n, "vert"));
+    let text_insets = tc_pr.map(|n| {
+        [
+            attr_i64(&n, "marL"),
+            attr_i64(&n, "marT"),
+            attr_i64(&n, "marR"),
+            attr_i64(&n, "marB"),
+        ]
+    });
     let text_body = child(tc, "txBody").map(|n| {
-        parse_text_body(
+        let mut body = parse_text_body(
             n,
             theme,
             rels,
@@ -1498,8 +1572,9 @@ pub(crate) fn parse_table_cell(
             None,
             None,
             None,
+            None, // inherited_reflection
             anchor,
-            None, // inherited_text_insets
+            text_insets,
             None, // inherited_alignment
             None, // inherited_ea_ln_brk
             None, // inherited_space_before
@@ -1507,7 +1582,13 @@ pub(crate) fn parse_table_cell(
             None, // inherited_line_spacing
             ShapeKind::Sp,
             zip,
-        )
+        );
+        // Table-cell text direction is authored on tcPr rather than txBody's
+        // bodyPr (ECMA-376 §21.1.3.17 CT_TableCellProperties@vert).
+        if let Some(direction) = text_direction.as_deref() {
+            body.vert = direction.to_owned();
+        }
+        body
     });
 
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
@@ -2387,18 +2468,20 @@ fn parse_connector(
         .and_then(|style| child(style, "effectRef"))
         .map(|effect_ref| parse_style_matrix_effects(effect_ref, theme))
         .unwrap_or_default();
+    let style_scene3d = style_effects.scene3d;
+    let style_sp3d = style_effects.sp3d;
+    let local_effect_node = child(sp_pr, "effectLst").or_else(|| child(sp_pr, "effectDag"));
     let EffectLst {
         shadow,
         inner_shadow,
         glow,
         soft_edge,
         reflection,
-    } = parse_effect_lst(child(sp_pr, "effectLst"), theme);
-    let shadow = shadow.or(style_effects.shadow);
-    let inner_shadow = inner_shadow.or(style_effects.inner_shadow);
-    let glow = glow.or(style_effects.glow);
-    let soft_edge = soft_edge.or(style_effects.soft_edge);
-    let reflection = reflection.or(style_effects.reflection);
+    } = if local_effect_node.is_some() {
+        parse_effect_lst(local_effect_node, theme)
+    } else {
+        style_effects.effects
+    };
 
     let cy = if t.cy == 0 { 1 } else { t.cy };
 
@@ -2479,8 +2562,8 @@ fn parse_connector(
         placeholder_type: None,
         placeholder_idx: None,
         text_rect: None,
-        scene3d: parse_scene3d(sp_pr),
-        sp3d: parse_sp3d(sp_pr),
+        scene3d: parse_scene3d(sp_pr).or(style_scene3d),
+        sp3d: parse_sp3d(sp_pr).or(style_sp3d),
     })
 }
 
@@ -2513,14 +2596,19 @@ mod style_ref_tests {
                   <a:fillStyleLst/>
                   <a:lnStyleLst>
                     <a:ln w="9525"/><a:ln w="25400"/>
-                    <a:ln w="38100"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+                  <a:ln w="38100" cmpd="dbl"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+                    <a:prstDash val="dash"/><a:headEnd type="triangle"/>
+                  </a:ln>
                   </a:lnStyleLst>
                   <a:effectStyleLst>
                     <a:effectStyle><a:effectLst>
                       <a:outerShdw blurRad="40000" dist="23000" dir="5400000">
                         <a:schemeClr val="phClr"><a:alpha val="35000"/></a:schemeClr>
                       </a:outerShdw>
-                    </a:effectLst></a:effectStyle>
+                    </a:effectLst>
+                      <a:scene3d><a:camera prst="isometricLeftUp"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>
+                      <a:sp3d prstMaterial="matte"><a:bevelT w="12700" h="6350"/></a:sp3d>
+                    </a:effectStyle>
                   </a:effectStyleLst>
                   <a:bgFillStyleLst/>
                 </a:fmtScheme>
@@ -2535,7 +2623,7 @@ mod style_ref_tests {
                 <a:xfrm><a:off x="0" y="0"/><a:ext cx="100000" cy="100000"/></a:xfrm>
                 <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
                 <a:solidFill><a:schemeClr val="accent1"/></a:solidFill>
-                <a:ln><a:headEnd type="none"/><a:tailEnd type="none"/></a:ln>
+                <a:ln cmpd="sng"><a:prstDash val="solid"/><a:headEnd type="none"/><a:tailEnd type="none"/></a:ln>
                 <a:effectLst/>
               </p:spPr>
               <p:style>
@@ -2563,12 +2651,61 @@ mod style_ref_tests {
         let stroke = shape.stroke.expect("theme line must survive partial a:ln");
         assert_eq!(stroke.color, "FFFFFF");
         assert_eq!(stroke.width, 38100);
-        let shadow = shape
-            .shadow
-            .expect("effectRef must resolve the theme effect");
-        assert_eq!(shadow.color, "4F81BD");
-        assert!((shadow.alpha - 0.35).abs() < 0.01);
-        assert_eq!(shadow.blur, 40000);
+        assert_eq!(stroke.dash_style, None, "explicit solid clears theme dash");
+        assert!(
+            stroke.head_end.is_none(),
+            "explicit none clears theme arrow"
+        );
+        assert_eq!(
+            stroke.cmpd, None,
+            "explicit single clears theme compound line"
+        );
+        assert!(
+            shape.shadow.is_none(),
+            "an authored effectLst replaces the theme effect component"
+        );
+        assert_eq!(
+            shape
+                .scene3d
+                .as_ref()
+                .map(|scene| scene.camera.prst.as_str()),
+            Some("isometricLeftUp"),
+            "effectRef retains the theme scene3d component"
+        );
+        assert_eq!(
+            shape
+                .sp3d
+                .as_ref()
+                .map(|surface| surface.prst_material.as_str()),
+            Some("matte"),
+            "effectRef retains the theme sp3d component"
+        );
+    }
+
+    #[test]
+    fn table_cell_projects_tcpr_vertical_text_and_margins_into_the_text_body() {
+        let doc = roxmltree::Document::parse(
+            r#"<a:tc xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Vertical label</a:t></a:r></a:p></a:txBody>
+              <a:tcPr vert="vert270" anchor="ctr" marL="100" marT="200" marR="300" marB="400"/>
+            </a:tc>"#,
+        )
+        .unwrap();
+        let mut zip = empty_zip();
+        let cell = parse_table_cell(
+            doc.root_element(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "ppt/slides",
+            &mut zip,
+        );
+        let body = cell.text_body.expect("table cell text body");
+        assert_eq!(body.vert, "vert270");
+        assert_eq!(body.vertical_anchor, "ctr");
+        assert_eq!(
+            (body.l_ins, body.t_ins, body.r_ins, body.b_ins),
+            (100, 200, 300, 400)
+        );
     }
 }
 

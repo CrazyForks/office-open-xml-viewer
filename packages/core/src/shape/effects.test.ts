@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
+  applyOuterShadow,
   applyInnerShadow,
   applySoftEdge,
   applyReflection,
@@ -119,6 +120,32 @@ describe('createAuxCanvas', () => {
     const ctx = { canvas: Object.create(BrokenCanvas.prototype) } as unknown as CanvasRenderingContext2D;
 
     expect(createAuxCanvasForContext(ctx, 10, 10)).toBeNull();
+  });
+});
+
+describe('applyOuterShadow (ECMA-376 §20.1.8.45)', () => {
+  let fake: { auxCtxs: RecordingCtx[] };
+  beforeEach(() => { fake = installFakeCanvas(); });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('recolours one composed silhouette and blurs/offsets it once', () => {
+    const live = new RecordingCtx();
+    const paint = vi.fn((c: unknown) => {
+      (c as RecordingCtx).ops.push({ op: 'paintShape' });
+    });
+    const shadow: Shadow = {
+      color: '000000', alpha: 0.38, blur: 38_100, dist: 19_050, dir: 90,
+    };
+
+    expect(applyOuterShadow(
+      live as never, paint as never, BBOX, shadow, SCALE, DEVICE_W, DEVICE_H,
+    )).toBe(true);
+
+    expect(paint).toHaveBeenCalledTimes(1);
+    expect(fake.auxCtxs[0].usedCompositeOps).toContain('source-in');
+    expect(fake.auxCtxs[0].ops.some(o => o.op === 'fillRect')).toBe(true);
+    expect(live.usedBlurFilters).toEqual(['blur(4px)']);
+    expect(live.ops.filter(o => o.op === 'drawImage')).toHaveLength(1);
   });
 });
 

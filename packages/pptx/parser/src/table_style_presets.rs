@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Fill, Stroke, TableStyleDef};
+use crate::{Fill, Stroke, TableStyleDef, TableTextStyle};
 use ooxml_common::color::{apply_tint_channels, TintMode};
 
 // ── Color helpers ────────────────────────────────────────────────────────────
@@ -294,15 +294,30 @@ fn medium_style_2(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
         whole_inside_h: border.clone(),
         whole_inside_v: border,
         first_row_border_b: Some(stroke(&lt)),
-        whole_text_color: Some(dk),
-        first_row_text_color: Some(lt.clone()),
-        last_row_text_color: Some(lt.clone()),
-        first_col_text_color: Some(lt.clone()),
-        last_col_text_color: Some(lt),
-        first_row_bold: Some(true),
-        last_row_bold: Some(true),
-        first_col_bold: Some(true),
-        last_col_bold: Some(true),
+        whole_text: TableTextStyle {
+            color: Some(dk),
+            ..Default::default()
+        },
+        first_row_text: TableTextStyle {
+            color: Some(lt.clone()),
+            bold: Some(true),
+            ..Default::default()
+        },
+        last_row_text: TableTextStyle {
+            color: Some(lt.clone()),
+            bold: Some(true),
+            ..Default::default()
+        },
+        first_col_text: TableTextStyle {
+            color: Some(lt.clone()),
+            bold: Some(true),
+            ..Default::default()
+        },
+        last_col_text: TableTextStyle {
+            color: Some(lt),
+            bold: Some(true),
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -871,14 +886,14 @@ mod tests {
         assert_eq!(solid_color(&style.first_row_fill), Some("4F81BD"));
         assert_eq!(solid_color(&style.whole_fill), Some("DCE6F2"));
         assert_eq!(solid_color(&style.band1h_fill), Some("B9CDE5"));
-        assert_eq!(style.first_row_text_color.as_deref(), Some("FFFFFF"));
-        assert_eq!(style.first_row_bold, Some(true));
-        assert_eq!(style.whole_text_color.as_deref(), Some("000000"));
-        assert_eq!(style.last_row_text_color.as_deref(), Some("FFFFFF"));
-        assert_eq!(style.first_col_text_color.as_deref(), Some("FFFFFF"));
-        assert_eq!(style.last_col_text_color.as_deref(), Some("FFFFFF"));
-        assert_eq!(style.last_row_bold, Some(true));
-        assert_eq!(style.first_col_bold, Some(true));
-        assert_eq!(style.last_col_bold, Some(true));
+        assert_eq!(style.first_row_text.color.as_deref(), Some("FFFFFF"));
+        assert_eq!(style.first_row_text.bold, Some(true));
+        assert_eq!(style.whole_text.color.as_deref(), Some("000000"));
+        assert_eq!(style.last_row_text.color.as_deref(), Some("FFFFFF"));
+        assert_eq!(style.first_col_text.color.as_deref(), Some("FFFFFF"));
+        assert_eq!(style.last_col_text.color.as_deref(), Some("FFFFFF"));
+        assert_eq!(style.last_row_text.bold, Some(true));
+        assert_eq!(style.first_col_text.bold, Some(true));
+        assert_eq!(style.last_col_text.bold, Some(true));
     }
 }

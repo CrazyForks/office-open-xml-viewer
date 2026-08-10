@@ -7,7 +7,7 @@
 
 use crate::fill::{
     parse_background, parse_blip_alpha, parse_color_node, parse_cust_geom, parse_fill,
-    parse_stroke, parse_xfrm,
+    parse_reflection, parse_stroke, parse_xfrm,
 };
 use crate::shape::extract_decorative_shapes;
 use crate::text::{
@@ -72,6 +72,9 @@ pub(crate) struct LayoutPlaceholders {
     /// Default caps ("all"/"small") per placeholder type, from layout/master
     /// lstStyle defRPr cap attribute (ECMA-376 §21.1.2.3.13)
     pub(crate) by_type_caps: HashMap<String, String>,
+    /// Default run reflection per placeholder type, inherited from layout or
+    /// master `lvl1pPr/defRPr/effectLst`.
+    pub(crate) by_type_reflection: HashMap<String, Reflection>,
     /// Vertical anchor ("t"/"ctr"/"b") per placeholder type, from layout/master bodyPr
     pub(crate) by_type_anchor: HashMap<String, String>,
     /// Per-placeholder layout `bodyPr` text insets (`lIns`, `tIns`, `rIns`,
@@ -363,6 +366,16 @@ impl LayoutPlaceholders {
         self.by_type_caps.get(ph_type).cloned().or_else(|| {
             if ph_type == "body" {
                 self.by_type_caps.get("").cloned()
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn lookup_reflection(&self, ph_type: &str) -> Option<Reflection> {
+        self.by_type_reflection.get(ph_type).cloned().or_else(|| {
+            if ph_type == "body" {
+                self.by_type_reflection.get("").cloned()
             } else {
                 None
             }
@@ -1050,20 +1063,24 @@ pub(crate) fn parse_master_level_bullets(
 /// Parse default bold/italic from master txStyles (titleStyle / bodyStyle / otherStyle)
 /// > lvl1pPr > defRPr @b and @i. Keyed by ph_type.
 /// > Only populated when the attribute is explicitly present on the master.
-pub(crate) fn parse_master_txstyle_bold_italic(
-    root: roxmltree::Node<'_, '_>,
-) -> (
+type MasterTxStyleRunProperties = (
     HashMap<String, bool>,
     HashMap<String, bool>,
     HashMap<String, String>,
-) {
+    HashMap<String, Reflection>,
+);
+
+pub(crate) fn parse_master_txstyle_run_properties(
+    root: roxmltree::Node<'_, '_>,
+) -> MasterTxStyleRunProperties {
     let mut bold_map: HashMap<String, bool> = HashMap::new();
     let mut italic_map: HashMap<String, bool> = HashMap::new();
     // ECMA-376 §21.1.2.3.13 cap="all"/"small" on the master txStyles defRPr —
     // e.g. a template titleStyle with cap="all" upper-cases every title.
     let mut caps_map: HashMap<String, String> = HashMap::new();
+    let mut reflection_map: HashMap<String, Reflection> = HashMap::new();
     let Some(tx_styles) = child(root, "txStyles") else {
-        return (bold_map, italic_map, caps_map);
+        return (bold_map, italic_map, caps_map, reflection_map);
     };
     let style_ph_map: &[(&str, &[&str])] = MASTER_TXSTYLE_PH_TYPES;
     for (style_name, ph_types) in style_ph_map {
@@ -1079,6 +1096,9 @@ pub(crate) fn parse_master_txstyle_bold_italic(
         let c = def_rpr
             .and_then(|rp| attr(&rp, "cap"))
             .filter(|v| v == "all" || v == "small");
+        let reflection = def_rpr
+            .and_then(|rp| child(rp, "effectLst"))
+            .and_then(parse_reflection);
         if let Some(bv) = b {
             for t in *ph_types {
                 bold_map.entry(t.to_string()).or_insert(bv);
@@ -1094,8 +1114,15 @@ pub(crate) fn parse_master_txstyle_bold_italic(
                 caps_map.entry(t.to_string()).or_insert(cv.clone());
             }
         }
+        if let Some(value) = reflection {
+            for t in *ph_types {
+                reflection_map
+                    .entry(t.to_string())
+                    .or_insert_with(|| value.clone());
+            }
+        }
     }
-    (bold_map, italic_map, caps_map)
+    (bold_map, italic_map, caps_map, reflection_map)
 }
 
 /// Parse default text color from master txStyles (titleStyle/bodyStyle/otherStyle)
@@ -1324,6 +1351,9 @@ pub(crate) fn parse_layout_placeholders(
         let layout_caps = layout_def_rpr
             .and_then(|rp| attr(&rp, "cap"))
             .filter(|v| v == "all" || v == "small");
+        let layout_reflection = layout_def_rpr
+            .and_then(|rp| child(rp, "effectLst"))
+            .and_then(parse_reflection);
         let layout_color: Option<String> = layout_def_rpr
             .and_then(|rp| child(rp, "solidFill"))
             .and_then(|sf| parse_color_node(sf, theme));
@@ -1532,6 +1562,11 @@ pub(crate) fn parse_layout_placeholders(
             }
             if let Some(c) = layout_caps.clone() {
                 lph.by_type_caps.entry(ph_type.clone()).or_insert(c);
+            }
+            if let Some(reflection) = layout_reflection.clone() {
+                lph.by_type_reflection
+                    .entry(ph_type.clone())
+                    .or_insert(reflection);
             }
             if let Some(a) = layout_alignment {
                 lph.by_type_alignment.entry(ph_type.clone()).or_insert(a);
@@ -1754,6 +1789,7 @@ pub(crate) struct ParsedMaster {
     pub(crate) master_bold: HashMap<String, bool>,
     pub(crate) master_italic: HashMap<String, bool>,
     pub(crate) master_caps: HashMap<String, String>,
+    pub(crate) master_reflection: HashMap<String, Reflection>,
     pub(crate) master_color: HashMap<String, String>,
 }
 
@@ -1877,8 +1913,8 @@ pub(crate) fn build_master_bundle(
     let (master_space_before, master_space_after, master_line_spacing) = master_root
         .map(parse_master_txstyle_spacing)
         .unwrap_or_default();
-    let (master_bold, master_italic, master_caps) = master_root
-        .map(parse_master_txstyle_bold_italic)
+    let (master_bold, master_italic, master_caps, master_reflection) = master_root
+        .map(parse_master_txstyle_run_properties)
         .unwrap_or_default();
     let master_color = master_root
         .map(|root| parse_master_txstyle_color(root, &theme))
@@ -1925,6 +1961,7 @@ pub(crate) fn build_master_bundle(
         master_bold,
         master_italic,
         master_caps,
+        master_reflection,
         master_color,
     }
 }
@@ -1992,6 +2029,43 @@ mod placeholder_geometry_tests {
             &mut zip,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn master_title_style_carries_run_reflection_to_title_placeholders() {
+        let xml = r#"
+          <p:sldMaster
+            xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <p:txStyles>
+              <p:titleStyle>
+                <a:lvl1pPr>
+                  <a:defRPr cap="all">
+                    <a:effectLst>
+                      <a:reflection blurRad="12700" stA="48000" endA="300"
+                        endPos="55000" dir="5400000" sy="-90000"
+                        algn="bl" rotWithShape="0"/>
+                    </a:effectLst>
+                  </a:defRPr>
+                </a:lvl1pPr>
+              </p:titleStyle>
+            </p:txStyles>
+          </p:sldMaster>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let (_, _, caps, reflections) = parse_master_txstyle_run_properties(doc.root_element());
+
+        assert_eq!(caps.get("title").map(String::as_str), Some("all"));
+        assert_eq!(caps.get("ctrTitle").map(String::as_str), Some("all"));
+        for ph_type in ["title", "ctrTitle"] {
+            let reflection = reflections
+                .get(ph_type)
+                .unwrap_or_else(|| panic!("missing reflection for {ph_type}"));
+            assert_eq!(reflection.blur, 12_700);
+            assert!((reflection.st_a - 0.48).abs() < 1e-9);
+            assert!((reflection.end_a - 0.003).abs() < 1e-9);
+            assert!((reflection.end_pos - 0.55).abs() < 1e-9);
+            assert!((reflection.sy + 0.9).abs() < 1e-9);
+        }
     }
 
     #[test]
