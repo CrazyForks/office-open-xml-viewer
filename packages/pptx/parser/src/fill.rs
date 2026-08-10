@@ -139,7 +139,7 @@ pub(crate) fn parse_style_matrix_fill(
     theme: &HashMap<String, String>,
     background: bool,
 ) -> Option<Fill> {
-    use ooxml_common::color::TintMode::WordLiteral;
+    use ooxml_common::color::TintMode::PowerPointLinear;
 
     let idx = attr(&style_ref, "idx")?.parse::<u32>().ok()?;
     let key = if background {
@@ -155,7 +155,7 @@ pub(crate) fn parse_style_matrix_fill(
     };
     let fragment = theme.get(&key)?;
 
-    let placeholder_color = parse_color_node_tint(style_ref, theme, WordLiteral);
+    let placeholder_color = parse_color_node_tint(style_ref, theme, PowerPointLinear);
 
     let wrapped = format!(
         r#"<root xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">{fragment}</root>"#
@@ -165,7 +165,7 @@ pub(crate) fn parse_style_matrix_fill(
         theme,
         placeholder_color: placeholder_color.as_deref(),
     };
-    parse_fill_with_resolver(doc.root_element(), &resolver, WordLiteral)
+    parse_fill_with_resolver(doc.root_element(), &resolver, PowerPointLinear)
 }
 
 /// ECMA-376 §20.1.8.14 `a:blipFill` → `Fill::Image`. The `resolve_blip`
@@ -880,7 +880,11 @@ pub(crate) fn parse_background<F: FnMut(&str) -> Option<String>>(
                 return Some(fill);
             }
         }
-        return parse_fill_tint(bg_pr, theme, ooxml_common::color::TintMode::WordLiteral);
+        return parse_fill_tint(
+            bg_pr,
+            theme,
+            ooxml_common::color::TintMode::PowerPointLinear,
+        );
     }
     // bgRef references a theme background style; its child is a color element
     if let Some(bg_ref) = child(bg, "bgRef") {
