@@ -79,4 +79,28 @@ describe('shape effect bounds', () => {
     expect(constructor).not.toHaveBeenCalled();
     expect(projection).toHaveBeenCalledTimes(2);
   });
+
+  it('still caches a bounded projection that crosses a viewport edge', () => {
+    const cacheContext = { setTransform: vi.fn() };
+    let created = 0;
+    class CrossingCanvas {
+      constructor() { created += 1; }
+      getContext(): typeof cacheContext { return cacheContext; }
+    }
+    vi.stubGlobal('OffscreenCanvas', CrossingCanvas);
+    const projection = vi.fn();
+    const replay = cacheDevicePaint(
+      projection,
+      { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      { x: -2, y: 20, w: 100, h: 60 },
+      { w: 960, h: 540 },
+    );
+    const target = {
+      save: vi.fn(), restore: vi.fn(), setTransform: vi.fn(), drawImage: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+    replay(target);
+    replay(target);
+    expect(created).toBe(1);
+    expect(projection).toHaveBeenCalledTimes(1);
+  });
 });

@@ -2597,10 +2597,10 @@ export function cacheDevicePaint(
   const w = Math.max(1, Math.ceil(bbox.x + bbox.w) - x + 1);
   const h = Math.max(1, Math.ceil(bbox.y + bbox.h) - y + 1);
   // This cache is an optimization, not a rendering dependency. Do not allocate
-  // a viewport-external or oversized projected surface: replaying the source
+  // a fully viewport-external or oversized projected surface: replaying the source
   // projection is slower but preserves both effect reach and the shared canvas
   // safety limits without risking an OOM/DOMException.
-  if (viewport && (x < 0 || y < 0 || x + w > viewport.w || y + h > viewport.h)) return paint;
+  if (viewport && (x + w <= 0 || y + h <= 0 || x >= viewport.w || y >= viewport.h)) return paint;
   if (clampCanvasSize(w, h).clamped) return paint;
   let canvas: ReturnType<typeof createAuxCanvas> = null;
   try {
@@ -2881,19 +2881,23 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
           h: (ctx.canvas as { height: number }).height || 0,
         },
       );
+      // A declined cache is still a valid projection path: the compositor will
+      // replay rawPaint. Check success only AFTER that first paint so an
+      // off-viewport or oversized cache request cannot demote a 3-D shape to
+      // the flat fallback merely because the optimization was skipped.
+      paintWithRasterEffects(
+        ctx,
+        el,
+        cachedPaint,
+        cachedPaint,
+        projectedGeometry.bbox,
+        projectedGeometry.anchor,
+        scale,
+        scale * devScale,
+        liveTransform,
+        Boolean(el.fill),
+      );
       if (projectionSucceeded) {
-        paintWithRasterEffects(
-          ctx,
-          el,
-          cachedPaint,
-          cachedPaint,
-          projectedGeometry.bbox,
-          projectedGeometry.anchor,
-          scale,
-          scale * devScale,
-          liveTransform,
-          Boolean(el.fill),
-        );
         paintProjectedText(ctx);
         ctx.restore();
         return;
