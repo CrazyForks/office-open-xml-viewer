@@ -834,8 +834,7 @@ pub trait ColorResolver {
     /// (no leading `#`) lets the renderer draw the correct default palette
     /// without needing theme access.
     ///
-    /// Defaults to `None` so a resolver whose renderer already owns a default
-    /// palette (pptx) leaves the series color unset and lets that palette apply.
+    /// Defaults to `None` for callers that do not carry a theme palette.
     fn resolve_series_accent(&self, _idx: usize) -> Option<String> {
         None
     }
@@ -4054,9 +4053,20 @@ pub fn parse_chart_part_with_references(
     let val_axis_major_tick_mark = read_major_tick_mark(val_ax);
     let cat_axis_major_tick_mark = read_major_tick_mark(cat_ax);
 
-    // Axis tick-label font size from `<c:txPr>` (in OOXML hundredths of a point).
-    let cat_axis_font_size_hpt = cat_ax.and_then(extract_axis_tick_label_size);
-    let val_axis_font_size_hpt = val_ax.and_then(extract_axis_tick_label_size);
+    // Axis-local text properties override the chart-wide `<c:chartSpace><c:txPr>`
+    // defaults. Microsoft documents the latter as the OfficeArt text properties
+    // for the entire chart, so an axis without its own `<c:txPr>` must inherit
+    // these values rather than fall back to renderer constants.
+    let chart_text_font_size_hpt = extract_axis_tick_label_size(root);
+    let chart_text_font_color = extract_axis_tick_label_color(root, color_resolver);
+    let chart_text_font_bold = extract_axis_tick_label_bold(root);
+    let chart_text_font_face = extract_axis_tick_label_face(root);
+    let cat_axis_font_size_hpt = cat_ax
+        .and_then(extract_axis_tick_label_size)
+        .or(chart_text_font_size_hpt);
+    let val_axis_font_size_hpt = val_ax
+        .and_then(extract_axis_tick_label_size)
+        .or(chart_text_font_size_hpt);
 
     // Data-label font size — first `<c:dLbls><c:txPr>` defRPr/rPr@sz we find.
     let data_label_font_size_hpt = extract_data_label_font_size(root);
@@ -4078,8 +4088,12 @@ pub fn parse_chart_part_with_references(
     // tick labels and `<c:spPr><a:ln>` styles the axis rule. Shared helpers so
     // the gray "2025年3月期" category labels and the light-gray category-axis
     // line in sample-2 slide-16's horizontal bar chart resolve the same way.
-    let cat_axis_font_color = cat_ax.and_then(|n| extract_axis_tick_label_color(n, color_resolver));
-    let val_axis_font_color = val_ax.and_then(|n| extract_axis_tick_label_color(n, color_resolver));
+    let cat_axis_font_color = cat_ax
+        .and_then(|n| extract_axis_tick_label_color(n, color_resolver))
+        .or_else(|| chart_text_font_color.clone());
+    let val_axis_font_color = val_ax
+        .and_then(|n| extract_axis_tick_label_color(n, color_resolver))
+        .or_else(|| chart_text_font_color.clone());
     let (cat_axis_line_color, cat_axis_line_width_emu, cat_axis_line_hidden) = cat_ax
         .map(|n| extract_axis_line_style(n, color_resolver))
         .unwrap_or((None, None, false));
@@ -4109,8 +4123,9 @@ pub fn parse_chart_part_with_references(
             title: t,
             hidden: axis_is_deleted(ax),
             format_code: extract_axis_format_code(ax),
-            font_color: extract_axis_tick_label_color(ax, color_resolver),
-            font_size_hpt: extract_axis_tick_label_size(ax),
+            font_color: extract_axis_tick_label_color(ax, color_resolver)
+                .or_else(|| chart_text_font_color.clone()),
+            font_size_hpt: extract_axis_tick_label_size(ax).or(chart_text_font_size_hpt),
             line_color,
             line_width_emu,
             line_hidden,
@@ -4261,8 +4276,12 @@ pub fn parse_chart_part_with_references(
     // ooxml-common helpers so the two parsers stay in lockstep. The chart-title
     // bold helper expects the `<c:title>`'s parent, so pass `title_node_opt`'s
     // parent (the element that holds it as a direct child).
-    let cat_axis_font_bold = cat_ax.and_then(extract_axis_tick_label_bold);
-    let val_axis_font_bold = val_ax.and_then(extract_axis_tick_label_bold);
+    let cat_axis_font_bold = cat_ax
+        .and_then(extract_axis_tick_label_bold)
+        .or(chart_text_font_bold);
+    let val_axis_font_bold = val_ax
+        .and_then(extract_axis_tick_label_bold)
+        .or(chart_text_font_bold);
     let title_font_bold = title_node_opt
         .and_then(|t| t.parent())
         .and_then(extract_chart_title_bold);
@@ -4289,8 +4308,12 @@ pub fn parse_chart_part_with_references(
     // (`<c:dLbls><c:txPr>…<a:latin>`) and legend text props, all via the shared
     // ooxml-common extractors so pptx/xlsx stay in lockstep. Absent faces stay
     // None; the renderer falls back to the theme body/heading font.
-    let cat_axis_font_face = cat_ax.and_then(extract_axis_tick_label_face);
-    let val_axis_font_face = val_ax.and_then(extract_axis_tick_label_face);
+    let cat_axis_font_face = cat_ax
+        .and_then(extract_axis_tick_label_face)
+        .or_else(|| chart_text_font_face.clone());
+    let val_axis_font_face = val_ax
+        .and_then(extract_axis_tick_label_face)
+        .or_else(|| chart_text_font_face.clone());
     let data_label_font_face = extract_data_label_face(root);
     let (legend_font_face, legend_font_size_hpt, legend_font_bold) =
         extract_legend_text_props(root);
