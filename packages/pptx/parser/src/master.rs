@@ -16,7 +16,7 @@ use crate::text::{
     merge_level_bullets, merge_level_indents, merge_level_sizes, read_level_bullets,
     read_level_font_sizes, read_level_indents, LevelBullets, LevelFontSizes, LevelIndents,
 };
-use crate::theme::{bake_clr_map, parse_theme_colors, PptxSchemeResolver};
+use crate::theme::{bake_clr_map, parse_theme_colors, resolve_theme_typeface, PptxSchemeResolver};
 use crate::types::*;
 use crate::{
     attr, attr_f64, attr_i64, attr_r, build_smartart_drawings, child, find_rel_target_by_type,
@@ -41,6 +41,11 @@ pub(crate) struct LayoutPlaceholders {
     pub(crate) by_idx_font_size: HashMap<u32, f64>,
     /// Default font size (pt) per placeholder type, from layout/master lstStyle
     pub(crate) by_type_font_size: HashMap<String, f64>,
+    /// Default Latin typeface per placeholder idx/type, inherited from the
+    /// layout placeholder's lstStyle and then the master txStyles. Theme font
+    /// tokens such as +mj-lt are resolved before storage.
+    pub(crate) by_idx_font_family: HashMap<u32, String>,
+    pub(crate) by_type_font_family: HashMap<String, String>,
     /// Per-list-level default font sizes (pt) per placeholder idx — index 0..=8
     /// maps to lvl1pPr..lvl9pPr (ECMA-376 §21.1.2.4). Lets nested bullets shrink
     /// per level (e.g. body 28pt → lvl2 24pt → lvl3 20pt) instead of all using
@@ -233,6 +238,19 @@ impl LayoutPlaceholders {
         self.by_type_font_size.get(ph_type).copied().or_else(|| {
             if ph_type == "body" {
                 self.by_type_font_size.get("").copied()
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn lookup_font_family(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<String> {
+        if let Some(i) = ph_idx {
+            return self.by_idx_font_family.get(&i).cloned();
+        }
+        self.by_type_font_family.get(ph_type).cloned().or_else(|| {
+            if ph_type == "body" {
+                self.by_type_font_family.get("").cloned()
             } else {
                 None
             }
@@ -794,6 +812,60 @@ pub(crate) fn parse_master_font_sizes(root: roxmltree::Node<'_, '_>) -> HashMap<
     map
 }
 
+/// Default Latin typefaces from master placeholder lstStyle/txStyles. The
+/// specific placeholder shape wins over the generic title/body/other style,
+/// matching the font-size cascade above (ECMA-376 §19.3.1.52 and
+/// §21.1.2.3.7). Theme tokens are resolved against this master's theme.
+pub(crate) fn parse_master_font_families(
+    root: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let read_family = |def_rpr: roxmltree::Node<'_, '_>| {
+        child(def_rpr, "latin")
+            .and_then(|latin| attr(&latin, "typeface"))
+            .map(|face| resolve_theme_typeface(&face, theme))
+    };
+
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        for sp in sp_tree
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sp")
+        {
+            if let Some(ph) = sp
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "ph")
+            {
+                let ph_type = attr(&ph, "type").unwrap_or_default();
+                if let Some(family) = child(sp, "txBody")
+                    .and_then(|tb| child(tb, "lstStyle"))
+                    .and_then(|ls| child(ls, "lvl1pPr"))
+                    .and_then(|lp| child(lp, "defRPr"))
+                    .and_then(read_family)
+                {
+                    map.entry(ph_type).or_insert(family);
+                }
+            }
+        }
+    }
+
+    if let Some(tx_styles) = child(root, "txStyles") {
+        for &(style_name, ph_types) in MASTER_TXSTYLE_PH_TYPES {
+            if let Some(family) = child(tx_styles, style_name)
+                .and_then(|style| child(style, "lvl1pPr"))
+                .and_then(|lp| child(lp, "defRPr"))
+                .and_then(read_family)
+            {
+                for ph_type in ph_types {
+                    map.entry((*ph_type).to_owned())
+                        .or_insert_with(|| family.clone());
+                }
+            }
+        }
+    }
+    map
+}
+
 /// Per-list-level default font sizes from the master, keyed by ph_type. Mirrors
 /// `parse_master_font_sizes` but captures every list level (lvl1pPr..lvl9pPr) so
 /// nested bullets inherit the correct shrinking sizes (ECMA-376 §21.1.2.4),
@@ -1151,6 +1223,7 @@ pub(crate) fn parse_master_transforms(root: roxmltree::Node<'_, '_>) -> HashMap<
 pub(crate) fn parse_layout_placeholders(
     root: roxmltree::Node<'_, '_>,
     master_font_sizes: &HashMap<String, f64>,
+    master_font_families: &HashMap<String, String>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
     master_level_indents: &HashMap<String, LevelIndents>,
     master_level_bullets: &HashMap<String, LevelBullets>,
@@ -1207,6 +1280,10 @@ pub(crate) fn parse_layout_placeholders(
         let layout_font_size = layout_def_rpr
             .and_then(|rp| attr_f64(&rp, "sz"))
             .map(|v| v / 100.0);
+        let layout_font_family = layout_def_rpr
+            .and_then(|rp| child(rp, "latin"))
+            .and_then(|latin| attr(&latin, "typeface"))
+            .map(|face| resolve_theme_typeface(&face, theme));
         // Per-level sizes from the layout placeholder's own lstStyle (all
         // lvlNpPr), used to give nested bullets their shrinking sizes.
         let layout_level_sizes: LevelFontSizes = child(sp, "txBody")
@@ -1331,6 +1408,12 @@ pub(crate) fn parse_layout_placeholders(
                 if let Some(fs) = fs {
                     lph.by_idx_font_size.entry(idx).or_insert(fs);
                 }
+                let family = layout_font_family
+                    .clone()
+                    .or_else(|| master_font_families.get(&ph_type).cloned());
+                if let Some(family) = family {
+                    lph.by_idx_font_family.entry(idx).or_insert(family);
+                }
                 // Per-level: layout lstStyle wins per level, else master.
                 let level_sizes = merge_level_sizes(
                     &layout_level_sizes,
@@ -1396,6 +1479,14 @@ pub(crate) fn parse_layout_placeholders(
                 layout_font_size.or_else(|| master_font_sizes.get(&ph_type).copied());
             if let Some(fs) = effective_fs {
                 lph.by_type_font_size.entry(ph_type.clone()).or_insert(fs);
+            }
+            let effective_family = layout_font_family
+                .clone()
+                .or_else(|| master_font_families.get(&ph_type).cloned());
+            if let Some(family) = effective_family {
+                lph.by_type_font_family
+                    .entry(ph_type.clone())
+                    .or_insert(family);
             }
             let type_level_sizes = merge_level_sizes(
                 &layout_level_sizes,
@@ -1549,6 +1640,7 @@ pub(crate) fn read_show_master_sp(node: roxmltree::Node<'_, '_>) -> bool {
 pub(crate) fn parse_layout(
     layout_xml: &str,
     master_font_sizes: &HashMap<String, f64>,
+    master_font_families: &HashMap<String, String>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
     master_level_indents: &HashMap<String, LevelIndents>,
     master_level_bullets: &HashMap<String, LevelBullets>,
@@ -1576,6 +1668,7 @@ pub(crate) fn parse_layout(
     let placeholders = parse_layout_placeholders(
         root,
         master_font_sizes,
+        master_font_families,
         master_level_font_sizes,
         master_level_indents,
         master_level_bullets,
@@ -1641,6 +1734,7 @@ pub(crate) struct ParsedMaster {
     /// only by the common no-override slides.
     pub(crate) master_decorative: Vec<SlideElement>,
     pub(crate) master_font_sizes: HashMap<String, f64>,
+    pub(crate) master_font_families: HashMap<String, String>,
     pub(crate) master_level_font_sizes: HashMap<String, LevelFontSizes>,
     pub(crate) master_level_indents: HashMap<String, LevelIndents>,
     pub(crate) master_level_bullets: HashMap<String, LevelBullets>,
@@ -1761,6 +1855,9 @@ pub(crate) fn build_master_bundle(
     });
 
     let master_font_sizes = master_root.map(parse_master_font_sizes).unwrap_or_default();
+    let master_font_families = master_root
+        .map(|root| parse_master_font_families(root, &theme))
+        .unwrap_or_default();
     let master_level_font_sizes = master_root
         .map(parse_master_level_font_sizes)
         .unwrap_or_default();
@@ -1811,6 +1908,7 @@ pub(crate) fn build_master_bundle(
         master_bg,
         master_decorative,
         master_font_sizes,
+        master_font_families,
         master_level_font_sizes,
         master_level_indents,
         master_level_bullets,
@@ -1853,6 +1951,7 @@ mod placeholder_geometry_tests {
         parse_layout_placeholders(
             doc.root_element(),
             &HashMap::<String, f64>::new(),
+            &HashMap::<String, String>::new(),
             &HashMap::<String, LevelFontSizes>::new(),
             &HashMap::<String, LevelIndents>::new(),
             &HashMap::<String, LevelBullets>::new(),

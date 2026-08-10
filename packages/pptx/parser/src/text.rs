@@ -371,6 +371,7 @@ pub(crate) fn parse_text_body(
     rels: &HashMap<String, String>,
     source_dir: &str,
     inherited_font_size: Option<f64>,
+    inherited_font_family: Option<String>,
     inherited_level_font_sizes: LevelFontSizes,
     inherited_level_indents: LevelIndents,
     inherited_level_bullets: &LevelBullets,
@@ -538,6 +539,11 @@ pub(crate) fn parse_text_body(
         .and_then(|rp| attr_f64(&rp, "sz"))
         .map(|v| v / 100.0)
         .or(inherited_font_size);
+    let default_font_family = own_def_rpr
+        .and_then(|rp| child(rp, "latin"))
+        .and_then(|latin| attr(&latin, "typeface"))
+        .map(|face| resolve_theme_typeface(&face, theme))
+        .or(inherited_font_family);
     // Effective per-list-level default sizes: this shape's own lstStyle wins per
     // level, else the layout/master inherited per-level sizes. Paragraphs pick
     // their size by `lvl` so nested bullets shrink (ECMA-376 §21.1.2.4).
@@ -620,6 +626,7 @@ pub(crate) fn parse_text_body(
                 body_default_space_before,
                 body_default_space_after,
                 body_default_line_spacing,
+                default_font_family.as_deref(),
                 &effective_level_sizes,
                 &effective_level_indents,
                 &effective_level_bullets,
@@ -765,6 +772,7 @@ pub(crate) fn parse_paragraph(
     body_default_space_before: Option<i64>,
     body_default_space_after: Option<i64>,
     body_default_line_spacing: Option<f64>,
+    body_default_font_family: Option<&str>,
     level_font_sizes: &LevelFontSizes,
     level_indents: &LevelIndents,
     level_bullets: &LevelBullets,
@@ -921,7 +929,8 @@ pub(crate) fn parse_paragraph(
     let def_font_family = def_rpr
         .and_then(|n| child(n, "latin"))
         .and_then(|n| attr(&n, "typeface"))
-        .map(|tf| resolve_theme_typeface(&tf, theme));
+        .map(|tf| resolve_theme_typeface(&tf, theme))
+        .or_else(|| body_default_font_family.map(str::to_owned));
 
     let mut runs = Vec::new();
     for node in p_node.children().filter(|n| n.is_element()) {

@@ -2575,6 +2575,7 @@ fn produce_slide_unit_with_journal(
             parse_layout(
                 lx,
                 &bundle.master_font_sizes,
+                &bundle.master_font_families,
                 &bundle.master_level_font_sizes,
                 &bundle.master_level_indents,
                 layout_master_bullets,
@@ -4042,6 +4043,192 @@ mod tests {
         }
     }
 
+    /// ECMA-376 Part 1 §19.3.1.3: bgRef values 1001 and above index the
+    /// theme's bgFillStyleLst (1001 = first entry). The referenced fill keeps
+    /// its gradient geometry while each phClr is substituted with the bgRef
+    /// colour before applying the style's colour transforms.
+    #[test]
+    fn test_parse_background_bg_ref_resolves_theme_style_matrix() {
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T">
+          <a:themeElements>
+            <a:clrScheme name="C">
+              <a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+              <a:dk2><a:srgbClr val="7DAFC3"/></a:dk2><a:lt2><a:srgbClr val="E5E4DF"/></a:lt2>
+              <a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2>
+              <a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4>
+              <a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6>
+              <a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink>
+            </a:clrScheme>
+            <a:fontScheme name="F"><a:majorFont><a:latin typeface="Arial"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme>
+            <a:fmtScheme name="S">
+              <a:fillStyleLst/>
+              <a:lnStyleLst/><a:effectStyleLst/>
+              <a:bgFillStyleLst>
+                <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+                <a:gradFill rotWithShape="1"><a:gsLst>
+                  <a:gs pos="20000"><a:schemeClr val="phClr"><a:tint val="80000"/></a:schemeClr></a:gs>
+                  <a:gs pos="100000"><a:schemeClr val="phClr"><a:lumMod val="80000"/></a:schemeClr></a:gs>
+                </a:gsLst><a:path path="circle"/></a:gradFill>
+              </a:bgFillStyleLst>
+            </a:fmtScheme>
+          </a:themeElements>
+        </a:theme>"#;
+        let mut theme = parse_theme_colors(theme_xml);
+        theme.insert("bg2".to_owned(), "7DAFC3".to_owned());
+        let background_xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:bg><p:bgRef idx="1002"><a:schemeClr val="bg2"/></p:bgRef></p:bg>
+        </p:cSld>"#;
+        let doc = roxmltree::Document::parse(background_xml).unwrap();
+        let mut resolve = |_rid: &str| -> Option<String> { None };
+        let fill = parse_background(doc.root_element(), &theme, &mut resolve)
+            .expect("bgRef 1002 should resolve the second bgFillStyleLst entry");
+        match fill {
+            Fill::Gradient {
+                stops, grad_type, ..
+            } => {
+                assert_eq!(grad_type, "radial");
+                assert_eq!(stops.len(), 2);
+                assert_ne!(
+                    stops[0].color, "7DAFC3",
+                    "style transforms must be retained"
+                );
+                assert_ne!(
+                    stops[1].color, "7DAFC3",
+                    "style transforms must be retained"
+                );
+            }
+            other => panic!("expected theme gradient, got {other:?}"),
+        }
+    }
+
+    /// ECMA-376 §20.1.2.3.34 defines tint as retained input colour: an 80%
+    /// tint keeps 80% of the source and adds 20% white. Presentation background
+    /// fills follow that literal definition; the SmartArt compatibility mode is
+    /// intentionally not applied to normal p:bgPr fills.
+    #[test]
+    fn test_parse_background_uses_literal_tint_semantics() {
+        let xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:bg><p:bgPr><a:solidFill><a:schemeClr val="bg2"><a:tint val="80000"/></a:schemeClr></a:solidFill></p:bgPr></p:bg>
+        </p:cSld>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::from([("bg2".to_owned(), "7DAFC3".to_owned())]);
+        let mut resolve = |_rid: &str| -> Option<String> { None };
+        match parse_background(doc.root_element(), &theme, &mut resolve) {
+            Some(Fill::Solid { color }) => assert_eq!(color, "97BFCF"),
+            other => panic!("expected literal-tint solid fill, got {other:?}"),
+        }
+    }
+
+    /// ECMA-376 §20.1.4.2.10: a shape fillRef selects fillStyleLst by its
+    /// one-based idx and substitutes the reference colour for phClr. The style
+    /// remains a gradient; reducing it to a solid accent loses the authored
+    /// appearance (the failure reported for Apache POI customGeo.pptx).
+    #[test]
+    fn test_shape_fill_ref_resolves_theme_gradient() {
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T">
+          <a:themeElements><a:clrScheme name="C">
+            <a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+            <a:dk2><a:srgbClr val="1F497D"/></a:dk2><a:lt2><a:srgbClr val="EEECE1"/></a:lt2>
+            <a:accent1><a:srgbClr val="4F81BD"/></a:accent1><a:accent2><a:srgbClr val="C0504D"/></a:accent2>
+            <a:accent3><a:srgbClr val="9BBB59"/></a:accent3><a:accent4><a:srgbClr val="8064A2"/></a:accent4>
+            <a:accent5><a:srgbClr val="4BACC6"/></a:accent5><a:accent6><a:srgbClr val="F79646"/></a:accent6>
+            <a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink>
+          </a:clrScheme><a:fontScheme name="F"><a:majorFont><a:latin typeface="Calibri"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme>
+          <a:fmtScheme name="S"><a:fillStyleLst>
+            <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+            <a:gradFill><a:gsLst>
+              <a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="50000"/></a:schemeClr></a:gs>
+              <a:gs pos="100000"><a:schemeClr val="phClr"><a:tint val="15000"/></a:schemeClr></a:gs>
+            </a:gsLst><a:lin ang="16200000"/></a:gradFill>
+          </a:fillStyleLst><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+          </a:themeElements>
+        </a:theme>"#;
+        let theme = parse_theme_colors(theme_xml);
+        let shape_xml = r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:nvSpPr><p:cNvPr id="2" name="Styled ellipse"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+          <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></a:xfrm><a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom></p:spPr>
+          <p:style><a:fillRef idx="2"><a:schemeClr val="accent1"/></a:fillRef></p:style>
+        </p:sp>"#;
+        let doc = roxmltree::Document::parse(shape_xml).unwrap();
+        let fill_ref = doc
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "fillRef")
+            .unwrap();
+        assert!(matches!(
+            parse_style_matrix_fill(fill_ref, &theme, false),
+            Some(Fill::Gradient { .. })
+        ));
+        let mut zip = PptxZip::new(Cursor::new(empty_zip_bytes())).unwrap();
+        let shape = parse_shape(
+            doc.root_element(),
+            &LayoutPlaceholders::default(),
+            &theme,
+            &HashMap::new(),
+            "ppt/slides",
+            None,
+            &mut zip,
+        )
+        .expect("shape should parse");
+        match shape.fill {
+            Some(Fill::Gradient { stops, .. }) => assert_eq!(stops.len(), 2),
+            other => panic!("expected style-matrix gradient, got {other:?}"),
+        }
+    }
+
+    /// ECMA-376 §19.3.1.52 / §21.1.2.3.7: a title with no local Latin
+    /// typeface inherits titleStyle's +mj-lt, resolved through the current
+    /// master's major Latin theme font.
+    #[test]
+    fn test_master_title_font_family_inherits_theme_major_latin() {
+        let theme = parse_theme_colors(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements>
+              <a:clrScheme name="C"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="111111"/></a:dk2><a:lt2><a:srgbClr val="EEEEEE"/></a:lt2><a:accent1><a:srgbClr val="111111"/></a:accent1><a:accent2><a:srgbClr val="222222"/></a:accent2><a:accent3><a:srgbClr val="333333"/></a:accent3><a:accent4><a:srgbClr val="444444"/></a:accent4><a:accent5><a:srgbClr val="555555"/></a:accent5><a:accent6><a:srgbClr val="666666"/></a:accent6><a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink></a:clrScheme>
+              <a:fontScheme name="F"><a:majorFont><a:latin typeface="Arial Black"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme>
+              <a:fmtScheme name="S"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+            </a:themeElements></a:theme>"#,
+        );
+        let master_xml = r#"<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree/></p:cSld><p:txStyles><p:titleStyle><a:lvl1pPr><a:defRPr><a:latin typeface="+mj-lt"/></a:defRPr></a:lvl1pPr></p:titleStyle></p:txStyles>
+        </p:sldMaster>"#;
+        let master_doc = roxmltree::Document::parse(master_xml).unwrap();
+        let families = parse_master_font_families(master_doc.root_element(), &theme);
+        assert_eq!(
+            families.get("title").map(String::as_str),
+            Some("Arial Black")
+        );
+        assert_eq!(
+            families.get("ctrTitle").map(String::as_str),
+            Some("Arial Black")
+        );
+
+        let placeholders = LayoutPlaceholders {
+            by_type_font_family: families,
+            ..LayoutPlaceholders::default()
+        };
+        let shape_xml = r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="ctrTitle"/></p:nvPr></p:nvSpPr>
+          <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="500000"/></a:xfrm></p:spPr>
+          <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr/><a:t>Trade show</a:t></a:r></a:p></p:txBody>
+        </p:sp>"#;
+        let doc = roxmltree::Document::parse(shape_xml).unwrap();
+        let mut zip = PptxZip::new(Cursor::new(empty_zip_bytes())).unwrap();
+        let shape = parse_shape(
+            doc.root_element(),
+            &placeholders,
+            &theme,
+            &HashMap::new(),
+            "ppt/slides",
+            None,
+            &mut zip,
+        )
+        .expect("title should parse");
+        let paragraph = &shape.text_body.expect("text body").paragraphs[0];
+        assert_eq!(paragraph.def_font_family.as_deref(), Some("Arial Black"));
+    }
+
     /// ECMA-376 §20.1.8.23 — a background `<a:blipFill>` whose `<a:blip>` carries
     /// a `<a:duotone>` surfaces the resolved endpoint colours onto
     /// `Fill::Image.duotone` (through the theme), so a picture FILL recolours like
@@ -4996,6 +5183,7 @@ mod tests {
                 &rels,
                 "ppt/slides",
                 None,
+                None,
                 [None; 9],
                 Default::default(), // inherited_level_indents
                 &empty_level_bullets(),
@@ -5080,6 +5268,7 @@ mod tests {
             layout_doc.root_element(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             &master_indents,
             &HashMap::new(),
             &HashMap::new(),
@@ -5152,6 +5341,7 @@ mod tests {
             parse_layout(
                 layout,
                 &m_f64,
+                &m_str,
                 &m_lfs,
                 &m_li,
                 &m_lb,
@@ -5646,6 +5836,7 @@ mod tests {
                 &rels,
                 "ppt/slides",
                 None,               // inherited_font_size
+                None,               // inherited_font_family
                 [None; 9],          // inherited_level_font_sizes
                 Default::default(), // inherited_level_indents
                 &empty_level_bullets(),
@@ -5716,6 +5907,7 @@ mod tests {
                 &theme,
                 &rels,
                 "ppt/slides",
+                None,
                 None,
                 [None; 9],
                 Default::default(),
@@ -5799,6 +5991,7 @@ mod tests {
                 &theme,
                 &rels,
                 "ppt/slides",
+                None,
                 None,
                 [None; 9],
                 Default::default(), // inherited_level_indents
@@ -5886,6 +6079,7 @@ mod tests {
                 &theme,
                 &rels,
                 "ppt/slides",
+                None,
                 None,
                 [None; 9],
                 Default::default(),
