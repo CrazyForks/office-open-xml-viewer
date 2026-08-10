@@ -90,9 +90,13 @@ function makeStrokeMock(): {
   ctx: CanvasRenderingContext2D;
   lastDash: () => number[];
   lastCap: () => CanvasLineCap;
+  lastJoin: () => CanvasLineJoin;
+  lastMiterLimit: () => number;
 } {
   let dash: number[] = [];
   let cap: CanvasLineCap = 'butt';
+  let join: CanvasLineJoin = 'miter';
+  let miterLimit = 10;
   const ctx = {
     strokeStyle: '',
     lineWidth: 0,
@@ -101,11 +105,17 @@ function makeStrokeMock(): {
     },
     get lineCap() { return cap; },
     set lineCap(value: CanvasLineCap) { cap = value; },
+    get lineJoin() { return join; },
+    set lineJoin(value: CanvasLineJoin) { join = value; },
+    get miterLimit() { return miterLimit; },
+    set miterLimit(value: number) { miterLimit = value; },
   };
   return {
     ctx: ctx as unknown as CanvasRenderingContext2D,
     lastDash: () => dash,
     lastCap: () => cap,
+    lastJoin: () => join,
+    lastMiterLimit: () => miterLimit,
   };
 }
 
@@ -206,5 +216,28 @@ describe('applyStroke dash patterns (§20.1.10.49 ST_PresetLineDashVal)', () => 
     // `1 1` becomes one stroke-width on and one stroke-width off.
     applyStroke(ctx, strokeWith('1 1'), 1);
     expect(lastDash()).toEqual([2, 2]);
+  });
+
+  it('renders custom DrawingML dash segments as line-width-relative lengths', () => {
+    const { ctx, lastDash } = makeStrokeMock();
+    applyStroke(ctx, {
+      color: '#000000',
+      width: 2,
+      dashStyle: 'dot',
+      customDash: [{ dash: 1.25, space: 0.75 }],
+    }, 1);
+    expect(lastDash()).toEqual([2.5, 1.5]);
+  });
+
+  it('applies the authored join and miter limit', () => {
+    const { ctx, lastJoin, lastMiterLimit } = makeStrokeMock();
+    applyStroke(ctx, {
+      color: '#000000',
+      width: 2,
+      lineJoin: 'miter',
+      miterLimit: 8,
+    }, 1);
+    expect(lastJoin()).toBe('miter');
+    expect(lastMiterLimit()).toBe(8);
   });
 });

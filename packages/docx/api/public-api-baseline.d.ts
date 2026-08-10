@@ -1229,7 +1229,7 @@ export interface SectionProps {
     lineNumbering?: LineNumbering | null;
     vAlign?: string | null;
 }
-type ShapeFill = {
+export type ShapeFill = {
     fillType: 'solid';
     color: string;
 } | {
@@ -1281,8 +1281,17 @@ export interface ShapeRun {
     fill: ShapeFill | null;
     stroke: string | null;
     strokeWidth?: number;
+    strokeFill?: ShapeStrokeFill | null;
     strokeDash?: string | null;
+    strokeCustomDash?: Array<{
+        dash: number;
+        space: number;
+    }>;
     strokeCap?: 'butt' | 'round' | 'square' | null;
+    strokeJoin?: 'round' | 'bevel' | 'miter' | null;
+    strokeMiterLimit?: number | null;
+    strokeAlignment?: 'ctr' | 'in' | null;
+    strokeCompound?: string | null;
     headEnd?: LineEnd | null;
     tailEnd?: LineEnd | null;
     rotation?: number;
@@ -1306,6 +1315,17 @@ export interface ShapeRun {
     textPath?: TextPath | null;
     fillOpacity?: number | null;
 }
+export type ShapeStrokeFill = {
+    fillType: 'gradient';
+    stops: GradientStop[];
+    angle: number;
+    gradType: string;
+} | {
+    fillType: 'pattern';
+    fg: string;
+    bg: string;
+    preset: string;
+};
 export interface ShapeText {
     text: string;
     fontSizePt: number;

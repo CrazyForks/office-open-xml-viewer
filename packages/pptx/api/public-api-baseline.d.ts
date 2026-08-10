@@ -1105,7 +1105,14 @@ export interface Stroke {
         fillType: 'none';
     }>;
     dashStyle?: string;
+    customDash?: ReadonlyArray<{
+        dash: number;
+        space: number;
+    }>;
     lineCap?: 'butt' | 'round' | 'square';
+    lineJoin?: 'round' | 'bevel' | 'miter';
+    miterLimit?: number;
+    alignment?: 'ctr' | 'in';
     headEnd?: ArrowEnd;
     tailEnd?: ArrowEnd;
     cmpd?: string;

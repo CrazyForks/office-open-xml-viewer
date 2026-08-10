@@ -184,6 +184,10 @@ pub(crate) struct TableRow {
 pub(crate) struct TableCell {
     pub(crate) text_body: Option<TextBody>,
     pub(crate) fill: Option<Fill>,
+    /// Whether `tcPr` authored a fill choice, including explicit `noFill`.
+    /// Kept parser-internal so table styles cannot overwrite direct formatting.
+    #[serde(skip)]
+    pub(crate) has_direct_fill: bool,
     /// Default run text colour inherited from the table style (`<a:tcTxStyle>`),
     /// used when a run carries no explicit colour. Hex, no `#`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -192,6 +196,20 @@ pub(crate) struct TableCell {
     pub(crate) border_r: Option<Stroke>,
     pub(crate) border_t: Option<Stroke>,
     pub(crate) border_b: Option<Stroke>,
+    /// Direct border presence is distinct from its rendered `Option<Stroke>`:
+    /// `<a:lnL><a:noFill/></a:lnL>` is authored and must suppress a style line.
+    #[serde(skip)]
+    pub(crate) has_direct_border_l: bool,
+    #[serde(skip)]
+    pub(crate) has_direct_border_r: bool,
+    #[serde(skip)]
+    pub(crate) has_direct_border_t: bool,
+    #[serde(skip)]
+    pub(crate) has_direct_border_b: bool,
+    #[serde(skip)]
+    pub(crate) has_direct_diagonal_tl: bool,
+    #[serde(skip)]
+    pub(crate) has_direct_diagonal_tr: bool,
     /// Diagonal from top-left to bottom-right (tl2br)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) diagonal_tl: Option<Stroke>,
@@ -737,6 +755,15 @@ pub(crate) struct ArrowEnd {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct StrokeDashSegment {
+    /// Dash length as a multiplier of the rendered line width.
+    pub(crate) dash: f64,
+    /// Gap length as a multiplier of the rendered line width.
+    pub(crate) space: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct Stroke {
     pub(crate) color: String,
     pub(crate) width: i64,
@@ -748,9 +775,19 @@ pub(crate) struct Stroke {
     /// OOXML prstDash value: "dash", "dot", "dashDot", "lgDash", "lgDashDot", "sysDash", "sysDot", etc.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) dash_style: Option<String>,
+    /// DrawingML custom dash pairs, normalized from percentage to line-width
+    /// multipliers. Present values take precedence over `dash_style`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(crate) custom_dash: Vec<StrokeDashSegment>,
     /// DrawingML cap normalized to the Canvas vocabulary.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) line_cap: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) line_join: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) miter_limit: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) alignment: Option<String>,
     /// Arrow at the start of the line (headEnd)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) head_end: Option<ArrowEnd>,

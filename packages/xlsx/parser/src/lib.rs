@@ -369,6 +369,10 @@ struct WorkbookShared {
     rels_xml: String,
     sheets: Vec<SheetMeta>,
     theme_colors: Rc<[String]>,
+    /// DrawingML `fmtScheme`, parsed once per workbook and reused by every
+    /// sheet's shape tree. Keeping the complete recipes avoids the previous
+    /// per-sheet theme re-inflate and width-only `lnStyleLst` projection.
+    theme_format_scheme: Rc<ooxml_common::theme::ThemeFormatScheme>,
     /// Workbook theme `(majorFont.latin, minorFont.latin)` Latin faces
     /// (§20.1.4.2). Chart-text fallback font (CH10).
     theme_fonts: (Option<String>, Option<String>),
@@ -406,6 +410,7 @@ impl WorkbookShared {
         };
         let rels_xml = read_zip_string(archive, "xl/_rels/workbook.xml.rels").unwrap_or_default();
         let theme_colors: Rc<[String]> = parse_theme_colors(archive).into();
+        let theme_format_scheme = Rc::new(parse_theme_format_scheme(archive));
         let theme_fonts = parse_theme_fonts(archive);
         let (shared_strings, shared_strings_error) =
             read_shared_strings(archive, theme_colors.as_ref());
@@ -414,6 +419,7 @@ impl WorkbookShared {
             rels_xml,
             sheets,
             theme_colors,
+            theme_format_scheme,
             theme_fonts,
             shared_strings: shared_strings.into(),
             shared_strings_error,
@@ -539,7 +545,12 @@ fn finalize_projected_sheet(
         ),
     );
     ws.charts = charts;
-    ws.shape_groups = load_sheet_shape_groups(archive, sheet_path, theme_colors);
+    ws.shape_groups = load_sheet_shape_groups(
+        archive,
+        sheet_path,
+        theme_colors,
+        shared.theme_format_scheme.as_ref(),
+    );
     ws.hyperlinks = load_hyperlinks(archive, sheet_path, hyperlink_rids);
     ws.comments = load_sheet_comments(archive, sheet_path);
     ws.comment_refs = ws.comments.iter().map(|c| c.cell_ref.clone()).collect();
@@ -855,19 +866,11 @@ fn extract_tab_color_from_head(head: &str, theme_colors: &[String]) -> Option<St
     )
 }
 
-/// Theme `fmtScheme > lnStyleLst` line widths (EMU), in declaration order.
-/// A drawing shape's `<a:style><a:lnRef idx="N">` resolves its outline width
-/// from entry N (1-based) of this list (ECMA-376 §20.1.4.2.19); an entry
-/// without an explicit `w` uses the CT_LineProperties default 9525 EMU =
-/// 0.75 pt (§20.1.2.2.24).
-pub(crate) fn parse_theme_ln_widths(archive: &mut XlsxZip) -> Vec<i64> {
+fn parse_theme_format_scheme(archive: &mut XlsxZip) -> ooxml_common::theme::ThemeFormatScheme {
     let Ok(xml) = read_zip_string(archive, "xl/theme/theme1.xml") else {
-        return Vec::new();
+        return ooxml_common::theme::ThemeFormatScheme::default();
     };
-    // Shared parse: reference line widths (EMU) in declaration order, filling the
-    // CT_LineProperties 9525 default for a bare `<a:ln>` — matching xlsx's prior
-    // behavior exactly (ECMA-376 §20.1.4.2.19 / §20.1.2.2.24).
-    ooxml_common::theme::parse_ln_style_widths(&xml)
+    ooxml_common::theme::ThemeFormatScheme::parse(&xml)
 }
 
 fn parse_theme_colors(archive: &mut XlsxZip) -> Vec<String> {

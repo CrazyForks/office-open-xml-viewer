@@ -7,9 +7,82 @@
 use crate::parse_preflighted_pptx_xml;
 use crate::{attr, child, parse_rels, read_zip_str, resolve_path, PptxZip};
 use ooxml_common::rels::relationship_part_path;
+use ooxml_common::theme::ThemeFormatScheme;
+use serde::ser::Serializer;
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 
 const THEME_REL_PREFIX: &str = "+themeRel-";
+const RAW_SCHEME_PREFIX: &str = "+rawScheme-";
+
+/// PPTX host adapter for the shared DrawingML theme model. The historic flat
+/// map remains the color/font/object-default carrier; `format_scheme` is kept
+/// beside it because style recipes are structured XML, not synthetic map keys.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PptxTheme {
+    values: HashMap<String, String>,
+    pub(crate) format_scheme: ThemeFormatScheme,
+}
+
+impl PptxTheme {
+    pub(crate) fn from_xml(xml: &str) -> Self {
+        let format_scheme = if parse_preflighted_pptx_xml(xml).is_ok() {
+            ThemeFormatScheme::parse(xml)
+        } else {
+            ThemeFormatScheme::default()
+        };
+        Self {
+            values: parse_theme_colors(xml),
+            format_scheme,
+        }
+    }
+}
+
+impl Deref for PptxTheme {
+    type Target = HashMap<String, String>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl DerefMut for PptxTheme {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.values
+    }
+}
+
+impl serde::Serialize for PptxTheme {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.values.serialize(serializer)
+    }
+}
+
+/// Theme inputs accepted by shape parsing. Unit tests and callers that build a
+/// palette directly continue to use a `HashMap`; package-backed parsing passes
+/// `PptxTheme` and therefore exposes the format scheme as well.
+pub(crate) trait PptxThemeSource {
+    fn colors(&self) -> &HashMap<String, String>;
+    fn format_scheme(&self) -> Option<&ThemeFormatScheme> {
+        None
+    }
+}
+
+impl PptxThemeSource for HashMap<String, String> {
+    fn colors(&self) -> &HashMap<String, String> {
+        self
+    }
+}
+
+impl PptxThemeSource for PptxTheme {
+    fn colors(&self) -> &HashMap<String, String> {
+        &self.values
+    }
+
+    fn format_scheme(&self) -> Option<&ThemeFormatScheme> {
+        Some(&self.format_scheme)
+    }
+}
 
 pub(crate) fn theme_relationship_path<'a>(
     theme: &'a HashMap<String, String>,
@@ -27,9 +100,9 @@ pub(crate) fn theme_relationship_path<'a>(
 /// references the style. Retain the resolved package paths beside the existing
 /// flat theme map so deferred `fillRef` / `bgRef` resolution uses the correct
 /// OPC source part.
-pub(crate) fn parse_theme_part(theme_path: &str, zip: &mut PptxZip) -> HashMap<String, String> {
+pub(crate) fn parse_theme_part(theme_path: &str, zip: &mut PptxZip) -> PptxTheme {
     let theme_xml = read_zip_str(zip, theme_path).unwrap_or_default();
-    let mut theme = parse_theme_colors(&theme_xml);
+    let mut theme = PptxTheme::from_xml(&theme_xml);
     let rels_xml = read_zip_str(zip, &relationship_part_path(theme_path)).unwrap_or_default();
     let theme_dir = theme_path.rsplit_once('/').map_or("", |(dir, _)| dir);
 
@@ -85,12 +158,12 @@ mod relationship_tests {
 ///
 /// The clrScheme and fontScheme are parsed by the shared
 /// [`ooxml_common::theme`] grammar; this function keeps pptx's flat merged-map
-/// storage (colors, `+mj-lt`/`+mn-*` font keys, `+lnRef-N` line widths and
+/// storage (colors, `+mj-lt`/`+mn-*` font keys and
 /// `+txDef`/`+spDef` object defaults all in one `HashMap<String, String>`)
-/// because ~30 call sites look these up by string key. The lnStyleLst and
-/// objectDefaults handling stays local — the former's "record only entries with
-/// an explicit `w`, as a raw string" contract differs from the shared
-/// default-filling `parse_ln_style_widths`, and the latter is pptx-specific.
+/// because ~30 call sites look these up by string key. Existing fill/effect
+/// fragment adapters and objectDefaults stay local. Structured line recipes
+/// are retained by [`PptxTheme`] instead of being flattened into width
+/// sentinels.
 pub(crate) fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     // Enforce the PPTX-local defense-in-depth node ceiling before any shared
@@ -104,6 +177,12 @@ pub(crate) fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
     // docx/xlsx). prstClr is now resolved via the shared preset table.
     for (slot, hex) in ooxml_common::theme::ThemeColorScheme::parse(xml).iter() {
         map.insert(slot.to_owned(), hex.to_owned());
+        // Logical PresentationML color names overlap the raw theme slot names
+        // for accent1..accent6/hlink/folHlink. Keep an immutable copy so a
+        // non-identity clrMap can be reapplied without destroying the source
+        // palette, and style-matrix recipes can resolve fixed scheme colors
+        // without accidentally applying the presentation mapping twice.
+        map.insert(format!("{RAW_SCHEME_PREFIX}{slot}"), hex.to_owned());
     }
 
     // Font scheme: shared parse, mapped onto pptx's `+mj-*` / `+mn-*` keys.
@@ -123,22 +202,11 @@ pub(crate) fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
     // fragments because phClr is supplied by each individual fillRef/bgRef and
     // therefore cannot be resolved while the theme is parsed. Only a referenced
     // fragment is reparsed later; ordinary explicit fills keep their current fast
-    // path. Line widths keep their existing compact string representation.
+    // path. Line recipes live in the shared `ThemeFormatScheme` sidecar.
     if let Some(fmt_scheme) = root
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "fmtScheme")
     {
-        if let Some(ln_style_lst) = child(fmt_scheme, "lnStyleLst") {
-            for (i, ln) in ln_style_lst
-                .children()
-                .filter(|n| n.is_element() && n.tag_name().name() == "ln")
-                .enumerate()
-            {
-                if let Some(w) = attr(&ln, "w") {
-                    map.insert(format!("+lnRef-{}", i + 1), w);
-                }
-            }
-        }
         for (list_name, key_prefix) in [
             ("fillStyleLst", "+fillStyle"),
             ("bgFillStyleLst", "+bgFillStyle"),
@@ -291,7 +359,11 @@ pub(crate) fn apply_clr_map(
             .unwrap_or_else(|| (*default_slot).to_owned());
         // theme[logical] = theme[slot] when the slot has a hex; otherwise skip
         // (leaves any prior value, and the canonical fallback still applies).
-        if let Some(hex) = theme.get(&slot).cloned() {
+        if let Some(hex) = theme
+            .get(&format!("{RAW_SCHEME_PREFIX}{slot}"))
+            .or_else(|| theme.get(&slot))
+            .cloned()
+        {
             theme.insert((*logical).to_owned(), hex);
         }
     }
@@ -351,6 +423,25 @@ pub(crate) struct PptxSchemeResolver<'a> {
     pub(crate) theme: &'a HashMap<String, String>,
 }
 
+/// Resolve the theme's authored color-scheme slots without applying the
+/// PresentationML logical color map. This is required after a `clrMap` maps an
+/// overlapping name such as `accent1` to another slot: format-scheme recipes
+/// and chart-local color maps refer to the underlying scheme slot, not the
+/// already-mapped logical color.
+pub(crate) struct PptxRawSchemeResolver<'a> {
+    pub(crate) theme: &'a HashMap<String, String>,
+}
+
+impl ooxml_common::color::ThemeResolver for PptxRawSchemeResolver<'_> {
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        let slot = ooxml_common::color::default_scheme_slot(name);
+        self.theme
+            .get(&format!("{RAW_SCHEME_PREFIX}{slot}"))
+            .or_else(|| self.theme.get(slot))
+            .cloned()
+    }
+}
+
 impl ooxml_common::color::ThemeResolver for PptxSchemeResolver<'_> {
     fn resolve_scheme_color(&self, name: &str) -> Option<String> {
         // Per ECMA-376 §19.3.1.6 the master's <p:clrMap> remaps logical
@@ -381,6 +472,50 @@ impl ooxml_common::color::ThemeResolver for PptxSchemeResolver<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_map_swaps_are_resolved_from_the_immutable_scheme_palette() {
+        let mut theme = parse_theme_colors(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements><a:clrScheme name="swap">
+                <a:dk1><a:srgbClr val="000000"/></a:dk1>
+                <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+                <a:dk2><a:srgbClr val="111111"/></a:dk2>
+                <a:lt2><a:srgbClr val="EEEEEE"/></a:lt2>
+                <a:accent1><a:srgbClr val="AA0000"/></a:accent1>
+                <a:accent2><a:srgbClr val="00BB00"/></a:accent2>
+                <a:accent3><a:srgbClr val="0000CC"/></a:accent3>
+                <a:accent4><a:srgbClr val="444444"/></a:accent4>
+                <a:accent5><a:srgbClr val="555555"/></a:accent5>
+                <a:accent6><a:srgbClr val="666666"/></a:accent6>
+                <a:hlink><a:srgbClr val="777777"/></a:hlink>
+                <a:folHlink><a:srgbClr val="888888"/></a:folHlink>
+              </a:clrScheme></a:themeElements>
+            </a:theme>"#,
+        );
+        let mapping = HashMap::from([
+            ("accent1".to_owned(), "accent2".to_owned()),
+            ("accent2".to_owned(), "accent1".to_owned()),
+        ]);
+
+        apply_clr_map(&mut theme, Some(&mapping));
+        assert_eq!(theme.get("accent1").map(String::as_str), Some("00BB00"));
+        assert_eq!(theme.get("accent2").map(String::as_str), Some("AA0000"));
+        assert_eq!(
+            ooxml_common::color::ThemeResolver::resolve_scheme_color(
+                &PptxRawSchemeResolver { theme: &theme },
+                "accent1",
+            ),
+            Some("AA0000".to_owned())
+        );
+
+        // Reapplying a different map must still use the authored palette, not
+        // the values written by the first mapping.
+        let second = HashMap::from([("accent1".to_owned(), "accent3".to_owned())]);
+        apply_clr_map(&mut theme, Some(&second));
+        assert_eq!(theme.get("accent1").map(String::as_str), Some("0000CC"));
+        assert_eq!(theme.get("accent2").map(String::as_str), Some("00BB00"));
+    }
 
     #[test]
     fn shallow_theme_xml_parses_colors() {

@@ -1215,6 +1215,14 @@ pub struct LineEnd {
     pub len: String,
 }
 
+/// One DrawingML custom dash pair normalized to line-width multipliers.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeLineDashSegment {
+    pub dash: f64,
+    pub space: f64,
+}
+
 /// Resolved character formatting of the WordprocessingML run that hosts a
 /// floating drawing. The drawing is out of inline flow, but Word still uses its
 /// anchor character's run metrics when sizing the containing text line.
@@ -1573,12 +1581,30 @@ pub struct ShapeRun {
     /// stroke width in pt.
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub stroke_width: f64,
+    /// Authored non-solid DrawingML line paint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_fill: Option<ShapeStrokeFill>,
     /// `<a:ln><a:prstDash val>` (ECMA-376 §20.1.8.48). None ⇒ solid.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stroke_dash: Option<String>,
+    /// `<a:ln><a:custDash>` pairs as line-width multipliers.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stroke_custom_dash: Vec<ShapeLineDashSegment>,
     /// VML `<v:stroke endcap>` / DrawingML line cap, normalized for Canvas.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stroke_cap: Option<String>,
+    /// DrawingML round/bevel/miter line join.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_join: Option<String>,
+    /// Miter limit as a line-width multiplier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_miter_limit: Option<f64>,
+    /// Authored DrawingML pen alignment (`ctr` or `in`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_alignment: Option<String>,
+    /// DrawingML compound-line mode (`dbl`, `thinThick`, ...).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_compound: Option<String>,
     /// `<a:ln><a:headEnd>` decoration (line start). None ⇒ no head.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head_end: Option<LineEnd>,
@@ -1733,6 +1759,22 @@ pub(crate) struct VmlTextPathFacts {
     pub(crate) x_scale: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) font_size_pt: Option<f64>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(tag = "fillType", rename_all = "camelCase")]
+pub enum ShapeStrokeFill {
+    #[serde(rename_all = "camelCase")]
+    Gradient {
+        stops: Vec<GradientStop>,
+        angle: f64,
+        grad_type: String,
+    },
+    Pattern {
+        fg: String,
+        bg: String,
+        preset: String,
+    },
 }
 
 #[derive(Serialize, Debug, Clone)]

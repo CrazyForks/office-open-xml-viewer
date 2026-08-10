@@ -182,6 +182,11 @@ export type {
   ShapeTextRun,
   PathInfo,
   PathCmd,
+  ArrowEnd,
+  GradientFill,
+  GradientStop,
+  PatternFill,
+  SolidFill,
   // Canonical chart model (shared with core / pptx). `ChartAnchor.chart` is a
   // `ChartModel`.
   ChartModel,

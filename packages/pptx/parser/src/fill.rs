@@ -5,7 +5,9 @@
 //! Shared XML helpers (`child`, `children_vec`, `attr`, `attr_r`, `attr_i64`,
 //! `attr_f64`) stay in `lib.rs` and are imported here.
 
-use crate::theme::{theme_relationship_path, PptxSchemeResolver};
+use crate::theme::{
+    theme_relationship_path, PptxRawSchemeResolver, PptxSchemeResolver, PptxThemeSource,
+};
 use crate::types::*;
 use crate::{attr, attr_f64, attr_i64, attr_r, child, parse_preflighted_pptx_xml};
 use ooxml_common::blip::{mime_from_ext, parse_blip_duotone};
@@ -113,6 +115,48 @@ fn parse_fill_with_resolver<R: ThemeResolver + ?Sized>(
     None
 }
 
+/// Resolve a fill/background style reference through the structured shared
+/// theme model. Fixed scheme colors are read from the authored scheme while
+/// only `phClr` is substituted from the reference's effective mapped color.
+pub(crate) fn parse_style_matrix_fill_from_source(
+    style_ref: roxmltree::Node<'_, '_>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
+) -> Option<Fill> {
+    use ooxml_common::color::{StyleMatrixColorResolver, TintMode};
+    use ooxml_common::theme::StyleMatrixLookup;
+
+    let idx = attr(&style_ref, "idx")?.parse::<usize>().ok()?;
+    let Some(format_scheme) = theme_source.format_scheme() else {
+        return parse_style_matrix_fill(style_ref, theme_source.colors(), false);
+    };
+    let entry = match format_scheme.lookup_fill_ref(idx) {
+        StyleMatrixLookup::NoStyle => return Some(Fill::None),
+        StyleMatrixLookup::Missing => return None,
+        StyleMatrixLookup::Entry(entry) => entry,
+    };
+    let entry_xml = entry.to_xml();
+    let document = roxmltree::Document::parse(&entry_xml).ok()?;
+    let theme = theme_source.colors();
+    let placeholder_color = parse_color_node_tint(style_ref, theme, TintMode::PowerPointLinear);
+    let raw_resolver = PptxRawSchemeResolver { theme };
+    let resolver = StyleMatrixColorResolver::new(&raw_resolver, placeholder_color.as_deref());
+    if let Some(blip_fill) = child(document.root_element(), "blipFill") {
+        let mut resolve_blip = |relationship_id: &str| {
+            theme_relationship_path(theme, relationship_id).map(str::to_owned)
+        };
+        if let Some(fill) =
+            parse_blip_fill_with_color_resolver(blip_fill, &resolver, &mut resolve_blip)
+        {
+            return Some(fill);
+        }
+    }
+    parse_fill_with_resolver(
+        document.root_element(),
+        &resolver,
+        TintMode::PowerPointLinear,
+    )
+}
+
 struct StyleMatrixSchemeResolver<'a> {
     theme: &'a HashMap<String, String>,
     placeholder_color: Option<&'a str>,
@@ -123,7 +167,7 @@ impl ThemeResolver for StyleMatrixSchemeResolver<'_> {
         if name == "phClr" {
             return self.placeholder_color.map(str::to_owned);
         }
-        PptxSchemeResolver { theme: self.theme }.resolve_scheme_color(name)
+        PptxRawSchemeResolver { theme: self.theme }.resolve_scheme_color(name)
     }
 }
 
@@ -240,71 +284,112 @@ fn parse_blip_fill_with_color_resolver<
     })
 }
 
-pub(crate) fn parse_arrow_end(node: roxmltree::Node<'_, '_>) -> ArrowEnd {
-    let kind = attr(&node, "type").unwrap_or_else(|| "none".to_owned());
-    let w = attr(&node, "w").unwrap_or_else(|| "med".to_owned());
-    let len = attr(&node, "len").unwrap_or_else(|| "med".to_owned());
-    ArrowEnd { kind, w, len }
+fn canvas_line_cap(cap: &str) -> Option<String> {
+    match cap {
+        "rnd" => Some("round".to_owned()),
+        "sq" => Some("square".to_owned()),
+        "flat" => Some("butt".to_owned()),
+        _ => None,
+    }
+}
+
+pub(crate) fn line_properties_to_stroke(
+    line: &ooxml_common::line::LineProperties,
+    fallback_color: Option<String>,
+) -> Option<Stroke> {
+    use ooxml_common::line::{LineDash, LineEnd, LineJoin, LinePaint};
+
+    let (color, fill) = match line.paint.as_ref()? {
+        LinePaint::NoFill => return None,
+        LinePaint::Solid { color } => (color.clone().or(fallback_color)?, None),
+        LinePaint::Gradient(Some(gradient)) => {
+            let color = gradient
+                .stops
+                .iter()
+                .rev()
+                .find(|stop| !stop.color.ends_with("00"))
+                .or_else(|| gradient.stops.last())?
+                .color
+                .clone();
+            (
+                color,
+                Some(Fill::Gradient {
+                    stops: gradient.stops.clone(),
+                    angle: gradient.angle,
+                    grad_type: gradient.grad_type.clone(),
+                }),
+            )
+        }
+        LinePaint::Gradient(None) => return None,
+        LinePaint::Pattern(pattern) => (
+            pattern.fg.clone(),
+            Some(Fill::Pattern {
+                fg: pattern.fg.clone(),
+                bg: pattern.bg.clone(),
+                preset: pattern.preset.clone(),
+            }),
+        ),
+    };
+    let dash_style = match line.dash.as_ref() {
+        Some(LineDash::Preset(Some(value))) if value != "solid" => Some(value.clone()),
+        _ => None,
+    };
+    let custom_dash = match line.dash.as_ref() {
+        Some(LineDash::Custom(stops)) => stops
+            .iter()
+            .map(|stop| StrokeDashSegment {
+                dash: stop.dash as f64 / 100_000.0,
+                space: stop.space as f64 / 100_000.0,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let (line_join, miter_limit) = match line.join.as_ref() {
+        Some(LineJoin::Round) => (Some("round".to_owned()), None),
+        Some(LineJoin::Bevel) => (Some("bevel".to_owned()), None),
+        Some(LineJoin::Miter { limit }) => (
+            Some("miter".to_owned()),
+            limit.map(|value| value as f64 / 100_000.0),
+        ),
+        None => (None, None),
+    };
+    let arrow = |end: &LineEnd| {
+        let kind = end.kind.clone().unwrap_or_else(|| "none".to_owned());
+        (kind != "none").then(|| ArrowEnd {
+            kind,
+            w: end.width.clone().unwrap_or_else(|| "med".to_owned()),
+            len: end.length.clone().unwrap_or_else(|| "med".to_owned()),
+        })
+    };
+    Some(Stroke {
+        color,
+        width: line.width.unwrap_or(9525),
+        fill,
+        dash_style,
+        custom_dash,
+        line_cap: line.cap.as_deref().and_then(canvas_line_cap),
+        line_join,
+        miter_limit,
+        alignment: line
+            .alignment
+            .clone()
+            .filter(|value| matches!(value.as_str(), "ctr" | "in")),
+        head_end: line.head_end.as_ref().and_then(arrow),
+        tail_end: line.tail_end.as_ref().and_then(arrow),
+        cmpd: line.compound.clone().filter(|value| value != "sng"),
+    })
 }
 
 pub(crate) fn parse_stroke(
     ln_node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> Option<Stroke> {
-    if child(ln_node, "noFill").is_some() {
-        return None;
-    }
-    let width = attr_i64(&ln_node, "w").unwrap_or(9525);
-    // CT_LineProperties uses EG_LineFillProperties (§20.1.8.38), so a line can
-    // carry the same solid/gradient/pattern paints as a shape. Keep a solid
-    // fallback colour for arrowheads and consumers that do not yet understand
-    // non-solid line paint.
-    let parsed_fill = parse_fill(ln_node, theme)?;
-    let color = match &parsed_fill {
-        Fill::Solid { color } => color.clone(),
-        Fill::Gradient { stops, .. } => stops
-            .iter()
-            .rev()
-            .find(|stop| !stop.color.ends_with("00"))
-            .or_else(|| stops.last())
-            .map(|stop| stop.color.clone())?,
-        Fill::Pattern { fg, .. } => fg.clone(),
-        Fill::None | Fill::Image { .. } => return None,
-    };
-    let fill = match parsed_fill {
-        Fill::Gradient { .. } | Fill::Pattern { .. } => Some(parsed_fill),
-        Fill::Solid { .. } => None,
-        Fill::None | Fill::Image { .. } => unreachable!(),
-    };
-    let dash_style = child(ln_node, "prstDash")
-        .and_then(|n| attr(&n, "val"))
-        .filter(|v| v != "solid");
-    let line_cap = attr(&ln_node, "cap").and_then(|cap| match cap.as_str() {
-        "rnd" => Some("round".to_owned()),
-        "sq" => Some("square".to_owned()),
-        "flat" => Some("butt".to_owned()),
-        _ => None,
-    });
-    // Arrow ends — only emit when type != "none"
-    let head_end = child(ln_node, "headEnd")
-        .map(parse_arrow_end)
-        .filter(|a| a.kind != "none");
-    let tail_end = child(ln_node, "tailEnd")
-        .map(parse_arrow_end)
-        .filter(|a| a.kind != "none");
-    // ECMA-376 §20.1.8.42 ST_CompoundLine. Default "sng" stays absent so the
-    // renderer keeps its single-stroke fast path.
-    let cmpd = attr(&ln_node, "cmpd").filter(|v| v != "sng");
-    Some(Stroke {
-        color,
-        width,
-        fill,
-        dash_style,
-        line_cap,
-        head_end,
-        tail_end,
-        cmpd,
-    })
+    let properties = ooxml_common::line::parse_line_properties(
+        ln_node,
+        &PptxSchemeResolver { theme },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    );
+    line_properties_to_stroke(&properties, None)
 }
 
 // ===========================
@@ -750,9 +835,10 @@ pub(crate) fn parse_xfrm(xfrm: roxmltree::Node<'_, '_>) -> Transform {
 /// against the correct relationship base.
 pub(crate) fn parse_background<F: FnMut(&str) -> Option<String>>(
     c_sld: roxmltree::Node<'_, '_>,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     resolve_blip: &mut F,
 ) -> Option<Fill> {
+    let theme = theme_source.colors();
     let bg = child(c_sld, "bg")?;
     // bgPr contains an explicit fill specification
     if let Some(bg_pr) = child(bg, "bgPr") {
@@ -772,7 +858,7 @@ pub(crate) fn parse_background<F: FnMut(&str) -> Option<String>>(
     }
     // bgRef references a theme background style; its child is a color element
     if let Some(bg_ref) = child(bg, "bgRef") {
-        return parse_style_matrix_fill(bg_ref, theme, true)
+        return parse_style_matrix_fill_from_source(bg_ref, theme_source)
             .or_else(|| parse_color_node(bg_ref, theme).map(|c| Fill::Solid { color: c }));
     }
     None

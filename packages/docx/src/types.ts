@@ -842,10 +842,17 @@ export interface ShapeRun {
   fill: ShapeFill | null;
   stroke: string | null;
   strokeWidth?: number;
+  strokeFill?: ShapeStrokeFill | null;
   /** `<a:ln><a:prstDash val>` — ECMA-376 §20.1.8.48. Absent = solid. */
   strokeDash?: string | null;
+  /** `<a:ln><a:custDash>` segments as line-width multipliers. */
+  strokeCustomDash?: Array<{ dash: number; space: number }>;
   /** Normalized line cap: `butt` | `round` | `square`. */
   strokeCap?: 'butt' | 'round' | 'square' | null;
+  strokeJoin?: 'round' | 'bevel' | 'miter' | null;
+  strokeMiterLimit?: number | null;
+  strokeAlignment?: 'ctr' | 'in' | null;
+  strokeCompound?: string | null;
   /** `<a:ln><a:headEnd>` line-start decoration (ECMA-376 §20.1.8.3). */
   headEnd?: LineEnd | null;
   /** `<a:ln><a:tailEnd>` line-end decoration (ECMA-376 §20.1.8.3). */
@@ -1059,6 +1066,10 @@ export type ShapeFill =
       alpha?: number;
       duotone?: Duotone;
     };
+
+export type ShapeStrokeFill =
+  | { fillType: 'gradient'; stops: GradientStop[]; angle: number; gradType: string }
+  | { fillType: 'pattern'; fg: string; bg: string; preset: string };
 
 export interface GradientStop {
   /** 0.0–1.0 */
