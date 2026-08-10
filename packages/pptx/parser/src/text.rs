@@ -1104,9 +1104,22 @@ fn parse_bullet_marker<F: FnMut(&str) -> Option<String>>(
 
     // Character bullet
     if let Some(bu_char) = child(p_pr, "buChar") {
-        // CT_TextCharBullet@char is xsd:string (§21.1.2.4.3). Preserve the
-        // authored string, including variation selectors and combining marks.
-        let ch = attr(&bu_char, "char").unwrap_or_else(|| "\u{2022}".into()); // •
+        // CT_TextCharBullet's attribute is schema-typed as a string. Flattened
+        // SmartArt caches can nevertheless repeat one marker (for example
+        // `••`) even though PowerPoint paints it once. Collapse only that
+        // duplicate-marker form; preserve genuinely multi-character values.
+        let ch = attr(&bu_char, "char")
+            .map(|value| {
+                let mut chars = value.chars();
+                let first = chars.next();
+                match first {
+                    Some(marker) if chars.clone().count() > 0 && chars.all(|ch| ch == marker) => {
+                        marker.to_string()
+                    }
+                    _ => value,
+                }
+            })
+            .unwrap_or_else(|| "\u{2022}".into()); // •
         return Some(BuMarker::Char(ch));
     }
 

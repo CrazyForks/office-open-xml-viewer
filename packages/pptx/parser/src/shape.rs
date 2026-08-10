@@ -315,7 +315,11 @@ pub(crate) fn parse_shape(
     let ph_idx: Option<u32> = ph_node
         .as_ref()
         .and_then(|n| attr(n, "idx"))
-        .and_then(|v| v.parse().ok());
+        .and_then(|v| v.parse().ok())
+        // PowerPoint uses the unsigned maximum as an unbound-placeholder
+        // sentinel. It is not a real layout slot; treating it as an authored
+        // idx suppresses the normal type/bodyStyle fallback.
+        .filter(|idx| *idx != u32::MAX);
     // Surface the explicit ph @type / @idx (when present) on the ShapeElement
     // JSON. We keep `ph_type` defaulted to "body" for the internal lookup
     // path, but only emit the `placeholder_type` field when a real `<p:ph>`
@@ -1815,7 +1819,9 @@ pub(crate) fn parse_sp_tree_node(
                     .find(|n| n.is_element() && n.tag_name().name() == "ph")
                 {
                     let ph_type = attr(&ph, "type").unwrap_or_else(|| "body".into());
-                    let ph_idx: Option<u32> = attr(&ph, "idx").and_then(|v| v.parse().ok());
+                    let ph_idx: Option<u32> = attr(&ph, "idx")
+                        .and_then(|v| v.parse().ok())
+                        .filter(|idx| *idx != u32::MAX);
                     if let Some(bf) = lph.lookup_blip_fill(&ph_type, ph_idx) {
                         let slide_xfrm = sp_pr_node.and_then(|p| child(p, "xfrm")).map(parse_xfrm);
                         let t = slide_xfrm.or_else(|| lph.lookup(&ph_type, ph_idx).cloned());
@@ -1890,7 +1896,8 @@ pub(crate) fn parse_sp_tree_node(
                     .descendants()
                     .find(|n| n.is_element() && n.tag_name().name() == "ph")
                     .and_then(|ph| attr(&ph, "idx"))
-                    .and_then(|s| s.parse::<u32>().ok());
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .filter(|idx| *idx != u32::MAX);
                 if let Some(idx) = ph_idx {
                     if let Some(t) = lph.by_idx.get(&idx) {
                         let blip_fill = child(node, "blipFill");

@@ -1619,6 +1619,43 @@ pub(crate) fn parse_layout_placeholders(
             }
         }
     }
+
+    // A slide placeholder can be intentionally unbound to a layout slot (for
+    // example PowerPoint's idx=2^32-1 sentinel on a blank layout). In that case
+    // it still inherits the matching master txStyles / placeholder defaults by
+    // type. The loop above only materializes type entries that also occur in
+    // the layout, so fill the absent types from the master after all layout
+    // overlays have won.
+    for (ph_type, value) in master_font_sizes {
+        lph.by_type_font_size
+            .entry(ph_type.clone())
+            .or_insert(*value);
+    }
+    for (ph_type, value) in master_font_families {
+        lph.by_type_font_family
+            .entry(ph_type.clone())
+            .or_insert_with(|| value.clone());
+    }
+    for (ph_type, value) in master_level_font_sizes {
+        lph.by_type_level_sizes
+            .entry(ph_type.clone())
+            .or_insert(*value);
+    }
+    for (ph_type, value) in master_level_indents {
+        lph.by_type_level_indents
+            .entry(ph_type.clone())
+            .or_insert(*value);
+    }
+    for (ph_type, value) in master_level_bullets {
+        lph.by_type_level_bullets
+            .entry(ph_type.clone())
+            .or_insert_with(|| value.clone());
+    }
+    for (ph_type, value) in master_anchors {
+        lph.by_type_anchor
+            .entry(ph_type.clone())
+            .or_insert_with(|| value.clone());
+    }
     lph
 }
 
@@ -1970,6 +2007,7 @@ pub(crate) fn build_master_bundle(
 mod placeholder_geometry_tests {
     use super::*;
     use crate::shape::parse_shape;
+    use crate::text::{BuMarker, BulletProps};
     use std::io::Cursor;
 
     fn empty_zip() -> PptxZip {
@@ -2029,6 +2067,49 @@ mod placeholder_geometry_tests {
             &mut zip,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn blank_layout_keeps_master_body_bullet_fallback() {
+        let xml = r#"<p:sldLayout
+          xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree/></p:cSld>
+        </p:sldLayout>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut zip = empty_zip();
+        let mut master_bullets = HashMap::new();
+        let mut body_levels = empty_level_bullets();
+        body_levels[0] = BulletProps {
+            marker: Some(BuMarker::Char("•".into())),
+            ..Default::default()
+        };
+        master_bullets.insert("body".to_owned(), body_levels);
+
+        let placeholders = parse_layout_placeholders(
+            doc.root_element(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &master_bullets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "ppt/slideLayouts",
+            &HashMap::new(),
+            &mut zip,
+        );
+
+        match placeholders.lookup_level_bullets("body", None)[0].resolve() {
+            Bullet::Char { ch, .. } => assert_eq!(ch, "•"),
+            other => panic!("expected master body bullet, got {other:?}"),
+        }
     }
 
     #[test]
