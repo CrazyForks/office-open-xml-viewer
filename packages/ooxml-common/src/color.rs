@@ -1,12 +1,12 @@
 //! OOXML color transforms (lumMod, lumOff, satMod, satOff, hueMod, hueOff,
 //! shade, tint, alpha and friends) shared between the docx and pptx parsers.
 //!
-//! Word and PowerPoint diverge on the `tint` transform — Word reads `val` as
-//! the *retained fraction of the input color* (the literal ECMA-376
-//! §20.1.2.3.34 reading: `result = val·input + (1-val)·white`), while
-//! PowerPoint applies it as a `lerp(input, white, val)` in linear sRGB. Empirical
-//! comparison against PDF exports confirms each app does its own thing — see
-//! `TintMode` and the per-app `apply_color_transforms_with` flag.
+//! Word and PowerPoint diverge on the color space used by the `tint` transform.
+//! Both read `val` as the *retained fraction of the input color* (ECMA-376
+//! §20.1.2.3.34: `result = val·input + (1-val)·white`), but Word applies the
+//! blend to encoded sRGB channels while PowerPoint applies it in linear sRGB.
+//! Empirical comparison against PDF exports confirms the color-space split —
+//! see `TintMode` and the per-app `apply_color_transforms_with` flag.
 //!
 //! Everything else (shade, lumMod/Off, satMod/Off, hueMod/Off, alpha
 //! family) is identical between the two and lives here uncopied.
@@ -74,7 +74,7 @@ pub enum TintMode {
     /// rendering of resume / cover templates that use accent recolors with
     /// tint values.
     WordLiteral,
-    /// PowerPoint: `lerp(input, white, val)` in linear sRGB. Matches
+    /// PowerPoint: `val·input + (1-val)·white` in linear sRGB. Matches
     /// PowerPoint's rendering of SmartArt accent recolors pixel-for-pixel.
     PowerPointLinear,
 }
@@ -178,15 +178,16 @@ pub fn apply_color_transforms(hex: &str, node: Node, tint_mode: TintMode) -> Str
                         bf = val * bf + (1.0 - val);
                     }
                     TintMode::PowerPointLinear => {
-                        // PowerPoint reads val as the lerp fraction toward
-                        // white in LINEAR sRGB. Verified against PDF
-                        // exports of SmartArt accent recolors.
+                        // PowerPoint retains `val` of the input in LINEAR sRGB.
+                        // Verified against PDF exports of SmartArt accent
+                        // recolors; treating val as the amount of white reverses
+                        // the gradient stops used by common SmartArt styles.
                         let lr = srgb_to_linear(rf);
                         let lg = srgb_to_linear(gf);
                         let lb = srgb_to_linear(bf);
-                        rf = linear_to_srgb((lr + (1.0 - lr) * val).clamp(0.0, 1.0));
-                        gf = linear_to_srgb((lg + (1.0 - lg) * val).clamp(0.0, 1.0));
-                        bf = linear_to_srgb((lb + (1.0 - lb) * val).clamp(0.0, 1.0));
+                        rf = linear_to_srgb((val * lr + (1.0 - val)).clamp(0.0, 1.0));
+                        gf = linear_to_srgb((val * lg + (1.0 - val)).clamp(0.0, 1.0));
+                        bf = linear_to_srgb((val * lb + (1.0 - val)).clamp(0.0, 1.0));
                     }
                 }
             }
@@ -902,8 +903,8 @@ mod tests {
         assert_eq!(parse(&unknown, TintMode::WordLiteral), None);
     }
 
-    /// The two TintModes diverge on `<a:tint>`: Word reads val as retained input
-    /// (a near-white wash at 20%), PowerPoint lerps toward white in linear sRGB.
+    /// The two TintModes diverge on `<a:tint>`: both retain the input fraction,
+    /// but Word blends encoded channels while PowerPoint blends linear sRGB.
     /// The two must produce DIFFERENT hex for the same input, proving the mode
     /// is threaded through parse_color_node.
     #[test]
@@ -914,6 +915,8 @@ mod tests {
         let word = parse(&xml, TintMode::WordLiteral).unwrap();
         let ppt = parse(&xml, TintMode::PowerPointLinear).unwrap();
         assert_ne!(word, ppt);
+        assert_eq!(word, "DAE3F3");
+        assert_eq!(ppt, "E9EBF5");
         // Both are 6-char uppercase hex with no '#'.
         assert_eq!(word.len(), 6);
         assert!(!word.contains('#'));
