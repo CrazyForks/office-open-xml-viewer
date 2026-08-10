@@ -4541,6 +4541,8 @@ mod tests {
         assert_eq!(v["numType"], "arabicPeriod");
         // The buClr resolves to the srgbClr literal (uppercase hex, no '#').
         assert_eq!(v["color"], "C00000");
+        assert_eq!(v["sizePct"], 100.0);
+        assert_eq!(v["fontFamily"], "+mj-lt");
     }
 
     /// §21.1.2.4.10 (buClrTx) — with no explicit `<a:buClr>` the auto-number

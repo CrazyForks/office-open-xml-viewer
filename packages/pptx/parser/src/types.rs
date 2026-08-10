@@ -911,6 +911,14 @@ pub(crate) enum Bullet {
         /// (§21.1.2.4.5 — the first run's colour). Always serialized (like the
         /// `Char` variant's `color`) so the TS side sees a stable `color` key.
         color: Option<String>,
+        /// `<a:buSzPct>` as a percentage of the first run's text size.
+        size_pct: Option<f64>,
+        /// `<a:buSzPts>` as an absolute marker size in points.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        size_pts: Option<f64>,
+        /// Explicit `<a:buFont typeface>`; None means follow the first run.
+        font_family: Option<String>,
     },
     /// Picture bullet (buBlip) — ECMA-376 §21.1.2.4.2 `<a:buBlip><a:blip
     /// r:embed="rIdN"/></a:buBlip>`. The `r:embed` is resolved to the blip's
