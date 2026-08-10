@@ -2477,6 +2477,44 @@ export function splitScene3dShapeTransform(
   };
 }
 
+interface EffectTransform {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+  e: number;
+  f: number;
+}
+
+/**
+ * Axis-aligned device-pixel bounds of a shape after the current Canvas
+ * transform. DrawingML group transforms are already folded into that matrix;
+ * effect surfaces must therefore be cropped from these transformed bounds,
+ * not from the shape's group-local coordinates.
+ */
+export function transformedEffectBounds(
+  transform: EffectTransform,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): { x: number; y: number; w: number; h: number } {
+  const points = [
+    { x, y },
+    { x: x + w, y },
+    { x, y: y + h },
+    { x: x + w, y: y + h },
+  ].map((point) => ({
+    x: transform.a * point.x + transform.c * point.y + transform.e,
+    y: transform.b * point.x + transform.d * point.y + transform.f,
+  }));
+  const minX = Math.min(...points.map((point) => point.x));
+  const minY = Math.min(...points.map((point) => point.y));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const maxY = Math.max(...points.map((point) => point.y));
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
 function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }, onTextRun?: TextRunCallback, fetchImage?: FetchImage) {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
@@ -2742,7 +2780,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const liveTransform = ctx.getTransform();
   const det = Math.abs(liveTransform.a * liveTransform.d - liveTransform.b * liveTransform.c);
   const devScale = det > 0 ? Math.sqrt(det) : 1;
-  const effBBox = { x: x * devScale, y: y * devScale, w: w * devScale, h: h * devScale };
+  const effBBox = transformedEffectBounds(liveTransform, x, y, w, h);
   const effScale = scale * devScale; // EMU → device px
   // A face-on camera does not need a homography, but sp3d bevels still alter
   // the front surface. Pictures already take this flat offscreen path; shapes
