@@ -1804,6 +1804,12 @@ pub enum PathCmd {
         x: f64,
         y: f64,
     },
+    QuadBezTo {
+        x1: f64,
+        y1: f64,
+        x: f64,
+        y: f64,
+    },
     /// Elliptical arc (all angles in degrees).
     ///
     /// The enum-level `#[serde(tag = ..., rename_all = "camelCase")]` renames the

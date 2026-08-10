@@ -8990,6 +8990,22 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn custom_geometry_preserves_quadratic_bezier() {
+        let xml = r#"<custGeom><pathLst><path w="100" h="200">
+          <moveTo><pt x="0" y="0"/></moveTo>
+          <quadBezTo><pt x="50" y="200"/><pt x="100" y="0"/></quadBezTo>
+        </path></pathLst></custGeom>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let paths = parse_cust_geom(doc.root_element(), 100.0, 200.0);
+        assert!(matches!(
+            paths[0][1],
+            PathCmd::QuadBezTo { x1, y1, x, y }
+                if (x1 - 0.5).abs() < 1e-9 && (y1 - 1.0).abs() < 1e-9
+                    && (x - 1.0).abs() < 1e-9 && y.abs() < 1e-9
+        ));
+    }
+
     /// A line chart whose horizontal axis is a `<c:dateAx>` (§21.2.2.39) — the
     /// date/time-series category axis. `axis_inner` is spliced into the dateAx.
     fn date_axis_chart_xml(axis_inner: &str) -> String {

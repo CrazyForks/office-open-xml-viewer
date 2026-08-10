@@ -433,95 +433,67 @@ pub(crate) fn parse_solid_fill(
     .map(|hex| format!("#{}", hex.to_uppercase()))
 }
 
-/// Parse a single custGeom path element. Each path has its own coordinate
-/// system (`a:path/@w`, `@h`) that the renderer scales to the shape's rect.
-pub(crate) fn parse_custom_path(path_node: &roxmltree::Node) -> PathInfo {
-    let w: f64 = path_node
-        .attribute("w")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.0);
-    let h: f64 = path_node
-        .attribute("h")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.0);
-    let mut commands: Vec<PathCmd> = Vec::new();
-    for cmd in path_node.children().filter(|n| n.is_element()) {
-        let name = cmd.tag_name().name();
-        // Collect `<a:pt x=.. y=..>` points in order.
-        let pts: Vec<(f64, f64)> = cmd
-            .children()
-            .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-            .map(|n| {
-                (
-                    n.attribute("x").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-                    n.attribute("y").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-                )
-            })
-            .collect();
-        match name {
-            "moveTo" => {
-                if let Some(p) = pts.first() {
-                    commands.push(PathCmd::MoveTo { x: p.0, y: p.1 });
-                }
+/// Adapt the shared DrawingML `a:custGeom` grammar to XLSX's existing raw
+/// path-coordinate wire model.
+fn parse_custom_paths(
+    cust_geom: roxmltree::Node<'_, '_>,
+    shape_width: f64,
+    shape_height: f64,
+) -> Vec<PathInfo> {
+    use ooxml_common::custom_geometry::{parse_custom_geometry, PathCommand};
+
+    parse_custom_geometry(cust_geom, shape_width, shape_height)
+        .paths
+        .into_iter()
+        .map(|path| {
+            let commands = path
+                .commands
+                .into_iter()
+                .map(|command| match command {
+                    PathCommand::MoveTo { x, y } => PathCmd::MoveTo { x, y },
+                    PathCommand::LineTo { x, y } => PathCmd::LineTo { x, y },
+                    PathCommand::CubicBezierTo {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        x,
+                        y,
+                    } => PathCmd::CubicBezTo {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        x3: x,
+                        y3: y,
+                    },
+                    PathCommand::QuadraticBezierTo { x1, y1, x, y } => PathCmd::QuadBezTo {
+                        x1,
+                        y1,
+                        x2: x,
+                        y2: y,
+                    },
+                    PathCommand::ArcTo {
+                        wr,
+                        hr,
+                        st_ang,
+                        sw_ang,
+                    } => PathCmd::ArcTo {
+                        wr,
+                        hr,
+                        st_ang,
+                        sw_ang,
+                    },
+                    PathCommand::Close => PathCmd::Close,
+                })
+                .collect();
+            PathInfo {
+                w: path.width,
+                h: path.height,
+                commands,
             }
-            "lnTo" => {
-                if let Some(p) = pts.first() {
-                    commands.push(PathCmd::LineTo { x: p.0, y: p.1 });
-                }
-            }
-            "cubicBezTo" => {
-                if pts.len() >= 3 {
-                    commands.push(PathCmd::CubicBezTo {
-                        x1: pts[0].0,
-                        y1: pts[0].1,
-                        x2: pts[1].0,
-                        y2: pts[1].1,
-                        x3: pts[2].0,
-                        y3: pts[2].1,
-                    });
-                }
-            }
-            "quadBezTo" => {
-                if pts.len() >= 2 {
-                    commands.push(PathCmd::QuadBezTo {
-                        x1: pts[0].0,
-                        y1: pts[0].1,
-                        x2: pts[1].0,
-                        y2: pts[1].1,
-                    });
-                }
-            }
-            "close" => commands.push(PathCmd::Close),
-            "arcTo" => {
-                // ECMA-376 §20.1.9.3: `wR`/`hR` in path-coord units;
-                // `stAng`/`swAng` in 60000ths of a degree.
-                let wr: f64 = cmd
-                    .attribute("wR")
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                let hr: f64 = cmd
-                    .attribute("hR")
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                let st_ang: f64 = cmd
-                    .attribute("stAng")
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                let sw_ang: f64 = cmd
-                    .attribute("swAng")
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                commands.push(PathCmd::ArcTo {
-                    wr,
-                    hr,
-                    st_ang,
-                    sw_ang,
-                });
-            }
-            _ => {}
-        }
-    }
-    PathInfo { w, h, commands }
+        })
+        .collect()
 }
 
 /// Parse `<xdr:txBody>` into a `ShapeText`. Returns `None` if the body
@@ -879,7 +851,11 @@ fn parse_preset_adj(prst_geom: &roxmltree::Node) -> Vec<Option<f64>> {
     out
 }
 
-pub(crate) fn parse_sp_geom(sp_pr: &roxmltree::Node) -> Option<ShapeGeom> {
+pub(crate) fn parse_sp_geom(
+    sp_pr: &roxmltree::Node,
+    shape_width: f64,
+    shape_height: f64,
+) -> Option<ShapeGeom> {
     for c in sp_pr.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
             "prstGeom" => {
@@ -889,18 +865,7 @@ pub(crate) fn parse_sp_geom(sp_pr: &roxmltree::Node) -> Option<ShapeGeom> {
                 });
             }
             "custGeom" => {
-                let mut paths: Vec<PathInfo> = Vec::new();
-                for pl in c
-                    .children()
-                    .filter(|n| n.is_element() && n.tag_name().name() == "pathLst")
-                {
-                    for p in pl
-                        .children()
-                        .filter(|n| n.is_element() && n.tag_name().name() == "path")
-                    {
-                        paths.push(parse_custom_path(&p));
-                    }
-                }
+                let paths = parse_custom_paths(c, shape_width, shape_height);
                 return Some(ShapeGeom::Custom { paths });
             }
             _ => {}
@@ -1041,7 +1006,7 @@ pub(crate) fn collect_shapes(
             let nw = root_w / root_ext_x;
             let nh = root_h / root_ext_y;
 
-            let geom = parse_sp_geom(&sp_pr);
+            let geom = parse_sp_geom(&sp_pr, xfrm.ext_x, xfrm.ext_y);
             let Some(geom) = geom else {
                 continue;
             };
@@ -3025,7 +2990,7 @@ mod geom_tests {
 
     fn geom_of(sp_pr_xml: &str) -> ShapeGeom {
         let doc = roxmltree::Document::parse(sp_pr_xml).unwrap();
-        parse_sp_geom(&doc.root_element()).expect("sp_pr has geometry")
+        parse_sp_geom(&doc.root_element(), 100.0, 100.0).expect("sp_pr has geometry")
     }
 
     /// A preset with no `<a:avLst>` yields an empty adjust vector — the engine
@@ -3042,6 +3007,30 @@ mod geom_tests {
             }
             other => panic!("expected Preset, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn custom_geometry_resolves_guides_and_preserves_quadratic_bezier() {
+        let geom = geom_of(&format!(
+            r#"<a:spPr {NS}><a:custGeom>
+          <a:gdLst><a:gd name="half" fmla="*/ w 1 2"/></a:gdLst>
+          <a:pathLst><a:path>
+            <a:moveTo><a:pt x="0" y="0"/></a:moveTo>
+            <a:quadBezTo><a:pt x="half" y="b"/><a:pt x="r" y="0"/></a:quadBezTo>
+          </a:path></a:pathLst>
+        </a:custGeom></a:spPr>"#
+        ));
+        let ShapeGeom::Custom { paths } = geom else {
+            panic!("expected custom geometry")
+        };
+        assert_eq!(paths[0].w, 100.0);
+        assert_eq!(paths[0].h, 100.0);
+        assert!(matches!(
+            paths[0].commands[1],
+            PathCmd::QuadBezTo { x1, y1, x2, y2 }
+                if (x1 - 50.0).abs() < 1e-9 && (y1 - 100.0).abs() < 1e-9
+                    && (x2 - 100.0).abs() < 1e-9 && y2.abs() < 1e-9
+        ));
     }
 
     /// `<a:gd name="adj" fmla="val X"/>` is read into the first adjust slot.
@@ -3419,13 +3408,16 @@ mod custom_path_arc_tests {
         // (`if (rx <= 0 || ry <= 0) break;`) short-circuits before the angles
         // are read, so only non-degenerate arcs surface the missing keys.
         let xml = format!(
-            r#"<a:path {NS} w="100" h="100">
+            r#"<a:custGeom {NS}><a:pathLst><a:path w="100" h="100">
                  <a:moveTo><a:pt x="0" y="50"/></a:moveTo>
                  <a:arcTo wR="50" hR="50" stAng="0" swAng="5400000"/>
-               </a:path>"#
+               </a:path></a:pathLst></a:custGeom>"#
         );
         let doc = roxmltree::Document::parse(&xml).unwrap();
-        let path = parse_custom_path(&doc.root_element());
+        let path = parse_custom_paths(doc.root_element(), 100.0, 100.0)
+            .into_iter()
+            .next()
+            .expect("custom geometry contains one path");
 
         // The parser keeps angles as raw 60000ths of a degree (the xlsx
         // convention — the TS renderer divides by 60000). swAng = 5_400_000 =

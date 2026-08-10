@@ -651,6 +651,12 @@ export type PathCmd = {
     x: number;
     y: number;
 } | {
+    cmd: 'quadBezTo';
+    x1: number;
+    y1: number;
+    x: number;
+    y: number;
+} | {
     cmd: 'arcTo';
     wr: number;
     hr: number;
