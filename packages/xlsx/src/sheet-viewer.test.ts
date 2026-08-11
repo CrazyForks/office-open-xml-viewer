@@ -68,12 +68,15 @@ function pointerEvent(overrides: Record<string, unknown> = {}): Record<string, u
 }
 
 describe('XlsxSheetViewer canvas mount', () => {
-  it('adds Ctrl/Cmd-clicked cells and Ctrl-dragged ranges to the selection', () => {
+  it('routes Ctrl/Cmd areas through the canonical state, context, copy, and notification APIs', async () => {
     installDom();
     const parent = makeContainer();
     const canvas = makeEl('canvas');
     parent.appendChild(canvas);
-    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const notifications: unknown[] = [];
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      onSelectionStateChange(selection) { notifications.push(selection); },
+    });
     const engine = (viewer as unknown as { engine: {
       currentWorksheet: Worksheet;
       canvasArea: FakeEl;
@@ -116,7 +119,7 @@ describe('XlsxSheetViewer canvas mount', () => {
       clientX: 560, clientY: 340, metaKey: true,
     }));
 
-    expect(viewer.selectionState).toEqual({
+    const expectedSelection = {
       areas: [
         { kind: 'cells', top: first.row, left: first.col, bottom: first.row, right: first.col },
         {
@@ -131,7 +134,14 @@ describe('XlsxSheetViewer canvas mount', () => {
       activeAreaIndex: 2,
       activeCell: third,
       extensionAnchor: third,
-    });
+    } as const;
+    expect(viewer.selectionState).toEqual(expectedSelection);
+    expect(notifications.at(-1)).toEqual(expectedSelection);
+    const context = viewer.getSelectionContext();
+    expect(context?.kind).toBe('range');
+    if (!context || context.kind !== 'range') throw new Error('Expected range context');
+    expect(context.selection).toEqual(expectedSelection);
+    await expect(viewer.copySelection()).resolves.toEqual({ status: 'unsupported-multiple-areas' });
     viewer.destroy();
   });
 
