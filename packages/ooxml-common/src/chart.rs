@@ -379,6 +379,11 @@ pub struct ChartTextBox {
     pub paragraphs: Vec<ChartTextParagraph>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical_anchor: Option<String>,
+    /// `<a:bodyPr wrap>` (`ST_TextWrappingType`). `None` retains DrawingML's
+    /// application-default square wrapping; only the explicit `none` value
+    /// disables wrapping in the renderer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<String>,
 }
 
 /// Pattern-only chart-series fill descriptor matching TS `PatternFill`.
@@ -1126,8 +1131,12 @@ pub fn parse_chart_user_shapes(root: Node, resolver: &dyn ColorResolver) -> Vec<
 
             let shape = child(anchor, "sp")?;
             let text_body = child(shape, "txBody")?;
-            let vertical_anchor = child(text_body, "bodyPr")
+            let body_pr = child(text_body, "bodyPr");
+            let vertical_anchor = body_pr
                 .and_then(|body| body.attribute("anchor"))
+                .map(str::to_string);
+            let wrap = body_pr
+                .and_then(|body| body.attribute("wrap"))
                 .map(str::to_string);
             let paragraphs = text_body
                 .children()
@@ -1161,6 +1170,7 @@ pub fn parse_chart_user_shapes(root: Node, resolver: &dyn ColorResolver) -> Vec<
                 h: y2 - y,
                 paragraphs,
                 vertical_anchor,
+                wrap,
             })
         })
         .collect()
@@ -4739,10 +4749,15 @@ pub fn parse_chart_part_with_references(
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "spPr");
     let chart_bg = match chart_sp_pr {
-        Some(sp) => sp
-            .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
-            .and_then(|fill| color_resolver.resolve_solid_fill(fill)),
+        Some(sp) if child(sp, "noFill").is_some() => None,
+        Some(sp) => match child(sp, "solidFill") {
+            Some(fill) => color_resolver.resolve_solid_fill(fill),
+            // `CT_ShapeProperties` carries a fill *choice*. Merely authoring
+            // another property (commonly `<a:ln><a:noFill/></a:ln>`) does not
+            // mean that the chart-area fill itself is `noFill`; retain the
+            // host application's default until a fill choice overrides it.
+            None => color_resolver.default_chart_bg(),
+        },
         None => color_resolver.default_chart_bg(),
     };
 
@@ -5711,7 +5726,7 @@ mod tests {
                   <cdr:nvSpPr><cdr:cNvPr id="1" name="TitleBox"/><cdr:cNvSpPr txBox="1"/></cdr:nvSpPr>
                   <cdr:spPr/>
                   <cdr:txBody>
-                    <a:bodyPr anchor="b"/><a:lstStyle/>
+                    <a:bodyPr anchor="b" wrap="square"/><a:lstStyle/>
                     <a:p>
                       <a:pPr algn="ctr"><a:defRPr sz="1200"><a:latin typeface="Lato"/></a:defRPr></a:pPr>
                       <a:r><a:rPr sz="2000" b="1"><a:solidFill><a:srgbClr val="1696d2"/></a:solidFill></a:rPr><a:t>Authored </a:t></a:r>
@@ -5731,6 +5746,7 @@ mod tests {
         assert_eq!(boxes[0].w, 0.8);
         assert_eq!(boxes[0].h, 0.11);
         assert_eq!(boxes[0].vertical_anchor.as_deref(), Some("b"));
+        assert_eq!(boxes[0].wrap.as_deref(), Some("square"));
         assert_eq!(boxes[0].paragraphs[0].align.as_deref(), Some("ctr"));
         assert_eq!(boxes[0].paragraphs[0].runs[0].text, "Authored ");
         assert_eq!(boxes[0].paragraphs[0].runs[0].font_size_hpt, Some(2000));
@@ -6516,6 +6532,40 @@ mod tests {
 
         assert_eq!(chart.series[0].color.as_deref(), Some("ED7D31"));
         assert_eq!(chart.series[1].color.as_deref(), Some("ED7D31"));
+    }
+
+    #[test]
+    fn chart_space_shape_properties_without_a_fill_keep_the_host_default() {
+        let chart_xml = |shape_properties: &str| {
+            format!(
+                r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+                  <c:chart><c:plotArea><c:barChart>
+                    <c:barDir val="col"/><c:grouping val="clustered"/>
+                    <c:ser><c:idx val="0"/><c:order val="0"/>
+                      <c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+                      <c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>
+                    </c:ser>
+                  </c:barChart></c:plotArea></c:chart>
+                  {shape_properties}
+                </c:chartSpace>"#
+            )
+        };
+
+        // `spPr` is often present only to suppress the chart border. Since it
+        // carries no fill choice, it must not also make the chart area
+        // transparent.
+        let line_only = chart_xml("<c:spPr><a:ln><a:noFill/></a:ln></c:spPr>");
+        let doc = chart_space_of(&line_only);
+        let parsed = parse_chart_part(doc.root_element(), &WhiteChartFixtureResolver)
+            .expect("line-only chart parses");
+        assert_eq!(parsed.chart_bg.as_deref(), Some("FFFFFF"));
+
+        // An explicit fill choice remains authoritative.
+        let no_fill = chart_xml("<c:spPr><a:noFill/></c:spPr>");
+        let doc = chart_space_of(&no_fill);
+        let parsed = parse_chart_part(doc.root_element(), &WhiteChartFixtureResolver)
+            .expect("noFill chart parses");
+        assert_eq!(parsed.chart_bg, None);
     }
 
     #[test]

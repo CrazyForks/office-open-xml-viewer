@@ -3,7 +3,7 @@
 // scatter, waterfall). Ported from the xlsx implementation with pptx
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
-import type { ChartDataLabelOverride, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, SecondaryValueAxis } from '../types/chart';
+import type { ChartDataLabelOverride, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, ChartTextBox, SecondaryValueAxis } from '../types/chart';
 import type { PatternFill } from '../types/common';
 import {
   computeChartFrame,
@@ -5556,9 +5556,11 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
 /** Render text shapes from the chart's related Chart Drawing part.
  *
  * `cdr:relSizeAnchor` coordinates are fractions of the full chart space, not
- * the plot area. Paragraph and run properties are authored DrawingML values;
- * only explicit paragraph boundaries are laid out here (no sample-specific
- * word-wrapping or auto-fit inference).
+ * the plot area. Paragraph and run properties are authored DrawingML values.
+ * `a:bodyPr@wrap="square"` (and the application default when omitted) wraps
+ * text inside the authored rectangle; `wrap="none"` keeps a paragraph on one
+ * line. Auto-fit remains deliberately separate because it is a different
+ * DrawingML choice with different font-scaling semantics.
  */
 function drawChartTextBoxes(
   ctx: CanvasRenderingContext2D,
@@ -5576,13 +5578,25 @@ function drawChartTextBoxes(
     const bh = box.h * rect.h;
     if (!(bw > 0 && bh > 0)) continue;
 
-    const paragraphMetrics = box.paragraphs.map(paragraph => {
-      const runs = paragraph.runs.map(run => {
-        const fontPx = Math.max(1, ((run.fontSizeHpt ?? 1000) / 100) * ptToPx);
-        const font = `${run.bold ? 'bold ' : ''}${fontPx}px ${chartFontFamily(chart, run.fontFace, 'minor')}`;
-        ctx.font = font;
-        return { run, fontPx, font, width: ctx.measureText(run.text).width };
-      });
+    type MeasuredTextRun = {
+      run: ChartTextBox['paragraphs'][number]['runs'][number];
+      text: string;
+      fontPx: number;
+      font: string;
+      width: number;
+    };
+    type MeasuredLine = {
+      paragraph: ChartTextBox['paragraphs'][number];
+      runs: MeasuredTextRun[];
+      width: number;
+      height: number;
+      baseline: number;
+    };
+
+    const makeLine = (
+      paragraph: ChartTextBox['paragraphs'][number],
+      runs: MeasuredTextRun[],
+    ): MeasuredLine => {
       const maxFontPx = Math.max(1, ...runs.map(run => run.fontPx));
       return {
         paragraph,
@@ -5591,8 +5605,50 @@ function drawChartTextBoxes(
         height: maxFontPx * 1.2,
         baseline: maxFontPx * 0.9,
       };
+    };
+
+    const lines = box.paragraphs.flatMap(paragraph => {
+      const measuredRuns = paragraph.runs.map(run => {
+        const fontPx = Math.max(1, ((run.fontSizeHpt ?? 1000) / 100) * ptToPx);
+        const font = `${run.bold ? 'bold ' : ''}${fontPx}px ${chartFontFamily(chart, run.fontFace, 'minor')}`;
+        ctx.font = font;
+        return { run, text: run.text, fontPx, font, width: ctx.measureText(run.text).width };
+      });
+      const paragraphWidth = measuredRuns.reduce((sum, run) => sum + run.width, 0);
+      if (box.wrap === 'none' || paragraphWidth <= bw) {
+        return [makeLine(paragraph, measuredRuns)];
+      }
+
+      const wrapped: MeasuredLine[] = [];
+      let current: MeasuredTextRun[] = [];
+      let currentWidth = 0;
+      const flush = () => {
+        if (!current.length) return;
+        wrapped.push(makeLine(paragraph, current));
+        current = [];
+        currentWidth = 0;
+      };
+
+      for (const measured of measuredRuns) {
+        const tokens = measured.text.match(/\s+|\S+/g) ?? [];
+        for (const token of tokens) {
+          const whitespace = /^\s+$/.test(token);
+          ctx.font = measured.font;
+          const tokenWidth = ctx.measureText(token).width;
+          if (current.length && currentWidth + tokenWidth > bw) {
+            flush();
+          }
+          // A wrapped line does not begin with the inter-word whitespace that
+          // caused the previous line to overflow.
+          if (whitespace && !current.length) continue;
+          current.push({ ...measured, text: token, width: tokenWidth });
+          currentWidth += tokenWidth;
+        }
+      }
+      flush();
+      return wrapped.length ? wrapped : [makeLine(paragraph, measuredRuns)];
     });
-    const textHeight = paragraphMetrics.reduce((sum, paragraph) => sum + paragraph.height, 0);
+    const textHeight = lines.reduce((sum, line) => sum + line.height, 0);
     const contentY = box.verticalAnchor === 'b'
       ? by + bh - textHeight
       : box.verticalAnchor === 'ctr'
@@ -5606,7 +5662,7 @@ function drawChartTextBoxes(
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
     let lineY = contentY;
-    for (const metric of paragraphMetrics) {
+    for (const metric of lines) {
       const align = metric.paragraph.align;
       let runX = align === 'ctr'
         ? bx + (bw - metric.width) / 2
@@ -5616,7 +5672,7 @@ function drawChartTextBoxes(
       for (const measured of metric.runs) {
         ctx.font = measured.font;
         ctx.fillStyle = measured.run.color ? `#${measured.run.color}` : '#000000';
-        ctx.fillText(measured.run.text, runX, lineY + metric.baseline);
+        ctx.fillText(measured.text, runX, lineY + metric.baseline);
         runX += measured.width;
       }
       lineY += metric.height;

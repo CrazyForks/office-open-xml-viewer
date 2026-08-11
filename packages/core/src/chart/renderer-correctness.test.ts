@@ -177,6 +177,40 @@ describe('chart drawing user-shape text boxes', () => {
     expect(authored?.y).toBeGreaterThan(RECT.h * 0.05);
     expect(authored?.y).toBeLessThanOrEqual(RECT.h * 0.2);
   });
+
+  it('wraps DrawingML text inside its authored rectangle unless wrap is none', () => {
+    const wrapped = recordingCtx();
+    renderChart(wrapped.ctx, baseModel({
+      categories: ['A'],
+      series: [series({ values: [1] })],
+      chartTextBoxes: [{
+        x: 0,
+        y: 0,
+        w: 0.16,
+        h: 0.3,
+        paragraphs: [{ runs: [{ text: 'Alpha beta gamma', fontSizeHpt: 1200 }] }],
+      }],
+    }), RECT, 1);
+
+    const wrappedWords = wrapped.texts.filter(text => ['Alpha', 'beta', 'gamma'].includes(text.text));
+    expect(wrappedWords).toHaveLength(3);
+    expect(new Set(wrappedWords.map(text => text.y)).size).toBeGreaterThan(1);
+
+    const unwrapped = recordingCtx();
+    renderChart(unwrapped.ctx, baseModel({
+      categories: ['A'],
+      series: [series({ values: [1] })],
+      chartTextBoxes: [{
+        x: 0,
+        y: 0,
+        w: 0.16,
+        h: 0.3,
+        wrap: 'none',
+        paragraphs: [{ runs: [{ text: 'Alpha beta gamma', fontSizeHpt: 1200 }] }],
+      }],
+    }), RECT, 1);
+    expect(unwrapped.texts.some(text => text.text === 'Alpha beta gamma')).toBe(true);
+  });
 });
 
 describe('bar chart authored layout and fills', () => {

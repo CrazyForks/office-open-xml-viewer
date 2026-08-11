@@ -750,6 +750,8 @@ export interface ChartTextBox {
   h: number;
   paragraphs: ChartTextParagraph[];
   verticalAnchor?: 't' | 'ctr' | 'b' | 'just' | 'dist' | string | null;
+  /** DrawingML `<a:bodyPr wrap>`; absent uses the application-default square wrap. */
+  wrap?: 'none' | 'square' | string | null;
 }
 
 /**
