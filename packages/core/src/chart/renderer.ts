@@ -337,6 +337,9 @@ function drawLegendSwatch(
   x: number, y: number, w: number, h: number,
   marker: LegendMarker | null = null,
   fillPattern: PatternFill | null = null,
+  outlineColor: string | null = null,
+  outlineWidthEmu: number | null = null,
+  ptToPx = 1,
 ): void {
   // A line/scatter series with markers shows the same compound key as Excel:
   // connecting stroke first, then the marker centered on it. Markers-only
@@ -368,6 +371,19 @@ function drawLegendSwatch(
       ctx.fillStyle = resolveFill(fillPattern, ctx, x, y, w, h) ?? color;
     }
     ctx.fillRect(x, y, w, h);
+    if (outlineColor) {
+      const outlineWidth = axisLineWidthPx(outlineWidthEmu, ptToPx);
+      ctx.save();
+      ctx.strokeStyle = `#${outlineColor}`;
+      ctx.lineWidth = outlineWidth;
+      ctx.strokeRect(
+        x + outlineWidth / 2,
+        y + outlineWidth / 2,
+        Math.max(0, w - outlineWidth),
+        Math.max(0, h - outlineWidth),
+      );
+      ctx.restore();
+    }
   }
 }
 
@@ -381,6 +397,8 @@ interface LegendEntry {
   marker: LegendMarker | null;
   swatchStyle: LegendSwatchStyle;
   fillPattern: PatternFill | null;
+  outlineColor: string | null;
+  outlineWidthEmu: number | null;
 }
 
 /** Build the legend entries for a chart. Pie/doughnut legends are
@@ -406,6 +424,8 @@ function buildLegendEntries(
       marker: null, // pie/doughnut/varyColors keys are always filled swatches.
       swatchStyle: legendSwatchStyle(chartType),
       fillPattern: null,
+      outlineColor: null,
+      outlineWidthEmu: null,
     }));
   }
   return series.map((s, i) => ({
@@ -416,6 +436,8 @@ function buildLegendEntries(
     // key describes the individual series' group, not the first/primary group.
     swatchStyle: legendSwatchStyle(s.seriesType ?? chartType),
     fillPattern: s.fillPattern ?? null,
+    outlineColor: s.lineHidden === true ? null : (s.lineColor ?? null),
+    outlineWidthEmu: s.lineWidthEmu ?? null,
   }));
 }
 
@@ -447,6 +469,7 @@ function drawLegend(
   scatterStyle?: string | null,
   varyByPoint = false,
   chartCategories: string[] = [],
+  ptToPx = 1,
 ): void {
   const gap = 4;
   const entries = buildLegendEntries(series, chartType, scatterStyle, varyByPoint, chartCategories);
@@ -474,7 +497,12 @@ function drawLegend(
     const ry = ly + lh / 2;
     for (let i = 0; i < entries.length; i++) {
       const sw = swatches[i];
-      drawLegendSwatch(ctx, entries[i].swatchStyle, entries[i].color, rx, ry - fontSize / 2, sw, fontSize, entries[i].marker, entries[i].fillPattern);
+      drawLegendSwatch(
+        ctx, entries[i].swatchStyle, entries[i].color,
+        rx, ry - fontSize / 2, sw, fontSize,
+        entries[i].marker, entries[i].fillPattern,
+        entries[i].outlineColor, entries[i].outlineWidthEmu, ptToPx,
+      );
       ctx.fillStyle = style.color; ctx.textAlign = 'left';
       ctx.fillText(labels[i], rx + sw + gap, ry);
       rx += itemWidths[i] + itemGap;
@@ -492,7 +520,12 @@ function drawLegend(
   let ry = ly + (lh - rowH * entries.length) / 2;
   for (let i = 0; i < entries.length; i++) {
     const sw = swatches[i];
-    drawLegendSwatch(ctx, entries[i].swatchStyle, entries[i].color, lx, ry, sw, fontSize, entries[i].marker, entries[i].fillPattern);
+    drawLegendSwatch(
+      ctx, entries[i].swatchStyle, entries[i].color,
+      lx, ry, sw, fontSize,
+      entries[i].marker, entries[i].fillPattern,
+      entries[i].outlineColor, entries[i].outlineWidthEmu, ptToPx,
+    );
     ctx.fillStyle = style.color; ctx.textAlign = 'left';
     ctx.fillText(elideToWidth(ctx, entries[i].label, maxTextPx), lx + sw + gap, ry + fontSize / 2);
     ry += rowH;
@@ -525,6 +558,7 @@ function drawLegendForLayout(
   x: number, y: number, w: number, h: number,
   px0: number, py0: number, pw: number, ph: number,
   topBand: number,
+  ptToPx: number,
 ): void {
   if (!leg) return;
   const legStyle = legendTextStyle(chart);
@@ -546,21 +580,21 @@ function drawLegendForLayout(
     // when on left/right. A manual box wider than tall implies horizontal —
     // matches Excel's one-row legend rendering for top/bottom manual layouts.
     const orient = lw >= lh ? 'horizontal' : 'vertical';
-    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient, chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories);
+    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient, chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx);
     return;
   }
   switch (leg.side) {
     case 'r':
-      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories);
+      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx);
       break;
     case 'l':
-      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories);
+      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx);
       break;
     case 't':
-      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories);
+      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx);
       break;
     case 'b':
-      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories);
+      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx);
       break;
   }
 }
@@ -2055,7 +2089,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     }
   }
 
-  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
+  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2, ptToPx);
   drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
 }
 
@@ -2492,7 +2526,7 @@ function renderLineChart(
     );
   }
 
-  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
+  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2, ptToPx);
   drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
 }
 
@@ -2727,7 +2761,7 @@ function renderStockChart(
     }
   }
 
-  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
+  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2, ptToPx);
   drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
 }
 
@@ -3282,7 +3316,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     );
   }
 
-  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
+  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2, ptToPx);
   drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
 }
 
@@ -3439,6 +3473,7 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     drawLegendForLayout(
       ctx, { ...chart, series: legendSeries } as ChartModel, pieLeg,
       x, y, w, h, plotLeft, plotTop, pw, ph, titleH + 2,
+      ptToPx,
     );
   }
 }
@@ -4000,6 +4035,7 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
     ctx, chart, leg,
     x, y, w, h,
     plotLeft, plotTop, pw, ph, frame.title.bandH + 2,
+    ptToPx,
   );
 }
 
@@ -4562,7 +4598,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     }
   }
 
-  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleBand.bandH + 2);
+  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleBand.bandH + 2, ptToPx);
   drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
 }
 
@@ -5703,6 +5739,7 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
     pw,
     ph,
     titleBand.bandH + 2,
+    ptToPx,
   );
 }
 
@@ -6063,11 +6100,6 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     if (tile.w < 0.5 || tile.h < 0.5) return;
     const base = accents[node.branchIndex % accents.length];
     const color = node.depth === 0 ? `#${base}` : mixHexWithWhite(base, Math.min(0.42, node.depth * 0.16));
-    ctx.fillStyle = color;
-    ctx.fillRect(tile.x, tile.y, tile.w, tile.h);
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(tile.x + 0.5, tile.y + 0.5, Math.max(0, tile.w - 1), Math.max(0, tile.h - 1));
     const labelOverride = labelOverrides.find(override => override.idx === node.labelIndex);
     const nodeLabelColor = labelOverride?.fontColor ? `#${labelOverride.fontColor}` : labelColor;
     const nodeLabelFontPx = labelOverride?.fontSizeHpt
@@ -6081,12 +6113,20 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       const bannerH = parentMode === 'banner' && showParent
         ? Math.min(tile.h * 0.28, fontPx + 7)
         : 0;
-      const pad = 1;
+      // `overlapping` (MS-ODRAWXML §2.24.3.69 CT_ParentLabelLayout) places the
+      // parent caption over its descendant data points. In Excel it does not
+      // create an additional painted parent rectangle; doing so here produced
+      // a hairline frame around each branch. Banner mode alone reserves and
+      // paints a caption band.
+      if (bannerH > 0) {
+        ctx.fillStyle = color;
+        ctx.fillRect(tile.x, tile.y, tile.w, bannerH);
+      }
       const content = {
-        x: tile.x + pad,
-        y: tile.y + bannerH + pad,
-        w: Math.max(0, tile.w - pad * 2),
-        h: Math.max(0, tile.h - bannerH - pad * 2),
+        x: tile.x,
+        y: tile.y + bannerH,
+        w: tile.w,
+        h: Math.max(0, tile.h - bannerH),
       };
       for (const child of layoutTreemapTiles(node.children, content)) paint(child.node, child.rect);
 
@@ -6100,6 +6140,12 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       }
       return;
     }
+
+    ctx.fillStyle = color;
+    ctx.fillRect(tile.x, tile.y, tile.w, tile.h);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tile.x + 0.5, tile.y + 0.5, Math.max(0, tile.w - 1), Math.max(0, tile.h - 1));
 
     const fontPx = nodeLabelFontPx;
     if (tile.w <= fontPx * 1.2 || tile.h <= fontPx * 1.2) return;

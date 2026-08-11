@@ -277,7 +277,9 @@ describe('bar chart authored layout and fills', () => {
     // A headless test has no bitmap canvas, so resolveFill deliberately falls
     // back to the pattern foreground. Both the bar and key must use it.
     expect(rec.rects.filter(rect => rect.fs === 'rgba(119,119,119,1)').length).toBeGreaterThanOrEqual(2);
-    expect(rec.strokeRects.some(rect => rect.ss === '#595959' && rect.lw === 1)).toBe(true);
+    // The authored series outline applies to both the plotted bars and their
+    // matching legend key. Excel's patterned key is not borderless.
+    expect(rec.strokeRects.filter(rect => rect.ss === '#595959' && rect.lw === 1)).toHaveLength(2);
   });
 
   it('renders scatter-series markers and labels over a reversed horizontal category axis', () => {
@@ -3992,6 +3994,19 @@ describe('CH15 — chartEx treemap', () => {
     const fills = rec.rects.map(r => r.fs.toUpperCase());
     expect(fills).toContain('#5B9BD5');
     expect(fills).toContain('#ED7D31');
+  });
+
+  it('does not paint padded parent frames for overlapping parent labels', () => {
+    const rec = recordingCtx();
+    const model = treemapModel();
+    model.chartexTreemap!.parentLabelLayout = 'overlapping';
+    renderChart(rec.ctx, model, RECT, 1);
+
+    // `overlapping` places the parent caption over its descendant tiles. The
+    // parent is not an additional painted tile or frame: only the three leaf
+    // rectangles are visible and separated by their own borders.
+    expect(rec.rects).toHaveLength(3);
+    expect(rec.strokeRects).toHaveLength(3);
   });
 
   it('honors ChartEx label visibility, separator, and inEnd placement', () => {
