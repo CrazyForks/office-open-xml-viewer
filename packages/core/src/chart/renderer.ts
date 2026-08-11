@@ -1193,8 +1193,9 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const stacked = chart.chartType.startsWith('stacked');
   const pct = chart.chartType === 'stackedBarPct' || chart.chartType === 'stackedBarHPct';
 
-  const barSeries  = chart.series.filter(s => s.seriesType !== 'line');
+  const barSeries  = chart.series.filter(s => s.seriesType !== 'line' && s.seriesType !== 'scatter');
   const lineSeries = chart.series.filter(s => s.seriesType === 'line');
+  const scatterSeries = chart.series.filter(s => s.seriesType === 'scatter');
 
   // Combo charts (bar + line) may bind the line series to a SECONDARY value
   // axis drawn on the right (ECMA-376 §21.2.2.* — a second `<c:valAx>` with
@@ -1625,6 +1626,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // Solving for barW gives the formula below. Stacked charts render one bar
   // per category so we treat them as N=1 and overlap=0.
   const catGap = !isH ? pw / n : ph / n;
+  const catRev = catAxisReversed(chart);
+  const categorySlotIndex = (ci: number): number => isH
+    ? (catRev ? ci : n - 1 - ci)
+    : (catRev ? n - 1 - ci : ci);
   const nSeriesEffective = stacked ? 1 : Math.max(1, barSeries.length);
   const overlapPct  = stacked ? 0 : (chart.barOverlap ?? 0);
   const gapWidthPct = chart.barGapWidth ?? 150;
@@ -1660,8 +1665,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
 
       if (!isH) {
         const bx = stacked
-          ? px0 + ci * catGap + catStart
-          : px0 + ci * catGap + catStart + si * clusterGap;
+          ? px0 + categorySlotIndex(ci) * catGap + catStart
+          : px0 + categorySlotIndex(ci) * catGap + catStart + si * clusterGap;
         // Column: the bar spans between the zero line and the value. Stacked
         // bars start at the running offset for their sign; clustered bars start
         // at the zero line.
@@ -1726,8 +1731,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         // ends up at the bottom; stacked horizontal bars use a single anchor.
         const siVisual = stacked ? si : (barSeries.length - 1 - si);
         const by = stacked
-          ? py0 + (n - 1 - ci) * catGap + catStart
-          : py0 + (n - 1 - ci) * catGap + catStart + siVisual * clusterGap;
+          ? py0 + categorySlotIndex(ci) * catGap + catStart
+          : py0 + categorySlotIndex(ci) * catGap + catStart + siVisual * clusterGap;
         const x0 = stacked ? valX(negative ? negOffset : posOffset) : zeroX;
         const x1 = stacked ? valX((negative ? negOffset : posOffset) + sv) : valX(sv);
         const bx = Math.min(x0, x1);
@@ -1799,14 +1804,14 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       // (e.g. dateAx serials → real dates). No-op for string categories.
       const raw = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
       if (!isH) {
-        const lx = px0 + ci * catGap + catGap / 2;
+        const lx = px0 + categorySlotIndex(ci) * catGap + catGap / 2;
         ctx.textAlign = 'center'; ctx.textBaseline = 'top';
         // Rotation elides against a longer diagonal budget; unrotated keeps the
         // slot width and the byte-stable `fillText(text, x, y)` path.
         const budget = rotRad === 0 ? catSlotMaxPx : ph * 0.4;
         drawRotatedCatLabel(ctx, elideToWidth(ctx, raw, budget), lx, py0 + ph + 3, rotRad);
       } else {
-        const ly = py0 + (n - 1 - ci) * catGap + catGap / 2;
+        const ly = py0 + categorySlotIndex(ci) * catGap + catGap / 2;
         ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
         ctx.fillText(elideToWidth(ctx, raw, horizLabelMaxPx), px0 - 4, ly);
       }
@@ -1826,7 +1831,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       for (let ci = 0; ci < n; ci++) {
         const v = s.values[ci];
         if (v == null) { started = false; continue; }
-        const lx = px0 + ci * catGap + catGap / 2;
+        const lx = px0 + categorySlotIndex(ci) * catGap + catGap / 2;
         const ly = yOf(v);
         if (!started) { ctx.moveTo(lx, ly); started = true; } else ctx.lineTo(lx, ly);
       }
@@ -1835,14 +1840,63 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         for (let ci = 0; ci < n; ci++) {
           const v = s.values[ci];
           if (v == null) continue;
-          const lx = px0 + ci * catGap + catGap / 2;
+          const lx = px0 + categorySlotIndex(ci) * catGap + catGap / 2;
           const ly = yOf(v);
           ctx.fillStyle = color;
           ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill();
         }
       }
       // Trendlines (`<c:trendline>`, §21.2.2.211) for the combo line series.
-      drawSeriesTrendlines(ctx, s, color, (i) => px0 + i * catGap + catGap / 2, yOf, ptToPx);
+      drawSeriesTrendlines(ctx, s, color, (i) => px0 + categorySlotIndex(i) * catGap + catGap / 2, yOf, ptToPx);
+    }
+  }
+
+  // A scatter group can be overlaid on a bar chart with its own pair of
+  // numeric axes (ECMA-376 CT_ScatterChart `axId`, first X then Y). This is the
+  // standard construction for dot/range plots: an invisible horizontal bar
+  // series supplies category labels and the visible scatter markers plus
+  // custom X error bars supply the dots and connecting ranges.
+  if (scatterSeries.length > 0) {
+    const allX: number[] = [];
+    const allY: number[] = [];
+    for (const s of scatterSeries) {
+      const sx = s.categories ?? [];
+      for (let i = 0; i < s.values.length; i++) {
+        const xv = scatterXValue(sx, i, false);
+        const yv = s.values[i];
+        if (xv == null || yv == null) continue;
+        allX.push(xv);
+        allY.push(yv);
+      }
+    }
+    if (allX.length && allY.length) {
+      const xAxis = chart.secondaryCatAxis;
+      const yAxis = chart.secondaryValAxis;
+      const xScale = valueAxisScale(
+        Math.min(...allX), Math.max(...allX),
+        xAxis?.min, xAxis?.max, pw / ptToPx, xAxis?.majorUnit,
+      );
+      const yScale = valueAxisScale(
+        Math.min(...allY), Math.max(...allY),
+        yAxis?.min, yAxis?.max, ph / ptToPx, yAxis?.majorUnit,
+      );
+      const scatterToX = (value: number): number =>
+        px0 + axisFraction(value, xScale.min, xScale.max) * pw;
+      const scatterToY = (value: number): number =>
+        py0 + ph - axisFraction(value, yScale.min, yScale.max) * ph;
+      drawScatterSeriesLayer(
+        ctx,
+        chart,
+        scatterSeries.map(series => ({ series, index: chart.series.indexOf(series) })),
+        false,
+        scatterToX,
+        scatterToY,
+        pw,
+        ph,
+        ptToPx,
+        false,
+        chart.scatterStyle ?? 'marker',
+      );
     }
   }
 
@@ -3673,6 +3727,120 @@ function scatterXValue(cats: string[], index: number, useIndexX: boolean): numbe
   return Number.isNaN(value) ? null : value;
 }
 
+/** Paint scatter series into an already-computed plot rectangle. Axis/gridline
+ * layout stays with the owning chart renderer, which lets a scatter group be
+ * overlaid on a bar chart without duplicating either chart's frame. */
+function drawScatterSeriesLayer(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  entries: Array<{ series: ChartSeries; index: number }>,
+  useIndexX: boolean,
+  toX: (value: number) => number,
+  toY: (value: number) => number,
+  pw: number,
+  ph: number,
+  ptToPx: number,
+  isBubble: boolean,
+  style: string,
+): void {
+  const drawLines = style === 'line' || style === 'lineMarker' || style === 'lineNoMarker';
+  const drawSmooth = style === 'smooth' || style === 'smoothMarker' || style === 'smoothNoMarker';
+  const hideMarkersByStyle = style === 'lineNoMarker' || style === 'smoothNoMarker';
+
+  for (const { series: s, index: si } of entries) {
+    const fallbackColor = chartColor(si, s);
+    const cats = s.categories ?? chart.categories;
+
+    for (const eb of s.errBars ?? []) {
+      drawSeriesErrorBars(ctx, s, eb, cats, useIndexX, toX, toY, fallbackColor);
+    }
+
+    if ((drawLines || drawSmooth) && s.lineHidden !== true) {
+      const pts: Array<{ x: number; y: number }> = [];
+      for (let ci = 0; ci < s.values.length; ci++) {
+        const yv = s.values[ci];
+        if (yv == null) continue;
+        const xv = scatterXValue(cats, ci, useIndexX);
+        if (xv == null) continue;
+        pts.push({ x: toX(xv), y: toY(yv) });
+      }
+      if (pts.length >= 2) {
+        ctx.save();
+        ctx.strokeStyle = s.color ? `#${s.color}` : fallbackColor;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        if (drawSmooth && pts.length >= 3) {
+          for (let i = 0; i < pts.length - 1; i++) {
+            const p0 = pts[i - 1] ?? pts[i];
+            const p1 = pts[i];
+            const p2 = pts[i + 1];
+            const p3 = pts[i + 2] ?? p2;
+            ctx.bezierCurveTo(
+              p1.x + (p2.x - p0.x) / 6,
+              p1.y + (p2.y - p0.y) / 6,
+              p2.x - (p3.x - p1.x) / 6,
+              p2.y - (p3.y - p1.y) / 6,
+              p2.x,
+              p2.y,
+            );
+          }
+        } else {
+          for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    const hideMarkers = hideMarkersByStyle
+      || s.showMarker === false
+      || (typeof s.markerSymbol === 'string' && s.markerSymbol === 'none');
+    if (!hideMarkers) {
+      let bubbleScale = 0;
+      if (isBubble && s.bubbleSizes?.length) {
+        const maxSize = Math.max(0, ...s.bubbleSizes.filter((value): value is number => value != null));
+        if (maxSize > 0) {
+          const maxRadiusPx = Math.min(pw, ph) / Math.max(8, s.values.length * 1.6);
+          bubbleScale = maxRadiusPx / Math.sqrt(maxSize);
+        }
+      }
+      for (let ci = 0; ci < s.values.length; ci++) {
+        const yv = s.values[ci];
+        if (yv == null) continue;
+        const xv = scatterXValue(cats, ci, useIndexX);
+        if (xv == null) continue;
+        const dpt = (s.dataPointOverrides ?? []).find(point => point.idx === ci);
+        const symbol = dpt?.markerSymbol ?? s.markerSymbol ?? 'circle';
+        let sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
+        if (isBubble && bubbleScale > 0) {
+          const bubbleSize = s.bubbleSizes?.[ci];
+          if (bubbleSize != null && bubbleSize > 0) {
+            sizePt = (Math.sqrt(bubbleSize) * bubbleScale * 2) / ptToPx;
+          }
+        }
+        const fill = dpt?.markerFill ?? dpt?.color ?? s.markerFill ?? fallbackColor;
+        const line = dpt?.markerLine ?? s.markerLine ?? null;
+        drawMarker(ctx, toX(xv), toY(yv), symbol, sizePt, fill, line, ptToPx);
+      }
+    }
+
+    drawSeriesDataLabels(
+      ctx,
+      s,
+      cats,
+      useIndexX,
+      toX,
+      toY,
+      ph,
+      ptToPx,
+      chart.date1904,
+      chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
+      chart.dataLabelPosition ?? 'r',
+    );
+  }
+}
+
 function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
   const { x, y, w, h } = r;
   // Shared frame bands. Title + bottom axis-label bands follow PowerPoint's
@@ -4249,7 +4417,13 @@ function drawSeriesDataLabels(
       text = ovr.text;
     } else if (showVal || showSerName || showCatName) {
       const parts: string[] = [];
-      if (showCatName && !useIndexX) parts.push(cats[i] ?? '');
+      if (showCatName && !useIndexX) {
+        parts.push(formatChartValWithCode(
+          xv,
+          s.catFormatCodes?.[i] ?? s.catFormatCode ?? null,
+          date1904,
+        ));
+      }
       if (showSerName) parts.push(s.name);
       if (showVal) {
         parts.push(formatChartValWithCode(yv, seriesDef?.formatCode ?? null, date1904));

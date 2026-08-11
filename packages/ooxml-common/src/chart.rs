@@ -167,6 +167,12 @@ pub struct ChartModel {
     pub radar_style: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary_val_axis: Option<SecondaryValueAxis>,
+    /// Numeric horizontal axis referenced by a scatter/bubble group overlaid
+    /// on a non-scatter primary chart. OOXML represents both scatter axes as
+    /// `<c:valAx>`; this keeps the second horizontal axis distinct from the
+    /// primary bar/column value axis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_cat_axis: Option<SecondaryValueAxis>,
     // ── Pie / doughnut geometry (CH8) ───────────────────────────────────────
     /// `<c:doughnutChart><c:holeSize val>` (§21.2.2.82, `ST_HoleSizePercent`
     /// §21.2.3.55) — hole diameter as 1–90% of the outer diameter. `None` when
@@ -425,6 +431,14 @@ pub struct ChartSeries {
     pub show_marker: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_format_code: Option<String>,
+    /// Number format of the series category/X source (`<c:cat|xVal>` cache).
+    /// Scatter data labels with `showCatName` use this for the displayed X
+    /// value (for example `0.15` authored as `15%`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_format_code: Option<String>,
+    /// Per-point category/X number formats from `<c:pt@formatCode>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_format_codes: Option<Vec<Option<String>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker_symbol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1230,11 +1244,17 @@ pub fn extract_bar_gap_overlap(root: Node) -> (Option<i32>, Option<i32>) {
     (gap, ov)
 }
 
-/// First `<c:dLbls><c:dLblPos val>` found anywhere in the chart (chart-level
-/// or per-series). ECMA-376 §21.2.2.49.
+/// First chart-group-level `<c:dLbls><c:dLblPos val>` in the chart.
+/// Series-level positions are retained on `ChartSeriesDataLabels` and must not
+/// leak into sibling series as a chart-wide fallback. ECMA-376 §21.2.2.49.
 pub fn extract_data_label_position(root: Node) -> Option<String> {
     root.descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
+        .filter(|n| {
+            n.parent()
+                .map(|parent| parent.tag_name().name() != "ser")
+                .unwrap_or(true)
+        })
         .find_map(|dlbls| {
             child(dlbls, "dLblPos")
                 .and_then(|n| n.attribute("val"))
@@ -2552,6 +2572,8 @@ pub fn parse_chartex_part_with_references(
         categories: None,
         bubble_sizes: None,
         val_format_code: None,
+        cat_format_code: None,
+        cat_format_codes: None,
         label_color: None,
         series_type: None,
         use_secondary_axis: None,
@@ -2798,6 +2820,7 @@ pub fn parse_chartex_part_with_references(
         chart_border_color,
         chart_border_width_emu,
         secondary_val_axis: None,
+        secondary_cat_axis: None,
         // chartEx charts (waterfall/treemap/etc.) are not pie/doughnut and
         // don't carry `<c:txPr>` axis/legend faces; only the theme fallback
         // fonts are threaded so their data labels can pick up the body font.
@@ -4254,14 +4277,44 @@ pub fn parse_chart_part_with_references(
             .or_else(|| val_ax_nodes.first())
             .copied()
     };
-    let secondary_val_ax = if !is_scatter_axes && val_ax_nodes.len() >= 2 {
-        val_ax_nodes
-            .iter()
-            .find(|n| ax_pos(n).as_deref() == Some("r"))
-            .copied()
+    // A scatter/bubble group overlaid on a bar/line/area chart references two
+    // additional numeric axes. The group's first `axId` is its horizontal X
+    // axis and the second is its vertical Y axis (CT_ScatterChart sequence).
+    // Resolve by ID instead of by `axPos`: both the primary bar value axis and
+    // the scatter X axis commonly sit at `b`, so position alone is ambiguous.
+    let combo_scatter_axis_ids = if !is_scatter_axes {
+        find_chart("scatterChart")
+            .or_else(|| find_chart("bubbleChart"))
+            .map(|group| {
+                group
+                    .children()
+                    .filter(|node| node.is_element() && node.tag_name().name() == "axId")
+                    .filter_map(|node| attr(&node, "val"))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     } else {
-        None
+        Vec::new()
     };
+    let axis_by_id = |id: Option<&String>| {
+        id.and_then(|wanted| {
+            val_ax_nodes
+                .iter()
+                .find(|node| ax_id_of(node).as_ref() == Some(wanted))
+                .copied()
+        })
+    };
+    let secondary_cat_ax = axis_by_id(combo_scatter_axis_ids.first());
+    let secondary_val_ax = axis_by_id(combo_scatter_axis_ids.get(1)).or_else(|| {
+        if !is_scatter_axes && val_ax_nodes.len() >= 2 {
+            val_ax_nodes
+                .iter()
+                .find(|n| ax_pos(n).as_deref() == Some("r"))
+                .copied()
+        } else {
+            None
+        }
+    });
     let secondary_ax_id = secondary_val_ax.as_ref().and_then(ax_id_of);
     let (val_min, val_max) = val_ax.map(extract_axis_min_max).unwrap_or((None, None));
     let val_axis_hidden = val_ax.map(axis_is_deleted).unwrap_or(false);
@@ -4305,8 +4358,6 @@ pub fn parse_chart_part_with_references(
     let categories: Vec<String> =
         collect_string_source(ser_nodes[0], category_tag, references).unwrap_or_default();
 
-    let is_scatter_like = chart_type == "scatter" || chart_type == "bubble";
-
     // Map a chart-group element name to the per-series `seriesType` string the
     // renderer dispatches on (mixed bar+line charts key line vs. non-line off
     // this field). Mirrors the xlsx `type_map`; `bubbleChart` folds to
@@ -4349,6 +4400,12 @@ pub fn parse_chart_part_with_references(
             let series_type = group
                 .map(|p| p.tag_name().name())
                 .and_then(group_series_type);
+            let series_is_scatter_like = matches!(series_type.as_deref(), Some("scatter"));
+            let own_category_tag = if series_is_scatter_like {
+                "xVal"
+            } else {
+                "cat"
+            };
             let use_secondary_axis = match (group, secondary_ax_id.as_deref()) {
                 (Some(g), Some(sec)) => g
                     .children()
@@ -4388,22 +4445,23 @@ pub fn parse_chart_part_with_references(
             // back to `ChartModel.categories` (the shared TS contract). Authored
             // caches/literals and genuinely distinct formulas remain per-series.
             let series_categories: Option<Vec<String>> = {
-                let own_formula = external_reference_formula(*ser, category_tag);
-                let shares_chart_categories = series_position == 0
-                    || (own_formula.is_some()
-                        && own_formula.as_deref() == shared_category_formula.as_deref());
+                let own_formula = external_reference_formula(*ser, own_category_tag);
+                let shares_chart_categories = own_category_tag == category_tag
+                    && (series_position == 0
+                        || (own_formula.is_some()
+                            && own_formula.as_deref() == shared_category_formula.as_deref()));
                 if shares_chart_categories {
                     None
                 } else {
-                    let has_own_source = ser
-                        .children()
-                        .any(|node| node.is_element() && node.tag_name().name() == category_tag);
-                    match collect_string_source(*ser, category_tag, references) {
-                        Some(own) if is_scatter_like || !own.is_empty() => Some(own),
+                    let has_own_source = ser.children().any(|node| {
+                        node.is_element() && node.tag_name().name() == own_category_tag
+                    });
+                    match collect_string_source(*ser, own_category_tag, references) {
+                        Some(own) if series_is_scatter_like || !own.is_empty() => Some(own),
                         // A distinct scatter/bubble X source that cannot be
                         // resolved must not inherit the first series' X values.
                         // `Some([])` explicitly suppresses that fallback.
-                        None if is_scatter_like && has_own_source => Some(Vec::new()),
+                        None if series_is_scatter_like && has_own_source => Some(Vec::new()),
                         _ => None,
                     }
                 }
@@ -4415,7 +4473,11 @@ pub fn parse_chart_part_with_references(
             // rides on the category count, so a value series with more points
             // than there are cat labels (cat-less line, sparse radar) keeps all
             // of its data.
-            let val_tag = if is_scatter_like { "yVal" } else { "val" };
+            let val_tag = if series_is_scatter_like {
+                "yVal"
+            } else {
+                "val"
+            };
             let values: Vec<Option<f64>> =
                 collect_number_source(*ser, val_tag, references).unwrap_or_default();
             let series_pt_count = values.len().max(1);
@@ -4433,7 +4495,10 @@ pub fn parse_chart_part_with_references(
 
             // Bubble per-point sizes (ECMA-376 §21.2.2.4 `<c:bubbleSize>`).
             // Only meaningful for bubble charts; scatter / others ignore.
-            let bubble_sizes: Option<Vec<Option<f64>>> = if chart_type == "bubble" {
+            let bubble_sizes: Option<Vec<Option<f64>>> = if group
+                .map(|node| node.tag_name().name() == "bubbleChart")
+                .unwrap_or(false)
+            {
                 collect_number_source(*ser, "bubbleSize", references).map(|mut sizes| {
                     sizes.resize(sizes.len().max(series_pt_count), None);
                     sizes
@@ -4580,6 +4645,57 @@ pub fn parse_chart_part_with_references(
                         .and_then(|fc| fc.text().map(|t| t.to_string()))
                 })
                 .filter(|s| !s.is_empty() && s != "General");
+            let cat_format_code = ser
+                .children()
+                .find(|node| node.is_element() && node.tag_name().name() == own_category_tag)
+                .and_then(|source| {
+                    source.descendants().find(|node| {
+                        node.is_element() && matches!(node.tag_name().name(), "numCache" | "numLit")
+                    })
+                })
+                .and_then(|cache| child(cache, "formatCode"))
+                .and_then(|format| format.text().map(str::to_string))
+                .filter(|format| !format.is_empty() && format != "General");
+            let cat_format_codes = ser
+                .children()
+                .find(|node| node.is_element() && node.tag_name().name() == own_category_tag)
+                .and_then(|source| {
+                    source.descendants().find(|node| {
+                        node.is_element() && matches!(node.tag_name().name(), "numCache" | "numLit")
+                    })
+                })
+                .and_then(|cache| {
+                    let point_count = child(cache, "ptCount")
+                        .and_then(|count| attr(&count, "val"))
+                        .and_then(|count| count.parse::<usize>().ok())
+                        .unwrap_or_else(|| {
+                            cache
+                                .children()
+                                .filter(|node| node.is_element() && node.tag_name().name() == "pt")
+                                .filter_map(|point| attr(&point, "idx"))
+                                .filter_map(|idx| idx.parse::<usize>().ok())
+                                .max()
+                                .map(|idx| idx + 1)
+                                .unwrap_or(0)
+                        });
+                    let mut formats = vec![None; point_count];
+                    for point in cache
+                        .children()
+                        .filter(|node| node.is_element() && node.tag_name().name() == "pt")
+                    {
+                        let Some(idx) =
+                            attr(&point, "idx").and_then(|idx| idx.parse::<usize>().ok())
+                        else {
+                            continue;
+                        };
+                        if idx >= formats.len() {
+                            formats.resize(idx + 1, None);
+                        }
+                        formats[idx] = attr(&point, "formatCode")
+                            .filter(|format| !format.is_empty() && format != "General");
+                    }
+                    formats.iter().any(Option::is_some).then_some(formats)
+                });
 
             // Series-level data-label text colour from `<c:dLbls><c:txPr>…solidFill`.
             // Scoped to this `<c:ser>` (not chart-root) so stacked-bar segments keep
@@ -4610,7 +4726,7 @@ pub fn parse_chart_part_with_references(
             let marker_node = child(*ser, "marker");
             let (marker_symbol, marker_size, marker_fill, marker_line) =
                 parse_marker_block(marker_node, color_resolver);
-            let show_marker = match (&marker_symbol, is_scatter_like) {
+            let show_marker = match (&marker_symbol, series_is_scatter_like) {
                 (Some(sym), _) => sym != "none",
                 (None, true) => true,
                 _ => chart_marker_default,
@@ -4642,6 +4758,8 @@ pub fn parse_chart_part_with_references(
                 categories: series_categories,
                 bubble_sizes,
                 val_format_code,
+                cat_format_code,
+                cat_format_codes,
                 label_color,
                 series_type,
                 // Shared `ChartSeries.use_secondary_axis` is `Option<bool>`; the
@@ -4864,7 +4982,7 @@ pub fn parse_chart_part_with_references(
     // Secondary value axis (combo charts) — parse the right-hand `<c:valAx>`
     // into a self-contained spec using the same shared helpers as the primary
     // axis. None for the common single value-axis case.
-    let secondary_val_axis = secondary_val_ax.map(|ax| {
+    let parse_auxiliary_value_axis = |ax| {
         let (min, max) = extract_axis_min_max(ax);
         let (t, title_size, title_bold, title_color) =
             extract_axis_title_with_props_resolved(ax, color_resolver);
@@ -4887,7 +5005,9 @@ pub fn parse_chart_part_with_references(
             title_font_bold: title_bold,
             title_font_color: title_color,
         }
-    });
+    };
+    let secondary_val_axis = secondary_val_ax.map(&parse_auxiliary_value_axis);
+    let secondary_cat_axis = secondary_cat_ax.map(parse_auxiliary_value_axis);
 
     // `<c:plotArea><c:layout><c:manualLayout>` — explicit plot-area rectangle
     // (fractions of chart space). ECMA-376 §21.2.2.32. Sample-2 slide-16 uses
@@ -5243,6 +5363,7 @@ pub fn parse_chart_part_with_references(
         chart_border_color,
         chart_border_width_emu,
         secondary_val_axis,
+        secondary_cat_axis,
         // Pie/doughnut geometry (CH8) + chart text font faces (CH10).
         hole_size,
         first_slice_angle,
@@ -5391,6 +5512,8 @@ mod tests {
                 categories: None,
                 show_marker: None,
                 val_format_code: None,
+                cat_format_code: None,
+                cat_format_codes: None,
                 marker_symbol: None,
                 marker_size: None,
                 marker_fill: None,
@@ -5468,6 +5591,7 @@ mod tests {
             scatter_style: None,
             radar_style: None,
             secondary_val_axis: None,
+            secondary_cat_axis: None,
             hole_size: None,
             first_slice_angle: None,
             cat_axis_font_face: None,
@@ -5585,6 +5709,17 @@ mod tests {
         assert_eq!(
             extract_data_label_position(d.root_element()).as_deref(),
             Some("ctr")
+        );
+
+        let series_only = root_of(
+            r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+              <c:plotArea><c:scatterChart><c:ser><c:dLbls><c:dLblPos val="l"/></c:dLbls></c:ser></c:scatterChart></c:plotArea>
+            </c:chart>"#,
+        );
+        assert_eq!(
+            extract_data_label_position(series_only.root_element()),
+            None,
+            "a series position must not become the sibling-series fallback",
         );
     }
 
@@ -6896,6 +7031,58 @@ mod tests {
         assert_eq!(sec.major_unit, Some(0.25));
         // The primary value axis declared no majorUnit → stays None.
         assert_eq!(m.val_axis_major_unit, None);
+    }
+
+    #[test]
+    fn parse_chart_part_bar_scatter_combo_keeps_xy_sources_and_both_numeric_axes() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart><c:plotArea>
+                <c:barChart><c:barDir val="bar"/><c:grouping val="clustered"/>
+                  <c:ser><c:idx val="0"/>
+                    <c:cat><c:strLit><c:pt idx="0"><c:v>Top</c:v></c:pt><c:pt idx="1"><c:v>Bottom</c:v></c:pt></c:strLit></c:cat>
+                    <c:val><c:numLit><c:pt idx="0"><c:v>0</c:v></c:pt><c:pt idx="1"><c:v>0</c:v></c:pt></c:numLit></c:val>
+                  </c:ser><c:axId val="1"/><c:axId val="2"/>
+                </c:barChart>
+                <c:scatterChart><c:scatterStyle val="marker"/>
+                  <c:ser><c:idx val="1"/>
+                    <c:marker><c:symbol val="circle"/></c:marker>
+                    <c:xVal><c:numLit><c:formatCode>0%</c:formatCode><c:pt idx="0" formatCode="0%"><c:v>0.15</c:v></c:pt><c:pt idx="1" formatCode="0.0%"><c:v>0.83</c:v></c:pt></c:numLit></c:xVal>
+                    <c:yVal><c:numLit><c:pt idx="0"><c:v>2</c:v></c:pt><c:pt idx="1"><c:v>1</c:v></c:pt></c:numLit></c:yVal>
+                  </c:ser><c:axId val="3"/><c:axId val="4"/>
+                </c:scatterChart>
+                <c:catAx><c:axId val="1"/><c:axPos val="l"/></c:catAx>
+                <c:valAx><c:axId val="2"/><c:axPos val="b"/><c:scaling><c:max val="1.4"/></c:scaling></c:valAx>
+                <c:valAx><c:axId val="3"/><c:axPos val="b"/><c:delete val="1"/></c:valAx>
+                <c:valAx><c:axId val="4"/><c:axPos val="r"/><c:delete val="1"/><c:scaling><c:min val="0"/><c:max val="2"/></c:scaling></c:valAx>
+              </c:plotArea></c:chart>
+            </c:chartSpace>"#
+        );
+        let doc = chart_space_of(&xml);
+        let model = parse_chart_part(doc.root_element(), &FixtureResolver)
+            .expect("bar/scatter combo parses");
+
+        assert_eq!(model.chart_type, "clusteredBarH");
+        let scatter = &model.series[1];
+        assert_eq!(scatter.series_type.as_deref(), Some("scatter"));
+        assert_eq!(
+            scatter.categories.as_deref(),
+            Some(&["0.15".into(), "0.83".into()][..])
+        );
+        assert_eq!(scatter.values, vec![Some(2.0), Some(1.0)]);
+        assert_eq!(scatter.use_secondary_axis, Some(true));
+        assert_eq!(scatter.show_marker, Some(true));
+        assert_eq!(scatter.cat_format_code.as_deref(), Some("0%"));
+        assert_eq!(
+            scatter.cat_format_codes.as_deref(),
+            Some(&[Some("0%".into()), Some("0.0%".into())][..])
+        );
+        assert_eq!(
+            model.secondary_cat_axis.as_ref().and_then(|axis| axis.max),
+            None
+        );
+        let y_axis = model.secondary_val_axis.expect("scatter Y axis parsed");
+        assert_eq!((y_axis.min, y_axis.max), (Some(0.0), Some(2.0)));
     }
 
     /// (c) Doughnut chart with per-point `<c:dPt>` colors, `showPercent`, and

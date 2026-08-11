@@ -78,6 +78,10 @@ export interface ChartSeries {
    * chart-level `<c:dLbls><c:numFmt>` is not set. null = no series-level code.
    */
   valFormatCode?: string | null;
+  /** Number format from the series category/X cache. */
+  catFormatCode?: string | null;
+  /** Per-point category/X formats from `<c:pt@formatCode>`. */
+  catFormatCodes?: (string | null)[] | null;
   /**
    * `<c:marker><c:symbol val>` (ECMA-376 §21.2.2.32) — point marker shape.
    * One of "circle"|"square"|"diamond"|"triangle"|"x"|"plus"|"star"|
@@ -555,6 +559,9 @@ export interface ChartModel {
    * value axis (the common case). See {@link SecondaryValueAxis}.
    */
   secondaryValAxis?: SecondaryValueAxis | null;
+  /** Numeric horizontal `<c:valAx>` used by a scatter/bubble group overlaid
+   *  on a non-scatter primary chart. */
+  secondaryCatAxis?: SecondaryValueAxis | null;
   /**
    * `<c:date1904>` (ECMA-376 §21.2.2.38). When true the chart's serial
    * date-times resolve against the 1904 date system (base 1904-01-01) instead

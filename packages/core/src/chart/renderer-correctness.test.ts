@@ -250,6 +250,52 @@ describe('bar chart authored layout and fills', () => {
     expect(rec.rects.filter(rect => rect.fs === 'rgba(119,119,119,1)').length).toBeGreaterThanOrEqual(2);
     expect(rec.strokeRects.some(rect => rect.ss === '#595959' && rect.lw === 1)).toBe(true);
   });
+
+  it('renders scatter-series markers and labels over a reversed horizontal category axis', () => {
+    const rec = recordingCtx();
+    const hiddenAxis = {
+      min: 0,
+      max: 2,
+      title: null,
+      hidden: true,
+      lineHidden: true,
+      majorTickMark: 'none',
+    };
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBarH',
+      categories: ['Top', 'Bottom'],
+      catAxisOrientation: 'maxMin',
+      valMax: 1.4,
+      secondaryCatAxis: { ...hiddenAxis, max: 1.4 },
+      secondaryValAxis: hiddenAxis,
+      series: [
+        series({ seriesType: 'bar', values: [0, 0] }),
+        series({
+          seriesType: 'scatter',
+          categories: ['0.2', '1.2'],
+          values: [2, 1],
+          markerSymbol: 'circle',
+          showMarker: true,
+          catFormatCode: '0%',
+          seriesDataLabels: {
+            showCatName: true,
+            showSerName: false,
+            showVal: false,
+            showPercent: false,
+          },
+        }),
+      ],
+    }), RECT, 1);
+
+    const top = rec.texts.find(text => text.text === 'Top');
+    const bottom = rec.texts.find(text => text.text === 'Bottom');
+    expect(top?.y).toBeLessThan(bottom?.y ?? 0);
+    const left = rec.texts.find(text => text.text === '20%');
+    const right = rec.texts.find(text => text.text === '120%');
+    expect(left).toBeDefined();
+    expect(right).toBeDefined();
+    expect(left?.x).toBeLessThan(right?.x ?? 0);
+  });
 });
 
 describe('CH1 — negative bar/column values extend from the zero line', () => {
