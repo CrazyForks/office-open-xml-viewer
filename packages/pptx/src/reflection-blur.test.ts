@@ -29,7 +29,7 @@ describe('paintDistanceAwareReflectionBlur', () => {
       .filter(op => op.op === 'drawImage')
       .map(op => op.args?.[0] as string)
       .map(filter => filter === 'none' ? 0 : Number(/^blur\((.+)px\)$/.exec(filter)?.[1]));
-    expect(radii.length).toBeGreaterThan(4);
+    expect(radii).toHaveLength(5);
     expect(radii[0]).toBe(0);
     expect(radii.at(-1)).toBeCloseTo(2, 10);
     expect(radii.every((radius, index) => index === 0 || radius >= radii[index - 1])).toBe(true);
@@ -50,6 +50,7 @@ describe('paintDistanceAwareReflectionBlur', () => {
     // Radius increments stay uniform even though the spatial bands do not.
     const radiusSteps = radii.slice(1).map((radius, index) => radius - radii[index]);
     expect(Math.max(...radiusSteps) - Math.min(...radiusSteps)).toBeLessThan(1e-10);
+    expect(Math.max(...radiusSteps)).toBeLessThanOrEqual(0.5);
     expect(clips[0].args?.[3]).toBeGreaterThan(clips.at(-1)?.args?.[3] as number);
   });
 
