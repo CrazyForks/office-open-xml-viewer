@@ -4427,6 +4427,29 @@ function mergeBorders(base: Border, overlay: Border | undefined): Border {
   };
 }
 
+/**
+ * Endpoint offsets for the two rails of an OOXML `double` cell border.
+ *
+ * Excel only extends/trims a rail at a corner that actually has a
+ * perpendicular border to join.  A standalone bottom border, for example,
+ * keeps both rails at the full cell width; applying the boxed-cell corner
+ * treatment there makes the inner (upper) rail visibly too short.
+ */
+export function doubleBorderRailEndpoints(
+  start: number,
+  end: number,
+  startJoined: boolean,
+  endJoined: boolean,
+  off = 1,
+): { outerStart: number; outerEnd: number; innerStart: number; innerEnd: number } {
+  return {
+    outerStart: startJoined ? start - off : start,
+    outerEnd: endJoined ? end + off : end,
+    innerStart: startJoined ? start + off : start,
+    innerEnd: endJoined ? end - off : end,
+  };
+}
+
 function renderBorder(
   ctx: CanvasRenderingContext2D,
   border: Border,
@@ -4501,14 +4524,28 @@ function renderBorder(
         // it), so no inherited-redraw "swap" is needed.
         const outerY = isTop ? y - off : y + h + off;
         const innerY = isTop ? y + off : y + h - off;
-        ctx.moveTo(x - off, outerY);   ctx.lineTo(x + w + off, outerY);
-        ctx.moveTo(x + off, innerY);   ctx.lineTo(x + w - off, innerY);
+        const rails = doubleBorderRailEndpoints(
+          x,
+          x + w,
+          !!border.left?.style && border.left.style !== 'none',
+          !!border.right?.style && border.right.style !== 'none',
+          off,
+        );
+        ctx.moveTo(rails.outerStart, outerY); ctx.lineTo(rails.outerEnd, outerY);
+        ctx.moveTo(rails.innerStart, innerY); ctx.lineTo(rails.innerEnd, innerY);
       } else {
         const isLeft = x1 === x;
         const outerX = isLeft ? x - off : x + w + off;
         const innerX = isLeft ? x + off : x + w - off;
-        ctx.moveTo(outerX, y - off);   ctx.lineTo(outerX, y + h + off);
-        ctx.moveTo(innerX, y + off);   ctx.lineTo(innerX, y + h - off);
+        const rails = doubleBorderRailEndpoints(
+          y,
+          y + h,
+          !!border.top?.style && border.top.style !== 'none',
+          !!border.bottom?.style && border.bottom.style !== 'none',
+          off,
+        );
+        ctx.moveTo(outerX, rails.outerStart); ctx.lineTo(outerX, rails.outerEnd);
+        ctx.moveTo(innerX, rails.innerStart); ctx.lineTo(innerX, rails.innerEnd);
       }
       ctx.stroke();
       continue;
