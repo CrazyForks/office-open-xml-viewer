@@ -14,6 +14,8 @@ interface ReflectionBlurBand {
   radius: number;
 }
 
+const TARGET_RADIUS_STEP_PX = 0.5;
+
 /**
  * PowerPoint keeps a floor reflection sharp where it meets the source and
  * progressively increases the authored blur toward the far edge. ECMA-376
@@ -31,10 +33,14 @@ function reflectionBlurBands(
     return [{ y: bounds.y, h: Math.max(0, bounds.h), radius: 0 }];
   }
 
-  // Around eight samples per blur pixel keeps adjacent filter radii close
-  // enough to avoid visible steps. Bound the number of bitmap passes because a
-  // presentation may contain many reflected runs.
-  const count = Math.max(4, Math.min(24, Math.ceil(maxBlur * 8)));
+  // A half-device-pixel radius step is already below the visible filter change
+  // for text at normal display scales. Finer sampling only repeats full bitmap
+  // copies without improving the edge. Bound the pass count because one slide
+  // may contain many reflected runs.
+  const count = Math.max(
+    4,
+    Math.min(24, Math.ceil(maxBlur / TARGET_RADIUS_STEP_PX) + 1),
+  );
   const bottom = bounds.y + bounds.h;
   const bands: ReflectionBlurBand[] = [];
   for (let index = 0; index < count; index++) {
