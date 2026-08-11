@@ -18,7 +18,7 @@ import { renderChart } from './renderer.js';
 // thin hairline strokeStyle (the resolved gridline color, default `#e0e0e0`)
 // marks a gridline. We tag events by role and check the first gridline precedes
 // the first series fill.
-type Ev = { op: 'fill' | 'stroke'; fillStyle: string; strokeStyle: string; lineWidth: number };
+type Ev = { op: 'fill' | 'stroke' | 'text'; fillStyle: string; strokeStyle: string; lineWidth: number; text?: string };
 
 function orderedRecordingCtx(): { ctx: CanvasRenderingContext2D; events: Ev[] } {
   const events: Ev[] = [];
@@ -43,13 +43,15 @@ function orderedRecordingCtx(): { ctx: CanvasRenderingContext2D; events: Ev[] } 
           return () => events.push({ op: 'fill', fillStyle: String(state.fillStyle), strokeStyle: String(state.strokeStyle), lineWidth: Number(state.lineWidth) });
         case 'stroke':
           return () => events.push({ op: 'stroke', fillStyle: String(state.fillStyle), strokeStyle: String(state.strokeStyle), lineWidth: Number(state.lineWidth) });
+        case 'fillText':
+          return (text: string) => events.push({ op: 'text', text, fillStyle: String(state.fillStyle), strokeStyle: String(state.strokeStyle), lineWidth: Number(state.lineWidth) });
         case 'createLinearGradient':
         case 'createRadialGradient':
           return () => ({ addColorStop() {} });
         case 'save': case 'restore': case 'beginPath': case 'closePath':
         case 'moveTo': case 'lineTo': case 'arc': case 'fillRect':
         case 'bezierCurveTo': case 'quadraticCurveTo': case 'rect':
-        case 'strokeRect': case 'clearRect': case 'fillText': case 'strokeText':
+        case 'strokeRect': case 'clearRect': case 'strokeText':
         case 'setLineDash': case 'translate': case 'rotate': case 'scale':
         case 'clip': case 'setTransform': case 'resetTransform': case 'getTransform':
           return () => undefined;
@@ -262,5 +264,81 @@ describe('CH — value-axis gridlines paint under the data series', () => {
     expect(firstGridline).toBeGreaterThanOrEqual(0);
     expect(firstMarker).toBeGreaterThanOrEqual(0);
     expect(firstGridline).toBeLessThan(firstMarker);
+  });
+
+  it('paints every scatter error-range series before every marker and data label in a dot plot combo', () => {
+    const rec = orderedRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBarH',
+      categories: ['A', 'B'],
+      series: [
+        series({ name: 'category anchor', values: [0, 0] }),
+        series({
+          name: 'start',
+          seriesType: 'scatter',
+          categories: ['0.2', '0.4'],
+          values: [1, 2],
+          markerSymbol: 'circle',
+          markerFill: 'EC008C',
+          errBars: [{
+            dir: 'x', barType: 'plus', plus: [0.3, 0.3], minus: [null, null],
+            noEndCap: false, color: 'E7E6E6', lineWidthEmu: 85_725,
+          }],
+          seriesDataLabels: {
+            showVal: false, showCatName: true, showSerName: false, showPercent: false,
+            position: 'l', fontColor: 'EC008C',
+          },
+        }),
+        series({
+          name: 'end',
+          seriesType: 'scatter',
+          categories: ['0.5', '0.7'],
+          values: [1, 2],
+          markerSymbol: 'circle',
+          markerFill: '1596D2',
+        }),
+        // This final scatter series authors the full-width horizontal guides.
+        // Per-series painting used to draw these AFTER the preceding series'
+        // markers and labels, visibly crossing through both.
+        series({
+          name: 'guides',
+          seriesType: 'scatter',
+          categories: ['0', '0'],
+          values: [1, 2],
+          markerSymbol: 'none',
+          showMarker: false,
+          errBars: [{
+            dir: 'x', barType: 'plus', plus: [1, 1], minus: [null, null],
+            noEndCap: true, color: 'D9D9D9', lineWidthEmu: 9_525,
+          }],
+        }),
+      ],
+      secondaryCatAxis: {
+        min: 0, max: 1, title: null, hidden: true, lineHidden: true, majorTickMark: 'none',
+      },
+      secondaryValAxis: {
+        min: 0, max: 3, title: null, hidden: true, lineHidden: true, majorTickMark: 'none',
+      },
+    }), RECT, 1);
+
+    let lastGuide = -1;
+    for (let index = rec.events.length - 1; index >= 0; index--) {
+      const event = rec.events[index];
+      if (event.op === 'stroke' && event.strokeStyle.toLowerCase() === '#d9d9d9') {
+        lastGuide = index;
+        break;
+      }
+    }
+    const firstMarker = rec.events.findIndex(event =>
+      event.op === 'fill' && event.fillStyle.toLowerCase() === '#ec008c',
+    );
+    const firstDataLabel = rec.events.findIndex(event =>
+      event.op === 'text' && event.fillStyle.toLowerCase() === '#ec008c',
+    );
+    expect(lastGuide).toBeGreaterThanOrEqual(0);
+    expect(firstMarker).toBeGreaterThanOrEqual(0);
+    expect(firstDataLabel).toBeGreaterThanOrEqual(0);
+    expect(lastGuide).toBeLessThan(firstMarker);
+    expect(lastGuide).toBeLessThan(firstDataLabel);
   });
 });

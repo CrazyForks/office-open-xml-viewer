@@ -1344,13 +1344,14 @@ pub fn extract_radar_style(root: Node) -> Option<String> {
 
 /// Parse a `<c:layout><c:manualLayout>` node into a [`ChartManualLayout`]
 /// (ECMA-376 §21.2.2.88). `layout_node` is the `<c:layout>` element; returns
-/// `None` when it carries no `<c:manualLayout>` child. `xMode`/`yMode` default
-/// to `"edge"`; `x`/`y` default to 0; `w`/`h` stay `None` when absent.
+/// `None` when it carries no `<c:manualLayout>` child. `layoutTarget` defaults
+/// to `"outer"` per CT_LayoutTarget; `x`/`y` default to 0; `w`/`h` stay `None`
+/// when absent.
 pub fn extract_manual_layout(layout_node: Node) -> Option<ChartManualLayout> {
     let manual = child(layout_node, "manualLayout")?;
     let mut x_mode = "edge".to_string();
     let mut y_mode = "edge".to_string();
-    let mut layout_target: Option<String> = None;
+    let mut layout_target = Some("outer".to_string());
     let mut x = 0.0_f64;
     let mut y = 0.0_f64;
     let mut w: Option<f64> = None;
@@ -2669,6 +2670,14 @@ pub fn parse_chartex_part_with_references(
     let val_max = val_scaling
         .and_then(|scaling| attr(&scaling, "max"))
         .and_then(|value| value.parse::<f64>().ok());
+    // MS-ODRAWXML §2.24.3.90 CT_ValueAxisScaling stores the ChartEx major
+    // interval as an attribute on `<cx:valScaling>` (unlike the classic
+    // `<c:valAx><c:majorUnit val>` child). `auto` and an omitted attribute both
+    // remain `None`; a positive finite number is an authored override.
+    let val_axis_major_unit = val_scaling
+        .and_then(|scaling| attr(&scaling, "majorUnit"))
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0);
     let cat_axis_title = cat_axis
         .and_then(|axis| child(axis, "title"))
         .and_then(chartex_text);
@@ -2933,9 +2942,9 @@ pub fn parse_chartex_part_with_references(
         date1904: false,
         // chartEx waterfall has no line/area blanks to display.
         disp_blanks_as: None,
-        // chartEx (cx:) has its own axis model (`<cx:axis>`); the classic
-        // `<c:catAx>`/`<c:valAx>` scale properties don't apply, so leave the
-        // CH6 fields unset — the renderer keeps its defaults (byte-stable).
+        // chartEx (cx:) has its own axis model (`<cx:axis>`). Shared fields are
+        // populated only where CT_ValueAxisScaling has the same semantics as
+        // the classic value-axis contract.
         val_axis_major_gridlines,
         cat_axis_major_gridlines: None,
         val_axis_gridline_color,
@@ -2943,7 +2952,7 @@ pub fn parse_chartex_part_with_references(
         cat_axis_gridline_color: None,
         cat_axis_gridline_width_emu: None,
         val_axis_minor_gridlines: None,
-        val_axis_major_unit: None,
+        val_axis_major_unit,
         val_axis_minor_unit: None,
         val_axis_log_base: None,
         val_axis_orientation: None,
@@ -3672,22 +3681,30 @@ pub fn parse_series_data_labels(
                 None => cache_for_idx.unwrap_or("").to_string(),
             }
         };
-        let font_color = child(dl, "txPr").and_then(|tx| {
+        // A custom rich-text label carries its direct formatting on
+        // `<c:tx><c:rich><a:p><a:r><a:rPr>`. Those run properties override the
+        // label's `<c:txPr><a:defRPr>` defaults (DrawingML text-property
+        // inheritance). Preserve the first text run's effective style in the
+        // current single-style label model; falling back to txPr keeps labels
+        // without explicit rich-run formatting unchanged.
+        let rich_run_props = child(dl, "tx").and_then(|tx| {
+            tx.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "rPr")
+        });
+        let default_run_props = child(dl, "txPr").and_then(|tx| {
             tx.descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
-                .and_then(|def| resolver.resolve_shape_fill(def))
         });
-        let font_size_hpt = dl
-            .descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
-            .and_then(|def| def.attribute("sz"))
+        let font_color = rich_run_props
+            .and_then(|run| resolver.resolve_shape_fill(run))
+            .or_else(|| default_run_props.and_then(|run| resolver.resolve_shape_fill(run)));
+        let font_size_hpt = rich_run_props
+            .and_then(|run| run.attribute("sz"))
+            .or_else(|| default_run_props.and_then(|run| run.attribute("sz")))
             .and_then(|v| v.parse::<i32>().ok());
-        let font_bold = dl
-            .descendants()
-            .find(|n| {
-                n.is_element() && (n.tag_name().name() == "defRPr" || n.tag_name().name() == "rPr")
-            })
-            .and_then(|def| def.attribute("b"))
+        let font_bold = rich_run_props
+            .and_then(|run| run.attribute("b"))
+            .or_else(|| default_run_props.and_then(|run| run.attribute("b")))
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"));
         // Per-point callout box (`<c:dLbl>` §21.2.2.47 `<c:spPr>` §21.2.2.197):
         // direct child spPr overrides the series-default box for this one point.
@@ -5150,7 +5167,7 @@ pub fn parse_chart_part_with_references(
         .map(|ml| {
             let mut x_mode = "edge".to_string();
             let mut y_mode = "edge".to_string();
-            let mut layout_target: Option<String> = None;
+            let mut layout_target = Some("outer".to_string());
             let mut x = 0.0_f64;
             let mut y = 0.0_f64;
             let mut w: Option<f64> = None;
@@ -7729,6 +7746,33 @@ mod tests {
         assert_eq!(o.position.as_deref(), Some("outEnd"));
     }
 
+    #[test]
+    fn parse_series_data_labels_rich_run_style_overrides_txpr_defaults() {
+        let cache = std::collections::HashMap::new();
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:dLbls>
+                <c:dLbl>
+                  <c:idx val="13"/>
+                  <c:tx><c:rich><a:p><a:r>
+                    <a:rPr sz="1100" b="1"><a:solidFill><a:srgbClr val="EC008B"/></a:solidFill></a:rPr>
+                    <a:t>Idaho</a:t>
+                  </a:r></a:p></c:rich></c:tx>
+                  <c:txPr><a:p><a:pPr><a:defRPr sz="900"><a:solidFill><a:srgbClr val="333333"/></a:solidFill></a:defRPr></a:pPr></a:p></c:txPr>
+                </c:dLbl>
+              </c:dLbls>
+            </c:ser>"#
+        );
+        let d = root_of(&xml);
+        let (_, overrides) =
+            parse_series_data_labels(d.root_element(), &FixtureResolver, &cache);
+        let label = &overrides[0];
+        assert_eq!(label.text, "Idaho");
+        assert_eq!(label.font_color.as_deref(), Some("EC008B"));
+        assert_eq!(label.font_size_hpt, Some(1100));
+        assert_eq!(label.font_bold, Some(true));
+    }
+
     // ── CT_Boolean bare-element defaults (issue #806) ───────────────────────
     //
     // dml-chart.xsd defines `CT_Boolean` with `val` `default="true"`. Every
@@ -8081,6 +8125,17 @@ mod tests {
         assert_eq!(layout.y, 0.2);
         assert_eq!(layout.w, Some(0.5));
         assert_eq!(layout.h, Some(0.6));
+
+        let omitted_target_xml = format!(
+            r#"<c:layout xmlns:c="{C_NS}"><c:manualLayout>
+              <c:xMode val="edge"/><c:yMode val="edge"/>
+              <c:x val="0.1"/><c:y val="0.2"/><c:w val="0.5"/><c:h val="0.6"/>
+            </c:manualLayout></c:layout>"#
+        );
+        let omitted_target_doc = root_of(&omitted_target_xml);
+        let omitted_target = extract_manual_layout(omitted_target_doc.root_element())
+            .expect("manualLayout present");
+        assert_eq!(omitted_target.layout_target.as_deref(), Some("outer"));
     }
 
     #[test]
@@ -8533,7 +8588,7 @@ mod tests {
                 </cx:plotAreaRegion>
                 <cx:axis id="0" hidden="1"><cx:catScaling/></cx:axis>
                 <cx:axis id="1">
-                  <cx:valScaling min="1" max="6"/>
+                  <cx:valScaling min="1" max="6" majorUnit="0.25" minorUnit="0.05"/>
                   <cx:title><cx:tx><cx:rich><a:p><a:r>
                     <a:rPr sz="900" b="0"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="Calibri"/></a:rPr>
                     <a:t>A&amp;R readiness score</a:t>
@@ -8576,6 +8631,7 @@ mod tests {
         assert_eq!(m.chart_border_color.as_deref(), Some("000000"));
         assert_eq!(m.chart_border_width_emu, Some(9525));
         assert_eq!((m.val_min, m.val_max), (Some(1.0), Some(6.0)));
+        assert_eq!(m.val_axis_major_unit, Some(0.25));
         assert_eq!(m.val_axis_title.as_deref(), Some("A&R readiness score"));
         assert_eq!(m.val_axis_title_font_size_hpt, Some(900));
         assert_eq!(m.val_axis_title_font_bold, Some(false));

@@ -342,9 +342,9 @@ function drawLegendSwatch(
   // connecting stroke first, then the marker centered on it. Markers-only
   // scatter skips the stroke.
   if (marker && !marker.withLine) {
-    // drawMarker sizes by `sizePt * ptToPx`; the swatch slot is `w × h` px, so
-    // pass a point size that yields ~h px at ptToPx=1 and center it in the slot.
-    drawMarker(ctx, x + w / 2, y + h / 2, marker.symbol, h, marker.fill, marker.line, 1);
+    // Excel's legend marker is about 7pt beside a 12pt label; keeping it near
+    // 0.58× the row height also leaves the surrounding key visually balanced.
+    drawMarker(ctx, x + w / 2, y + h / 2, marker.symbol, h * 0.58, marker.fill, marker.line, 1);
     return;
   }
   ctx.fillStyle = color;
@@ -361,7 +361,7 @@ function drawLegendSwatch(
     ctx.stroke();
     ctx.lineWidth = prevW;
     if (marker) {
-      drawMarker(ctx, x + w / 2, y + h / 2, marker.symbol, h, marker.fill, marker.line, 1);
+      drawMarker(ctx, x + w / 2, y + h / 2, marker.symbol, h * 0.58, marker.fill, marker.line, 1);
     }
   } else {
     if (fillPattern) {
@@ -448,7 +448,7 @@ function drawLegend(
   varyByPoint = false,
   chartCategories: string[] = [],
 ): void {
-  const sw = 10; const gap = 4;
+  const gap = 4;
   const entries = buildLegendEntries(series, chartType, scatterStyle, varyByPoint, chartCategories);
   const boldPrefix = style.bold ? 'bold ' : '';
   if (orient === 'horizontal') {
@@ -457,6 +457,7 @@ function drawLegend(
     ctx.font = `${boldPrefix}${fontSize}px ${style.fontFamily}`;
     ctx.textBaseline = 'middle';
     const itemGap = 12;
+    const swatches = entries.map(entry => entry.swatchStyle === 'line' ? fontSize * 1.6 : Math.min(10, fontSize));
     // Cap each entry's text at the full legend strip (minus its own swatch+gap)
     // so only a single name that would span the *entire* strip is elided — the
     // width-based replacement for the old slice(0, 30) runaway guard. Normal
@@ -465,13 +466,14 @@ function drawLegend(
     // strip simply center-overflow rather than being clipped. Elide once and
     // reuse for both the width calc and the draw so the two never disagree.
     const nEntries = Math.max(1, entries.length);
-    const maxTextPx = lw - sw - gap;
+    const maxTextPx = lw - Math.max(...swatches, 0) - gap;
     const labels = entries.map((e) => elideToWidth(ctx, e.label, maxTextPx));
-    const itemWidths = labels.map((l) => sw + gap + ctx.measureText(l).width);
+    const itemWidths = labels.map((l, i) => swatches[i] + gap + ctx.measureText(l).width);
     const total = itemWidths.reduce((a, b) => a + b, 0) + itemGap * (nEntries - 1);
     let rx = lx + (lw - total) / 2;
     const ry = ly + lh / 2;
     for (let i = 0; i < entries.length; i++) {
+      const sw = swatches[i];
       drawLegendSwatch(ctx, entries[i].swatchStyle, entries[i].color, rx, ry - fontSize / 2, sw, fontSize, entries[i].marker, entries[i].fillPattern);
       ctx.fillStyle = style.color; ctx.textAlign = 'left';
       ctx.fillText(labels[i], rx + sw + gap, ry);
@@ -483,11 +485,13 @@ function drawLegend(
   ctx.font = `${boldPrefix}${fontSize}px ${style.fontFamily}`;
   ctx.textBaseline = 'middle';
   const rowH = fontSize + 4;
+  const swatches = entries.map(entry => entry.swatchStyle === 'line' ? fontSize * 1.6 : Math.min(10, fontSize));
   // Vertical legend: each label runs from just after the swatch to the right
   // edge of the reserved legend column, so cap it at that remaining width.
-  const maxTextPx = lw - sw - gap;
+  const maxTextPx = lw - Math.max(...swatches, 0) - gap;
   let ry = ly + (lh - rowH * entries.length) / 2;
   for (let i = 0; i < entries.length; i++) {
+    const sw = swatches[i];
     drawLegendSwatch(ctx, entries[i].swatchStyle, entries[i].color, lx, ry, sw, fontSize, entries[i].marker, entries[i].fillPattern);
     ctx.fillStyle = style.color; ctx.textAlign = 'left';
     ctx.fillText(elideToWidth(ctx, entries[i].label, maxTextPx), lx + sw + gap, ry + fontSize / 2);
@@ -1440,6 +1444,24 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     }
     valLabelBandW = wmax + 16; // ~12px tick+gap to the axis + ~4px to the title
   }
+  let horizontalCategoryLabelBandW = 0;
+  if (
+    isH
+    && !chart.catAxisHidden
+    && chart.plotAreaManualLayout != null
+    && chart.plotAreaManualLayout.layoutTarget !== 'inner'
+  ) {
+    ctx.font = `${catAxFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+    for (const category of cats) {
+      horizontalCategoryLabelBandW = Math.max(
+        horizontalCategoryLabelBandW,
+        ctx.measureText(formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904)).width,
+      );
+    }
+    horizontalCategoryLabelBandW += chart.catAxisFontSizeHpt != null
+      ? valueTickLabelGapPx(catAxFontPx)
+      : 4;
+  }
   // Secondary value-axis label band (right edge). Measure with the SAME font
   // and number format the axis is drawn with (`secFontPx` / `sec.formatCode`),
   // otherwise a `%`/thousands format or an explicit font size makes the
@@ -1472,6 +1494,24 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       : legLeftW + valTitleW + valLabelBandW,
   };
 
+  // `layoutTarget="outer"` includes tick labels and axis titles, but not the
+  // chart title or legend. Convert only those measured axis bands to the inner
+  // bar/column plot rectangle; an explicit `inner` target ignores the insets in
+  // `computeChartFrame`.
+  const manualOuterInsets = isH
+    ? {
+        t: 0,
+        r: chart.valAxisHidden ? 0 : measuredValTickFontPx / 2,
+        b: chart.valAxisHidden ? 0 : measuredValTickFontPx + catTitleH,
+        l: chart.catAxisHidden ? 0 : horizontalCategoryLabelBandW + valTitleW,
+      }
+    : {
+        t: chart.valAxisHidden ? 0 : measuredValTickFontPx / 2,
+        r: secLabelBandW + secTitleBandW,
+        b: chart.catAxisHidden ? 0 : catAxisLabelBandH(catAxFontPx) + catTitleH,
+        l: chart.valAxisHidden ? 0 : valLabelBandW + valTitleW,
+      };
+
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + titleTopPad, titleFontPx);
 
   // Plot-area placement: honor `<c:plotArea><c:layout><c:manualLayout>` when
@@ -1490,6 +1530,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     legendSideReserveFrac: 0.22,
     pad,
     honorPlotAreaManualLayout: true,
+    manualOuterInsets,
   });
   if (pw <= 0 || ph <= 0) return;
 
@@ -2085,6 +2126,27 @@ function renderLineChart(
     : null;
   const isSecondarySeries = (s: ChartSeries): boolean => sec != null && s.useSecondaryAxis === true;
 
+  // Resolve the primary extent before frame placement. An authored
+  // `layoutTarget="outer"` rectangle includes the value-axis labels, so its
+  // conversion to the inner plot rectangle needs the width of the formatted
+  // tick labels. This is the same extent used again for the final scale below.
+  let dataMin = Infinity; let dataMax = -Infinity;
+  for (let ci = 0; ci < n; ci++) {
+    for (let si = 0; si < chart.series.length; si++) {
+      if (isSecondarySeries(chart.series[si])) continue;
+      if (!stacked && chart.series[si].values[ci] == null) continue;
+      const v = plotted(si, ci);
+      dataMin = Math.min(dataMin, v); dataMax = Math.max(dataMax, v);
+    }
+  }
+  if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
+  const isLogAxis = chart.valAxisLogBase != null && chart.valAxisLogBase >= 2;
+  if (chart.valMin != null) dataMin = pct ? chart.valMin * 100 : chart.valMin;
+  else if (dataMin > 0 && !isLogAxis) dataMin = 0;
+  if (chart.valMax != null) dataMax = pct ? chart.valMax * 100 : chart.valMax;
+  else if (dataMax < 0) dataMax = 0;
+  if (dataMax === dataMin) dataMax = dataMin + 1;
+
   // Shared frame bands. Title + category-label bands follow PowerPoint's chart
   // auto-layout (font-proportional, pinned to the demo slide-5 line-chart PDF);
   // see cartesianTitleBand / catAxisLabelBandH in layout.ts. The default 0.22
@@ -2139,6 +2201,28 @@ function renderLineChart(
     ? (sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05)) + 8
     : 0;
 
+  const provisionalPlan = planValueAxis(chart, dataMin, dataMax, phEst / ptToPx, pct);
+  let primaryLabelWidth = 0;
+  if (
+    !chart.valAxisHidden
+    && chart.valAxisTickLabelPos !== 'none'
+    && chart.plotAreaManualLayout != null
+    && chart.plotAreaManualLayout.layoutTarget !== 'inner'
+  ) {
+    const previousFont = ctx.font;
+    ctx.font = `${valAxFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+    for (const value of provisionalPlan.majorLines) {
+      primaryLabelWidth = Math.max(
+        primaryLabelWidth,
+        ctx.measureText(formatPrimaryValueAxisTick(chart, value, pct)).width,
+      );
+    }
+    ctx.font = previousFont;
+  }
+  const primaryLabelGap = chart.valAxisFontSizeHpt != null
+    ? valueTickLabelGapPx(valAxFontPx)
+    : 6;
+
   // Pad based on actual label metrics rather than magic percents so an explicit
   // <c:txPr sz="1000"> (10pt) correctly compresses the plot area.
   const pad = {
@@ -2148,6 +2232,13 @@ function renderLineChart(
     l: valAxFontPx * 2.2 + 10 + valTitleW + legLeftW,
   };
 
+  const manualOuterInsets = {
+    t: chart.valAxisHidden ? 0 : valAxFontPx / 2,
+    r: secLabelBandW + secTitleBandW,
+    b: chart.catAxisHidden ? 0 : catAxisLabelBandH(catAxFontPx) + catTitleH,
+    l: chart.valAxisHidden ? 0 : primaryLabelWidth + primaryLabelGap + valTitleW,
+  };
+
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + titleTopPad, titleFontPx);
 
   const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
@@ -2155,6 +2246,7 @@ function renderLineChart(
     legendSideReserveFrac: 0.22,
     pad,
     honorPlotAreaManualLayout: true,
+    manualOuterInsets,
   });
   if (pw <= 0 || ph <= 0) return;
 
@@ -2162,31 +2254,6 @@ function renderLineChart(
     ctx.fillStyle = `#${chart.plotAreaBg}`;
     ctx.fillRect(px0, py0, pw, ph);
   }
-
-  // Primary axis extent is taken from the PLOTTED values of the PRIMARY series
-  // only (secondary series live on their own axis), so a stacked chart's top
-  // line (the cumulative sum) drives the maximum rather than the tallest single
-  // series. Every category still contributes each primary series' cumulative
-  // value. When `sec` is null every series is primary, identical to pre-CH7.
-  let dataMin = Infinity; let dataMax = -Infinity;
-  for (let ci = 0; ci < n; ci++) {
-    for (let si = 0; si < chart.series.length; si++) {
-      if (isSecondarySeries(chart.series[si])) continue;
-      if (!stacked && chart.series[si].values[ci] == null) continue;
-      const v = plotted(si, ci);
-      dataMin = Math.min(dataMin, v); dataMax = Math.max(dataMax, v);
-    }
-  }
-  if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
-  // A log axis can't anchor at 0 (log undefined) — keep the positive data
-  // minimum so `logAxisScale` can floor it to a decade. Linear axes keep the
-  // historical 0-anchor for positive data (byte-stable).
-  const isLogAxis = chart.valAxisLogBase != null && chart.valAxisLogBase >= 2;
-  if (chart.valMin != null) dataMin = pct ? chart.valMin * 100 : chart.valMin;
-  else if (dataMin > 0 && !isLogAxis) dataMin = 0;
-  if (chart.valMax != null) dataMax = pct ? chart.valMax * 100 : chart.valMax;
-  else if (dataMax < 0) dataMax = 0;
-  if (dataMax === dataMin) dataMax = dataMin + 1;
 
   // Value axis is vertical → its length is the plot height (axis-length-aware
   // auto major unit, same model as the bar/column renderer). `planValueAxis`
@@ -2386,29 +2453,32 @@ function renderLineChart(
   }
 
   if (!chart.catAxisHidden) {
-    const labelInterval = Math.max(1, Math.ceil(n / 8));
     const catLabelColor = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
     ctx.fillStyle = catLabelColor; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     ctx.font = `${catAxFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
-    // Only every `labelInterval`-th category is drawn, so the horizontal room a
-    // centered label owns is the spacing between two drawn labels: (pw/n)·interval.
-    const catSlotMaxPx = (pw / n) * labelInterval - 4;
-    // Ticks are still drawn under `tickLblPos="none"`; only the labels drop.
+    // Tick marks and labels have independent authored skip intervals
+    // (§21.2.2.205/§21.2.2.206). When tickLblSkip is absent every non-empty
+    // cached category is paintable; sparse caches deliberately use blank
+    // indices to author intervals such as every second year.
+    const tickInterval = Math.max(1, Math.floor(chart.catAxisTickMarkSkip ?? 1));
+    for (let ci = 0; ci < n; ci += tickInterval) {
+      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, toX(ci), primaryCatTickColor, primaryCatTickWidth);
+    }
     const showLabels = catLabelsVisible(chart);
+    const labelInterval = Math.max(1, Math.floor(chart.catAxisTickLabelSkip ?? 1));
     const rotRad = catLabelRotationRad(chart);
     for (let ci = 0; ci < n; ci += labelInterval) {
       const tx = toX(ci);
-      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, tx, primaryCatTickColor, primaryCatTickWidth);
       if (!showLabels) continue;
       ctx.fillStyle = catLabelColor;
       // §21.2.2.71: format numeric-serial categories (e.g. dateAx) via the
       // category-axis numFmt; string categories pass through unchanged.
       const label = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
-      const budget = rotRad === 0 ? catSlotMaxPx : ph * 0.4;
+      if (!label) continue;
       const gap = chart.catAxisFontSizeHpt != null
         ? categoryTickLabelGapPx(catAxFontPx)
         : 5;
-      drawRotatedCatLabel(ctx, elideToWidth(ctx, label, budget), tx, py0 + ph + gap, rotRad);
+      drawRotatedCatLabel(ctx, label, tx, py0 + ph + gap, rotRad);
     }
   }
 
@@ -2758,6 +2828,78 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     ? (sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05)) + 8
     : 0;
 
+  // Resolve the primary extent before frame placement so an authored
+  // `layoutTarget="outer"` can be converted to the inner data rectangle using
+  // the actual formatted tick-label width. The outer rectangle includes axis
+  // labels and ticks (ECMA-376 §21.2.2.89); treating its left edge as `px0`
+  // pushes the labels outside chart space.
+  const computeAreaDataMax = (): number => {
+    let max = 0;
+    for (let ci = 0; ci < n; ci++) {
+      if (stacked) {
+        let sum = 0;
+        for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) {
+          sum += stackedValue(areaIndex, ci);
+        }
+        max = Math.max(max, sum);
+      } else {
+        for (const s of chart.series) {
+          if (isSecondarySeries(s)) continue;
+          max = Math.max(max, s.values[ci] ?? 0);
+        }
+      }
+      for (const { series } of lineSeries) {
+        if (isSecondarySeries(series)) continue;
+        max = Math.max(max, series.values[ci] ?? 0);
+      }
+    }
+    if (pct) max = max > 0 ? 100 : 0;
+    if (chart.valMax != null) max = pct ? chart.valMax * 100 : chart.valMax;
+    return max === 0 ? 1 : max;
+  };
+  const dataMax = computeAreaDataMax();
+  const explicitMax = pct ? dataMax : chart.valMax;
+  const majorUnit = valueAxisUnitInRendererSpace(chart.valAxisMajorUnit, pct);
+  const provisionalScale = valueAxisScale(
+    0,
+    dataMax,
+    undefined,
+    explicitMax,
+    phEst / ptToPx,
+    majorUnit,
+  );
+  const manualValTickFontPx = chart.valAxisFontSizeHpt != null
+    ? valAxFontPx
+    : Math.max(8, Math.min(11, phEst / 20));
+  let primaryLabelWidth = 0;
+  if (
+    !chart.valAxisHidden
+    && chart.plotAreaManualLayout != null
+    && chart.plotAreaManualLayout.layoutTarget !== 'inner'
+  ) {
+    const prevFont = ctx.font;
+    ctx.font = `${manualValTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+    const steps = Math.round(provisionalScale.max / provisionalScale.step);
+    for (let si = 0; si <= steps; si++) {
+      primaryLabelWidth = Math.max(
+        primaryLabelWidth,
+        ctx.measureText(formatPrimaryValueAxisTick(chart, si * provisionalScale.step, pct)).width,
+      );
+    }
+    ctx.font = prevFont;
+  }
+  const primaryLabelGap = chart.valAxisFontSizeHpt != null
+    ? valueTickLabelGapPx(manualValTickFontPx)
+    : 6;
+  const manualOuterInsets = {
+    t: chart.valAxisHidden ? 0 : manualValTickFontPx / 2,
+    r: secLabelBandW + secTitleBandW,
+    b: chart.catAxisHidden
+      ? 0
+      : catAxFontPx + (chart.catAxisFontSizeHpt != null ? categoryTickLabelGapPx(catAxFontPx) : 3) + catTitleH,
+    l: chart.valAxisHidden ? 0 : primaryLabelWidth + primaryLabelGap + valTitleW,
+  };
+
   const pad = {
     t: padT,
     r: legRightW + w * 0.05 + secLabelBandW + secTitleBandW,
@@ -2772,6 +2914,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     legendSideReserveFrac: 0.22,
     pad,
     honorPlotAreaManualLayout: true,
+    manualOuterInsets,
   });
   if (pw <= 0 || ph <= 0) return;
 
@@ -2783,33 +2926,9 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // Primary extent from the PRIMARY series only (secondary series live on their
   // own axis). When `sec` is null every series is primary, byte-identical to
   // the pre-CH7 path.
-  let dataMax = 0;
-  for (let ci = 0; ci < n; ci++) {
-    if (stacked) {
-      let sum = 0;
-      for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) sum += stackedValue(areaIndex, ci);
-      dataMax = Math.max(dataMax, sum);
-    } else {
-      for (const s of chart.series) {
-        if (isSecondarySeries(s)) continue;
-        dataMax = Math.max(dataMax, s.values[ci] ?? 0);
-      }
-    }
-    for (const { series } of lineSeries) {
-      if (isSecondarySeries(series)) continue;
-      dataMax = Math.max(dataMax, series.values[ci] ?? 0);
-    }
-  }
-  // percentStacked always tops out at exactly 100% (each category's Σ|v|
-  // normalizes to 100), matching the bar/line percentStacked axis convention.
-  if (pct) dataMax = dataMax > 0 ? 100 : 0;
-  if (chart.valMax != null) dataMax = pct ? chart.valMax * 100 : chart.valMax;
-  if (dataMax === 0) dataMax = 1;
   // Area anchors the value axis at 0; ignore the returned min. Value axis is
   // vertical → length = plot height (axis-length-aware auto major unit). An
   // explicit `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto step.
-  const explicitMax = pct ? dataMax : chart.valMax;
-  const majorUnit = valueAxisUnitInRendererSpace(chart.valAxisMajorUnit, pct);
   const { max: axMax, step } = valueAxisScale(
     0,
     dataMax,
@@ -3131,30 +3250,25 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     ctx.font = `${drawnCatTickFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
-    // Show every category label that fits; thin out only when adjacent labels
-    // would collide (so 12 months all render, unlike a fixed n/8 cap). Measure
-    // each label's real full width (the previous slice(0,10) under-measured wide
-    // CJK labels, which weakened the collision test) to pick the interval, then
-    // draw each label elided to the room a drawn label actually owns —
-    // (pw/n)·interval, the spacing between two drawn labels.
+    // Category labels are controlled by the authored `<c:tickLblSkip>` interval.
+    // Do not add an automatic collision interval: sparse category caches often
+    // deliberately leave alternating entries empty to obtain a two-year label
+    // cadence, and a computed interval starting at index 0 can discard every
+    // non-empty label. Excel paints the authored sparse labels even when the
+    // final pair overlaps.
     // §21.2.2.71: format numeric-serial categories (e.g. dateAx) via the
     // category-axis numFmt before measuring and drawing; string categories
     // pass through unchanged.
     const labels = cats.map(c =>
       formatCategoryLabel((c ?? '').toString(), chart.catAxisFormatCode, chart.date1904));
-    let maxLabelW = 0;
-    for (let ci = 0; ci < n; ci++) {
-      maxLabelW = Math.max(maxLabelW, ctx.measureText(labels[ci] ?? '').width);
-    }
     const authoredSkip = Math.max(1, Math.floor(chart.catAxisTickLabelSkip ?? 1));
-    const collisionInterval = Math.max(1, Math.ceil((maxLabelW + 6) / (pw / n)));
-    const labelInterval = Math.ceil(collisionInterval / authoredSkip) * authoredSkip;
-    const catSlotMaxPx = (pw / n) * labelInterval - 4;
-    for (let ci = 0; ci < n; ci += labelInterval) {
+    for (let ci = 0; ci < n; ci += authoredSkip) {
+      const label = labels[ci] ?? '';
+      if (!label) continue;
       const gap = chart.catAxisFontSizeHpt != null
         ? categoryTickLabelGapPx(drawnCatTickFontPx)
         : 3;
-      ctx.fillText(elideToWidth(ctx, labels[ci] ?? '', catSlotMaxPx), toX(ci), py0 + ph + gap);
+      ctx.fillText(label, toX(ci), py0 + ph + gap);
     }
   }
 
@@ -3944,15 +4058,24 @@ function drawScatterSeriesLayer(
   const drawLines = style === 'line' || style === 'lineMarker' || style === 'lineNoMarker';
   const drawSmooth = style === 'smooth' || style === 'smoothMarker' || style === 'smoothNoMarker';
   const hideMarkersByStyle = style === 'lineNoMarker' || style === 'smoothNoMarker';
+  const layers = entries.map(({ series, index }) => ({
+    series,
+    fallbackColor: chartColor(index, series),
+    cats: series.categories ?? chart.categories,
+  }));
 
-  for (const { series: s, index: si } of entries) {
-    const fallbackColor = chartColor(si, s);
-    const cats = s.categories ?? chart.categories;
-
+  // Excel paints a scatter group by geometry phase, not one complete series at
+  // a time: all series lines/error bars first, then all markers, then all data
+  // labels. This is observable in dot/range plots where a final invisible
+  // scatter series authors full-width horizontal guides. Painting per series
+  // placed those guides on top of earlier series' dots and labels.
+  for (const { series: s, fallbackColor, cats } of layers) {
     for (const eb of s.errBars ?? []) {
       drawSeriesErrorBars(ctx, s, eb, cats, useIndexX, toX, toY, fallbackColor);
     }
+  }
 
+  for (const { series: s, fallbackColor, cats } of layers) {
     if ((drawLines || drawSmooth) && s.lineHidden !== true) {
       const pts: Array<{ x: number; y: number }> = [];
       for (let ci = 0; ci < s.values.length; ci++) {
@@ -3990,7 +4113,9 @@ function drawScatterSeriesLayer(
         ctx.restore();
       }
     }
+  }
 
+  for (const { series: s, fallbackColor, cats } of layers) {
     const hideMarkers = hideMarkersByStyle
       || s.showMarker === false
       || (typeof s.markerSymbol === 'string' && s.markerSymbol === 'none');
@@ -4024,7 +4149,9 @@ function drawScatterSeriesLayer(
         drawMarker(ctx, toX(xv), toY(yv), symbol, sizePt, fill, line, ptToPx, lineWidthPx);
       }
     }
+  }
 
+  for (const { series: s, cats } of layers) {
     drawSeriesDataLabels(
       ctx,
       s,
@@ -4038,7 +4165,9 @@ function drawScatterSeriesLayer(
       chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
       chart.dataLabelPosition ?? 'r',
     );
+  }
 
+  for (const { series: s, fallbackColor, cats } of layers) {
     const trendlineX = s.values.map((_, index) => scatterXValue(cats, index, useIndexX));
     drawSeriesTrendlines(ctx, s, fallbackColor, toX, toY, ptToPx, trendlineX);
   }

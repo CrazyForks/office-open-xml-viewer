@@ -534,9 +534,9 @@ export interface ChartModel {
   titleManualLayout?: ChartManualLayout | null;
   /**
    * `<c:plotArea><c:layout><c:manualLayout>` absolute placement for the
-   * plot area. `layoutTarget="inner"` (default) describes the inner plot
-   * rect (no axes / labels); `outer` describes the outer rect (axes
-   * included).
+   * plot area. `layoutTarget="inner"` describes the inner plot rect (no axes /
+   * labels); `outer` describes the outer rect (axes included) and is the schema
+   * default when the element or its `val` is omitted.
    */
   plotAreaManualLayout?: ChartManualLayout | null;
   /**

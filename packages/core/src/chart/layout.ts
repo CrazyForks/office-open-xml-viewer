@@ -330,6 +330,12 @@ export interface FrameParams {
   pad?: ChartPad;
   radialGapFrac?: number;
   honorPlotAreaManualLayout?: boolean;
+  /** Insets from an authored `layoutTarget="outer"` rectangle to its inner
+   * data region. The caller measures the real axis-label/tick bands and passes
+   * them here; `layoutTarget="inner"` ignores these insets. ECMA-376
+   * §21.2.2.89 defines the outer target as including tick marks and axis
+   * labels, while CT_LayoutTarget defaults an omitted `val` to `outer`. */
+  manualOuterInsets?: ChartPad;
 }
 
 /**
@@ -373,11 +379,22 @@ export function computeChartFrame(
   const pml = params.honorPlotAreaManualLayout ? chart.plotAreaManualLayout : null;
   if (pml && pml.w != null && pml.h != null) {
     // Manual plot layout is common to all chart families (§21.2.2.32),
-    // including pie/doughnut. The authored rectangle is authoritative.
-    px0 = x + pml.x * w;
-    py0 = y + pml.y * h;
-    pw = pml.w * w;
-    ph = pml.h * h;
+    // including pie/doughnut. `layoutTarget` defaults to `outer` in the
+    // CT_LayoutTarget schema. An outer rectangle includes tick marks and axis
+    // labels, so convert it to the inner data region with caller-measured
+    // insets; an explicitly-authored `inner` rectangle is already the data
+    // region and remains verbatim.
+    const outerX = x + pml.x * w;
+    const outerY = y + pml.y * h;
+    const outerW = pml.w * w;
+    const outerH = pml.h * h;
+    const inset = pml.layoutTarget === 'inner'
+      ? { t: 0, r: 0, b: 0, l: 0 }
+      : (params.manualOuterInsets ?? { t: 0, r: 0, b: 0, l: 0 });
+    px0 = outerX + inset.l;
+    py0 = outerY + inset.t;
+    pw = outerW - inset.l - inset.r;
+    ph = outerH - inset.t - inset.b;
   } else if (params.radialGapFrac != null) {
     // Radial (pie/radar): centre the plot in the leftover space. Verbatim from
     // the pie/radar inline math.

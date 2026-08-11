@@ -905,6 +905,32 @@ describe('CH7 — percentStacked normalizes signed values against per-category �
 });
 
 describe('CH2 — stackedLine / stackedLinePct stack cumulatively', () => {
+  it('draws every authored non-empty sparse category label when tickLblSkip is absent', () => {
+    const rec = recordingCtx();
+    const categories = Array.from({ length: 25 }, () => '');
+    const expected: string[] = [];
+    for (let index = 1, year = 2000; year <= 2022; index += 2, year += 2) {
+      categories[index] = String(year);
+      expected.push(String(year));
+    }
+    // The final source row also carries 2022. Excel paints both adjacent labels
+    // rather than letting an auto-collision heuristic discard the authored
+    // sparse sequence.
+    categories[24] = '2022';
+
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories,
+      series: [series({ values: categories.map((_, index) => index + 1) })],
+      catAxisFontSizeHpt: 1200,
+    }), RECT, 1);
+
+    const yearLabels = rec.texts
+      .map(text => text.text)
+      .filter(text => /^20\d{2}$/.test(text));
+    expect(yearLabels).toEqual([...expected, '2022']);
+  });
+
   it('stackedLine plots the second series at the cumulative sum', () => {
     // Two flat series (all 10, all 20). Stacked, the second line rides at
     // y=30 across every category; unstacked it would ride at y=20. We detect
@@ -978,6 +1004,43 @@ describe('CH2 — stackedLine / stackedLinePct stack cumulatively', () => {
 });
 
 describe('CH4 — stackedAreaPct normalizes like the line/bar percentStacked convention', () => {
+  it('keeps value labels inside an authored outer plot-area rectangle', () => {
+    const rec = recordingCtx();
+    const outerX = 0.007891414141414141 * 760;
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedArea',
+      categories: ['2016', '2017'],
+      series: [
+        series({ values: [0.45, 0.4] }),
+        series({ values: [0.55, 0.6] }),
+      ],
+      valMax: 1,
+      valAxisMajorUnit: 0.2,
+      valAxisFormatCode: '0.0',
+      valAxisFontSizeHpt: 1200,
+      catAxisFontSizeHpt: 1200,
+      plotAreaBg: 'ABCDEF',
+      plotAreaManualLayout: {
+        xMode: 'edge', yMode: 'edge',
+        x: 0.007891414141414141,
+        y: 0.1949702068511199,
+        w: 0.9732744107744108,
+        h: 0.6791097091286356,
+      },
+    }), { x: 0, y: 0, w: 760, h: 560 }, 1);
+
+    const topTick = rec.texts.find(text => text.text === '1.0');
+    expect(topTick).toBeDefined();
+    expect(topTick?.align).toBe('right');
+    const tickLeft = (topTick?.x ?? 0) - (topTick?.width ?? 0);
+    // CT_LayoutTarget defaults to `outer`: its left edge includes the value
+    // labels, while the inner data rectangle begins after their measured width
+    // and authored-font gap. The label must not be pushed outside chart space.
+    expect(tickLeft).toBeCloseTo(outerX, 5);
+    const plotBg = rec.rects.find(rect => rect.fs === '#ABCDEF');
+    expect(plotBg?.x).toBeGreaterThan(outerX);
+  });
+
   it('honors the authored inner plot-area rectangle for area charts', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -1042,6 +1105,59 @@ describe('CH4 — stackedAreaPct normalizes like the line/bar percentStacked con
     // to that magnitude, not be normalized to 100.
     expect(Math.max(...nums)).toBeGreaterThanOrEqual(40);
     expect(nums).not.toContain(100);
+  });
+});
+
+describe('ECMA-376 §21.2.2.89 — omitted layoutTarget defaults to outer', () => {
+  const outer = {
+    xMode: 'edge' as const,
+    yMode: 'edge' as const,
+    x: 0.01,
+    y: 0.2,
+    w: 0.97,
+    h: 0.68,
+  };
+
+  it('line: keeps the formatted value labels inside the outer rectangle', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['2000', '2002'],
+      series: [series({ values: [200, 1_400] })],
+      valMin: 0,
+      valMax: 1_400,
+      valAxisMajorUnit: 200,
+      valAxisFormatCode: '"$"#,##0',
+      valAxisFontSizeHpt: 1000,
+      catAxisFontSizeHpt: 1000,
+      plotAreaBg: 'ABCDEF',
+      plotAreaManualLayout: outer,
+    }), { x: 0, y: 0, w: 700, h: 420 }, 1);
+
+    const topTick = rec.texts.find(text => text.text === '$1,400');
+    expect(topTick).toBeDefined();
+    const tickLeft = (topTick?.x ?? 0) - (topTick?.width ?? 0);
+    expect(tickLeft).toBeCloseTo(7, 5);
+    expect(rec.rects.find(rect => rect.fs === '#ABCDEF')?.x).toBeGreaterThan(7);
+  });
+
+  it('column: removes the category-label band from the outer plot height', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      series: [series({ values: [1, 2] })],
+      valAxisHidden: true,
+      catAxisFontSizeHpt: 1000,
+      plotAreaBg: 'ABCDEF',
+      plotAreaManualLayout: outer,
+    }), { x: 0, y: 0, w: 700, h: 420 }, 1);
+
+    const plot = rec.rects.find(rect => rect.fs === '#ABCDEF');
+    expect(plot).toBeDefined();
+    expect(plot?.x).toBeCloseTo(7, 5);
+    expect(plot?.h).toBeLessThan(0.68 * 420);
+    expect(rec.texts.find(text => text.text === 'A')?.y).toBeGreaterThan((plot?.y ?? 0) + (plot?.h ?? 0));
   });
 });
 
@@ -4153,9 +4269,39 @@ describe('CH — combo chart legends reflect each series chart group', () => {
       seg.length === 2 &&
       Math.abs(seg[0].y - (lineLabel as TextCall).y) < 0.01 &&
       Math.abs(seg[1].y - (lineLabel as TextCall).y) < 0.01 &&
-      Math.abs(seg[1].x - seg[0].x - 10) < 0.01 &&
+      seg[1].x - seg[0].x > 10 &&
       seg[1].x < (lineLabel as TextCall).x,
     );
     expect(lineKey).toBeDefined();
+  });
+
+  it('keeps a line visible on both sides of a circular line-series legend marker', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B'],
+      series: [series({
+        name: 'Outstanding', values: [20, 30],
+        markerSymbol: 'circle', markerSize: 7, markerFill: 'FFFFFF', markerLine: '1696D2',
+      })],
+      showLegend: true,
+      legendPos: 'b',
+    }), RECT, 1);
+
+    const label = rec.texts.find(text => text.text === 'Outstanding');
+    const keyLine = rec.segments.find(segment =>
+      segment.length === 2 &&
+      Math.abs(segment[0].y - (label as TextCall).y) < 0.01 &&
+      Math.abs(segment[1].y - (label as TextCall).y) < 0.01 &&
+      segment[1].x < (label as TextCall).x,
+    );
+    const keyMarker = rec.arcs.find(arc =>
+      Math.abs(arc.y - (label as TextCall).y) < 0.01 &&
+      arc.x < (label as TextCall).x,
+    );
+    expect(keyLine).toBeDefined();
+    expect(keyMarker).toBeDefined();
+    expect((keyLine as Array<{ x: number; y: number }>)[1].x - (keyLine as Array<{ x: number; y: number }>)[0].x)
+      .toBeGreaterThan((keyMarker as ArcCall).r * 2);
   });
 });

@@ -249,6 +249,33 @@ describe('computeChartFrame — cartesian', () => {
     });
   });
 
+  it('treats an omitted layoutTarget as outer and removes measured axis bands', () => {
+    const chart = model({
+      plotAreaManualLayout: {
+        xMode: 'edge',
+        yMode: 'edge',
+        x: 0.01,
+        y: 0.02,
+        w: 0.8,
+        h: 0.8,
+      },
+    });
+    const frame = computeChartFrame(chart, X, Y, W, H, PTPX, {
+      titleTopPadFrac: 0.02,
+      titleBottomPadFrac: 0.025,
+      legendSideReserveFrac: 0.22,
+      pad: { t: 20, r: 10, b: 30, l: 40 },
+      honorPlotAreaManualLayout: true,
+      manualOuterInsets: { t: 6, r: 8, b: 18, l: 28 },
+    });
+    expect(frame.plotRect).toEqual({
+      px0: X + 0.01 * W + 28,
+      py0: Y + 0.02 * H + 6,
+      pw: 0.8 * W - 28 - 8,
+      ph: 0.8 * H - 6 - 18,
+    });
+  });
+
   it('ignores plotArea manual layout when the flag is off', () => {
     const chart = model({
       plotAreaManualLayout: { xMode: 'edge', yMode: 'edge', x: 0.1, y: 0.2, w: 0.7, h: 0.6 },
