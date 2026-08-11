@@ -1068,9 +1068,7 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(viewerStyle?.textContent).toContain(
       '[data-xlsx-viewport-input]:focus{outline:none}',
     );
-    expect(viewerStyle?.textContent).toContain(
-      '[data-xlsx-viewport-input]:focus-visible:not([data-xlsx-pointer-focus]){outline:2px solid #1a73e8;outline-offset:-2px}',
-    );
+    expect(viewerStyle?.textContent).not.toContain(':focus-visible');
     expect(openerDocument.head.querySelector('style[data-xlsx-viewer-styles]')).toBeNull();
     const viewportInput = mounted.find((element) => element.hasAttribute('data-xlsx-viewport-input')) as FakeEl;
     viewportInput.dispatch('pointerdown', {
@@ -1081,9 +1079,6 @@ describe('XlsxSheetViewer canvas mount', () => {
       clientY: 0,
       shiftKey: false,
     });
-    expect(viewportInput.hasAttribute('data-xlsx-pointer-focus')).toBe(true);
-    viewportInput.dispatch('blur');
-    expect(viewportInput.hasAttribute('data-xlsx-pointer-focus')).toBe(false);
     expect(viewportInput._listeners.get('keydown')).toHaveLength(1);
     expect(popupDocument.listenerCount('keydown')).toBe(0);
     expect(openerDocument.listenerCount('keydown')).toBe(0);

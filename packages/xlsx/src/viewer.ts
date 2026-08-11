@@ -140,11 +140,10 @@ const VIEWER_STYLE_ATTR = 'data-xlsx-viewer-styles';
  *  it must live in a stylesheet rather than on the elements. */
 const VIEWER_STYLE_CSS =
   `.xlsx-tab-strip::-webkit-scrollbar{display:none}` +
-  // The viewport must remain focusable so copy shortcuts belong to the active
-  // Viewer. Suppress the browser's click-focus ring, but retain an explicit
-  // inset indicator for keyboard navigation.
+  // The viewport remains focusable so copy shortcuts belong to the active
+  // Viewer, but selection state is communicated at cell level. A viewport-wide
+  // focus ring is visually indistinguishable from a sheet selection border.
   `[data-xlsx-viewport-input]:focus{outline:none}` +
-  `[data-xlsx-viewport-input]:focus-visible:not([data-xlsx-pointer-focus]){outline:2px solid #1a73e8;outline-offset:-2px}` +
   `.xlsx-tab-nav{background:transparent;transition:background 0.1s;}` +
   `.xlsx-tab-nav:hover{background:rgba(0,0,0,0.08);}` +
   // Excel-status-bar zoom slider: a thin uniform gray track (no colored
@@ -3690,11 +3689,6 @@ class XlsxViewerEngine implements ZoomableViewer {
     }
 
     this.surface.on('pointerdown', (e: PointerEvent) => {
-      // focus() is programmatic even though this path originated from a pointer,
-      // so Chromium may otherwise match :focus-visible and draw a full blue
-      // viewport frame on every cell click. Mark that focus origin explicitly;
-      // keyboard Tab focus still receives the accessible focus indicator.
-      this.scrollHost.setAttribute('data-xlsx-pointer-focus', '');
       this.scrollHost.focus?.({ preventScroll: true });
       if (e.button !== 0) return;
       if (this.isSelecting && e.pointerId !== this.selectionPointerId) return;
@@ -3799,10 +3793,6 @@ class XlsxViewerEngine implements ZoomableViewer {
         e.pointerId,
         true,
       );
-    });
-
-    this.surface.on('blur', () => {
-      this.scrollHost.removeAttribute('data-xlsx-pointer-focus');
     });
 
     this.surface.on('pointermove', (e: PointerEvent) => {
