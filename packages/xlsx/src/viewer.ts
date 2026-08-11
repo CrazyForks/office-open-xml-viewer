@@ -64,6 +64,7 @@ import {
   summaryAfterFor,
   gutterExtentPx,
   outlineBracketSegments,
+  outlinePaneClipRect,
   OUTLINE_LANE_PX,
   type BandOutline,
   type OutlineGroup,
@@ -1255,6 +1256,48 @@ class XlsxViewerEngine implements ZoomableViewer {
     ctx.lineWidth = 1;
     ctx.fillStyle = '#404040';
 
+    // Outline gutter geometry participates in the same header/frozen-pane split
+    // as the worksheet canvas. Clip every logical run to its own pane so a
+    // scrolled detail rail cannot leak upward into the column-letter header or
+    // through the frozen-row boundary (and mirror the equivalent rule for RTL
+    // frozen columns).
+    const geometry = getGridGeometryForWorksheet(ws);
+    const effective = geometry.effectiveFrozenBands({
+      scale: cs,
+      width: this.canvasArea.clientWidth,
+      height: this.canvasArea.clientHeight,
+      headerWidth: HEADER_W,
+      headerHeight: HEADER_H,
+      rows: ws.freezeRows ?? 0,
+      cols: ws.freezeCols ?? 0,
+    });
+    const axes = geometry.axesAtScale(cs);
+    const frozenBandCount = isRow ? effective.rows : effective.cols;
+    const frozenExtent = isRow
+      ? axes.row.offsetOf(effective.rows + 1)
+      : axes.col.offsetOf(effective.cols + 1);
+    const headerExtent = (isRow ? HEADER_H : HEADER_W) * cs;
+    const paneClip = (start: number, end: number) => outlinePaneClipRect(
+      axis,
+      start,
+      end,
+      frozenBandCount,
+      headerExtent,
+      frozenExtent,
+      cssW,
+      cssH,
+      !isRow && ws.rightToLeft === true,
+    );
+    const clipContext = (start: number, end: number): boolean => {
+      const clip = paneClip(start, end);
+      if (clip.w <= 0 || clip.h <= 0) return false;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(clip.x, clip.y, clip.w, clip.h);
+      ctx.clip();
+      return true;
+    };
+
     for (const g of layout.groups) {
       // Lane index for this level: lane 0 is the outermost (level 1). Buttons and
       // the outermost bracket sit nearest the grid edge? Excel draws level 1 in
@@ -1276,12 +1319,15 @@ class XlsxViewerEngine implements ZoomableViewer {
       // draws only the +/- toggle, no bracket. Skip the bracket when the run has
       // negligible length.
       if (!g.collapsed && runEnd - runStart > 1) {
-        ctx.beginPath();
-        for (const segment of outlineBracketSegments(axis, laneCenterCross, a, b, lanePx)) {
-          ctx.moveTo(segment.x1, segment.y1);
-          ctx.lineTo(segment.x2, segment.y2);
+        if (clipContext(g.start, g.end)) {
+          ctx.beginPath();
+          for (const segment of outlineBracketSegments(axis, laneCenterCross, a, b, lanePx)) {
+            ctx.moveTo(segment.x1, segment.y1);
+            ctx.lineTo(segment.x2, segment.y2);
+          }
+          ctx.stroke();
+          ctx.restore();
         }
-        ctx.stroke();
       }
 
       // +/- toggle box on the summary band.
@@ -1291,7 +1337,10 @@ class XlsxViewerEngine implements ZoomableViewer {
           const along = isRow
             ? sRect.y + sRect.h / 2
             : this.screenX(sRect.x, sRect.w) + sRect.w / 2;
-          this.drawToggleBox(ctx, isRow ? laneCenterCross : along, isRow ? along : laneCenterCross, g.collapsed, cs);
+          if (clipContext(g.summary, g.summary)) {
+            this.drawToggleBox(ctx, isRow ? laneCenterCross : along, isRow ? along : laneCenterCross, g.collapsed, cs);
+            ctx.restore();
+          }
         }
       }
     }
@@ -1315,6 +1364,31 @@ class XlsxViewerEngine implements ZoomableViewer {
         String(l),
         cs,
       );
+    }
+
+    // Paint the pane separator last so it visibly cuts the outline rail at the
+    // same coordinate as the main grid's separator. This also extends the line
+    // through the outline gutter, making the frozen-row boundary continuous
+    // from the gutter through the row-number header and cells.
+    if (frozenBandCount > 0) {
+      const divider = isRow
+        ? headerExtent + frozenExtent
+        : ws.rightToLeft === true
+          ? cssW - headerExtent - frozenExtent
+          : headerExtent + frozenExtent;
+      ctx.save();
+      ctx.strokeStyle = '#7a7a7a';
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      if (isRow) {
+        ctx.moveTo(0, divider);
+        ctx.lineTo(cssW, divider);
+      } else {
+        ctx.moveTo(divider, 0);
+        ctx.lineTo(divider, cssH);
+      }
+      ctx.stroke();
+      ctx.restore();
     }
   }
 

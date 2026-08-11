@@ -9,6 +9,7 @@ import {
   gutterExtentPx,
   OUTLINE_LANE_PX,
   outlineBracketSegments,
+  outlinePaneClipRect,
   type BandOutline,
   type OutlineWorksheetLike,
 } from './outline.js';
@@ -105,6 +106,29 @@ describe('outlineBracketSegments', () => {
       { x1: 40, y1: 10, x2: 100, y2: 10 },
       { x1: 100, y1: 10, x2: 100, y2: 20 },
     ]);
+  });
+});
+
+describe('outlinePaneClipRect', () => {
+  it('clips a scrollable row group below the frozen-row separator', () => {
+    expect(outlinePaneClipRect('row', 8, 20, 7, 24, 105, 76, 500)).toEqual({
+      x: 0, y: 129, w: 76, h: 371,
+    });
+  });
+
+  it('keeps a frozen row group between the column header and separator', () => {
+    expect(outlinePaneClipRect('row', 2, 6, 7, 24, 105, 76, 500)).toEqual({
+      x: 0, y: 24, w: 76, h: 105,
+    });
+  });
+
+  it('mirrors frozen and scrollable column clips in RTL', () => {
+    expect(outlinePaneClipRect('col', 1, 2, 2, 48, 120, 600, 57, true)).toEqual({
+      x: 432, y: 0, w: 120, h: 57,
+    });
+    expect(outlinePaneClipRect('col', 3, 9, 2, 48, 120, 600, 57, true)).toEqual({
+      x: 0, y: 0, w: 432, h: 57,
+    });
   });
 });
 

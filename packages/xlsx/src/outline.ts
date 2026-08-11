@@ -91,6 +91,49 @@ export interface OutlineBracketSegment {
   y2: number;
 }
 
+/** Visible pane rectangle for one outline detail/summary run. Outline gutter
+ * geometry shares the worksheet header + frozen-pane coordinate system, so a
+ * scrolled run must be clipped at the frozen boundary instead of leaking into
+ * the column/row header. Fractions are already resolved to CSS pixels by the
+ * viewer before calling this helper. */
+export function outlinePaneClipRect(
+  axis: OutlineAxis,
+  start: number,
+  end: number,
+  frozenBandCount: number,
+  headerExtentPx: number,
+  frozenExtentPx: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  rtl = false,
+): { x: number; y: number; w: number; h: number } {
+  if (axis === 'row') {
+    const boundary = Math.min(canvasHeight, headerExtentPx + frozenExtentPx);
+    let top = Math.min(canvasHeight, headerExtentPx);
+    let bottom = canvasHeight;
+    if (frozenBandCount > 0 && end <= frozenBandCount) bottom = boundary;
+    else if (frozenBandCount > 0 && start > frozenBandCount) top = boundary;
+    return { x: 0, y: top, w: canvasWidth, h: Math.max(0, bottom - top) };
+  }
+
+  if (!rtl) {
+    const boundary = Math.min(canvasWidth, headerExtentPx + frozenExtentPx);
+    let left = Math.min(canvasWidth, headerExtentPx);
+    let right = canvasWidth;
+    if (frozenBandCount > 0 && end <= frozenBandCount) right = boundary;
+    else if (frozenBandCount > 0 && start > frozenBandCount) left = boundary;
+    return { x: left, y: 0, w: Math.max(0, right - left), h: canvasHeight };
+  }
+
+  const headerLeft = Math.max(0, canvasWidth - headerExtentPx);
+  const boundary = Math.max(0, headerLeft - frozenExtentPx);
+  let left = 0;
+  let right = headerLeft;
+  if (frozenBandCount > 0 && end <= frozenBandCount) left = boundary;
+  else if (frozenBandCount > 0 && start > frozenBandCount) right = boundary;
+  return { x: left, y: 0, w: Math.max(0, right - left), h: canvasHeight };
+}
+
 /** Build the expanded-group bracket. Excel hooks the bracket toward the grid at
  * the FIRST detail band; the summary band at the opposite end carries the
  * minus button and therefore has no second hook. `detailStart` is the on-screen

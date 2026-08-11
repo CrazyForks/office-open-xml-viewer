@@ -3241,14 +3241,11 @@ export function renderViewport(
     ctx.lineWidth = 0.5;
     ctx.beginPath();
     const dy = scrollAreaY + crispOffset(scrollAreaY, 0.5, dpr);
-    if (rtl) {
-      // cell area is [0, canvasW - hw]
-      ctx.moveTo(0, dy);
-      ctx.lineTo(canvasW - hw, dy);
-    } else {
-      ctx.moveTo(hw, dy);
-      ctx.lineTo(canvasW, dy);
-    }
+    // Excel carries the separator through the row-number header so the frozen
+    // boundary stays visible at the left (LTR) or right (RTL) edge as well as
+    // across the cell area.
+    ctx.moveTo(0, dy);
+    ctx.lineTo(canvasW, dy);
     ctx.stroke();
     ctx.restore();
   }
