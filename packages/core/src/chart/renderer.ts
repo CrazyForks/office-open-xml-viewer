@@ -2089,6 +2089,7 @@ function renderLineChart(
     titleBand,
     legendSideReserveFrac: 0.22,
     pad,
+    honorPlotAreaManualLayout: true,
   });
   if (pw <= 0 || ph <= 0) return;
 
@@ -2419,6 +2420,7 @@ function renderStockChart(
     titleBand,
     legendSideReserveFrac: 0.22,
     pad,
+    honorPlotAreaManualLayout: true,
   });
   if (pw <= 0 || ph <= 0) return;
 
@@ -2681,6 +2683,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     titleBand,
     legendSideReserveFrac: 0.22,
     pad,
+    honorPlotAreaManualLayout: true,
   });
   if (pw <= 0 || ph <= 0) return;
 
@@ -2794,7 +2797,14 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
 
   // Draw the series area fills ON TOP of the gridlines laid down above.
   const stackBase = stacked ? new Array(n).fill(0) as number[] : null;
-  for (let si = chart.series.length - 1; si >= 0; si--) {
+  // In a stacked area chart, series order is the stacking order: series 0 is
+  // adjacent to the category axis, then series 1, and so on (CT_AreaChart's
+  // ordered `ser` sequence). Plain unstacked area retains the historical
+  // back-to-front painting so the first series remains visually on top.
+  const seriesOrder = stacked
+    ? chart.series.map((_, index) => index)
+    : chart.series.map((_, index) => chart.series.length - 1 - index);
+  for (const si of seriesOrder) {
     const s = chart.series[si];
     const color = chartColor(si, s);
     const baseY = py0 + ph;
@@ -2835,7 +2845,10 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       ctx.lineTo(toX(n - 1), baseY);
     }
     ctx.closePath();
-    ctx.fillStyle = hexToRgba(color, 0.6);
+    // `<a:solidFill>` is opaque unless the DrawingML color itself carries an
+    // alpha transform. The shared model currently carries an opaque resolved
+    // hex, so do not invent translucency for area series.
+    ctx.fillStyle = color;
     ctx.fill();
     ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash([]);
     ctx.stroke();
@@ -2856,16 +2869,12 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   {
     const areaMarkerR = Math.max(2, 2.5 * ptToPx);
     // Top of each series' band per category (stacked); the raw value otherwise.
-    // Rebuilt here independently of the fill loop's mutated stackBase. The fill
-    // loop above draws bands back-to-front (si = length-1 → 0) and accumulates
-    // stackBase AFTER each band, so band si's top edge is the REVERSE-cumulative
-    // sum Σ_{k=si..length-1} — series 0 (drawn last, on top) reaches the full
-    // stack total; the last series (drawn first, at the bottom) has only its
-    // own value. A forward sum (Σ_{k=0..si}) would swap that ordering.
+    // Rebuilt independently of the fill loop's mutated stackBase. The ordered
+    // series sequence stacks forward, so band si reaches Σ_{k=0..si}.
     const topValue = (si: number, ci: number): number => {
       if (stacked) {
         let sum = 0;
-        for (let k = si; k < chart.series.length; k++) sum += stackedValue(k, ci);
+        for (let k = 0; k <= si; k++) sum += stackedValue(k, ci);
         return sum;
       }
       return chart.series[si].values[ci] ?? 0;
@@ -2945,12 +2954,13 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // Category-axis major tick marks. With crossBetween="between" PowerPoint
   // draws them at the band BOUNDARIES (n+1 dividers); "midCat" ticks centers.
   if (!chart.catAxisHidden && chart.catAxisMajorTickMark && chart.catAxisMajorTickMark !== 'none') {
+    const tickSkip = Math.max(1, Math.floor(chart.catAxisTickMarkSkip ?? 1));
     if (between) {
-      for (let ci = 0; ci <= n; ci++) {
+      for (let ci = 0; ci <= n; ci += tickSkip) {
         drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, px0 + (ci / n) * pw, catLineColor, catLineW);
       }
     } else {
-      for (let ci = 0; ci < n; ci++) {
+      for (let ci = 0; ci < n; ci += tickSkip) {
         drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, toX(ci), catLineColor, catLineW);
       }
     }
@@ -2975,7 +2985,9 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     for (let ci = 0; ci < n; ci++) {
       maxLabelW = Math.max(maxLabelW, ctx.measureText(labels[ci] ?? '').width);
     }
-    const labelInterval = Math.max(1, Math.ceil((maxLabelW + 6) / (pw / n)));
+    const authoredSkip = Math.max(1, Math.floor(chart.catAxisTickLabelSkip ?? 1));
+    const collisionInterval = Math.max(1, Math.ceil((maxLabelW + 6) / (pw / n)));
+    const labelInterval = Math.ceil(collisionInterval / authoredSkip) * authoredSkip;
     const catSlotMaxPx = (pw / n) * labelInterval - 4;
     for (let ci = 0; ci < n; ci += labelInterval) {
       ctx.fillText(elideToWidth(ctx, labels[ci] ?? '', catSlotMaxPx), toX(ci), py0 + ph + 3);

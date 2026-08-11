@@ -679,6 +679,10 @@ export interface ChartModel {
    * labels. null/undefined ⇒ nextTo (byte-stable).
    */
   catAxisTickLabelPos?: string | null;
+  /** `<c:catAx><c:tickLblSkip val>` category-label interval. */
+  catAxisTickLabelSkip?: number | null;
+  /** `<c:catAx><c:tickMarkSkip val>` category-tick interval. */
+  catAxisTickMarkSkip?: number | null;
   /** `<c:valAx><c:tickLblPos val>` (§21.2.2.207). "none" hides value tick labels. */
   valAxisTickLabelPos?: string | null;
   /**

@@ -289,6 +289,12 @@ pub struct ChartModel {
     /// `"low"` | `"high"` | `"none"` (labels hidden). `None` = nextTo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_tick_label_pos: Option<String>,
+    /// `<c:catAx><c:tickLblSkip val>` (§21.2.2.205), 1-based interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_tick_label_skip: Option<u32>,
+    /// `<c:catAx><c:tickMarkSkip val>` (§21.2.2.206), 1-based interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_tick_mark_skip: Option<u32>,
     /// `<c:valAx><c:tickLblPos val>` (§21.2.2.207).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_axis_tick_label_pos: Option<String>,
@@ -2871,6 +2877,8 @@ pub fn parse_chartex_part_with_references(
         val_axis_orientation: None,
         cat_axis_orientation: None,
         cat_axis_tick_label_pos: None,
+        cat_axis_tick_label_skip: None,
+        cat_axis_tick_mark_skip: None,
         val_axis_tick_label_pos: None,
         cat_axis_label_rotation: None,
         stock_hi_low_lines: None,
@@ -5238,6 +5246,16 @@ pub fn parse_chart_part_with_references(
     let val_axis_log_base = val_ax.and_then(extract_axis_log_base);
     let val_axis_orientation = val_ax.and_then(extract_axis_orientation);
     let cat_axis_orientation = cat_ax.and_then(extract_axis_orientation);
+    let cat_axis_tick_label_skip = cat_ax
+        .and_then(|axis| child(axis, "tickLblSkip"))
+        .and_then(|skip| attr(&skip, "val"))
+        .and_then(|skip| skip.parse::<u32>().ok())
+        .filter(|skip| *skip > 0);
+    let cat_axis_tick_mark_skip = cat_ax
+        .and_then(|axis| child(axis, "tickMarkSkip"))
+        .and_then(|skip| attr(&skip, "val"))
+        .and_then(|skip| skip.parse::<u32>().ok())
+        .filter(|skip| *skip > 0);
     let cat_axis_tick_label_pos = cat_ax.and_then(extract_axis_tick_label_pos);
     let val_axis_tick_label_pos = val_ax.and_then(extract_axis_tick_label_pos);
     let cat_axis_label_rotation = cat_ax.and_then(extract_axis_tick_label_rotation);
@@ -5409,6 +5427,8 @@ pub fn parse_chart_part_with_references(
         val_axis_orientation,
         cat_axis_orientation,
         cat_axis_tick_label_pos,
+        cat_axis_tick_label_skip,
+        cat_axis_tick_mark_skip,
         val_axis_tick_label_pos,
         cat_axis_label_rotation,
         stock_hi_low_lines,
@@ -5620,6 +5640,8 @@ mod tests {
             val_axis_orientation: None,
             cat_axis_orientation: None,
             cat_axis_tick_label_pos: None,
+            cat_axis_tick_label_skip: None,
+            cat_axis_tick_mark_skip: None,
             val_axis_tick_label_pos: None,
             cat_axis_label_rotation: None,
             stock_hi_low_lines: None,
@@ -7051,7 +7073,7 @@ mod tests {
                     <c:yVal><c:numLit><c:pt idx="0"><c:v>2</c:v></c:pt><c:pt idx="1"><c:v>1</c:v></c:pt></c:numLit></c:yVal>
                   </c:ser><c:axId val="3"/><c:axId val="4"/>
                 </c:scatterChart>
-                <c:catAx><c:axId val="1"/><c:axPos val="l"/></c:catAx>
+                <c:catAx><c:axId val="1"/><c:axPos val="l"/><c:tickLblSkip val="2"/><c:tickMarkSkip val="3"/></c:catAx>
                 <c:valAx><c:axId val="2"/><c:axPos val="b"/><c:scaling><c:max val="1.4"/></c:scaling></c:valAx>
                 <c:valAx><c:axId val="3"/><c:axPos val="b"/><c:delete val="1"/></c:valAx>
                 <c:valAx><c:axId val="4"/><c:axPos val="r"/><c:delete val="1"/><c:scaling><c:min val="0"/><c:max val="2"/></c:scaling></c:valAx>
@@ -7063,6 +7085,8 @@ mod tests {
             .expect("bar/scatter combo parses");
 
         assert_eq!(model.chart_type, "clusteredBarH");
+        assert_eq!(model.cat_axis_tick_label_skip, Some(2));
+        assert_eq!(model.cat_axis_tick_mark_skip, Some(3));
         let scatter = &model.series[1];
         assert_eq!(scatter.series_type.as_deref(), Some("scatter"));
         assert_eq!(
