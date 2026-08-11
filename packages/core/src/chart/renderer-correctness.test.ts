@@ -1576,6 +1576,97 @@ describe('CH9 — scatter error-bar cap geometry (§21.2.2.20)', () => {
   });
 });
 
+describe('CH9 — scatter axis crossing and tick-label position (§21.2.2.207)', () => {
+  it('crosses both numeric axes at zero while low tick labels stay on the plot edges', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'scatter',
+      categories: ['-1', '1'],
+      series: [series({ values: [-1, 1], showMarker: false })],
+      catAxisMin: -1,
+      catAxisMax: 1,
+      valMin: -1,
+      valMax: 1,
+      catAxisCrosses: 'autoZero',
+      valAxisCrosses: 'autoZero',
+      catAxisTickLabelPos: 'low',
+      valAxisTickLabelPos: 'low',
+      catAxisMajorGridlines: false,
+      valAxisMajorGridlines: false,
+    }), RECT, 1);
+
+    const verticalAxis = rec.segments
+      .filter(segment => segment.length === 2 && Math.abs(segment[0].x - segment[1].x) < 0.001)
+      .sort((a, b) => Math.abs(b[1].y - b[0].y) - Math.abs(a[1].y - a[0].y))[0];
+    expect(verticalAxis).toBeDefined();
+    const horizontalAxis = rec.segments
+      .filter(segment => segment.length === 2 && Math.abs(segment[0].y - segment[1].y) < 0.001)
+      .sort((a, b) => Math.abs(b[1].x - b[0].x) - Math.abs(a[1].x - a[0].x))[0];
+    expect(horizontalAxis).toBeDefined();
+
+    const verticalX = (verticalAxis[0].x + verticalAxis[1].x) / 2;
+    const horizontalY = (horizontalAxis[0].y + horizontalAxis[1].y) / 2;
+    expect(verticalX).toBeGreaterThan(horizontalAxis[0].x);
+    expect(verticalX).toBeLessThan(horizontalAxis[1].x);
+    expect(horizontalY).toBeGreaterThan(verticalAxis[0].y);
+    expect(horizontalY).toBeLessThan(verticalAxis[1].y);
+
+    const xLabels = rec.texts.filter(text => text.align === 'center' && text.baseline === 'top');
+    expect(xLabels.length).toBeGreaterThan(0);
+    expect(xLabels.every(text => text.y > Math.max(verticalAxis[0].y, verticalAxis[1].y))).toBe(true);
+    const yLabels = rec.texts.filter(text => text.align === 'right' && text.baseline === 'middle');
+    expect(yLabels.length).toBeGreaterThan(0);
+    expect(yLabels.every(text => text.x < Math.min(horizontalAxis[0].x, horizontalAxis[1].x))).toBe(true);
+  });
+});
+
+describe('CH9 — bubble scale and numeric-X trendlines', () => {
+  it('applies bubbleScale to the default maximum bubble diameter', () => {
+    const render = (bubbleScale: number) => {
+      const rec = markerRecordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'bubble',
+        bubbleScale,
+        categories: ['0', '1'],
+        series: [series({ values: [0, 1], bubbleSizes: [25, 100] })],
+        catAxisMin: 0,
+        catAxisMax: 1,
+        valMin: 0,
+        valMax: 1,
+      }), RECT, 1);
+      return Math.max(...rec.arcs.map(arc => arc.r));
+    };
+    expect(render(100) / render(50)).toBeCloseTo(2, 5);
+  });
+
+  it('fits and extends a scatter trendline in numeric X-axis units', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['1', '2', '3'],
+      series: [series({
+        values: [1, 2, 3],
+        bubbleSizes: [1, 1, 1],
+        trendLines: [{ trendlineType: 'linear', backward: 0.5, forward: 0.5, lineColor: '000000' }],
+      })],
+      catAxisMin: 0,
+      catAxisMax: 4,
+      valMin: 0,
+      valMax: 4,
+    }), RECT, 1);
+    const markerXs = rec.arcs.map(arc => arc.x);
+    const diagonal = rec.segments.find(segment =>
+      segment.length === 2
+      && Math.abs(segment[0].x - segment[1].x) > 1
+      && Math.abs(segment[0].y - segment[1].y) > 1,
+    );
+    expect(diagonal).toBeDefined();
+    const trendline = diagonal as Array<{ x: number; y: number }>;
+    expect(Math.min(trendline[0].x, trendline[1].x)).toBeLessThan(Math.min(...markerXs));
+    expect(Math.max(trendline[0].x, trendline[1].x)).toBeGreaterThan(Math.max(...markerXs));
+  });
+});
+
 describe('CH9 — line/area per-point data labels (§21.2.2.45)', () => {
   for (const chartType of ['line', 'area'] as const) {
     it(`${chartType}: dataLabelOverrides render custom text at the point, and delete (empty) skips it`, () => {
@@ -2767,8 +2858,7 @@ describe('CH6 — category-axis label rotation + tickLblPos (commit 2)', () => {
   });
 });
 
-/** Recording context that captures line-dash state alongside stroked segments,
- *  so a dashed trendline can be distinguished from the solid data line. */
+/** Recording context that captures line-dash state alongside stroked segments. */
 function dashSegRecordingCtx(): { ctx: CanvasRenderingContext2D; segs: Array<{ dashed: boolean }> } {
   const segs: Array<{ dashed: boolean }> = [];
   let dash: number[] = [];
@@ -2810,22 +2900,24 @@ describe('CH6-follow — series trendlines (commit 3)', () => {
     series: [series({ name: 'S', values: [1, 3, 5, 7], ...over })],
   });
 
-  it('a linear trendline draws a dashed line', () => {
+  it('a linear trendline without prstDash draws an additional solid line', () => {
     const noTrend = dashSegRecordingCtx();
     renderChart(noTrend.ctx, lineWithTrend({}), RECT, 1);
     expect(noTrend.segs.some(s => s.dashed)).toBe(false);
 
     const withTrend = dashSegRecordingCtx();
     renderChart(withTrend.ctx, lineWithTrend({ trendLines: [{ trendlineType: 'linear' }] }), RECT, 1);
-    expect(withTrend.segs.some(s => s.dashed)).toBe(true);
-    // The solid data line is still drawn too.
-    expect(withTrend.segs.some(s => !s.dashed)).toBe(true);
+    expect(withTrend.segs.length).toBeGreaterThan(noTrend.segs.length);
+    expect(withTrend.segs.some(s => s.dashed)).toBe(false);
   });
 
-  it('a movingAvg trendline draws a dashed line', () => {
+  it('a movingAvg trendline without prstDash draws an additional solid line', () => {
+    const noTrend = dashSegRecordingCtx();
+    renderChart(noTrend.ctx, lineWithTrend({}), RECT, 1);
     const rec = dashSegRecordingCtx();
     renderChart(rec.ctx, lineWithTrend({ trendLines: [{ trendlineType: 'movingAvg', period: 2 }] }), RECT, 1);
-    expect(rec.segs.some(s => s.dashed)).toBe(true);
+    expect(rec.segs.length).toBeGreaterThan(noTrend.segs.length);
+    expect(rec.segs.some(s => s.dashed)).toBe(false);
   });
 
   it('an unsupported trendline type draws nothing extra (dashed absent)', () => {

@@ -346,17 +346,17 @@ stroke ss=#888 lw=1 dash=
 save
 set fillStyle=#4472C4
 beginPath
-arc 88.8,213.31,26.9894,0,6.2832
+arc 88.8,213.31,10.7958,0,6.2832
 fill fs=#4472C4 ga=1
 restore
 save
 beginPath
-arc 354.4,91.17,38.1687,0,6.2832
+arc 354.4,91.17,15.2675,0,6.2832
 fill fs=#4472C4 ga=1
 restore
 save
 beginPath
-arc 620,152.24,31.9343,0,6.2832
+arc 620,152.24,12.7737,0,6.2832
 fill fs=#4472C4 ga=1
 restore
 restore"

@@ -167,6 +167,10 @@ pub struct ChartModel {
     pub plot_area_manual_layout: Option<ChartManualLayout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scatter_style: Option<String>,
+    /// `<c:bubbleChart><c:bubbleScale val>` (§21.2.2.21) — bubble diameter
+    /// scale as a percentage of the renderer's default bubble size (0–300).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_scale: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radar_style: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2877,6 +2881,7 @@ pub fn parse_chartex_part_with_references(
         val_axis_format_code,
         plot_area_manual_layout: None,
         scatter_style: None,
+        bubble_scale: None,
         // chartEx (waterfall/treemap/etc.) has its own axis model and is not
         // wired for axis titles or an explicit chartSpace border yet.
         cat_axis_title,
@@ -4213,6 +4218,13 @@ pub fn parse_chart_part_with_references(
             .and_then(|n| attr(&n, "val"))
             .unwrap_or_else(|| "col".into());
         canonical_chart_type("bar", &bar_dir, &grouping)
+    } else if let Some(ac) = find_chart("areaChart").or_else(|| find_chart("area3DChart")) {
+        // An area+line combination must dispatch through the area renderer so
+        // the fill-bearing group is stacked before the line overlay. Selecting
+        // line merely because a `<c:lineChart>` is also present discards every
+        // authored area fill. Per-series `series_type` keeps both groups.
+        let grouping = read_grouping(&ac, "standard");
+        canonical_chart_type("area", "col", &grouping)
     } else if let Some(lc) = find_chart("lineChart").or_else(|| find_chart("line3DChart")) {
         let grouping = read_grouping(&lc, "standard");
         canonical_chart_type("line", "col", &grouping)
@@ -4236,9 +4248,6 @@ pub fn parse_chart_part_with_references(
         "pie".to_string()
     } else if find_chart("doughnutChart").is_some() {
         "doughnut".to_string()
-    } else if let Some(ac) = find_chart("areaChart").or_else(|| find_chart("area3DChart")) {
-        let grouping = read_grouping(&ac, "standard");
-        canonical_chart_type("area", "col", &grouping)
     } else if find_chart("scatterChart").is_some() {
         "scatter".to_string()
     } else if find_chart("bubbleChart").is_some() {
@@ -4624,6 +4633,17 @@ pub fn parse_chart_part_with_references(
                 .find(|n| n.is_element() && n.tag_name().name() == "spPr")
                 .and_then(|sp| {
                     if sp
+                        .children()
+                        .any(|n| n.is_element() && n.tag_name().name() == "noFill")
+                    {
+                        // An explicit shape-level `<a:noFill/>` suppresses the
+                        // series fill but does not remove the series from the
+                        // data model (notably, an invisible first series can be
+                        // the baseline of a stacked area chart). CSS accepts
+                        // 8-digit hex, so preserve that authored transparency
+                        // without conflating it with `None` (theme fallback).
+                        Some("00000000".to_string())
+                    } else if sp
                         .children()
                         .any(|n| n.is_element() && n.tag_name().name() == "solidFill")
                     {
@@ -5191,6 +5211,16 @@ pub fn parse_chart_part_with_references(
     } else {
         None
     };
+    let bubble_scale = if chart_type == "bubble" {
+        plot_area
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "bubbleScale")
+            .and_then(|n| attr(&n, "val"))
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value <= 300)
+    } else {
+        None
+    };
 
     // Axis titles + run props (ECMA-376 §21.2.2.6 `CT_Title`). Iterate every
     // `<c:catAx>`/`<c:valAx>` so the scatter case — two `<c:valAx>`, no
@@ -5463,6 +5493,7 @@ pub fn parse_chart_part_with_references(
         val_axis_format_code,
         plot_area_manual_layout,
         scatter_style,
+        bubble_scale,
         cat_axis_title,
         val_axis_title,
         // TS `ChartElement` renamed the axis-title run-prop fields to the
@@ -5709,6 +5740,7 @@ mod tests {
             title_manual_layout: None,
             plot_area_manual_layout: None,
             scatter_style: None,
+            bubble_scale: None,
             radar_style: None,
             secondary_val_axis: None,
             secondary_cat_axis: None,
@@ -6789,6 +6821,39 @@ mod tests {
 
         assert_eq!(chart.series[0].color.as_deref(), Some("ED7D31"));
         assert_eq!(chart.series[1].color.as_deref(), Some("ED7D31"));
+    }
+
+    #[test]
+    fn area_series_no_fill_stays_transparent_but_remains_in_the_stack() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart><c:plotArea><c:areaChart>
+                <c:grouping val="stacked"/>
+                <c:ser><c:idx val="0"/><c:order val="0"/>
+                  <c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>
+                  <c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+                  <c:val><c:numLit><c:pt idx="0"><c:v>80</c:v></c:pt></c:numLit></c:val>
+                </c:ser>
+              </c:areaChart>
+              <c:lineChart><c:grouping val="standard"/>
+                <c:ser><c:idx val="1"/><c:order val="1"/>
+                  <c:spPr><a:ln><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></c:spPr>
+                  <c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+                  <c:val><c:numLit><c:pt idx="0"><c:v>85</c:v></c:pt></c:numLit></c:val>
+                </c:ser>
+              </c:lineChart></c:plotArea></c:chart>
+            </c:chartSpace>"#
+        );
+        let doc = chart_space_of(&xml);
+        let chart = parse_chart_part(doc.root_element(), &FixtureResolver).expect("chart parses");
+
+        assert_eq!(chart.chart_type, "stackedArea");
+        assert_eq!(chart.series[0].series_type.as_deref(), Some("area"));
+        assert_eq!(chart.series[0].color.as_deref(), Some("00000000"));
+        assert_eq!(chart.series[0].line_hidden, Some(true));
+        assert_eq!(chart.series[0].values, vec![Some(80.0)]);
+        assert_eq!(chart.series[1].series_type.as_deref(), Some("line"));
+        assert_eq!(chart.series[1].line_color.as_deref(), Some("000000"));
     }
 
     #[test]
@@ -9163,6 +9228,7 @@ mod tests {
                 <c:yVal><c:numRef><c:f>Y</c:f></c:numRef></c:yVal>
                 <c:bubbleSize><c:numRef><c:f>Size</c:f></c:numRef></c:bubbleSize>
               </c:ser>
+              <c:bubbleScale val="40"/>
             </c:bubbleChart></c:plotArea></c:chart></c:chartSpace>"#
         );
         let doc = root_of(&xml);
@@ -9179,6 +9245,7 @@ mod tests {
             chart.series[0].bubble_sizes,
             Some(vec![Some(3.0), Some(5.0)])
         );
+        assert_eq!(chart.bubble_scale, Some(40));
     }
 
     #[test]

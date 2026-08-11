@@ -801,7 +801,7 @@ function planValueAxis(
 
 /** Draw a series' `<c:trendline>` regression lines (ECMA-376 §21.2.2.211).
  *  Each trendline is fitted over the series' non-null `(categoryIndex, value)`
- *  points via {@link fitTrendline} and stroked (dashed) through the chart's
+ *  points via {@link fitTrendline} and stroked through the chart's
  *  `toX` (category-index → pixel) and `toY` (value → pixel) maps. `forward` /
  *  `backward` extend the linear fit past the data ends by that many category
  *  units. Unsupported types (exp/log/power/poly) fit to nothing and draw
@@ -814,6 +814,7 @@ function drawSeriesTrendlines(
   toX: (i: number) => number,
   toY: (v: number) => number,
   ptToPx: number,
+  xValues?: readonly (number | null)[],
 ): void {
   const tls = s.trendLines;
   if (!tls || tls.length === 0) return;
@@ -821,7 +822,8 @@ function drawSeriesTrendlines(
   const xs: number[] = []; const ys: number[] = [];
   for (let i = 0; i < s.values.length; i++) {
     const v = s.values[i];
-    if (v != null) { xs.push(i); ys.push(v); }
+    const x = xValues ? xValues[i] : i;
+    if (v != null && x != null) { xs.push(x); ys.push(v); }
   }
   if (xs.length < 2) return;
   const prevDash = ctx.getLineDash ? ctx.getLineDash() : [];
@@ -842,7 +844,10 @@ function drawSeriesTrendlines(
     }
     ctx.strokeStyle = tl.lineColor ? `#${tl.lineColor}` : seriesColor;
     ctx.lineWidth = tl.lineWidthEmu ? axisLineWidthPx(tl.lineWidthEmu, ptToPx) : 1.5;
-    ctx.setLineDash([6, 4]);
+    // `<c:trendline><c:spPr><a:ln>` without an authored dash is a solid line.
+    // Dash presets can be added to ChartTrendline when the parser retains one;
+    // never invent a dashed style for an otherwise solid DrawingML line.
+    ctx.setLineDash([]);
     ctx.beginPath();
     for (let i = 0; i < fxs.length; i++) {
       const px = toX(fxs[i]); const py = toY(fys[i]);
@@ -2591,6 +2596,16 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const { x, y, w, h } = r;
   const cats = chartCategories(chart);
   const n = cats.length; if (n === 0) return;
+  // A plot area can contain both `<c:areaChart>` and `<c:lineChart>` groups.
+  // Only the ordered area-group series participate in the filled stack; line
+  // series share the axes but remain independent overlays (§21.2.2.145).
+  const areaSeries = chart.series
+    .map((series, chartIndex) => ({ series, chartIndex }))
+    .filter(({ series }) => series.seriesType == null || series.seriesType === 'area');
+  const lineSeries = chart.series
+    .map((series, chartIndex) => ({ series, chartIndex }))
+    .filter(({ series }) => series.seriesType === 'line');
+  if (areaSeries.length === 0 && lineSeries.length === 0) return;
   const stacked = chart.chartType === 'stackedArea' || chart.chartType === 'stackedAreaPct';
   // stackedAreaPct (`<c:grouping val="percentStacked">`, ECMA-376 §21.2.2.76
   // c:grouping / §21.2.3.17 ST_Grouping) normalizes each category so the stack
@@ -2602,15 +2617,15 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const pctTotals = pct
     ? cats.map((_, ci) => {
         let t = 0;
-        for (const s of chart.series) t += Math.abs(s.values[ci] ?? 0);
+        for (const { series } of areaSeries) t += Math.abs(series.values[ci] ?? 0);
         return t || 1;
       })
     : null;
   // The stacked (normalized when pct) contribution of series `si` at category
   // `ci` — what actually gets added to the running stack base/top. Un-stacked
   // charts never call this (raw values are used directly below).
-  const stackedValue = (si: number, ci: number): number => {
-    const raw = chart.series[si].values[ci] ?? 0;
+  const stackedValue = (areaIndex: number, ci: number): number => {
+    const raw = areaSeries[areaIndex].series.values[ci] ?? 0;
     return pct && pctTotals ? (raw / pctTotals[ci]) * 100 : raw;
   };
 
@@ -2699,13 +2714,17 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   for (let ci = 0; ci < n; ci++) {
     if (stacked) {
       let sum = 0;
-      for (let si = 0; si < chart.series.length; si++) sum += stackedValue(si, ci);
+      for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) sum += stackedValue(areaIndex, ci);
       dataMax = Math.max(dataMax, sum);
     } else {
       for (const s of chart.series) {
         if (isSecondarySeries(s)) continue;
         dataMax = Math.max(dataMax, s.values[ci] ?? 0);
       }
+    }
+    for (const { series } of lineSeries) {
+      if (isSecondarySeries(series)) continue;
+      dataMax = Math.max(dataMax, series.values[ci] ?? 0);
     }
   }
   // percentStacked always tops out at exactly 100% (each category's Σ|v|
@@ -2802,11 +2821,11 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // ordered `ser` sequence). Plain unstacked area retains the historical
   // back-to-front painting so the first series remains visually on top.
   const seriesOrder = stacked
-    ? chart.series.map((_, index) => index)
-    : chart.series.map((_, index) => chart.series.length - 1 - index);
-  for (const si of seriesOrder) {
-    const s = chart.series[si];
-    const color = chartColor(si, s);
+    ? areaSeries.map((_, index) => index)
+    : areaSeries.map((_, index) => areaSeries.length - 1 - index);
+  for (const areaIndex of seriesOrder) {
+    const { series: s, chartIndex } = areaSeries[areaIndex];
+    const color = chartColor(chartIndex, s);
     const baseY = py0 + ph;
     // Unstacked secondary series ride their own vertical scale; the stacked
     // branch is never reached with a secondary axis (`sec` is null when
@@ -2828,14 +2847,14 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     if (stacked && stackBase) {
       const topPts = [];
       for (let ci = 0; ci < n; ci++) {
-        topPts.push({ x: toX(ci), y: toY(stackedValue(si, ci) + stackBase[ci]) });
+        topPts.push({ x: toX(ci), y: toY(stackedValue(areaIndex, ci) + stackBase[ci]) });
       }
       ctx.moveTo(topPts[0].x, topPts[0].y);
       appendCurve(ctx, topPts, smooth);
       for (let ci = n - 1; ci >= 0; ci--) {
         ctx.lineTo(toX(ci), toY(stackBase[ci]));
       }
-      for (let ci = 0; ci < n; ci++) stackBase[ci] += stackedValue(si, ci);
+      for (let ci = 0; ci < n; ci++) stackBase[ci] += stackedValue(areaIndex, ci);
     } else {
       const topPts = [];
       for (let ci = 0; ci < n; ci++) topPts.push({ x: toX(ci), y: yOf(s.values[ci] ?? 0) });
@@ -2850,8 +2869,12 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     // hex, so do not invent translucency for area series.
     ctx.fillStyle = color;
     ctx.fill();
-    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash([]);
-    ctx.stroke();
+    if (s.lineHidden !== true) {
+      ctx.strokeStyle = s.lineColor ? `#${s.lineColor}` : color;
+      ctx.lineWidth = s.lineWidthEmu ? axisLineWidthPx(s.lineWidthEmu, ptToPx) : 1.5;
+      ctx.setLineDash([]);
+      ctx.stroke();
+    }
   }
 
   // Markers, error bars, and per-point data labels for area series. Drawn in a
@@ -2871,19 +2894,19 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     // Top of each series' band per category (stacked); the raw value otherwise.
     // Rebuilt independently of the fill loop's mutated stackBase. The ordered
     // series sequence stacks forward, so band si reaches Σ_{k=0..si}.
-    const topValue = (si: number, ci: number): number => {
+    const topValue = (areaIndex: number, ci: number): number => {
       if (stacked) {
         let sum = 0;
-        for (let k = 0; k <= si; k++) sum += stackedValue(k, ci);
+        for (let k = 0; k <= areaIndex; k++) sum += stackedValue(k, ci);
         return sum;
       }
-      return chart.series[si].values[ci] ?? 0;
+      return areaSeries[areaIndex].series.values[ci] ?? 0;
     };
-    for (let si = 0; si < chart.series.length; si++) {
-      const s = chart.series[si];
-      const color = chartColor(si, s);
+    for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) {
+      const { series: s, chartIndex } = areaSeries[areaIndex];
+      const color = chartColor(chartIndex, s);
       const yOf = yMapFor(s);
-      const plottedOf = (ci: number): number => topValue(si, ci);
+      const plottedOf = (ci: number): number => topValue(areaIndex, ci);
       // Error bars first (markers overlay their tips).
       for (const eb of s.errBars ?? []) {
         drawCategoryErrorBars(ctx, s, eb, n, toX, yOf, plottedOf, color);
@@ -2922,6 +2945,62 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
         chart.dataLabelPosition ?? 'ctr',
       );
     }
+  }
+
+  // Paint `<c:lineChart>` groups after the area fills, using the same category
+  // and value-axis transforms. They do not alter the area stack. This is the
+  // OOXML combo-chart z-order: later chart groups overlay earlier ones.
+  for (const { series: s, chartIndex } of lineSeries) {
+    const color = chartColor(chartIndex, s);
+    const stroke = s.lineColor ? `#${s.lineColor}` : color;
+    const yOf = yMapFor(s);
+    if (s.lineHidden !== true) {
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = s.lineWidthEmu ? axisLineWidthPx(s.lineWidthEmu, ptToPx) : Math.max(1, 2.25 * ptToPx);
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      let run: Array<{ x: number; y: number }> = [];
+      const flushRun = (): void => {
+        if (run.length === 0) return;
+        ctx.moveTo(run[0].x, run[0].y);
+        appendCurve(ctx, run, s.smooth === true);
+        run = [];
+      };
+      for (let ci = 0; ci < n; ci++) {
+        const value = s.values[ci];
+        if (value == null) {
+          if ((chart.dispBlanksAs ?? 'gap') === 'gap') flushRun();
+          if ((chart.dispBlanksAs ?? 'gap') !== 'zero') continue;
+        }
+        run.push({ x: toX(ci), y: yOf(value ?? 0) });
+      }
+      flushRun();
+      ctx.stroke();
+    }
+
+    const plottedOf = (ci: number): number => s.values[ci] ?? 0;
+    for (const eb of s.errBars ?? []) {
+      drawCategoryErrorBars(ctx, s, eb, n, toX, yOf, plottedOf, stroke);
+    }
+    if (s.showMarker === true || seriesHasMarkerDetail(s)) {
+      for (let ci = 0; ci < n; ci++) {
+        const value = s.values[ci];
+        if (value == null) continue;
+        const dpt = (s.dataPointOverrides ?? []).find(d => d.idx === ci);
+        const symbol = dpt?.markerSymbol ?? s.markerSymbol ?? 'circle';
+        if (symbol === 'none') continue;
+        drawMarker(
+          ctx, toX(ci), yOf(value), symbol, dpt?.markerSize ?? s.markerSize ?? 5,
+          dpt?.markerFill ?? dpt?.color ?? s.markerFill ?? stroke,
+          dpt?.markerLine ?? s.markerLine ?? null, ptToPx,
+        );
+      }
+    }
+    drawCategoryDataLabels(
+      ctx, s, cats, n, toX, yOf, plottedOf, ph, ptToPx, chart.date1904 ?? false, false,
+      chartFontFamily(chart, chart.dataLabelFontFace, 'minor'), chart.dataLabelPosition ?? 'r',
+    );
+    drawSeriesTrendlines(ctx, s, stroke, toX, yOf, ptToPx);
   }
 
   // Value-axis tick marks + labels. The gridlines themselves were already laid
@@ -3742,6 +3821,22 @@ function scatterXValue(cats: string[], index: number, useIndexX: boolean): numbe
   return Number.isNaN(value) ? null : value;
 }
 
+/** `<c:bubbleScale>` scales the default bubble diameter, not its data area.
+ * The schema default is 100%; the data value remains area-proportional, so the
+ * per-point diameter is proportional to sqrt(value). */
+function bubbleSizeToDiameterScale(
+  chart: ChartModel,
+  bubbleSizes: readonly (number | null)[],
+  pw: number,
+  ph: number,
+): number {
+  const maxSize = Math.max(0, ...bubbleSizes.filter((value): value is number => value != null));
+  if (maxSize <= 0) return 0;
+  const scalePercent = clamp(chart.bubbleScale ?? 100, 0, 300) / 100;
+  const defaultMaxDiameterPx = Math.min(pw, ph) * 0.1;
+  return (defaultMaxDiameterPx * scalePercent) / Math.sqrt(maxSize);
+}
+
 /** Paint scatter series into an already-computed plot rectangle. Axis/gridline
  * layout stays with the owning chart renderer, which lets a scatter group be
  * overlaid on a bar chart without duplicating either chart's frame. */
@@ -3814,11 +3909,7 @@ function drawScatterSeriesLayer(
     if (!hideMarkers) {
       let bubbleScale = 0;
       if (isBubble && s.bubbleSizes?.length) {
-        const maxSize = Math.max(0, ...s.bubbleSizes.filter((value): value is number => value != null));
-        if (maxSize > 0) {
-          const maxRadiusPx = Math.min(pw, ph) / Math.max(8, s.values.length * 1.6);
-          bubbleScale = maxRadiusPx / Math.sqrt(maxSize);
-        }
+        bubbleScale = bubbleSizeToDiameterScale(chart, s.bubbleSizes, pw, ph);
       }
       for (let ci = 0; ci < s.values.length; ci++) {
         const yv = s.values[ci];
@@ -3831,7 +3922,7 @@ function drawScatterSeriesLayer(
         if (isBubble && bubbleScale > 0) {
           const bubbleSize = s.bubbleSizes?.[ci];
           if (bubbleSize != null && bubbleSize > 0) {
-            sizePt = (Math.sqrt(bubbleSize) * bubbleScale * 2) / ptToPx;
+            sizePt = (Math.sqrt(bubbleSize) * bubbleScale) / ptToPx;
           }
         }
         const fill = dpt?.markerFill ?? dpt?.color ?? s.markerFill ?? fallbackColor;
@@ -3853,6 +3944,9 @@ function drawScatterSeriesLayer(
       chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
       chart.dataLabelPosition ?? 'r',
     );
+
+    const trendlineX = s.values.map((_, index) => scatterXValue(cats, index, useIndexX));
+    drawSeriesTrendlines(ctx, s, fallbackColor, toX, toY, ptToPx, trendlineX);
   }
 }
 
@@ -3991,6 +4085,27 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const toY = (v: number) => py0 + ph - ((v - yMin) / (yMax - yMin)) * ph;
   const xStep = niceStep(xMax - xMin);
 
+  // Each scatter axis is a numeric value axis. Its crossing coordinate comes
+  // from the opposite axis's scale (§21.2.2.31 / §21.2.2.32): autoZero uses
+  // zero when the range contains it, while min/max pin the rule to an edge.
+  let xAxisY = py0 + ph;
+  if (chart.catAxisCrossesAt != null) {
+    xAxisY = clamp(toY(chart.catAxisCrossesAt), py0, py0 + ph);
+  } else {
+    const crosses = chart.catAxisCrosses ?? 'autoZero';
+    if (crosses === 'autoZero' && yMin < 0 && yMax > 0) xAxisY = clamp(toY(0), py0, py0 + ph);
+    else if (crosses === 'max') xAxisY = py0;
+  }
+
+  let yAxisX = px0;
+  if (chart.valAxisCrossesAt != null) {
+    yAxisX = clamp(toX(chart.valAxisCrossesAt), px0, px0 + pw);
+  } else {
+    const crosses = chart.valAxisCrosses ?? 'autoZero';
+    if (crosses === 'autoZero' && xMin < 0 && xMax > 0) yAxisX = clamp(toX(0), px0, px0 + pw);
+    else if (crosses === 'max') yAxisX = px0 + pw;
+  }
+
   // Y-axis gridlines + labels + major tick marks. Scatter has no baseline
   // special-case, so it strokes every gridline in the resolved color/width.
   const grid = valGridStroke(chart, ptToPx);
@@ -4002,14 +4117,28 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       const v = yMin + si * yAxisStep; if (v > yMax + yAxisStep * 0.01) break;
       const gy = toY(v);
       ctx.strokeStyle = grid.color; ctx.lineWidth = grid.width;
-      ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
-      ctx.fillStyle = '#555'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 4, gy);
+      if (drawValMajorGridlines(chart)) {
+        ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      }
+      if (chart.valAxisTickLabelPos !== 'none') {
+        ctx.fillStyle = '#555';
+        const labelPos = chart.valAxisTickLabelPos ?? 'nextTo';
+        let labelX: number;
+        if (labelPos === 'high') {
+          ctx.textAlign = 'left'; labelX = px0 + pw + 4;
+        } else if (labelPos === 'low') {
+          ctx.textAlign = 'right'; labelX = px0 - 4;
+        } else {
+          ctx.textAlign = 'right'; labelX = yAxisX - 4;
+        }
+        ctx.textBaseline = 'middle';
+        ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), labelX, gy);
+      }
       // Scatter keeps its own undefined colour default (→ drawAxisTick's '#888'),
       // so only the width formula is shared. `axisLineWidthPx`'s 1 px fallback is
       // equivalent to undefined here (drawAxisTick treats both as a hairline).
       const yAxisLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : undefined;
-      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, yAxisLineColor, axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx));
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', yAxisX, gy, yAxisLineColor, axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx));
     }
   }
 
@@ -4026,27 +4155,6 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       if (v > xMax + xStep * 0.01) break;
       const gx = toX(v);
       ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
-    }
-  }
-
-  // X-axis Y position. `<c:catAx><c:crossesAt>` wins; otherwise honor
-  // `<c:catAx><c:crosses>` (`autoZero` / `min` / `max`). The `autoZero`
-  // default puts the axis at y=0 if the data range crosses zero —
-  // that's what makes Excel "Project Timeline" templates split
-  // milestones (positive Y) above the timeline ruler and tasks
-  // (negative Y) below. Clamped to the plot rect so the axis line
-  // stays visible when the data doesn't actually cross.
-  let xAxisY = py0 + ph;
-  if (chart.catAxisCrossesAt != null) {
-    xAxisY = clamp(toY(chart.catAxisCrossesAt), py0, py0 + ph);
-  } else {
-    const c = chart.catAxisCrosses ?? 'autoZero';
-    if (c === 'autoZero' && yMin < 0 && yMax > 0) {
-      xAxisY = clamp(toY(0), py0, py0 + ph);
-    } else if (c === 'min') {
-      xAxisY = py0 + ph;
-    } else if (c === 'max') {
-      xAxisY = py0;
     }
   }
 
@@ -4068,26 +4176,30 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     ctx.save();
     ctx.strokeStyle = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#888';
     ctx.lineWidth = axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx);
-    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(yAxisX, py0); ctx.lineTo(yAxisX, py0 + ph); ctx.stroke();
     ctx.restore();
   }
 
   // X-axis tick labels (catAxis), formatted via catAxisFormatCode (typically
   // a date code like "m/d/yyyy"). Skipped when catAxisHidden. Drawn just
-  // below the axis line wherever it sits (axis crossing in the middle of
-  // the plot still anchors the labels to the line itself). Major tick
-  // marks also get drawn here so `<c:majorTickMark val="cross">` produces
+  // at the authored high/low plot edge or next to the crossing axis. Major
+  // tick marks remain attached to the axis rule so `<c:majorTickMark val="cross">` produces
   // the crossing ruler look that templates like the Vertex42 timeline
   // depend on.
   if (!chart.catAxisHidden) {
     const tickFontPx = Math.max(8, Math.min(11, ph / 20));
     ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${tickFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
     const xSteps = Math.round((xMax - xMin) / xStep) + 1;
-    ctx.fillStyle = '#555'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillStyle = '#555'; ctx.textAlign = 'center';
+    const labelPos = chart.catAxisTickLabelPos ?? 'nextTo';
+    const labelY = labelPos === 'low' ? py0 + ph + 4 : labelPos === 'high' ? py0 - 4 : xAxisY + 4;
+    ctx.textBaseline = labelPos === 'high' ? 'bottom' : 'top';
     for (let si = 0; si < xSteps; si++) {
       const v = xMin + si * xStep; if (v > xMax + xStep * 0.01) break;
       const gx = toX(v);
-      ctx.fillText(formatChartValWithCode(v, chart.catAxisFormatCode, chart.date1904), gx, xAxisY + 4);
+      if (labelPos !== 'none') {
+        ctx.fillText(formatChartValWithCode(v, chart.catAxisFormatCode, chart.date1904), gx, labelY);
+      }
       const xAxisLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : undefined;
       drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', xAxisY, gx, xAxisLineColor, axisLineWidthPx(chart.catAxisLineWidthEmu, ptToPx));
     }
@@ -4166,15 +4278,11 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     if (!hideMarkers) {
       // Bubble size scaling. ECMA-376 §21.2.2.4 treats `<c:bubbleSize>` as an
       // area-proportional value, so radius scales by sqrt. We pick a max
-      // radius proportional to the plot width / point count so bubbles
-      // don't overlap in typical Excel-style data.
+      // diameter proportional to the plot's shorter side, then scaled by the
+      // authored `<c:bubbleScale>` percentage.
       let bubbleScale = 0;
       if (isBubble && s.bubbleSizes && s.bubbleSizes.length > 0) {
-        const maxSz = Math.max(0, ...s.bubbleSizes.filter((v): v is number => v != null));
-        if (maxSz > 0) {
-          const maxRadiusPx = Math.min(pw, ph) / Math.max(8, s.values.length * 1.6);
-          bubbleScale = maxRadiusPx / Math.sqrt(maxSz);
-        }
+        bubbleScale = bubbleSizeToDiameterScale(chart, s.bubbleSizes, pw, ph);
       }
 
       for (let ci = 0; ci < s.values.length; ci++) {
@@ -4189,7 +4297,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
           if (bsz != null && bsz > 0) {
             // Convert resulting radius (px) back to pt so drawMarker's
             // ptToPx multiplication gives the same px size.
-            sizePt = (Math.sqrt(bsz) * bubbleScale * 2) / ptToPx;
+            sizePt = (Math.sqrt(bsz) * bubbleScale) / ptToPx;
           }
         }
         const fill = dpt?.markerFill
@@ -4209,6 +4317,16 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       // `'r'` (right of the marker) — unchanged from the previous hardcoded 'r'.
       chart.dataLabelPosition ?? 'r',
     );
+
+    if (s.trendLines && s.trendLines.length > 0) {
+      const trendlineX = s.values.map((_, index) => scatterXValue(cats, index, useIndexX));
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(px0, py0, pw, ph);
+      ctx.clip();
+      drawSeriesTrendlines(ctx, s, fallbackColor, toX, toY, ptToPx, trendlineX);
+      ctx.restore();
+    }
   }
 
   drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleBand.bandH + 2);

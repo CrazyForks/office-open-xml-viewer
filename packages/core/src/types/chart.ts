@@ -550,6 +550,11 @@ export interface ChartModel {
    */
   scatterStyle?: string | null;
   /**
+   * `<c:bubbleChart><c:bubbleScale val>` (ECMA-376 §21.2.2.21), 0–300 percent
+   * of the default bubble diameter. null/undefined uses the schema default 100.
+   */
+  bubbleScale?: number | null;
+  /**
    * `<c:radarChart><c:radarStyle val>` (ECMA-376 §21.2.3.10). Controls
    * whether radar series render as line + markers ("standard" / "marker")
    * or as a closed polygon with area fill ("filled"). null = default

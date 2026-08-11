@@ -207,6 +207,7 @@ export interface ChartModel {
     titleManualLayout?: ChartManualLayout | null;
     plotAreaManualLayout?: ChartManualLayout | null;
     scatterStyle?: string | null;
+    bubbleScale?: number | null;
     radarStyle?: string | null;
     secondaryValAxis?: SecondaryValueAxis | null;
     date1904?: boolean;

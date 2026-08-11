@@ -145,6 +145,34 @@ describe('CH — value-axis gridlines paint under the data series', () => {
     expect(firstGridline).toBeLessThan(firstSeriesFill);
   });
 
+  it('a stacked area/line combo stacks only area series and paints the line as an overlay', () => {
+    const rec = orderedRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedArea',
+      categories: ['A', 'B', 'C'],
+      series: [
+        series({
+          name: 'Invisible baseline', seriesType: 'area', color: '00000000',
+          lineHidden: true, values: [80, 90, 85],
+        }),
+        series({ name: 'Band', seriesType: 'area', color: '1696D2', values: [10, 12, 11] }),
+        series({
+          name: 'Forecast', seriesType: 'line', color: '000000', lineColor: '000000',
+          showMarker: false, values: [85, 95, 91],
+        }),
+      ],
+    }), RECT, 1);
+
+    const fills = rec.events.filter(event => event.op === 'fill');
+    expect(fills.map(event => event.fillStyle.toLowerCase())).toEqual(['#00000000', '#1696d2']);
+    const lineOverlay = rec.events.find(event =>
+      event.op === 'stroke'
+      && event.strokeStyle.toLowerCase() === '#000000'
+      && event.lineWidth > 1,
+    );
+    expect(lineOverlay).toBeDefined();
+  });
+
   it('an area chart honors <c:minorGridlines> with the same count as line, all before the fill', () => {
     // Regression for #883: renderAreaChart silently ignored `<c:minorGridlines>`
     // (§21.2.2.129) while bar/line/stock honored it. With an identical value-axis
