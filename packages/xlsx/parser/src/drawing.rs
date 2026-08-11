@@ -260,6 +260,11 @@ pub(crate) fn parse_drawing_anchors(
         let mime_type = mime_from_ext(&image_path).to_string();
 
         anchors.push(ImageAnchor {
+            z_order: anchor
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "pic")
+                .map(|n| n.range().start as u64)
+                .unwrap_or(anchor.range().start as u64),
             from_col,
             from_col_off,
             from_row,
@@ -1371,6 +1376,7 @@ pub(crate) fn collect_shapes(
             }
 
             out.push(ShapeInfo {
+                z_order: child.range().start as u64,
                 x: nx,
                 y: ny,
                 w: nw,
@@ -1478,6 +1484,7 @@ pub(crate) fn collect_shapes(
             }
 
             out.push(ShapeInfo {
+                z_order: child.range().start as u64,
                 x: nx,
                 y: ny,
                 w: nw,
@@ -2218,6 +2225,7 @@ pub(crate) fn parse_ole_object_anchors(
         };
 
         anchors.push(ImageAnchor {
+            z_order: ole.range().start as u64,
             from_col: rect.from_col,
             from_col_off: rect.from_col_off,
             from_row: rect.from_row,
@@ -3749,6 +3757,7 @@ mod blip_svg_tests {
     #[test]
     fn image_anchor_serializes_path_refs_not_data_url() {
         let anchor = ImageAnchor {
+            z_order: 42,
             from_col: 1,
             from_col_off: 0,
             from_row: 1,

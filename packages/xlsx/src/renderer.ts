@@ -2,7 +2,8 @@ import type {
   Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
   CfRule, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
-  Run, GradientFillSpec, ShapeInfo, SlicerItem, SlicerStyle, SlicerElementStyle,
+  Run, GradientFillSpec, ShapeInfo, ShapeAnchor, ImageAnchor, ChartAnchor,
+  SlicerItem, SlicerStyle, SlicerElementStyle,
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
 import type { Stroke } from '@silurus/ooxml-core';
@@ -3191,42 +3192,13 @@ export function renderViewport(
     scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
   );
 
-  // ── Anchored images (clipped to scrollable area) ─────────────
-  if (worksheet.images && worksheet.images.length > 0 && opts.loadedImages) {
-    renderImages(
-      ctx, worksheet, colAxis, rowAxis, opts.loadedImages, cs,
-      startRow, startCol,
-      scrollOffsetX, scrollOffsetY,
-      scrollAreaX, scrollAreaY,
-      scrollAreaW, scrollAreaH,
-      worksheet.rightToLeft === true, canvasW,
-    );
-  }
-
-  // ── Anchored shape groups (custom geometry, incl. embedded images) ────
-  if (worksheet.shapeGroups && worksheet.shapeGroups.length > 0) {
-    renderShapeGroups(
-      ctx, worksheet, colAxis, rowAxis, cs,
-      startRow, startCol,
-      scrollOffsetX, scrollOffsetY,
-      scrollAreaX, scrollAreaY,
-      scrollAreaW, scrollAreaH,
-      opts.loadedImages,
-      worksheet.rightToLeft === true, canvasW,
-    );
-  }
-
-  // ── Anchored charts (clipped to scrollable area) ──────────────
-  if (worksheet.charts && worksheet.charts.length > 0) {
-    renderCharts(
-      ctx, worksheet, colAxis, rowAxis, cs,
-      startRow, startCol,
-      scrollOffsetX, scrollOffsetY,
-      scrollAreaX, scrollAreaY,
-      scrollAreaW, scrollAreaH,
-      worksheet.rightToLeft === true, canvasW,
-    );
-  }
+  // ── Anchored DrawingML objects, in authored z-order ───────────
+  renderAnchoredDrawings(
+    ctx, worksheet, colAxis, rowAxis, opts.loadedImages, cs,
+    startRow, startCol, scrollOffsetX, scrollOffsetY,
+    scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
+    worksheet.rightToLeft === true, canvasW,
+  );
 
   // ── Anchored slicers (Office 2010+ pivot/table filter buttons) ──
   if (worksheet.slicers && worksheet.slicers.length > 0) {
@@ -3500,6 +3472,81 @@ function renderHeaders(
 // Image anchors  (ECMA-376 §20.5, <xdr:twoCellAnchor>)
 // ────────────────────────────────────────────────────────────────
 
+type AnchoredDrawing =
+  | { kind: 'image'; zOrder: number; fallbackOrder: number; anchor: ImageAnchor }
+  | { kind: 'shape'; zOrder: number; fallbackOrder: number; anchor: ShapeAnchor; shape: ShapeInfo }
+  | { kind: 'chart'; zOrder: number; fallbackOrder: number; anchor: ChartAnchor };
+
+/** Paint worksheet drawing objects in their DrawingML document order.
+ *
+ * ECMA-376 §20.5.2.35 defines the worksheet drawing as an ordered sequence;
+ * later objects are visually above earlier objects. A grouped chart can contain
+ * a chart frame followed by title/footer text boxes, so rendering by object type
+ * (all shapes, then all charts) incorrectly covered those text boxes with the
+ * chart background. Parser-emitted `zOrder` values are byte positions in the
+ * selected drawing-part XML and therefore preserve that authored order. */
+function renderAnchoredDrawings(
+  ctx: CanvasRenderingContext2D,
+  ws: Worksheet,
+  colAxis: GridAxisGeometry,
+  rowAxis: GridAxisGeometry,
+  loadedImages: Map<string, CanvasImageSource | null> | undefined,
+  cs: number,
+  startRow: number,
+  startCol: number,
+  scrollOffsetX: number,
+  scrollOffsetY: number,
+  scrollAreaX: number,
+  scrollAreaY: number,
+  scrollAreaW: number,
+  scrollAreaH: number,
+  rtl: boolean,
+  canvasW: number,
+): void {
+  const drawings: AnchoredDrawing[] = [];
+  let fallbackOrder = 0;
+  if (loadedImages) {
+    for (const anchor of ws.images ?? []) {
+      drawings.push({ kind: 'image', zOrder: anchor.zOrder ?? Number.MAX_SAFE_INTEGER, fallbackOrder: fallbackOrder++, anchor });
+    }
+  }
+  for (const anchor of ws.shapeGroups ?? []) {
+    for (const shape of anchor.shapes) {
+      drawings.push({ kind: 'shape', zOrder: shape.zOrder ?? Number.MAX_SAFE_INTEGER, fallbackOrder: fallbackOrder++, anchor, shape });
+    }
+  }
+  for (const anchor of ws.charts ?? []) {
+    drawings.push({ kind: 'chart', zOrder: anchor.zOrder ?? Number.MAX_SAFE_INTEGER, fallbackOrder: fallbackOrder++, anchor });
+  }
+  drawings.sort((a, b) => a.zOrder - b.zOrder || a.fallbackOrder - b.fallbackOrder);
+
+  for (const drawing of drawings) {
+    if (drawing.kind === 'image') {
+      renderImages(
+        ctx, ws, colAxis, rowAxis, loadedImages as Map<string, CanvasImageSource | null>, cs,
+        startRow, startCol, scrollOffsetX, scrollOffsetY,
+        scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH, rtl, canvasW,
+        [drawing.anchor],
+      );
+    } else if (drawing.kind === 'shape') {
+      renderShapeGroups(
+        ctx, ws, colAxis, rowAxis, cs,
+        startRow, startCol, scrollOffsetX, scrollOffsetY,
+        scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
+        loadedImages, rtl, canvasW,
+        [{ ...drawing.anchor, shapes: [drawing.shape] }],
+      );
+    } else {
+      renderCharts(
+        ctx, ws, colAxis, rowAxis, cs,
+        startRow, startCol, scrollOffsetX, scrollOffsetY,
+        scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH, rtl, canvasW,
+        [drawing.anchor],
+      );
+    }
+  }
+}
+
 /** Sum scaled column widths for cols 1..n-1 (sheet-space X of col n in scaled px). */
 function sheetXForCol(
   axis: GridAxisGeometry,
@@ -3534,6 +3581,7 @@ function renderImages(
   scrollAreaH: number,
   rtl: boolean,
   canvasW: number,
+  anchors: readonly ImageAnchor[] = ws.images,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
 
@@ -3547,7 +3595,7 @@ function renderImages(
   ctx.rect(clipX, scrollAreaY, scrollAreaW, scrollAreaH);
   ctx.clip();
 
-  for (const anchor of ws.images) {
+  for (const anchor of anchors) {
     // A `<a:duotone>` picture was recoloured at decode time and cached under a
     // colour-suffixed key (§20.1.8.23); look it up with the same key.
     const img = loadedImages.get(imageCacheKey(anchor.imagePath, anchor.duotone));
@@ -3627,10 +3675,10 @@ function renderShapeGroups(
   loadedImages: Map<string, CanvasImageSource | null> | undefined,
   rtl: boolean,
   canvasW: number,
+  anchors: readonly ShapeAnchor[] = ws.shapeGroups ?? [],
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
-  const anchors = ws.shapeGroups;
-  if (!anchors || anchors.length === 0) return;
+  if (anchors.length === 0) return;
 
   const scrollOriginSheetX = sheetXForCol(colAxis, startCol);
   const scrollOriginSheetY = sheetYForRow(rowAxis, startRow);
@@ -4661,6 +4709,7 @@ function renderCharts(
   scrollAreaH: number,
   rtl: boolean,
   canvasW: number,
+  anchors: readonly ChartAnchor[] = ws.charts,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
 
@@ -4668,7 +4717,7 @@ function renderCharts(
   const scrollOriginSheetY = sheetYForRow(rowAxis, startRow);
   const clipX = sheetAnchoredRectX(scrollAreaX, scrollAreaW, canvasW, rtl);
 
-  for (const anchor of ws.charts) {
+  for (const anchor of anchors) {
     const fromCol1 = anchor.fromCol + 1;
     const fromRow1 = anchor.fromRow + 1;
     const toCol1   = anchor.toCol   + 1;

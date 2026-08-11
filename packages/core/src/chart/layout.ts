@@ -138,7 +138,7 @@ export function chartTitleBand(
   topPadFrac: number,
   bottomPadFrac: number,
 ): ChartTitleBand {
-  if (!chart.title) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
+  if (!chart.title && !chart.titlePresent) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
   const fontPx = chartTitleFontPx(chart, h, ptToPx);
   // Total band height is preserved verbatim from the family fractions so the
   // plot rectangle below stays put.
@@ -274,7 +274,7 @@ export function cartesianTitleBand(
   h: number,
   ptToPx: number,
 ): ChartTitleBand {
-  if (!chart.title) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
+  if (!chart.title && !chart.titlePresent) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
   const fontPx = chartTitleFontPx(chart, h, ptToPx);
   const bandH = fontPx * TITLE_BAND_FONT_FRAC;
   const topPad = Math.min(Math.max(0, bandH - fontPx), fontPx * TITLE_TOP_PAD_FONT_FRAC);

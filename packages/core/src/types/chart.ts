@@ -271,6 +271,8 @@ export interface ChartSeriesDataLabels {
   position?: string;
   fontColor?: string;
   formatCode?: string;
+  /** `<c:dLbls><c:separator>` (§21.2.2.170), including authored line breaks. */
+  separator?: string;
   /** Series-level bold default for data labels. */
   fontBold?: boolean;
   /** Series-level font size for data labels (OOXML hundredths of a point). */
@@ -325,6 +327,8 @@ export type ChartType =
 export interface ChartModel {
   chartType: ChartType;
   title: string | null;
+  /** Direct chart title element exists; an empty title still reserves its band. */
+  titlePresent?: boolean;
   categories: string[];
   series: ChartSeries[];
   /** Text boxes in the Chart Drawing part referenced by `<c:userShapes>`.

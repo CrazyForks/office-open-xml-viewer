@@ -63,6 +63,10 @@ pub struct ChartModel {
     // ── Required (always serialized) ────────────────────────────────────────
     pub chart_type: String,
     pub title: Option<String>,
+    /// A direct `<c:title>` / `<cx:title>` exists even when its text is empty.
+    /// Empty title placeholders still reserve their authored layout band.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_present: bool,
     pub categories: Vec<String>,
     pub series: Vec<ChartSeries>,
     pub show_data_labels: bool,
@@ -620,6 +624,10 @@ pub struct ChartSeriesDataLabels {
     pub font_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_code: Option<String>,
+    /// `<c:dLbls><c:separator>` (§21.2.2.170) inserted between enabled label
+    /// components. Office commonly stores a line break here for pie labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_bold: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2409,6 +2417,7 @@ pub fn parse_chartex_part_with_references(
     // Office may save either DrawingML rich text or the compact
     // `<cx:txData><cx:v>` form used by Excel-authored XLSX chartEx parts.
     let chartex_title = child(chart_node, "title").and_then(chartex_text);
+    let chartex_title_present = child(chart_node, "title").is_some();
 
     // ── chartEx title font size (MS 2014 chartex ext) ────────────────────────
     // Precedence: an explicit `sz` on the chartEx part's own `<cx:title>` rich
@@ -2494,6 +2503,7 @@ pub fn parse_chartex_part_with_references(
             }
         })
         .unwrap_or_else(|| vec![None; pt_count]);
+    let source_number_format = chartex_number_format(root, &["size", "val"], references);
 
     // `<cx:subtotals><cx:idx val>` identifies only points explicitly marked as
     // totals. The first waterfall point starts at zero geometrically, but it is
@@ -2532,6 +2542,7 @@ pub fn parse_chartex_part_with_references(
     // positive-bar labels stay tx1 (black).
     let mut data_label_colors_vec: Vec<Option<String>> = vec![None; raw_values.len().max(1)];
     let mut has_per_label_color = false;
+    let mut data_label_overrides = Vec::new();
     for dl in series_node
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "dataLabel")
@@ -2540,29 +2551,54 @@ pub fn parse_chartex_part_with_references(
             continue;
         };
         if idx >= data_label_colors_vec.len() {
-            continue;
+            data_label_colors_vec.resize(idx + 1, None);
         }
         // First `<a:solidFill>` inside the per-idx <cx:txPr>.
-        let txpr = match dl
+        let txpr = dl
             .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "txPr")
+            .find(|n| n.is_element() && n.tag_name().name() == "txPr");
+        let font_color = txpr.and_then(|txpr| {
+            txpr.descendants()
+                .filter(|n| n.is_element() && n.tag_name().name() == "solidFill")
+                .find_map(|fill| resolver.resolve_solid_fill(fill))
+        });
+        if let Some(color) = font_color.clone() {
+            data_label_colors_vec[idx] = Some(color);
+            has_per_label_color = true;
+        }
+        let text = txpr
+            .map(|txpr| flatten_rich_text(txpr, None))
+            .unwrap_or_default();
+        let font_size_hpt = extract_axis_tick_label_size(dl);
+        let font_bold = extract_axis_tick_label_bold(dl);
+        let position = attr(&dl, "pos");
+        if !text.is_empty()
+            || font_color.is_some()
+            || font_size_hpt.is_some()
+            || font_bold.is_some()
+            || position.is_some()
         {
-            Some(n) => n,
-            None => continue,
-        };
-        for desc in txpr.descendants().filter(|n| n.is_element()) {
-            if desc.tag_name().name() != "solidFill" {
-                continue;
-            }
-            if let Some(c) = resolver.resolve_solid_fill(desc) {
-                data_label_colors_vec[idx] = Some(c);
-                has_per_label_color = true;
-                break;
-            }
+            data_label_overrides.push(ChartDataLabelOverride {
+                idx: idx as u32,
+                text,
+                position,
+                font_color,
+                font_size_hpt,
+                font_bold,
+                label_box: None,
+                show_val: None,
+                show_cat_name: None,
+                show_ser_name: None,
+                show_percent: None,
+                deleted: None,
+            });
         }
     }
+    if !has_per_label_color {
+        data_label_colors_vec.clear();
+    }
 
-    let series = vec![ChartSeries {
+    let mut series = vec![ChartSeries {
         name: String::new(),
         values: raw_values,
         color,
@@ -2577,7 +2613,7 @@ pub fn parse_chartex_part_with_references(
         },
         categories: None,
         bubble_sizes: None,
-        val_format_code: None,
+        val_format_code: source_number_format,
         cat_format_code: None,
         cat_format_codes: None,
         label_color: None,
@@ -2589,7 +2625,11 @@ pub fn parse_chartex_part_with_references(
         marker_fill: None,
         marker_line: None,
         data_point_overrides: None,
-        data_label_overrides: None,
+        data_label_overrides: if data_label_overrides.is_empty() {
+            None
+        } else {
+            Some(data_label_overrides)
+        },
         series_data_labels: None,
         err_bars: None,
         // chartEx (waterfall) has no `<c:smooth>` concept.
@@ -2686,6 +2726,32 @@ pub fn parse_chartex_part_with_references(
         .and_then(extract_axis_tick_label_face)
         .or(style_data_label_face);
     let data_label_position = data_labels.and_then(|labels| attr(&labels, "pos"));
+    if let Some(labels) = data_labels {
+        let visibility = child(labels, "visibility");
+        let visible_attr = |name: &str| -> bool {
+            visibility
+                .and_then(|node| attr(&node, name))
+                .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        };
+        series[0].series_data_labels = Some(ChartSeriesDataLabels {
+            show_val: visible_attr("value"),
+            show_cat_name: visible_attr("categoryName"),
+            show_ser_name: visible_attr("seriesName"),
+            show_percent: false,
+            position: data_label_position.clone(),
+            font_color: data_label_font_color.clone(),
+            format_code: child(labels, "numFmt").and_then(|format| attr(&format, "formatCode")),
+            separator: child(labels, "separator")
+                .and_then(|separator| separator.text())
+                .map(|value| value.to_string()),
+            font_bold: data_label_font_bold,
+            font_size_hpt: data_label_font_size_hpt,
+            label_box: None,
+            show_leader_lines: false,
+            leader_line_color: None,
+            leader_line_width_emu: None,
+        });
+    }
     let (cat_axis_line_color, cat_axis_line_width_emu, cat_axis_line_hidden) = cat_axis
         .map(|axis| extract_axis_line_style(axis, resolver))
         .unwrap_or((None, None, false));
@@ -2755,6 +2821,7 @@ pub fn parse_chartex_part_with_references(
     Some(ChartModel {
         chart_type,
         title: chartex_title,
+        title_present: chartex_title_present,
         categories,
         series,
         // chartEx layouts color by branch/series index, not §21.2.2.227
@@ -3185,6 +3252,25 @@ fn chartex_number_values(
     references.resolve_numbers(formula)
 }
 
+fn chartex_number_format(
+    root: Node,
+    dimension_types: &[&str],
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<String> {
+    let dimension = root.descendants().find(|n| {
+        n.is_element()
+            && n.tag_name().name() == "numDim"
+            && attr(n, "type").is_some_and(|kind| dimension_types.contains(&kind.as_str()))
+    })?;
+    let formula = dimension
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "f")
+        .and_then(|node| node.text())
+        .map(str::trim)
+        .filter(|formula| !formula.is_empty())?;
+    references.resolve_number_format(formula)
+}
+
 fn parse_chartex_hierarchy_rows(
     root: Node,
     references: &mut dyn ChartReferenceResolver,
@@ -3500,6 +3586,9 @@ pub fn parse_series_data_labels(
     let format_code = child(d_lbls, "numFmt")
         .and_then(|n| n.attribute("formatCode"))
         .map(|s| s.to_string());
+    let separator = child(d_lbls, "separator")
+        .and_then(|n| n.text())
+        .map(|s| s.to_string());
     // defRPr fill / bold / size come from the dLbls-level `<c:txPr>`.
     let txpr = child(d_lbls, "txPr");
     let font_color = txpr.and_then(|tx| {
@@ -3545,6 +3634,7 @@ pub fn parse_series_data_labels(
         position: position.clone(),
         font_color: font_color.clone(),
         format_code,
+        separator,
         font_bold: font_bold_default,
         font_size_hpt: font_size_default,
         label_box,
@@ -3949,6 +4039,13 @@ pub trait ChartReferenceResolver {
     /// empty or all-gap vector is a successfully resolved empty range.
     fn resolve_strings(&mut self, formula: &str) -> Option<Vec<String>>;
     fn resolve_numbers(&mut self, formula: &str) -> Option<Vec<Option<f64>>>;
+
+    /// Resolve the source-linked number format of a numeric reference. ChartEx
+    /// dimensions frequently omit caches and `<cx:numFmt>` while data labels
+    /// remain linked to the first source cell's worksheet number format.
+    fn resolve_number_format(&mut self, _formula: &str) -> Option<String> {
+        None
+    }
 
     /// Resolve a rectangular hierarchy source into chartEx level vectors in
     /// document order (deepest level first, root level last). Legacy callers
@@ -5321,9 +5418,11 @@ pub fn parse_chart_part_with_references(
         }
     };
 
+    let title_present = title_node_opt.is_some() || title.is_some();
     Some(ChartModel {
         chart_type,
         title,
+        title_present,
         categories,
         series,
         vary_colors,
@@ -5516,6 +5615,7 @@ mod tests {
         let m = ChartModel {
             chart_type: "clusteredBar".to_string(),
             title: None,
+            title_present: false,
             categories: vec!["A".to_string(), "B".to_string()],
             series: vec![ChartSeries {
                 name: "S1".to_string(),
@@ -7531,6 +7631,7 @@ mod tests {
             r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}">
               <c:dLbls>
                 <c:numFmt formatCode="0.0%"/>
+                <c:separator>&#10;</c:separator>
                 <c:dLbl>
                   <c:idx val="1"/>
                   <c:tx><c:rich><a:p><a:r><a:t>Custom</a:t></a:r></a:p></c:rich></c:tx>
@@ -7554,6 +7655,7 @@ mod tests {
         assert!(defaults.show_percent);
         assert_eq!(defaults.position.as_deref(), Some("ctr"));
         assert_eq!(defaults.format_code.as_deref(), Some("0.0%"));
+        assert_eq!(defaults.separator.as_deref(), Some("\n"));
 
         assert_eq!(overrides.len(), 1);
         let o = &overrides[0];
@@ -8063,6 +8165,10 @@ mod tests {
                 <cx:plotArea>
                   <cx:plotAreaRegion>
                     <cx:series layoutId="treemap">
+                      <cx:dataLabels pos="inEnd">
+                        <cx:visibility seriesName="0" categoryName="1" value="1"/>
+                        <cx:separator>&#10;</cx:separator>
+                      </cx:dataLabels>
                       <cx:layoutPr><cx:parentLabelLayout val="banner"/></cx:layoutPr>
                     </cx:series>
                   </cx:plotAreaRegion>
@@ -8079,6 +8185,15 @@ mod tests {
         assert_eq!(m.series[0].values, vec![Some(50.0), Some(30.0), Some(20.0)]);
         assert_eq!(m.series[0].color, None);
         assert_eq!(m.series[0].data_label_colors, None);
+        let labels = m.series[0]
+            .series_data_labels
+            .as_ref()
+            .expect("data labels");
+        assert!(labels.show_cat_name);
+        assert!(labels.show_val);
+        assert!(!labels.show_ser_name);
+        assert_eq!(labels.position.as_deref(), Some("inEnd"));
+        assert_eq!(labels.separator.as_deref(), Some("\n"));
         let tm = m.chartex_treemap.expect("treemap data present");
         assert_eq!(tm.parent_label_layout.as_deref(), Some("banner"));
         assert_eq!(tm.rows.len(), 3);
@@ -8095,6 +8210,37 @@ mod tests {
         assert!(!m.val_axis_hidden);
     }
 
+    #[test]
+    fn parse_chartex_treemap_retains_hierarchy_node_label_overrides() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chartData><cx:data id="0">
+                <cx:strDim type="cat">
+                  <cx:lvl ptCount="2"><cx:pt idx="0">Leaf A</cx:pt><cx:pt idx="1">Leaf B</cx:pt></cx:lvl>
+                  <cx:lvl ptCount="2"><cx:pt idx="0">Group A</cx:pt><cx:pt idx="1">Group B</cx:pt></cx:lvl>
+                </cx:strDim>
+                <cx:numDim type="size"><cx:lvl ptCount="2"><cx:pt idx="0">10</cx:pt><cx:pt idx="1">20</cx:pt></cx:lvl></cx:numDim>
+              </cx:data></cx:chartData>
+              <cx:chart><cx:plotArea><cx:plotAreaRegion><cx:series layoutId="treemap">
+                <cx:dataLabels pos="inEnd">
+                  <cx:visibility categoryName="1" value="1"/>
+                  <cx:dataLabel idx="3"><cx:txPr><a:p><a:r><a:rPr sz="900"><a:solidFill><a:srgbClr val="222222"/></a:solidFill></a:rPr><a:t>Custom Leaf&#10;20</a:t></a:r></a:p></cx:txPr></cx:dataLabel>
+                </cx:dataLabels>
+              </cx:series></cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let d = chart_space_of(&xml);
+        let m =
+            parse_chartex_part(d.root_element(), &FixtureResolver, None).expect("treemap parses");
+        let overrides = m.series[0].data_label_overrides.as_ref().expect("override");
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].idx, 3);
+        assert_eq!(overrides[0].text, "Custom Leaf\n20");
+        assert_eq!(overrides[0].font_color.as_deref(), Some("222222"));
+        assert_eq!(overrides[0].font_size_hpt, Some(900));
+        assert_eq!(m.series[0].data_label_colors.as_ref().unwrap().len(), 4);
+    }
+
     struct FormulaOnlyTreemapResolver;
 
     impl ChartReferenceResolver for FormulaOnlyTreemapResolver {
@@ -8104,6 +8250,10 @@ mod tests {
 
         fn resolve_numbers(&mut self, formula: &str) -> Option<Vec<Option<f64>>> {
             (formula == "_xlchart.v1.2").then(|| vec![Some(50.0), Some(30.0), Some(20.0)])
+        }
+
+        fn resolve_number_format(&mut self, formula: &str) -> Option<String> {
+            (formula == "_xlchart.v1.2").then(|| "#,##0".to_string())
         }
 
         fn resolve_string_levels(&mut self, formula: &str) -> Option<Vec<Vec<String>>> {
@@ -8151,6 +8301,7 @@ mod tests {
             model.series[0].values,
             vec![Some(50.0), Some(30.0), Some(20.0)]
         );
+        assert_eq!(model.series[0].val_format_code.as_deref(), Some("#,##0"));
     }
 
     /// (c) A `<cx:chartSpace>` with no `<cx:series>` is not a chartEx chart —

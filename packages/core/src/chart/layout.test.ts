@@ -76,6 +76,10 @@ describe('chartTitleBand', () => {
       bandH: 0,
     });
   });
+  it('reserves the title band for an authored empty title placeholder', () => {
+    expect(chartTitleBand(model({ titlePresent: true }), H, PTPX, 0.02, 0.025).bandH).toBeGreaterThan(0);
+    expect(cartesianTitleBand(model({ titlePresent: true }), H, PTPX).bandH).toBeGreaterThan(0);
+  });
   it('keeps the bar family bandH but uses a font-proportional top pad', () => {
     const f = chartTitleFontPx(model({ title: 'T' }), H, PTPX);
     // bandH is unchanged from the family fractions (plot must not move).

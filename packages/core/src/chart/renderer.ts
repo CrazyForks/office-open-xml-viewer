@@ -3233,9 +3233,9 @@ function drawPieRichLabels(
       const parts: string[] = [];
       if (showCatName) parts.push((cats[i] ?? '').toString());
       if (showSerName) parts.push(s.name);
-      if (showVal) parts.push(formatChartValWithCode(vals[i], def.formatCode ?? null, chart.date1904 ?? false));
+      if (showVal) parts.push(formatChartValWithCode(vals[i], def.formatCode ?? s.valFormatCode ?? null, chart.date1904 ?? false));
       if (showPercent) parts.push(`${Math.round((vals[i] / total) * 100)}%`);
-      text = parts.filter(Boolean).join(' ');
+      text = parts.filter(Boolean).join(def.separator ?? ' ');
     }
     if (!text) continue;
     const pos = ov?.position ?? def.position ?? 'bestFit';
@@ -3271,7 +3271,10 @@ function drawPieRichLabels(
     ctx.font = `${bold ? 'bold ' : ''}${sizePx}px ${font}`;
     ctx.fillStyle = fontColor ? `#${fontColor}` : (outside ? '#333' : '#fff');
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(text, lx2, ly2);
+    const lines = text.split(/\r?\n/);
+    const lineHeight = sizePx * 1.15;
+    const firstY = ly2 - ((lines.length - 1) * lineHeight) / 2;
+    lines.forEach((line, lineIndex) => ctx.fillText(line, lx2, firstY + lineIndex * lineHeight));
   }
 }
 
@@ -3365,7 +3368,7 @@ function drawPieCalloutLabels(
     } else {
       if (showCatName) { const c = (cats[i] ?? '').toString(); if (c) lines.push(c); }
       if (showSerName && s.name) lines.push(s.name);
-      if (showVal) lines.push(formatChartValWithCode(vals[i], def.formatCode ?? null, chart.date1904 ?? false));
+      if (showVal) lines.push(formatChartValWithCode(vals[i], def.formatCode ?? s.valFormatCode ?? null, chart.date1904 ?? false));
       if (showPercent) lines.push(`${Math.round((vals[i] / total) * 100)}%`);
     }
     if (lines.length === 0) continue;
@@ -4341,7 +4344,11 @@ function drawSeriesErrorBars(
   const drawPlus = eb.barType === 'plus' || eb.barType === 'both';
   const drawMinus = eb.barType === 'minus' || eb.barType === 'both';
   const isX = eb.dir === 'x';
-  const capHalf = ctx.lineWidth * 1.5;
+  // Office's error-bar cap spans one stroke width. Keeping the cap square with
+  // the authored error-bar stroke also lets a same-size endpoint marker cover
+  // it, as Excel does; the former 3× stroke-width cap protruded above/below
+  // overlaid markers.
+  const capHalf = ctx.lineWidth / 2;
   for (let i = 0; i < s.values.length; i++) {
     const yv = s.values[i]; if (yv == null) continue;
     const xv = scatterXValue(cats, i, useIndexX);
@@ -4599,7 +4606,7 @@ function drawCategoryErrorBars(
   ctx.strokeStyle = eb.color ? `#${eb.color}` : fallbackColor;
   ctx.lineWidth = eb.lineWidthEmu ? Math.max(0.5, eb.lineWidthEmu / EMU_PER_PT) : 1;
   ctx.setLineDash(dashPatternForPreset(eb.dash));
-  const capHalf = ctx.lineWidth * 1.5;
+  const capHalf = ctx.lineWidth / 2;
   for (let ci = 0; ci < n; ci++) {
     if (s.values[ci] == null) continue;
     const pv = plotted(ci);
@@ -5364,6 +5371,9 @@ interface SunburstNode {
   /** Root-branch index (which top-level branch this node descends from) — used
    *  to color the whole sub-tree in one accent. */
   branchIndex: number;
+  /** ChartEx data-label index. Office numbers hierarchy nodes in pre-order,
+   * excluding the synthetic root, rather than by source leaf row. */
+  labelIndex: number;
   a0: number;
   a1: number;
 }
@@ -5377,7 +5387,7 @@ interface SunburstNode {
  */
 function buildSunburstTree(rows: { path: string[]; size: number }[]): SunburstNode {
   const root: SunburstNode = {
-    label: '', value: 0, depth: -1, children: [], branchIndex: -1, a0: 0, a1: 0,
+    label: '', value: 0, depth: -1, children: [], branchIndex: -1, labelIndex: -1, a0: 0, a1: 0,
   };
   for (const row of rows) {
     let node = root;
@@ -5393,6 +5403,7 @@ function buildSunburstTree(rows: { path: string[]; size: number }[]): SunburstNo
           // Top-level nodes (d === 0) define the branch index; deeper nodes
           // inherit their ancestor's.
           branchIndex: d === 0 ? node.children.length : node.branchIndex,
+          labelIndex: -1,
           a0: 0, a1: 0,
         };
         node.children.push(child);
@@ -5402,6 +5413,14 @@ function buildSunburstTree(rows: { path: string[]; size: number }[]): SunburstNo
     }
   }
   root.value = root.children.reduce((s, c) => s + c.value, 0);
+  let nextLabelIndex = 0;
+  const assignLabelIndices = (node: SunburstNode): void => {
+    for (const child of node.children) {
+      child.labelIndex = nextLabelIndex++;
+      assignLabelIndices(child);
+    }
+  };
+  assignLabelIndices(root);
   return root;
 }
 
@@ -5684,6 +5703,12 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const accents = chart.chartexAccents?.length ? chart.chartexAccents : CHART_PALETTE;
   const fontFamily = chartFontFamily(chart, chart.dataLabelFontFace, 'minor');
   const parentMode = treemap.parentLabelLayout ?? 'overlapping';
+  const labelDef = chart.series[0]?.seriesDataLabels;
+  const labelFontPx = labelDef?.fontSizeHpt
+    ? (labelDef.fontSizeHpt / 100) * ptToPx
+    : Math.max(8, Math.min(13, frame.plotRect.ph * 0.025));
+  const labelColor = labelDef?.fontColor ? `#${labelDef.fontColor}` : '#ffffff';
+  const labelOverrides = chart.series[0]?.dataLabelOverrides ?? [];
 
   const paint = (node: SunburstNode, tile: TreemapRect): void => {
     if (tile.w < 0.5 || tile.h < 0.5) return;
@@ -5694,10 +5719,16 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 1;
     ctx.strokeRect(tile.x + 0.5, tile.y + 0.5, Math.max(0, tile.w - 1), Math.max(0, tile.h - 1));
+    const labelOverride = labelOverrides.find(override => override.idx === node.labelIndex);
+    const nodeLabelColor = labelOverride?.fontColor ? `#${labelOverride.fontColor}` : labelColor;
+    const nodeLabelFontPx = labelOverride?.fontSizeHpt
+      ? (labelOverride.fontSizeHpt / 100) * ptToPx
+      : labelFontPx;
+    const nodeLabelBold = labelOverride?.fontBold ?? labelDef?.fontBold ?? false;
 
     if (node.children.length > 0) {
       const showParent = parentMode !== 'none';
-      const fontPx = Math.max(8, Math.min(13, Math.min(tile.w, tile.h) * 0.12));
+      const fontPx = nodeLabelFontPx;
       const bannerH = parentMode === 'banner' && showParent
         ? Math.min(tile.h * 0.28, fontPx + 7)
         : 0;
@@ -5711,24 +5742,53 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       for (const child of layoutTreemapTiles(node.children, content)) paint(child.node, child.rect);
 
       if (showParent && tile.w > fontPx * 2 && tile.h > fontPx + 4) {
-        ctx.font = `bold ${fontPx}px ${fontFamily}`;
-        ctx.fillStyle = '#ffffff';
+        ctx.font = `${nodeLabelBold ? 'bold ' : ''}${fontPx}px ${fontFamily}`;
+        ctx.fillStyle = nodeLabelColor;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
-        const shown = elideToWidth(ctx, node.label, tile.w - 8);
+        const shown = elideToWidth(ctx, labelOverride?.text || node.label, tile.w - 8);
         if (shown) ctx.fillText(shown, tile.x + 4, tile.y + 3);
       }
       return;
     }
 
-    const fontPx = Math.max(7, Math.min(12, Math.min(tile.w, tile.h) * 0.18));
+    const fontPx = nodeLabelFontPx;
     if (tile.w <= fontPx * 1.2 || tile.h <= fontPx * 1.2) return;
-    ctx.font = `${fontPx}px ${fontFamily}`;
-    ctx.fillStyle = '#ffffff';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    const shown = elideToWidth(ctx, node.label, tile.w - 6);
-    if (shown) ctx.fillText(shown, tile.x + tile.w / 2, tile.y + tile.h / 2);
+    ctx.font = `${nodeLabelBold ? 'bold ' : ''}${fontPx}px ${fontFamily}`;
+    ctx.fillStyle = nodeLabelColor;
+    const parts: string[] = [];
+    if (labelOverride?.text) {
+      parts.push(labelOverride.text);
+    } else {
+      if (labelDef?.showCatName ?? true) parts.push(node.label);
+      if (labelDef?.showVal) {
+        parts.push(formatChartValWithCode(
+          node.value,
+          labelDef.formatCode ?? chart.series[0]?.valFormatCode ?? null,
+          chart.date1904,
+        ));
+      }
+    }
+    const lines = parts.join(labelDef?.separator ?? ' ').split(/\r?\n/);
+    const lineH = fontPx * 1.1;
+    const position = labelDef?.position ?? 'ctr';
+    if (position === 'inEnd') {
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'bottom';
+      const lastY = tile.y + tile.h - 5;
+      lines.forEach((line, index) => {
+        const shown = elideToWidth(ctx, line, tile.w - 10);
+        if (shown) ctx.fillText(shown, tile.x + 5, lastY - (lines.length - 1 - index) * lineH);
+      });
+    } else {
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const firstY = tile.y + tile.h / 2 - ((lines.length - 1) * lineH) / 2;
+      lines.forEach((line, index) => {
+        const shown = elideToWidth(ctx, line, tile.w - 6);
+        if (shown) ctx.fillText(shown, tile.x + tile.w / 2, firstY + index * lineH);
+      });
+    }
   };
 
   ctx.save();

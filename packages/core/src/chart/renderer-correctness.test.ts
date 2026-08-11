@@ -1542,6 +1542,40 @@ describe('CH9 — line/area draw per-series error bars (§21.2.2.20)', () => {
   }
 });
 
+describe('CH9 — scatter error-bar cap geometry (§21.2.2.20)', () => {
+  it('keeps an x-error-bar end cap within an overlaid endpoint marker diameter', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'scatter',
+      categories: ['0.15'],
+      series: [series({
+        name: 'Start',
+        categories: ['0.15'],
+        values: [1],
+        markerSymbol: 'circle',
+        markerSize: 10,
+        errBars: [{
+          dir: 'x', barType: 'plus', plus: [0.3], minus: [null], noEndCap: false,
+          lineWidthEmu: 85725,
+        }],
+      })],
+      valMin: 0,
+      valMax: 2,
+    }), RECT, 1);
+    const marker = rec.arcs.find(a => a.r > 0);
+    expect(marker).toBeDefined();
+    const cap = rec.segments.find(segment =>
+      segment.length === 2
+      && Math.abs(segment[0].x - segment[1].x) < 0.001
+      && Math.abs((segment[0].y + segment[1].y) / 2 - (marker as ArcCall).y) < 0.001
+      && segment[0].x > (marker as ArcCall).x,
+    );
+    expect(cap).toBeDefined();
+    expect(Math.abs((cap as Array<{ x: number; y: number }>)[1].y - (cap as Array<{ x: number; y: number }>)[0].y))
+      .toBeLessThanOrEqual((marker as ArcCall).r * 2);
+  });
+});
+
 describe('CH9 — line/area per-point data labels (§21.2.2.45)', () => {
   for (const chartType of ['line', 'area'] as const) {
     it(`${chartType}: dataLabelOverrides render custom text at the point, and delete (empty) skips it`, () => {
@@ -2134,6 +2168,26 @@ describe('CH8 — pie / doughnut geometry', () => {
     const texts = rec.fontTexts.map(t => t.text);
     // "Alpha 30%" etc. — category name and percent joined.
     expect(texts.some(t => t.includes('Alpha') && t.includes('30%'))).toBe(true);
+  });
+
+  it('rich pie dLbls honor the authored separator and value-cache format', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, pieModel({
+      series: [series({
+        name: 'S',
+        categories: ['Alpha', 'Beta'],
+        values: [0.43, 0.57],
+        valFormatCode: '0%',
+        seriesDataLabels: {
+          showVal: true, showCatName: true, showSerName: false, showPercent: false,
+          separator: '\n',
+        },
+      })],
+    }), RECT, 1);
+    const texts = rec.fontTexts.map(t => t.text);
+    expect(texts).toContain('Alpha');
+    expect(texts).toContain('43%');
+    expect(texts).not.toContain('Alpha 0.43');
   });
 });
 
@@ -3606,6 +3660,53 @@ describe('CH15 — chartEx treemap', () => {
     const fills = rec.rects.map(r => r.fs.toUpperCase());
     expect(fills).toContain('#5B9BD5');
     expect(fills).toContain('#ED7D31');
+  });
+
+  it('honors ChartEx label visibility, separator, and inEnd placement', () => {
+    const rec = recordingCtx();
+    const model = treemapModel();
+    model.series = [series({
+      values: [50, 30, 20],
+      seriesDataLabels: {
+        showVal: true,
+        showCatName: true,
+        showSerName: false,
+        showPercent: false,
+        separator: '\n',
+        position: 'inEnd',
+        fontSizeHpt: 1000,
+      },
+    })];
+    renderChart(rec.ctx, model, RECT, 1);
+    const north = rec.texts.find(text => text.text === 'North');
+    const fifty = rec.texts.find(text => text.text === '50');
+    expect(north).toMatchObject({ align: 'left', baseline: 'bottom' });
+    expect(fifty).toMatchObject({ align: 'left', baseline: 'bottom' });
+    expect((fifty as TextCall).y).toBeGreaterThan((north as TextCall).y);
+  });
+
+  it('applies ChartEx per-label overrides by hierarchy-node preorder index', () => {
+    const rec = recordingCtx();
+    const model = treemapModel();
+    model.series = [series({
+      values: [50, 30, 20],
+      seriesDataLabels: {
+        showVal: true,
+        showCatName: true,
+        showSerName: false,
+        showPercent: false,
+        separator: '\n',
+        position: 'inEnd',
+        fontColor: 'FFFFFF',
+      },
+      // preorder: Americas=0, North=1, South=2, Asia=3, East=4
+      dataLabelOverrides: [{ idx: 4, text: 'Custom East\n20', fontColor: '222222' }],
+    })];
+    renderChart(rec.ctx, model, RECT, 1);
+    const custom = rec.texts.filter(text => text.text === 'Custom East' || text.text === '20');
+    expect(custom.map(text => text.text)).toEqual(expect.arrayContaining(['Custom East', '20']));
+    expect(custom.every(text => text.fillStyle === '#222222')).toBe(true);
+    expect(rec.texts.map(text => text.text)).not.toContain('East');
   });
 });
 

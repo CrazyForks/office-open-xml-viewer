@@ -4,7 +4,10 @@ use crate::worksheet_reference::{
     parse_a1_range, resolve_worksheet_reference, split_sheet_ref, ReferencedCellValue,
     WorksheetReferenceSession,
 };
-use crate::{find_rel_target_by_type, parse_rels_map, resolve_fill_color, resolve_zip_path};
+use crate::{
+    find_rel_target_by_type, parse_rels_map, resolve_fill_color, resolve_sheet_path,
+    resolve_zip_path,
+};
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{is_c_ns, is_r_ns, is_xdr_ns};
 
@@ -68,6 +71,107 @@ impl XlsxChartReferenceResolver<'_, '_, '_, '_> {
             .map(|defined| defined.formula.clone())
             .unwrap_or_else(|| trimmed.to_string())
     }
+
+    fn source_style_index(&mut self, formula: &str) -> Option<u32> {
+        let (formula_sheet, reference) = split_sheet_ref(formula)?;
+        let range = parse_a1_range(&reference)?;
+        let target_sheet = formula_sheet.as_deref().unwrap_or(self.sheet_name);
+        if target_sheet.eq_ignore_ascii_case(self.sheet_name) {
+            if let Some(rows) = self.materialized_rows {
+                return rows
+                    .iter()
+                    .find(|row| row.index == range.top)
+                    .and_then(|row| {
+                        row.cells
+                            .iter()
+                            .find(|cell| cell.row == range.top && cell.col == range.left)
+                    })
+                    .map(|cell| cell.style_index);
+            }
+        }
+
+        let sheet = self
+            .sheets
+            .iter()
+            .find(|sheet| sheet.name.eq_ignore_ascii_case(target_sheet))?;
+        let relative_path = resolve_sheet_path(self.workbook_rels, &sheet.r_id)?;
+        let part = format!("xl/{relative_path}");
+        let xml = read_zip_string(self.archive, &part).ok()?;
+        let document = parse_guarded(&xml).ok()?;
+        document
+            .descendants()
+            .find(|node| {
+                if !node.is_element() || node.tag_name().name() != "c" {
+                    return false;
+                }
+                node.attribute("r")
+                    .and_then(parse_a1_range)
+                    .is_some_and(|cell| cell.top == range.top && cell.left == range.left)
+            })
+            .map(|cell| {
+                cell.attribute("s")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0)
+            })
+    }
+
+    fn number_format_for_style(&mut self, style_index: u32) -> Option<String> {
+        let xml = read_zip_string(self.archive, "xl/styles.xml").ok()?;
+        let document = parse_guarded(&xml).ok()?;
+        let cell_xfs = document
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "cellXfs")?;
+        let num_fmt_id = cell_xfs
+            .children()
+            .filter(|node| node.is_element() && node.tag_name().name() == "xf")
+            .nth(style_index as usize)
+            .and_then(|xf| xf.attribute("numFmtId"))
+            .and_then(|value| value.parse::<u32>().ok())?;
+        if let Some(format_code) = document
+            .descendants()
+            .find(|node| {
+                node.is_element()
+                    && node.tag_name().name() == "numFmt"
+                    && node
+                        .attribute("numFmtId")
+                        .and_then(|value| value.parse::<u32>().ok())
+                        == Some(num_fmt_id)
+            })
+            .and_then(|node| node.attribute("formatCode"))
+        {
+            return Some(format_code.to_string());
+        }
+        // ECMA-376 §18.8.30 built-in number formats. Chart labels only need
+        // the format code; returning it keeps the shared renderer independent
+        // of XLSX style-index semantics.
+        let built_in = match num_fmt_id {
+            0 => "General",
+            1 => "0",
+            2 => "0.00",
+            3 => "#,##0",
+            4 => "#,##0.00",
+            9 => "0%",
+            10 => "0.00%",
+            11 => "0.00E+00",
+            14 => "m/d/yy",
+            15 => "d-mmm-yy",
+            16 => "d-mmm",
+            17 => "mmm-yy",
+            18 => "h:mm AM/PM",
+            19 => "h:mm:ss AM/PM",
+            20 => "h:mm",
+            21 => "h:mm:ss",
+            22 => "m/d/yy h:mm",
+            37 => "#,##0 ;(#,##0)",
+            38 => "#,##0 ;[Red](#,##0)",
+            39 => "#,##0.00;(#,##0.00)",
+            40 => "#,##0.00;[Red](#,##0.00)",
+            48 => "##0.0E+0",
+            49 => "@",
+            _ => return None,
+        };
+        Some(built_in.to_string())
+    }
 }
 
 impl ooxml_common::chart::ChartReferenceResolver for XlsxChartReferenceResolver<'_, '_, '_, '_> {
@@ -116,6 +220,12 @@ impl ooxml_common::chart::ChartReferenceResolver for XlsxChartReferenceResolver<
                 })
                 .collect()
         })
+    }
+
+    fn resolve_number_format(&mut self, formula: &str) -> Option<String> {
+        let formula = self.expand_defined_name(formula);
+        let style_index = self.source_style_index(&formula)?;
+        self.number_format_for_style(style_index)
     }
 
     fn resolve_string_levels(&mut self, formula: &str) -> Option<Vec<Vec<String>>> {
@@ -454,6 +564,7 @@ pub(crate) fn load_sheet_charts(
                 }
 
                 all_charts.push(ChartAnchor {
+                    z_order: graphic_frame.range().start as u64,
                     from_col,
                     from_col_off,
                     from_row,
@@ -892,7 +1003,7 @@ mod worksheet_reference_tests {
     use std::io::{Cursor, Write};
     use zip::write::SimpleFileOptions;
 
-    const DATA_XML: &str = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="C1" t="inlineStr"><is><t>المبيعات</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>أحمد</t></is></c><c r="C2"><v>5000</v></c><c r="D2"><v>10</v></c><c r="E2"><v>3</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>سارة</t></is></c><c r="C3"><v>6200</v></c><c r="D3"><v>20</v></c><c r="E3"><v>5</v></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>خالد</t></is></c><c r="C4"><v>7500</v></c><c r="D4"><v>30</v></c><c r="E4"><v>7</v></c></row></sheetData></worksheet>"#;
+    const DATA_XML: &str = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="C1" t="inlineStr"><is><t>المبيعات</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>أحمد</t></is></c><c r="C2" s="1"><v>5000</v></c><c r="D2"><v>10</v></c><c r="E2"><v>3</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>سارة</t></is></c><c r="C3" s="1"><v>6200</v></c><c r="D3"><v>20</v></c><c r="E3"><v>5</v></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>خالد</t></is></c><c r="C4" s="1"><v>7500</v></c><c r="D4"><v>30</v></c><c r="E4"><v>7</v></c></row></sheetData></worksheet>"#;
 
     fn chart_xml(with_cache: bool) -> String {
         let name_cache = if with_cache {
@@ -942,6 +1053,8 @@ mod worksheet_reference_tests {
                 .start_file("xl/worksheets/sheet2.xml", options)
                 .unwrap();
             writer.write_all(DATA_XML.as_bytes()).unwrap();
+            writer.start_file("xl/styles.xml", options).unwrap();
+            writer.write_all(br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="3"/></cellXfs></styleSheet>"#).unwrap();
             writer.finish().unwrap();
         }
         crate::XlsxZip::new(Cursor::new(bytes)).unwrap()
@@ -1007,6 +1120,33 @@ mod worksheet_reference_tests {
         assert_eq!(
             chart.series[0].values,
             vec![Some(5000.0), Some(6200.0), Some(7500.0)],
+        );
+    }
+
+    #[test]
+    fn chart_reference_resolves_source_linked_builtin_number_format() {
+        let mut archive = archive_with_chart_and_data(&chart_xml(false));
+        let rels = parse_guarded(workbook_rels_xml()).unwrap();
+        let sheet_metas = sheets();
+        let mut session = WorksheetReferenceSession::default();
+        session.seed_current_sheet("Dashboard", None);
+        let mut resolver = XlsxChartReferenceResolver {
+            archive: &mut archive,
+            materialized_rows: None,
+            sheet_name: "Dashboard",
+            sheets: &sheet_metas,
+            workbook_rels: &rels,
+            shared_strings: &[],
+            defined_names: &[],
+            session: &mut session,
+        };
+        assert_eq!(
+            ooxml_common::chart::ChartReferenceResolver::resolve_number_format(
+                &mut resolver,
+                "'التقرير'!$C$2:$C$4",
+            )
+            .as_deref(),
+            Some("#,##0"),
         );
     }
 

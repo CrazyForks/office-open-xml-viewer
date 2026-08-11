@@ -13,7 +13,8 @@ import { renderChart } from './renderer.js';
 
 // Ordered event recorder: logs each fill()/stroke() with the style in effect at
 // the call, so we can assert the RELATIVE order of gridline strokes vs series
-// fills. A translucent `rgba(...)` fillStyle marks a series area/line fill; a
+// fills. These fixtures have no other path fill, so `fill()` marks a series
+// area fill; a
 // thin hairline strokeStyle (the resolved gridline color, default `#e0e0e0`)
 // marks a gridline. We tag events by role and check the first gridline precedes
 // the first series fill.
@@ -101,11 +102,11 @@ function baseModel(over: Partial<ChartModel>): ChartModel {
 const RECT: ChartRect = { x: 0, y: 0, w: 640, h: 360 };
 
 // The default value-axis gridline is a thin hairline (`#e0e0e0`, 0.5 px). A
-// series fill for the area family is a translucent `rgba(...)`. These heuristics
-// classify the recorded events by role.
+// series fill for the area family is an authored opaque solid fill. These
+// predicates classify the recorded events by role.
 const isGridlineStroke = (e: Ev): boolean =>
   e.op === 'stroke' && e.lineWidth <= 1 && e.strokeStyle.toLowerCase() === '#e0e0e0';
-const isSeriesFill = (e: Ev): boolean => e.op === 'fill' && /^rgba\(/i.test(e.fillStyle);
+const isSeriesFill = (e: Ev): boolean => e.op === 'fill';
 
 describe('CH — value-axis gridlines paint under the data series', () => {
   it('an area chart strokes its major gridlines BEFORE filling the series area', () => {
