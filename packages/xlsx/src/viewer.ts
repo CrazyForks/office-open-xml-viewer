@@ -63,6 +63,7 @@ import {
   colBands,
   summaryAfterFor,
   gutterExtentPx,
+  outlineBracketSegments,
   OUTLINE_LANE_PX,
   type BandOutline,
   type OutlineGroup,
@@ -1276,17 +1277,9 @@ class XlsxViewerEngine implements ZoomableViewer {
       // negligible length.
       if (!g.collapsed && runEnd - runStart > 1) {
         ctx.beginPath();
-        if (isRow) {
-          ctx.moveTo(laneCenterCross, runStart);
-          ctx.lineTo(laneCenterCross, runEnd);
-          // Elbow tick toward the grid at the summary end.
-          const tickY = g.summary != null && g.summary > g.end ? runEnd : runStart;
-          ctx.lineTo(laneCenterCross + lanePx / 2, tickY);
-        } else {
-          ctx.moveTo(runStart, laneCenterCross);
-          ctx.lineTo(runEnd, laneCenterCross);
-          const tickX = g.summary != null && g.summary > g.end ? runEnd : runStart;
-          ctx.lineTo(tickX, laneCenterCross + lanePx / 2);
+        for (const segment of outlineBracketSegments(axis, laneCenterCross, a, b, lanePx)) {
+          ctx.moveTo(segment.x1, segment.y1);
+          ctx.lineTo(segment.x2, segment.y2);
         }
         ctx.stroke();
       }
@@ -1465,7 +1458,38 @@ class XlsxViewerEngine implements ZoomableViewer {
     // Reflect the new collapsed state on the summary band so the next toggle
     // reads the correct direction and the +/- glyph flips.
     if (group.summary != null) this.setBandCollapsed(axis, group.summary, nowCollapsed);
-    this.afterOutlineMutation(ws);
+    // Collapsing removes the detail bands before the summary. Anchor that
+    // surviving summary band at the viewport start after geometry has been
+    // rebuilt; otherwise the browser clamps the shortened scroll extent and
+    // leaves an unrelated partial row at the top.
+    this.afterOutlineMutation(
+      ws,
+      nowCollapsed && group.summary != null ? { axis, summary: group.summary } : undefined,
+    );
+  }
+
+  /** Align an outline summary band to the scrollable viewport's start without
+   * disturbing the perpendicular axis. */
+  private scrollOutlineSummaryToStart(axis: OutlineAxis, summary: number): void {
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    const cs = this.viewport.scale;
+    const offset = getGridGeometryForWorksheet(ws).scrollOffsetForCell(
+      axis === 'row' ? summary : 1,
+      axis === 'col' ? summary : 1,
+      {
+        scale: cs,
+        viewportWidth: this.canvasArea.clientWidth,
+        viewportHeight: this.canvasArea.clientHeight,
+        currentX: this.effectiveScrollLeft,
+        currentY: this.viewportTop,
+        headerWidth: HEADER_W,
+        headerHeight: HEADER_H,
+        align: 'start',
+      },
+    );
+    if (axis === 'row') this.viewportTop = offset.y;
+    else this.setViewportLeft(offset.x);
   }
 
   /** Collapse/expand the whole sheet to `level` on one axis. */
@@ -1588,12 +1612,18 @@ class XlsxViewerEngine implements ZoomableViewer {
 
   /** Shared tail of a gutter interaction: invalidate the axis cache, rebuild the
    *  outline (collapsed flags changed), refresh dependent geometry, re-render. */
-  private afterOutlineMutation(ws: Worksheet): void {
+  private afterOutlineMutation(
+    ws: Worksheet,
+    anchor?: { axis: OutlineAxis; summary: number },
+  ): void {
     GridGeometry.invalidate(ws);
     this.buildOutlineLayoutOnly(ws);
     this.updateSpacerSize(ws);
+    if (anchor) this.scrollOutlineSummaryToStart(anchor.axis, anchor.summary);
     this.updateSelectionOverlay();
+    this.updateFindOverlay();
     this.scheduleRender();
+    if (anchor) this.emitViewportChange();
   }
 
   /** Rebuild only the layout + band lists (not the stashes) after a collapse

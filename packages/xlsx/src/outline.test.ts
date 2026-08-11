@@ -8,6 +8,7 @@ import {
   summaryAfterFor,
   gutterExtentPx,
   OUTLINE_LANE_PX,
+  outlineBracketSegments,
   type BandOutline,
   type OutlineWorksheetLike,
 } from './outline.js';
@@ -88,6 +89,22 @@ describe('buildOutlineLayout', () => {
     expect(l1).toHaveLength(2);
     expect(l1[0]).toMatchObject({ start: 2, end: 3, summary: 4 });
     expect(l1[1]).toMatchObject({ start: 5, end: 6, summary: 7 });
+  });
+});
+
+describe('outlineBracketSegments', () => {
+  it('hooks a row bracket toward the grid at the first detail row only', () => {
+    expect(outlineBracketSegments('row', 10, 40, 100, 20)).toEqual([
+      { x1: 10, y1: 40, x2: 10, y2: 100 },
+      { x1: 10, y1: 40, x2: 20, y2: 40 },
+    ]);
+  });
+
+  it('keeps the logical first column as the hook under reversed screen order', () => {
+    expect(outlineBracketSegments('col', 10, 100, 40, 20)).toEqual([
+      { x1: 40, y1: 10, x2: 100, y2: 10 },
+      { x1: 100, y1: 10, x2: 100, y2: 20 },
+    ]);
   });
 });
 

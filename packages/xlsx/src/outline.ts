@@ -81,6 +81,42 @@ export interface OutlineLayout {
   groups: OutlineGroup[];
 }
 
+/** One canvas segment of an outline bracket. Kept in the pure geometry layer
+ * so the start hook cannot accidentally become a diagonal or migrate to the
+ * summary end when row/column rendering changes. */
+export interface OutlineBracketSegment {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/** Build the expanded-group bracket. Excel hooks the bracket toward the grid at
+ * the FIRST detail band; the summary band at the opposite end carries the
+ * minus button and therefore has no second hook. `detailStart` is the on-screen
+ * coordinate of the group's first logical detail band (important for RTL
+ * columns), while the long rail spans both detail endpoints. */
+export function outlineBracketSegments(
+  axis: OutlineAxis,
+  laneCenter: number,
+  detailStart: number,
+  detailEnd: number,
+  laneExtent: number,
+): OutlineBracketSegment[] {
+  const low = Math.min(detailStart, detailEnd);
+  const high = Math.max(detailStart, detailEnd);
+  if (axis === 'row') {
+    return [
+      { x1: laneCenter, y1: low, x2: laneCenter, y2: high },
+      { x1: laneCenter, y1: detailStart, x2: laneCenter + laneExtent / 2, y2: detailStart },
+    ];
+  }
+  return [
+    { x1: low, y1: laneCenter, x2: high, y2: laneCenter },
+    { x1: detailStart, y1: laneCenter, x2: detailStart, y2: laneCenter + laneExtent / 2 },
+  ];
+}
+
 /**
  * Build the outline layout for one axis from its band metadata.
  *
