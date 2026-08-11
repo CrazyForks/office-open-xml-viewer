@@ -6,10 +6,23 @@
 // truth for chart rendering across PPTX / XLSX (and future DrawingML charts
 // in DOCX).
 
+import type { PatternFill } from './common';
+
 export interface ChartSeries {
   name: string;
   /** Hex without '#'. null = fall back to palette. */
   color: string | null;
+  /**
+   * `<c:ser><c:spPr><a:pattFill>` DrawingML pattern fill. When present it
+   * paints the series marks and matching legend key; `color` remains the
+   * solid/fallback series colour.
+   */
+  fillPattern?: PatternFill | null;
+  /** `<c:ser><c:spPr><a:ln><a:solidFill>` series outline/stroke color (hex,
+   * no '#'). For bar/column charts this is the border around each bar. */
+  lineColor?: string | null;
+  /** Explicit series outline/stroke width from `<a:ln@w>` (EMU). */
+  lineWidthEmu?: number | null;
   /** Numeric values; null = missing data point. */
   values: (number | null)[];
   /**
@@ -77,7 +90,8 @@ export interface ChartSeries {
    * points. null = renderer default (~5 pt).
    */
   markerSize?: number | null;
-  /** `<c:marker><c:spPr><a:solidFill>` resolved hex (no `#`). */
+  /** `<c:marker><c:spPr>` fill as 6/8-digit resolved hex (no `#`); transparent
+   *  `00000000` represents an explicit `<a:noFill/>`. */
   markerFill?: string | null;
   /** `<c:marker><c:spPr><a:ln><a:solidFill>` resolved hex (no `#`). */
   markerLine?: string | null;
@@ -301,7 +315,7 @@ export type ChartType =
   | 'scatter' | 'bubble' | 'radar' | 'waterfall'
   | 'stock'
   // chartEx (MS 2014 chartex ext) layouts CH15 renders.
-  | 'boxWhisker' | 'sunburst'
+  | 'boxWhisker' | 'sunburst' | 'treemap'
   | string;
 
 export interface ChartModel {
@@ -309,6 +323,9 @@ export interface ChartModel {
   title: string | null;
   categories: string[];
   series: ChartSeries[];
+  /** Text boxes in the Chart Drawing part referenced by `<c:userShapes>`.
+   *  Coordinates are chart-space fractions from `<cdr:relSizeAnchor>`. */
+  chartTextBoxes?: ChartTextBox[] | null;
   /**
    * §21.2.2.227 `<c:varyColors val="1"/>` on a SINGLE-series bar/column chart:
    * color each data point (bar) from the theme/palette sequence and list one
@@ -371,6 +388,8 @@ export interface ChartModel {
   valAxisFontColor?: string | null;
   /** `<c:dLbls><c:txPr>` font size (hpt) for data-point value labels. */
   dataLabelFontSizeHpt: number | null;
+  /** `<c:dLbls|cx:dataLabels>` text bold flag. null = chart-style default. */
+  dataLabelFontBold?: boolean | null;
   /** Waterfall subtotal category indices. */
   subtotalIndices: number[];
   /** `<c:legend><c:manualLayout>` absolute placement fractions of the chart
@@ -680,7 +699,7 @@ export interface ChartModel {
    * NOT yet draw them (tracked follow-up). null/undefined when absent.
    */
   stockUpDownBars?: boolean | null;
-  // ── chartEx box-and-whisker / sunburst (CH15, MS 2014 chartex ext) ─────────
+  // ── chartEx structured layouts (CH15, MS 2014 chartex ext) ────────────────
   /**
    * Structured box-and-whisker data (`chartType === 'boxWhisker'`). Present
    * ONLY for boxWhisker charts; null/absent otherwise so the flat
@@ -694,12 +713,43 @@ export interface ChartModel {
    */
   chartexSunburst?: ChartexSunburst | null;
   /**
+   * Structured treemap hierarchy (`chartType === 'treemap'`). Present ONLY
+   * for treemap charts; null/absent otherwise.
+   */
+  chartexTreemap?: ChartexTreemap | null;
+  /**
    * Theme accent palette (`accent1..6`, hex without '#') for chartEx charts
-   * that color by branch/series index (boxWhisker series, sunburst branches).
+   * that color by branch/series index (boxWhisker series and
+   * sunburst/treemap branches).
    * null/absent when the resolver supplies no default palette (pptx); the
    * renderer then falls back to its own `CHART_PALETTE`.
    */
   chartexAccents?: string[] | null;
+}
+
+/** A formatted DrawingML run inside a chart-relative text box. */
+export interface ChartTextRun {
+  text: string;
+  fontSizeHpt?: number | null;
+  bold?: boolean | null;
+  color?: string | null;
+  fontFace?: string | null;
+}
+
+/** One DrawingML paragraph inside a chart-relative text box. */
+export interface ChartTextParagraph {
+  runs: ChartTextRun[];
+  align?: 'l' | 'ctr' | 'r' | 'just' | 'dist' | string | null;
+}
+
+/** A text shape anchored to a fractional rectangle in the chart space. */
+export interface ChartTextBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  paragraphs: ChartTextParagraph[];
+  verticalAnchor?: 't' | 'ctr' | 'b' | 'just' | 'dist' | string | null;
 }
 
 /**
@@ -714,6 +764,10 @@ export interface ChartexBoxSeries {
   /** Fill (hex, no '#') — theme accent cycled by series index. null = fall
    *  back to the renderer palette. */
   color?: string | null;
+  /** Explicit `<cx:series><cx:spPr><a:ln>` outline color (hex, no '#'). */
+  lineColor?: string | null;
+  /** Explicit series outline width from `<a:ln@w>` (EMU). */
+  lineWidthEmu?: number | null;
   /** Raw sample values grouped by category (outer = category index parallel to
    *  {@link ChartexBoxWhisker.categories}, inner = the points in that group). */
   valuesByCategory: number[][];
@@ -724,9 +778,7 @@ export interface ChartexBoxSeries {
   /** `<cx:visibility outliers>` — draw outlier points. */
   showOutliers: boolean;
   /** `<cx:visibility nonoutliers>` — draw the interior (non-outlier) sample
-   *  points as jittered dots on top of the box. Flag parsed; interior-dot
-   *  rendering is pending a fixture that enables it (every sample-24 series
-   *  ships `nonoutliers="0"`, so there is nothing to verify against yet). */
+   *  points as dots on top of the box. */
   showNonoutliers: boolean;
   /** `<cx:statistics quartileMethod>` — "exclusive" (Excel default) | "inclusive". */
   quartileMethod: string;
@@ -754,6 +806,13 @@ export interface ChartexSunburstRow {
 /** A chartEx sunburst: the flat rows the renderer folds into a ring tree. */
 export interface ChartexSunburst {
   rows: ChartexSunburstRow[];
+}
+
+/** A chartEx treemap hierarchy and its requested parent-label presentation. */
+export interface ChartexTreemap {
+  rows: ChartexSunburstRow[];
+  /** `<cx:parentLabelLayout val>`: `banner`, `overlapping`, or `none`. */
+  parentLabelLayout?: string | null;
 }
 
 /**

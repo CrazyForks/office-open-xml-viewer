@@ -4000,7 +4000,23 @@ fn load_chart_map(
         // `.../2011/relationships/chartStyle`). Resolve+read it best-effort;
         // legacy `<c:>` charts ignore it (their title size is inline).
         let style_xml = load_chart_style_xml(zip, &path);
-        if let Some(chart) = parse_docx_chart(&xml, style_xml.as_deref(), theme) {
+        let user_shapes_xml = load_chart_user_shapes_xml(zip, &path, &xml);
+        if let Some(mut chart) = parse_docx_chart(&xml, style_xml.as_deref(), theme) {
+            if let (Some(user_shapes_xml), Ok(chart_doc)) =
+                (user_shapes_xml.as_deref(), parse_guarded(&xml))
+            {
+                if let Ok(user_shapes_doc) = parse_guarded(user_shapes_xml) {
+                    let resolver = DocxColorResolver { theme };
+                    let text_boxes = ooxml_common::chart::parse_chart_user_shapes_for_chart(
+                        chart_doc.root_element(),
+                        user_shapes_doc.root_element(),
+                        &resolver,
+                    );
+                    if !text_boxes.is_empty() {
+                        chart.chart_text_boxes = Some(text_boxes);
+                    }
+                }
+            }
             chart_map.insert(rid.clone(), chart);
         }
     }
@@ -4026,6 +4042,31 @@ fn load_chart_style_xml(zip: &mut Zip, chart_path: &str) -> Option<String> {
         find_rel_target_by_type(&rels_xml, ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)?;
     let style_path = ooxml_common::rels::resolve_target(&format!("{}/", dir), &target);
     read_zip_string(zip, &style_path).ok()
+}
+
+fn load_chart_user_shapes_xml(zip: &mut Zip, chart_path: &str, chart_xml: &str) -> Option<String> {
+    let chart_doc = parse_guarded(chart_xml).ok()?;
+    let rid = chart_doc
+        .root_element()
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "userShapes")?
+        .attributes()
+        .find(|attribute| {
+            attribute.name() == "id"
+                && attribute
+                    .namespace()
+                    .is_some_and(|namespace| namespace.ends_with("/relationships"))
+        })?
+        .value();
+    let (dir, file) = chart_path.rsplit_once('/').unwrap_or(("", chart_path));
+    let rels_path = format!("{}/_rels/{}.rels", dir, file);
+    let rels_xml = read_zip_string(zip, &rels_path).ok()?;
+    let target = ooxml_common::rels::parse_rels(&rels_xml)
+        .get(rid)?
+        .target
+        .clone();
+    let user_shapes_path = ooxml_common::rels::resolve_target(&format!("{}/", dir), &target);
+    read_zip_string(zip, &user_shapes_path).ok()
 }
 
 fn load_header_footer_set(

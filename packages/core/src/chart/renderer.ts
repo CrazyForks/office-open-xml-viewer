@@ -4,6 +4,7 @@
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
 import type { ChartDataLabelOverride, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, SecondaryValueAxis } from '../types/chart';
+import type { PatternFill } from '../types/common';
 import {
   computeChartFrame,
   cartesianTitleBand,
@@ -18,7 +19,7 @@ import { niceStep, valueAxisScale, axisFraction, logAxisScale, fitTrendline } fr
 import { axisLineWidthPx, resolveAxisLine, resolveGridline, isCrossBetween } from './axis-style.js';
 import { formatChartVal, formatChartValWithCode, formatCategoryLabel } from './chart-number-format.js';
 import { elideToWidth } from './text-elide.js';
-import { hexToRgba } from '../shape/paint.js';
+import { hexToRgba, resolveFill } from '../shape/paint.js';
 import { EMU_PER_PT, PT_TO_PX } from '../units.js';
 
 // ─── Palette + helpers ──────────────────────────────────────────────────────
@@ -60,6 +61,20 @@ function scaleHexRgb(hex: string, factor: number): string {
   const b = Math.round(parseInt(h.slice(4, 6), 16) * f);
   const to2 = (n: number): string => n.toString(16).padStart(2, '0');
   return `#${to2(r)}${to2(g)}${to2(b)}`;
+}
+
+/** Mix a six-digit hex color toward white. Used to distinguish nested treemap
+ * levels while keeping every tile visibly tied to its top-level branch. */
+function mixHexWithWhite(hex: string, amount: number): string {
+  const h = hex.startsWith('#') ? hex.slice(1) : hex;
+  if (h.length < 6) return `#${h}`;
+  const a = Math.max(0, Math.min(1, amount));
+  const mix = (start: number): number => {
+    const channel = parseInt(h.slice(start, start + 2), 16);
+    return Math.round(channel + (255 - channel) * a);
+  };
+  const to2 = (n: number): string => n.toString(16).padStart(2, '0');
+  return `#${to2(mix(0))}${to2(mix(2))}${to2(mix(4))}`;
 }
 
 // ─── Font-face resolution (CH10) ─────────────────────────────────────────────
@@ -308,6 +323,7 @@ function drawLegendSwatch(
   color: string,
   x: number, y: number, w: number, h: number,
   marker: LegendMarker | null = null,
+  fillPattern: PatternFill | null = null,
 ): void {
   // Markers-only scatter series show their point glyph as the key (#803).
   if (marker) {
@@ -330,6 +346,9 @@ function drawLegendSwatch(
     ctx.stroke();
     ctx.lineWidth = prevW;
   } else {
+    if (fillPattern) {
+      ctx.fillStyle = resolveFill(fillPattern, ctx, x, y, w, h) ?? color;
+    }
     ctx.fillRect(x, y, w, h);
   }
 }
@@ -343,6 +362,7 @@ interface LegendEntry {
   color: string;
   marker: LegendMarker | null;
   swatchStyle: LegendSwatchStyle;
+  fillPattern: PatternFill | null;
 }
 
 /** Build the legend entries for a chart. Pie/doughnut legends are
@@ -367,6 +387,7 @@ function buildLegendEntries(
       color: legendEntryColor(chartType, series, i, varyByPoint),
       marker: null, // pie/doughnut/varyColors keys are always filled swatches.
       swatchStyle: legendSwatchStyle(chartType),
+      fillPattern: null,
     }));
   }
   return series.map((s, i) => ({
@@ -376,6 +397,7 @@ function buildLegendEntries(
     // A combo chart has multiple chart groups under one plotArea. The legend
     // key describes the individual series' group, not the first/primary group.
     swatchStyle: legendSwatchStyle(s.seriesType ?? chartType),
+    fillPattern: s.fillPattern ?? null,
   }));
 }
 
@@ -432,7 +454,7 @@ function drawLegend(
     let rx = lx + (lw - total) / 2;
     const ry = ly + lh / 2;
     for (let i = 0; i < entries.length; i++) {
-      drawLegendSwatch(ctx, entries[i].swatchStyle, entries[i].color, rx, ry - fontSize / 2, sw, fontSize, entries[i].marker);
+      drawLegendSwatch(ctx, entries[i].swatchStyle, entries[i].color, rx, ry - fontSize / 2, sw, fontSize, entries[i].marker, entries[i].fillPattern);
       ctx.fillStyle = style.color; ctx.textAlign = 'left';
       ctx.fillText(labels[i], rx + sw + gap, ry);
       rx += itemWidths[i] + itemGap;
@@ -448,7 +470,7 @@ function drawLegend(
   const maxTextPx = lw - sw - gap;
   let ry = ly + (lh - rowH * entries.length) / 2;
   for (let i = 0; i < entries.length; i++) {
-    drawLegendSwatch(ctx, entries[i].swatchStyle, entries[i].color, lx, ry, sw, fontSize, entries[i].marker);
+    drawLegendSwatch(ctx, entries[i].swatchStyle, entries[i].color, lx, ry, sw, fontSize, entries[i].marker, entries[i].fillPattern);
     ctx.fillStyle = style.color; ctx.textAlign = 'left';
     ctx.fillText(elideToWidth(ctx, entries[i].label, maxTextPx), lx + sw + gap, ry + fontSize / 2);
     ry += rowH;
@@ -1339,7 +1361,21 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       : legLeftW + valTitleW + valLabelBandW,
   };
 
-  drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
+  if (chart.title) {
+    const tml = chart.titleManualLayout;
+    if (tml && (tml.x !== undefined || tml.y !== undefined)) {
+      drawChartTitle(
+        ctx,
+        chart,
+        x + tml.x * w,
+        y + tml.y * h,
+        (tml.w ?? 0.5) * w,
+        titleFontPx,
+      );
+    } else {
+      drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
+    }
+  }
 
   // Plot-area placement: honor `<c:plotArea><c:layout><c:manualLayout>` when
   // present (ECMA-376 §21.2.2.32). Templates use this to keep bars from
@@ -1589,8 +1625,21 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         const y1 = stacked ? valY((negative ? negOffset : posOffset) + sv) : valY(sv);
         const by = Math.min(y0, y1);
         const barH = Math.abs(y1 - y0);
-        ctx.fillStyle = color;
+        ctx.fillStyle = s.fillPattern
+          ? (resolveFill(s.fillPattern, ctx, bx, by, barW, barH) ?? color)
+          : color;
         ctx.fillRect(bx, by, barW, barH);
+        if (s.lineColor && !s.lineHidden && barW > 0 && barH > 0) {
+          const outlineW = axisLineWidthPx(s.lineWidthEmu, ptToPx);
+          ctx.strokeStyle = `#${s.lineColor}`;
+          ctx.lineWidth = outlineW;
+          ctx.strokeRect(
+            bx + outlineW / 2,
+            by + outlineW / 2,
+            Math.max(0, barW - outlineW),
+            Math.max(0, barH - outlineW),
+          );
+        }
         if (chart.showDataLabels && sv !== 0) {
           // ECMA-376 §21.2.2.30 / §21.1.2.3.10 — data label font size comes from
           // `<c:dLbls><c:txPr>...<a:defRPr@sz>` (hundredths of a point). When
@@ -1639,8 +1688,21 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         const x1 = stacked ? valX((negative ? negOffset : posOffset) + sv) : valX(sv);
         const bx = Math.min(x0, x1);
         const barL = Math.abs(x1 - x0);
-        ctx.fillStyle = color;
+        ctx.fillStyle = s.fillPattern
+          ? (resolveFill(s.fillPattern, ctx, bx, by, barL, barW) ?? color)
+          : color;
         ctx.fillRect(bx, by, barL, barW);
+        if (s.lineColor && !s.lineHidden && barL > 0 && barW > 0) {
+          const outlineW = axisLineWidthPx(s.lineWidthEmu, ptToPx);
+          ctx.strokeStyle = `#${s.lineColor}`;
+          ctx.lineWidth = outlineW;
+          ctx.strokeRect(
+            bx + outlineW / 2,
+            by + outlineW / 2,
+            Math.max(0, barL - outlineW),
+            Math.max(0, barW - outlineW),
+          );
+        }
         if (chart.showDataLabels && sv !== 0) {
           const seriesLabels = s.seriesDataLabels;
           const sizeHpt = seriesLabels?.fontSizeHpt ?? chart.dataLabelFontSizeHpt;
@@ -3700,6 +3762,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
 
   const toX = (v: number) => px0 + ((v - xMin) / (xMax - xMin)) * pw;
   const toY = (v: number) => py0 + ph - ((v - yMin) / (yMax - yMin)) * ph;
+  const xStep = niceStep(xMax - xMin);
 
   // Y-axis gridlines + labels + major tick marks. Scatter has no baseline
   // special-case, so it strokes every gridline in the resolved color/width.
@@ -3720,6 +3783,22 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       // equivalent to undefined here (drawAxisTick treats both as a hairline).
       const yAxisLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : undefined;
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, yAxisLineColor, axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx));
+    }
+  }
+
+  // A scatter chart's horizontal axis is represented by the shared category-
+  // axis fields in the model even though OOXML stores it as a second valAx.
+  // Its major gridlines therefore run vertically through each numeric X tick.
+  if (!chart.catAxisHidden && drawCatMajorGridlines(chart) && xStep > 0) {
+    const xGrid = catGridStroke(chart, ptToPx);
+    const xSteps = Math.round((xMax - xMin) / xStep) + 1;
+    ctx.strokeStyle = xGrid.color;
+    ctx.lineWidth = xGrid.width;
+    for (let si = 0; si < xSteps; si++) {
+      const v = xMin + si * xStep;
+      if (v > xMax + xStep * 0.01) break;
+      const gx = toX(v);
+      ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
     }
   }
 
@@ -3776,7 +3855,6 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   if (!chart.catAxisHidden) {
     const tickFontPx = Math.max(8, Math.min(11, ph / 20));
     ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${tickFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
-    const xStep = niceStep(xMax - xMin);
     const xSteps = Math.round((xMax - xMin) / xStep) + 1;
     ctx.fillStyle = '#555'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     for (let si = 0; si < xSteps; si++) {
@@ -4608,36 +4686,16 @@ interface BoxStats {
   whiskerHi: number;
   mean: number;
   outliers: number[];
-  /** Interior (non-outlier) points. Kept alongside the outliers so the optional
-   *  interior-dot overlay (`ChartexBoxSeries.showNonoutliers`) has its data
-   *  ready; that overlay is not drawn yet (flag parsed; interior-dot rendering
-   *  pending a fixture that enables it — sample-24 ships `nonoutliers="0"`). */
+  /** Interior (non-outlier) points used by the optional point overlay. */
   inner: number[];
 }
 
-/**
- * Linear-interpolated quantile of `sorted` at probability `p` (0..1).
- * `method === 'inclusive'` uses the R-7 / Excel `QUARTILE.INC` rank
- * `p·(n−1)`; anything else uses the `exclusive` (R-6 / `QUARTILE.EXC`) rank
- * `p·(n+1)` clamped into `[1, n]` — the box-and-whisker default Office writes
- * (`<cx:statistics quartileMethod="exclusive">`).
- */
-function boxQuantile(sorted: number[], p: number, method: string): number {
-  const n = sorted.length;
-  if (n === 0) return 0;
-  if (n === 1) return sorted[0];
-  let pos: number;
-  if (method === 'inclusive') {
-    pos = p * (n - 1) + 1; // 1-based rank
-  } else {
-    pos = p * (n + 1);
-    if (pos < 1) pos = 1;
-    if (pos > n) pos = n;
-  }
-  const lo = Math.floor(pos);
-  const frac = pos - lo;
-  if (lo >= n) return sorted[n - 1];
-  return sorted[lo - 1] + frac * (sorted[lo] - sorted[lo - 1]);
+function boxMedian(sorted: number[]): number {
+  if (sorted.length === 0) return 0;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle];
 }
 
 /**
@@ -4649,9 +4707,16 @@ function boxQuantile(sorted: number[], p: number, method: string): number {
 function computeBoxStats(values: number[], method: string): BoxStats | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
-  const q1 = boxQuantile(sorted, 0.25, method);
-  const median = boxQuantile(sorted, 0.5, method);
-  const q3 = boxQuantile(sorted, 0.75, method);
+  const middle = Math.floor(sorted.length / 2);
+  const median = boxMedian(sorted);
+  // Excel's box-chart "inclusive median" option includes an odd-sized
+  // sample's median in each half; "exclusive median" omits it. For even-sized
+  // samples the two methods share the same lower and upper halves.
+  const includeMedian = method === 'inclusive' && sorted.length % 2 === 1;
+  const lower = sorted.slice(0, middle + (includeMedian ? 1 : 0));
+  const upper = sorted.slice(middle + (sorted.length % 2 === 1 && !includeMedian ? 1 : 0));
+  const q1 = boxMedian(lower.length ? lower : sorted);
+  const q3 = boxMedian(upper.length ? upper : sorted);
   const iqr = q3 - q1;
   const loFence = q1 - 1.5 * iqr;
   const hiFence = q3 + 1.5 * iqr;
@@ -4685,31 +4750,9 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
   if (!box || box.categories.length === 0 || box.series.length === 0) return;
   const { x, y, w, h } = r;
 
-  // Shared title band + cartesian plot rect. Reserve a category-label band at
-  // the bottom and a value-label gutter on the left; no legend (Office draws
-  // box-and-whisker without one by default).
-  const titleBand = cartesianTitleBand(chart, h, ptToPx);
-  const catAxFontPx0 = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
-  const valAxFontPx0 = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
-  const pad = {
-    t: titleBand.bandH + valAxFontPx0 / 2 + 2,
-    r: w * 0.02,
-    b: (chart.catAxisHidden ? h * 0.02 : catAxisLabelBandH(catAxFontPx0)),
-    l: chart.valAxisHidden ? w * 0.02 : w * 0.1,
-  };
-  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
-    titleBand,
-    legendSideReserveFrac: 0,
-    pad,
-  });
-  drawChartTitle(ctx, chart, x, y + frame.title.topPad, w, frame.title.fontPx);
-  const { px0, py0, pw, ph } = frame.plotRect;
-
-  const cats = box.categories;
-  const nCat = cats.length;
-  const nSer = box.series.length;
-
-  // Value-axis extent across every sample point in every box.
+  // Resolve the value range before laying out the plot. The tick labels are a
+  // real layout input: reserve their measured width instead of a percentage of
+  // the chart width, which made the axis drift right on wide ChartEx charts.
   let dataMin = Infinity;
   let dataMax = -Infinity;
   for (const s of box.series) {
@@ -4721,6 +4764,76 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
     }
   }
   if (!isFinite(dataMin) || !isFinite(dataMax)) return;
+
+  const font = chartFontFamily(chart, chart.valAxisFontFace, 'minor');
+  const valFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
+  const provisionalScale = valueAxisScale(
+    dataMin,
+    dataMax,
+    chart.valMin,
+    chart.valMax,
+    h / ptToPx,
+    chart.valAxisMajorUnit,
+  );
+  let valLabelBandW = 0;
+  if (!chart.valAxisHidden) {
+    const previousFont = ctx.font;
+    ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${valFontPx}px ${font}`;
+    let maxLabelW = 0;
+    const tickCount = Math.min(
+      1000,
+      Math.max(0, Math.round((provisionalScale.max - provisionalScale.min) / provisionalScale.step)),
+    );
+    for (let tickIndex = 0; tickIndex <= tickCount; tickIndex++) {
+      const value = provisionalScale.min + tickIndex * provisionalScale.step;
+      const label = formatChartValWithCode(
+        value,
+        chart.valAxisFormatCode,
+        chart.date1904,
+      );
+      maxLabelW = Math.max(maxLabelW, ctx.measureText(label).width);
+    }
+    ctx.font = previousFont;
+    // Four pixels are used by fillText's axis gap below; the remaining four
+    // keep the label box clear of the adjacent vertical title band.
+    valLabelBandW = maxLabelW + 8;
+  }
+
+  // Shared title band + cartesian plot rect. Reserve category/value-axis bands
+  // and, when present in the chart model, the authored legend band.
+  const titleBand = cartesianTitleBand(chart, h, ptToPx);
+  const catAxFontPx0 = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
+  const valAxFontPx0 = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
+  const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
+  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
+  const pad = {
+    t: titleBand.bandH + legTopH + valAxFontPx0 / 2 + 2,
+    r: legRightW + w * 0.02,
+    b: legBottomH + axBands.catBandH + (chart.catAxisHidden ? h * 0.02 : catAxisLabelBandH(catAxFontPx0)),
+    l: legLeftW + axBands.valBandW + (chart.valAxisHidden ? w * 0.02 : valLabelBandW),
+  };
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleBand,
+    legendSideReserveFrac: 0.22,
+    pad,
+  });
+  drawChartTitle(ctx, chart, x, y + frame.title.topPad, w, frame.title.fontPx);
+  const { px0, py0, pw, ph } = frame.plotRect;
+
+  const cats = box.categories;
+  const nCat = cats.length;
+  const nSer = box.series.length;
+  const oneBoxPerSeries = nCat === nSer && cats.every((_category, categoryIndex) => {
+    const populatedSeries = box.series
+      .map((series, seriesIndex) => ({
+        seriesIndex,
+        populated: (series.valuesByCategory[categoryIndex]?.length ?? 0) > 0,
+      }))
+      .filter(entry => entry.populated);
+    return populatedSeries.length === 1 && populatedSeries[0].seriesIndex === categoryIndex;
+  });
+
   // Excel's auto value axis (nice-rounded min/max/step). For the sample data
   // (−78..128) this yields −100..150 step 50, matching PowerPoint.
   const { min: axisMin, max: axisMax, step } = valueAxisScale(
@@ -4729,22 +4842,42 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
   const span = axisMax - axisMin || 1;
   const yOf = (v: number): number => py0 + ph * (1 - (v - axisMin) / span);
 
-  const font = chartFontFamily(chart, chart.valAxisFontFace, 'minor');
-  const valFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
+  const valAxisLine = resolveAxisLine(chart.valAxisLineColor, chart.valAxisLineWidthEmu, ptToPx);
+  const valGridline = resolveGridline(
+    chart.valAxisGridlineColor,
+    chart.valAxisGridlineWidthEmu,
+    ptToPx,
+  );
 
   // Value-axis gridlines + labels (unless the value axis is hidden).
   ctx.save();
   if (!chart.valAxisHidden) {
-    ctx.font = `${valFontPx}px ${font}`;
+    ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${valFontPx}px ${font}`;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     for (let v = axisMin; v <= axisMax + 1e-6; v += step) {
       const gy = yOf(v);
-      ctx.strokeStyle = '#e6e6e6';
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      if (chart.valAxisMajorGridlines !== false) {
+        ctx.strokeStyle = valGridline.color;
+        ctx.lineWidth = valGridline.width;
+        ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      }
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#595959';
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 4, gy);
+      drawAxisTick(
+        ctx,
+        chart.valAxisMajorTickMark,
+        'val',
+        px0,
+        gy,
+        valAxisLine.color,
+        valAxisLine.width,
+      );
+    }
+    if (!chart.valAxisLineHidden) {
+      ctx.strokeStyle = valAxisLine.color;
+      ctx.lineWidth = valAxisLine.width;
+      ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
     }
   }
   // Category-axis baseline.
@@ -4758,17 +4891,22 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
   // gapWidth>` widens the inter-category gap (parser normalizes the fraction to
   // the legacy percent, default 150%). The boxes fill the slot minus that gap,
   // split evenly with a thin inter-box gutter.
-  const slotW = pw / nCat;
+  // ChartEx places categorical box/whisker data points at interior category
+  // positions, leaving one category interval between each plot edge and the
+  // first/last point. `gapWidth` controls the box-vs-gap width inside that
+  // interval; it does not consume the two outer category intervals.
+  const slotW = pw / (nCat + 1);
   const gapWidthPct = chart.barGapWidth ?? 150;
   const groupW = slotW / (1 + gapWidthPct / 100);
   const boxGutter = groupW * 0.06;
-  const boxW = (groupW - boxGutter * (nSer - 1)) / nSer;
+  const clusteredBoxW = (groupW - boxGutter * (nSer - 1)) / nSer;
   const paletteOf = (si: number): string => {
     const accent = chart.chartexAccents?.[si % (chart.chartexAccents?.length ?? 1)];
     const fill = box.series[si].color ?? accent ?? CHART_PALETTE[si % CHART_PALETTE.length];
     return `#${fill}`;
   };
-  // Outline color for the box edge / median / whisker / mean marker: the series
+  // Outline color for the box edge / median / whisker / mean marker: an
+  // explicit chartEx series line wins. Otherwise use the series
   // accent darkened by `lumMod 80%` — PowerPoint's default modern chart style
   // (`<cs:dataPoint>` line = `phClr` + one variation step). On sample-24 p.2 the
   // accent2 fill `ED7D31` darkens to `BE6427` (pixel-verified), which equals a
@@ -4780,15 +4918,20 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
 
   const catFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   for (let ci = 0; ci < nCat; ci++) {
-    const slotLeft = px0 + slotW * ci + (slotW - groupW) / 2;
+    const categoryCenterX = px0 + slotW * (ci + 1);
+    const slotLeft = categoryCenterX - groupW / 2;
     for (let si = 0; si < nSer; si++) {
       const s = box.series[si];
       const stats = computeBoxStats(s.valuesByCategory[ci] ?? [], s.quartileMethod);
       if (!stats) continue;
-      const bx = slotLeft + si * (boxW + boxGutter);
+      const boxW = oneBoxPerSeries ? groupW : clusteredBoxW;
+      const bx = oneBoxPerSeries ? slotLeft : slotLeft + si * (boxW + boxGutter);
       const cx = bx + boxW / 2;
       const fill = paletteOf(si);
-      const edge = scaleHexRgb(fill, LUM_MOD_80);
+      const edge = s.lineColor ? `#${s.lineColor}` : scaleHexRgb(fill, LUM_MOD_80);
+      const edgeWidth = s.lineWidthEmu
+        ? axisLineWidthPx(s.lineWidthEmu, ptToPx)
+        : 1;
       const yQ1 = yOf(stats.q1);
       const yQ3 = yOf(stats.q3);
       const boxTop = Math.min(yQ1, yQ3);
@@ -4797,7 +4940,7 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
       // Whiskers: vertical line from box edges to whisker ends, with end caps.
       const capW = boxW * 0.4;
       ctx.strokeStyle = edge;
-      ctx.lineWidth = 1;
+      ctx.lineWidth = edgeWidth;
       ctx.beginPath();
       ctx.moveTo(cx, yOf(stats.whiskerHi)); ctx.lineTo(cx, yQ3);
       ctx.moveTo(cx, yQ1); ctx.lineTo(cx, yOf(stats.whiskerLo));
@@ -4809,21 +4952,41 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
       ctx.fillStyle = fill;
       ctx.fillRect(bx, boxTop, boxW, boxH);
       ctx.strokeStyle = edge;
-      ctx.lineWidth = 0.75;
-      ctx.strokeRect(bx + 0.375, boxTop + 0.375, boxW - 0.75, boxH - 0.75);
+      ctx.lineWidth = edgeWidth;
+      ctx.strokeRect(
+        bx + edgeWidth / 2,
+        boxTop + edgeWidth / 2,
+        boxW - edgeWidth,
+        boxH - edgeWidth,
+      );
 
       // Median line across the box.
       const yMed = yOf(stats.median);
       ctx.strokeStyle = edge;
-      ctx.lineWidth = 1;
+      ctx.lineWidth = edgeWidth;
       ctx.beginPath(); ctx.moveTo(bx, yMed); ctx.lineTo(bx + boxW, yMed); ctx.stroke();
+
+      // Interior sample points. Excel overlays the raw non-outlier values on
+      // the box/whiskers when cx:visibility@nonoutliers is enabled.
+      if (s.showNonoutliers) {
+        const pR = Math.max(1.25, boxW * 0.045);
+        ctx.fillStyle = fill;
+        ctx.strokeStyle = edge;
+        ctx.lineWidth = edgeWidth;
+        for (const point of stats.inner) {
+          ctx.beginPath();
+          ctx.arc(cx, yOf(point), pR, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
 
       // Mean `×` marker (same accent×0.8 as the rest of the outline).
       if (s.meanMarker) {
         const mY = yOf(stats.mean);
         const mR = Math.max(2, boxW * 0.14);
         ctx.strokeStyle = edge;
-        ctx.lineWidth = 1;
+        ctx.lineWidth = edgeWidth;
         ctx.beginPath();
         ctx.moveTo(cx - mR, mY - mR); ctx.lineTo(cx + mR, mY + mR);
         ctx.moveTo(cx + mR, mY - mR); ctx.lineTo(cx - mR, mY + mR);
@@ -4835,7 +4998,7 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
         ctx.fillStyle = fill;
         const oR = Math.max(1.5, boxW * 0.06);
         for (const o of stats.outliers) {
-          ctx.beginPath(); ctx.arc(cx, yOf(o), oR, 0, Math.PI * 2); ctx.fill();
+          ctx.beginPath(); ctx.arc(cx, yOf(o), oR, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
         }
       }
     }
@@ -4848,11 +5011,50 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       const label = cats[ci];
-      const ccx = px0 + slotW * ci + slotW / 2;
-      ctx.fillText(label, ccx, py0 + ph + 4);
+      ctx.fillText(label, categoryCenterX, py0 + ph + 4);
     }
   }
   ctx.restore();
+
+  drawAxisTitles(
+    ctx,
+    chart,
+    x,
+    y,
+    w,
+    h,
+    px0,
+    py0,
+    pw,
+    ph,
+    legLeftW,
+    legBottomH,
+    axBands.catFontPx,
+    axBands.valFontPx,
+  );
+
+  const legendChart: ChartModel = {
+    ...chart,
+    series: box.series.map(series => ({
+      name: series.name,
+      values: [],
+      color: series.color ?? null,
+    })),
+  };
+  drawLegendForLayout(
+    ctx,
+    legendChart,
+    leg,
+    x,
+    y,
+    w,
+    h,
+    px0,
+    py0,
+    pw,
+    ph,
+    titleBand.bandH + 2,
+  );
 }
 
 // ─── chartEx: sunburst (CH15, MS 2014 chartex ext) ───────────────────────────
@@ -5022,8 +5224,9 @@ function renderSunburstChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r
       ctx.lineWidth = 1;
       ctx.stroke();
 
-      // Label: white, centered at the mid-radius / mid-angle, rotated to run
-      // along the arc (tangential), word-wrapped and elided to the wedge.
+      // Excel's sunburst category labels run along the radius (not around the
+      // circumference). Center the text at the wedge mid-radius and wrap it to
+      // the available ring-band width; additional lines stack tangentially.
       const midA = (node.a0 + node.a1) / 2;
       const midR = (rInner + rOuter) / 2;
       // Radial room the label may occupy (the ring band, minus padding).
@@ -5035,36 +5238,55 @@ function renderSunburstChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r
 
       ctx.save();
       ctx.translate(cx + Math.cos(midA) * midR, cy + Math.sin(midA) * midR);
-      // Orient the text so it reads along the ring: rotate to the tangent, and
-      // flip on the left half so it isn't upside-down.
-      let rot = midA + Math.PI / 2;
+      // Orient the text along the radius and flip on the left half so it stays
+      // readable instead of becoming upside-down.
+      let rot = midA;
       const deg = ((rot * 180) / Math.PI) % 360;
-      if (deg > 90 && deg < 270) rot += Math.PI;
+      if (deg > 90 || deg < -90) rot += Math.PI;
       ctx.rotate(rot);
       ctx.font = `${labelPx}px ${labelFont}`;
       ctx.fillStyle = '#ffffff';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      // The text runs along the tangent (rotated frame's x-axis), so its
-      // available width is the arc length and its stacking room (wrap lines) is
-      // the radial band.
+      // The rotated frame's x-axis is radial: width is the ring band and the
+      // available line stack is the wedge's tangential arc length.
       const words = node.label.split(/\s+/).filter(Boolean);
-      const maxLineW = arcLen - 2;
+      const maxLineW = radialRoom - 2;
       const lines: string[] = [];
       let cur = '';
       for (const word of words) {
         const trial = cur ? `${cur} ${word}` : word;
-        if (ctx.measureText(trial).width <= maxLineW || !cur) {
+        if (ctx.measureText(trial).width <= maxLineW) {
           cur = trial;
-        } else {
-          lines.push(cur);
-          cur = word;
+          continue;
         }
+        if (cur) {
+          lines.push(cur);
+          cur = '';
+        }
+        if (ctx.measureText(word).width <= maxLineW) {
+          cur = word;
+          continue;
+        }
+        // Narrow outer rings legitimately split a long category name inside
+        // the word (Excel's sample renders "Califor" / "nia"). Retain every
+        // character instead of eliding the label.
+        let chunk = '';
+        for (const char of word) {
+          const next = chunk + char;
+          if (chunk && ctx.measureText(next).width > maxLineW) {
+            lines.push(chunk);
+            chunk = char;
+          } else {
+            chunk = next;
+          }
+        }
+        cur = chunk;
       }
       if (cur) lines.push(cur);
-      // Cap the number of lines to what the radial band holds.
+      // Cap the number of lines to what the tangential arc holds.
       const lineH = labelPx * 1.05;
-      const maxLines = Math.max(1, Math.floor(radialRoom / lineH));
+      const maxLines = Math.max(1, Math.floor(arcLen / lineH));
       const shown = lines.slice(0, maxLines).map(l => elideToWidth(ctx, l, maxLineW));
       const totalH = shown.length * lineH;
       shown.forEach((line, li) => {
@@ -5075,6 +5297,225 @@ function renderSunburstChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r
     }
   }
   ctx.restore();
+}
+
+// ─── chartEx: treemap (CH15, MS 2014 chartex ext) ───────────────────────────
+
+interface TreemapRect { x: number; y: number; w: number; h: number }
+interface TreemapTile { node: SunburstNode; rect: TreemapRect }
+
+/** Standard squarified-treemap layout. Areas are exactly proportional to node
+ * values; descending stable order keeps the aspect ratios useful without any
+ * document-specific tuning. */
+function layoutTreemapTiles(nodes: SunburstNode[], rect: TreemapRect): TreemapTile[] {
+  const positive = nodes
+    .map((node, index) => ({ node, index, value: Math.max(0, node.value) }))
+    .filter(entry => entry.value > 0)
+    .sort((a, b) => b.value - a.value || a.index - b.index);
+  const total = positive.reduce((sum, entry) => sum + entry.value, 0);
+  if (total <= 0 || rect.w <= 0 || rect.h <= 0) return [];
+
+  const scale = (rect.w * rect.h) / total;
+  const entries = positive.map(entry => ({ ...entry, area: entry.value * scale }));
+  const tiles: TreemapTile[] = [];
+  let remaining = { ...rect };
+  let row: typeof entries = [];
+
+  const worstRatio = (items: typeof entries, shortSide: number): number => {
+    if (items.length === 0 || shortSide <= 0) return Number.POSITIVE_INFINITY;
+    const sum = items.reduce((s, item) => s + item.area, 0);
+    const max = Math.max(...items.map(item => item.area));
+    const min = Math.min(...items.map(item => item.area));
+    const side2 = shortSide * shortSide;
+    return Math.max((side2 * max) / (sum * sum), (sum * sum) / (side2 * min));
+  };
+
+  const placeRow = (items: typeof entries): void => {
+    if (items.length === 0) return;
+    const area = items.reduce((sum, item) => sum + item.area, 0);
+    if (remaining.w >= remaining.h) {
+      const colW = remaining.h > 0 ? area / remaining.h : 0;
+      let y = remaining.y;
+      for (let i = 0; i < items.length; i++) {
+        const h = i === items.length - 1 ? remaining.y + remaining.h - y : items[i].area / colW;
+        tiles.push({ node: items[i].node, rect: { x: remaining.x, y, w: colW, h } });
+        y += h;
+      }
+      remaining = { x: remaining.x + colW, y: remaining.y, w: Math.max(0, remaining.w - colW), h: remaining.h };
+    } else {
+      const rowH = remaining.w > 0 ? area / remaining.w : 0;
+      let x = remaining.x;
+      for (let i = 0; i < items.length; i++) {
+        const w = i === items.length - 1 ? remaining.x + remaining.w - x : items[i].area / rowH;
+        tiles.push({ node: items[i].node, rect: { x, y: remaining.y, w, h: rowH } });
+        x += w;
+      }
+      remaining = { x: remaining.x, y: remaining.y + rowH, w: remaining.w, h: Math.max(0, remaining.h - rowH) };
+    }
+  };
+
+  let index = 0;
+  while (index < entries.length) {
+    const next = entries[index];
+    const side = Math.min(remaining.w, remaining.h);
+    if (row.length === 0 || worstRatio([...row, next], side) <= worstRatio(row, side)) {
+      row.push(next);
+      index++;
+    } else {
+      placeRow(row);
+      row = [];
+    }
+  }
+  placeRow(row);
+  return tiles;
+}
+
+/** Render chartEx `layoutId="treemap"` as nested, area-proportional rectangles.
+ * The chartEx hierarchy is shared with sunburst; `parentLabelLayout="banner"`
+ * reserves a header inside each parent, `none` suppresses parent captions, and
+ * the other/absent modes overlay the caption without changing tile area. */
+function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
+  const treemap = chart.chartexTreemap;
+  if (!treemap || treemap.rows.length === 0) return;
+
+  const frame = computeChartFrame(chart, r.x, r.y, r.w, r.h, ptToPx, {
+    titleTopPadFrac: 0.035,
+    titleBottomPadFrac: 0.035,
+    legendSideReserveFrac: 0,
+    radialGapFrac: 0.015,
+  });
+  drawChartTitle(ctx, chart, r.x, r.y + frame.title.topPad, r.w, frame.title.fontPx);
+  const root = buildSunburstTree(treemap.rows);
+  if (root.value <= 0 || root.children.length === 0) return;
+
+  const accents = chart.chartexAccents?.length ? chart.chartexAccents : CHART_PALETTE;
+  const fontFamily = chartFontFamily(chart, chart.dataLabelFontFace, 'minor');
+  const parentMode = treemap.parentLabelLayout ?? 'overlapping';
+
+  const paint = (node: SunburstNode, tile: TreemapRect): void => {
+    if (tile.w < 0.5 || tile.h < 0.5) return;
+    const base = accents[node.branchIndex % accents.length];
+    const color = node.depth === 0 ? `#${base}` : mixHexWithWhite(base, Math.min(0.42, node.depth * 0.16));
+    ctx.fillStyle = color;
+    ctx.fillRect(tile.x, tile.y, tile.w, tile.h);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tile.x + 0.5, tile.y + 0.5, Math.max(0, tile.w - 1), Math.max(0, tile.h - 1));
+
+    if (node.children.length > 0) {
+      const showParent = parentMode !== 'none';
+      const fontPx = Math.max(8, Math.min(13, Math.min(tile.w, tile.h) * 0.12));
+      const bannerH = parentMode === 'banner' && showParent
+        ? Math.min(tile.h * 0.28, fontPx + 7)
+        : 0;
+      const pad = 1;
+      const content = {
+        x: tile.x + pad,
+        y: tile.y + bannerH + pad,
+        w: Math.max(0, tile.w - pad * 2),
+        h: Math.max(0, tile.h - bannerH - pad * 2),
+      };
+      for (const child of layoutTreemapTiles(node.children, content)) paint(child.node, child.rect);
+
+      if (showParent && tile.w > fontPx * 2 && tile.h > fontPx + 4) {
+        ctx.font = `bold ${fontPx}px ${fontFamily}`;
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        const shown = elideToWidth(ctx, node.label, tile.w - 8);
+        if (shown) ctx.fillText(shown, tile.x + 4, tile.y + 3);
+      }
+      return;
+    }
+
+    const fontPx = Math.max(7, Math.min(12, Math.min(tile.w, tile.h) * 0.18));
+    if (tile.w <= fontPx * 1.2 || tile.h <= fontPx * 1.2) return;
+    ctx.font = `${fontPx}px ${fontFamily}`;
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const shown = elideToWidth(ctx, node.label, tile.w - 6);
+    if (shown) ctx.fillText(shown, tile.x + tile.w / 2, tile.y + tile.h / 2);
+  };
+
+  ctx.save();
+  const { px0, py0, pw, ph } = frame.plotRect;
+  for (const tile of layoutTreemapTiles(root.children, { x: px0, y: py0, w: pw, h: ph })) {
+    paint(tile.node, tile.rect);
+  }
+  ctx.restore();
+}
+
+/** Render text shapes from the chart's related Chart Drawing part.
+ *
+ * `cdr:relSizeAnchor` coordinates are fractions of the full chart space, not
+ * the plot area. Paragraph and run properties are authored DrawingML values;
+ * only explicit paragraph boundaries are laid out here (no sample-specific
+ * word-wrapping or auto-fit inference).
+ */
+function drawChartTextBoxes(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  rect: ChartRect,
+  ptToPx: number,
+): void {
+  const boxes = chart.chartTextBoxes;
+  if (!boxes?.length) return;
+
+  for (const box of boxes) {
+    const bx = rect.x + box.x * rect.w;
+    const by = rect.y + box.y * rect.h;
+    const bw = box.w * rect.w;
+    const bh = box.h * rect.h;
+    if (!(bw > 0 && bh > 0)) continue;
+
+    const paragraphMetrics = box.paragraphs.map(paragraph => {
+      const runs = paragraph.runs.map(run => {
+        const fontPx = Math.max(1, ((run.fontSizeHpt ?? 1000) / 100) * ptToPx);
+        const font = `${run.bold ? 'bold ' : ''}${fontPx}px ${chartFontFamily(chart, run.fontFace, 'minor')}`;
+        ctx.font = font;
+        return { run, fontPx, font, width: ctx.measureText(run.text).width };
+      });
+      const maxFontPx = Math.max(1, ...runs.map(run => run.fontPx));
+      return {
+        paragraph,
+        runs,
+        width: runs.reduce((sum, run) => sum + run.width, 0),
+        height: maxFontPx * 1.2,
+        baseline: maxFontPx * 0.9,
+      };
+    });
+    const textHeight = paragraphMetrics.reduce((sum, paragraph) => sum + paragraph.height, 0);
+    const contentY = box.verticalAnchor === 'b'
+      ? by + bh - textHeight
+      : box.verticalAnchor === 'ctr'
+        ? by + (bh - textHeight) / 2
+        : by;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(bx, by, bw, bh);
+    ctx.clip();
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    let lineY = contentY;
+    for (const metric of paragraphMetrics) {
+      const align = metric.paragraph.align;
+      let runX = align === 'ctr'
+        ? bx + (bw - metric.width) / 2
+        : align === 'r'
+          ? bx + bw - metric.width
+          : bx;
+      for (const measured of metric.runs) {
+        ctx.font = measured.font;
+        ctx.fillStyle = measured.run.color ? `#${measured.run.color}` : '#000000';
+        ctx.fillText(measured.run.text, runX, lineY + metric.baseline);
+        runX += measured.width;
+      }
+      lineY += metric.height;
+    }
+    ctx.restore();
+  }
 }
 
 // ─── Background frame + dispatcher ──────────────────────────────────────────
@@ -5131,16 +5572,17 @@ export function renderChart(
       ctx.restore();
     }
 
-    // chartEx box-and-whisker / sunburst carry their data in the structured
-    // `chartexBox` / `chartexSunburst` fields, not the flat `series` array, so the
+    // chartEx box-and-whisker / sunburst / treemap carry their data in the structured
+    // `chartexBox` / `chartexSunburst` / `chartexTreemap` fields, not the flat `series` array, so the
     // empty-series "(no data)" guard must not fire for them.
-    const hasChartexData = chart.chartexBox != null || chart.chartexSunburst != null;
+    const hasChartexData = chart.chartexBox != null || chart.chartexSunburst != null || chart.chartexTreemap != null;
     if (chart.series.length === 0 && !hasChartexData) {
       ctx.fillStyle = '#888';
       ctx.font = '12px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('(no data)', x + w / 2, y + h / 2);
+      drawChartTextBoxes(ctx, chart, rect, ptToPx);
       return;
     }
 
@@ -5177,6 +5619,8 @@ export function renderChart(
         renderBoxWhiskerChart(ctx, chart, rect, ptToPx); break;
       case 'sunburst':
         renderSunburstChart(ctx, chart, rect, ptToPx); break;
+      case 'treemap':
+        renderTreemapChart(ctx, chart, rect, ptToPx); break;
       default:
         ctx.fillStyle = '#888';
         ctx.font = '11px sans-serif';
@@ -5184,6 +5628,7 @@ export function renderChart(
         ctx.textBaseline = 'middle';
         ctx.fillText(`Chart: ${chart.chartType}`, x + w / 2, y + h / 2);
     }
+    drawChartTextBoxes(ctx, chart, rect, ptToPx);
   } finally {
     ctx.restore();
   }

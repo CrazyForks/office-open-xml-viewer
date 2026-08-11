@@ -4,7 +4,7 @@
 //! `fill`, text-body parsing from `text`, chart parsing from `chart`, and the
 //! shared XML/zip helpers + `TableStyleDef` from the crate root.
 
-use crate::chart::{parse_chartex, parse_legacy_chart};
+use crate::chart::{parse_chartex, parse_legacy_chart_with_user_shapes};
 use crate::fill::{
     line_properties_to_stroke, parse_blip_alpha, parse_color_node, parse_cust_geom,
     parse_effect_lst, parse_fill, parse_scene3d, parse_sp3d, parse_stroke,
@@ -57,6 +57,35 @@ fn load_chart_style_xml(zip: &mut PptxZip, chart_path: &str) -> Option<String> {
         find_rel_target_by_type(&rels_xml, ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)?;
     let style_path = resolve_path(dir, &target);
     read_zip_str(zip, &style_path).ok()
+}
+
+fn load_chart_user_shapes_xml(
+    zip: &mut PptxZip,
+    chart_path: &str,
+    chart_xml: &str,
+) -> Option<String> {
+    let chart_doc = crate::parse_preflighted_pptx_xml(chart_xml).ok()?;
+    let rid = chart_doc
+        .root_element()
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "userShapes")?
+        .attributes()
+        .find(|attribute| {
+            attribute.name() == "id"
+                && attribute
+                    .namespace()
+                    .is_some_and(|namespace| namespace.ends_with("/relationships"))
+        })?
+        .value();
+    let dir = chart_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let rels_path = relationship_part_path(chart_path);
+    let rels_xml = read_zip_str(zip, &rels_path).ok()?;
+    let target = ooxml_common::rels::parse_rels(&rels_xml)
+        .get(rid)?
+        .target
+        .clone();
+    let user_shapes_path = resolve_path(dir, &target);
+    read_zip_str(zip, &user_shapes_path).ok()
 }
 
 /// OOXML spec default positions for common placeholder types.
@@ -2519,7 +2548,13 @@ pub(crate) fn parse_sp_tree_node(
                                 let style_xml = load_chart_style_xml(zip, &chart_path);
                                 parse_chartex(&chart_xml, style_xml.as_deref(), theme)
                             } else {
-                                parse_legacy_chart(&chart_xml, theme)
+                                let user_shapes_xml =
+                                    load_chart_user_shapes_xml(zip, &chart_path, &chart_xml);
+                                parse_legacy_chart_with_user_shapes(
+                                    &chart_xml,
+                                    user_shapes_xml.as_deref(),
+                                    theme,
+                                )
                             };
                             if let Some(mut chart) = chart_opt {
                                 chart.x = t.x;

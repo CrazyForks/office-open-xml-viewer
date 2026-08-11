@@ -57,10 +57,30 @@ pub(crate) fn parse_legacy_chart(
     xml: &str,
     theme: &HashMap<String, String>,
 ) -> Option<ChartElement> {
+    parse_legacy_chart_with_user_shapes(xml, None, theme)
+}
+
+pub(crate) fn parse_legacy_chart_with_user_shapes(
+    xml: &str,
+    user_shapes_xml: Option<&str>,
+    theme: &HashMap<String, String>,
+) -> Option<ChartElement> {
     let doc = parse_preflighted_pptx_xml(xml).ok()?;
     let root = doc.root_element();
     let resolver = PptxColorResolver { theme };
-    let chart = ooxml_common::chart::parse_chart_part(root, &resolver)?;
+    let mut chart = ooxml_common::chart::parse_chart_part(root, &resolver)?;
+    if let Some(user_shapes_xml) = user_shapes_xml {
+        if let Ok(user_shapes_doc) = parse_preflighted_pptx_xml(user_shapes_xml) {
+            let text_boxes = ooxml_common::chart::parse_chart_user_shapes_for_chart(
+                root,
+                user_shapes_doc.root_element(),
+                &resolver,
+            );
+            if !text_boxes.is_empty() {
+                chart.chart_text_boxes = Some(text_boxes);
+            }
+        }
+    }
     Some(ChartElement {
         x: 0,
         y: 0,
@@ -190,5 +210,25 @@ mod tests {
         let element = parse_legacy_chart(&xml, &theme).expect("chart should parse");
 
         assert_eq!(element.chart.series[0].color.as_deref(), Some("ED7D31"));
+    }
+
+    #[test]
+    fn legacy_chart_accepts_shared_chart_drawing_text_boxes() {
+        let chart_xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+        );
+        let user_shapes_xml = format!(
+            r#"<c:userShapes xmlns:c="{C_NS}" xmlns:cdr="http://schemas.openxmlformats.org/drawingml/2006/chartDrawing" xmlns:a="{A_NS}"><cdr:relSizeAnchor><cdr:from><cdr:x>0</cdr:x><cdr:y>0</cdr:y></cdr:from><cdr:to><cdr:x>1</cdr:x><cdr:y>0.1</cdr:y></cdr:to><cdr:sp><cdr:nvSpPr><cdr:cNvPr id="1" name="TitleBox"/><cdr:cNvSpPr/></cdr:nvSpPr><cdr:spPr/><cdr:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="1800"/><a:t>Shared title</a:t></a:r></a:p></cdr:txBody></cdr:sp></cdr:relSizeAnchor></c:userShapes>"#
+        );
+
+        let element = parse_legacy_chart_with_user_shapes(
+            &chart_xml,
+            Some(&user_shapes_xml),
+            &HashMap::new(),
+        )
+        .expect("chart should parse");
+
+        let boxes = element.chart.chart_text_boxes.expect("chart text boxes");
+        assert_eq!(boxes[0].paragraphs[0].runs[0].text, "Shared title");
     }
 }

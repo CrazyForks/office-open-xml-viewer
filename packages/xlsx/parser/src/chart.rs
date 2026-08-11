@@ -1,11 +1,42 @@
 use crate::read_zip_string;
 use crate::types::*;
 use crate::worksheet_reference::{
-    resolve_worksheet_reference, ReferencedCellValue, WorksheetReferenceSession,
+    parse_a1_range, resolve_worksheet_reference, split_sheet_ref, ReferencedCellValue,
+    WorksheetReferenceSession,
 };
 use crate::{find_rel_target_by_type, parse_rels_map, resolve_fill_color, resolve_zip_path};
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{is_c_ns, is_r_ns, is_xdr_ns};
+
+const CHARTEX_NS: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
+
+/// Collect live graphic frames while applying MCE branch selection at any
+/// nesting depth. Excel may place a chartEx `AlternateContent` directly under
+/// an anchor or inside an `xdr:grpSp`; walking plain descendants would also
+/// visit the fallback preview, so MCE nodes must be handled explicitly.
+fn collect_selected_graphic_frames<'a, 'input>(
+    node: roxmltree::Node<'a, 'input>,
+    out: &mut Vec<roxmltree::Node<'a, 'input>>,
+) {
+    if !node.is_element() {
+        return;
+    }
+    if node.tag_name().name() == "AlternateContent" {
+        if let Some(selected) =
+            ooxml_common::mce::select_alternate_content(node, &crate::drawing::xlsx_understands_ns)
+        {
+            collect_selected_graphic_frames(selected, out);
+        }
+        return;
+    }
+    if node.tag_name().name() == "graphicFrame" && is_xdr_ns(node.tag_name().namespace()) {
+        out.push(node);
+        return;
+    }
+    for child in node.children().filter(|child| child.is_element()) {
+        collect_selected_graphic_frames(child, out);
+    }
+}
 
 pub(crate) struct ChartReferenceContext<'a, 'input, 'session> {
     pub(crate) materialized_rows: Option<&'a [Row]>,
@@ -13,6 +44,7 @@ pub(crate) struct ChartReferenceContext<'a, 'input, 'session> {
     pub(crate) sheets: &'a [SheetMeta],
     pub(crate) workbook_rels: &'a roxmltree::Document<'input>,
     pub(crate) shared_strings: &'a [SharedString],
+    pub(crate) defined_names: &'a [DefinedName],
     pub(crate) session: &'session mut WorksheetReferenceSession,
 }
 
@@ -23,14 +55,27 @@ struct XlsxChartReferenceResolver<'archive, 'data, 'input, 'session> {
     sheets: &'data [SheetMeta],
     workbook_rels: &'data roxmltree::Document<'input>,
     shared_strings: &'data [SharedString],
+    defined_names: &'data [DefinedName],
     session: &'session mut WorksheetReferenceSession,
+}
+
+impl XlsxChartReferenceResolver<'_, '_, '_, '_> {
+    fn expand_defined_name(&self, formula: &str) -> String {
+        let trimmed = formula.trim();
+        self.defined_names
+            .iter()
+            .find(|defined| defined.name.eq_ignore_ascii_case(trimmed))
+            .map(|defined| defined.formula.clone())
+            .unwrap_or_else(|| trimmed.to_string())
+    }
 }
 
 impl ooxml_common::chart::ChartReferenceResolver for XlsxChartReferenceResolver<'_, '_, '_, '_> {
     fn resolve_strings(&mut self, formula: &str) -> Option<Vec<String>> {
+        let formula = self.expand_defined_name(formula);
         resolve_worksheet_reference(
             self.archive,
-            formula,
+            &formula,
             self.materialized_rows,
             self.sheet_name,
             self.sheets,
@@ -51,9 +96,10 @@ impl ooxml_common::chart::ChartReferenceResolver for XlsxChartReferenceResolver<
     }
 
     fn resolve_numbers(&mut self, formula: &str) -> Option<Vec<Option<f64>>> {
+        let formula = self.expand_defined_name(formula);
         resolve_worksheet_reference(
             self.archive,
-            formula,
+            &formula,
             self.materialized_rows,
             self.sheet_name,
             self.sheets,
@@ -71,6 +117,28 @@ impl ooxml_common::chart::ChartReferenceResolver for XlsxChartReferenceResolver<
                 .collect()
         })
     }
+
+    fn resolve_string_levels(&mut self, formula: &str) -> Option<Vec<Vec<String>>> {
+        let expanded = self.expand_defined_name(formula);
+        let (_, reference) = split_sheet_ref(&expanded)?;
+        let range = parse_a1_range(&reference)?;
+        let column_count = usize::try_from(range.right - range.left + 1).ok()?;
+        let values = self.resolve_strings(&expanded)?;
+        if column_count == 0 || values.len() % column_count != 0 {
+            return None;
+        }
+        let row_count = values.len() / column_count;
+        let mut levels = vec![Vec::with_capacity(row_count); column_count];
+        for row in values.chunks_exact(column_count) {
+            for (column, value) in row.iter().enumerate() {
+                levels[column].push(value.clone());
+            }
+        }
+        // Worksheet hierarchy ranges are authored root→leaf by columns, while
+        // chartEx `<cx:lvl>` document order is deepest→root.
+        levels.reverse();
+        Some(levels)
+    }
 }
 
 /// Read the chartStyle part (`styleN.xml`) associated with a chart part at
@@ -87,6 +155,30 @@ fn load_chart_style_xml(archive: &mut crate::XlsxZip, chart_path: &str) -> Optio
         find_rel_target_by_type(&rels_xml, ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)?;
     let style_path = resolve_zip_path(dir, &target);
     read_zip_string(archive, &style_path).ok()
+}
+
+/// Follow the owning legacy chart's `<c:userShapes r:id>` relationship to its
+/// Chart Drawing part (`cdr:CT_Drawing`, ECMA-376 dml-chartDrawing.xsd).
+fn load_chart_user_shapes_xml(
+    archive: &mut crate::XlsxZip,
+    chart_path: &str,
+    chart_xml: &str,
+) -> Option<String> {
+    let chart_doc = parse_guarded(chart_xml).ok()?;
+    let rid = chart_doc
+        .root_element()
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "userShapes")?
+        .attributes()
+        .find(|attribute| attribute.name() == "id" && is_r_ns(attribute.namespace()))?
+        .value()
+        .to_string();
+    let (dir, file) = chart_path.rsplit_once('/')?;
+    let rels_path = format!("{}/_rels/{}.rels", dir, file);
+    let rels_xml = read_zip_string(archive, &rels_path).ok()?;
+    let target = parse_rels_map(&rels_xml).remove(&rid)?;
+    let user_shapes_path = resolve_zip_path(dir, &target);
+    read_zip_string(archive, &user_shapes_path).ok()
 }
 
 /// Given a sheet path (e.g. "worksheets/sheet1.xml"), locate and parse
@@ -171,15 +263,6 @@ pub(crate) fn load_sheet_charts(
             let (mut to_col, mut to_col_off, mut to_row, mut to_row_off) = (0u32, 0i64, 0u32, 0i64);
             // oneCellAnchor size: `<xdr:ext cx cy>` in EMU.
             let (mut ext_cx, mut ext_cy) = (0i64, 0i64);
-            let mut chart_rid: Option<String> = None;
-            // Modern chartEx (Microsoft `cx:` namespace, 2014) parts are wired the
-            // same way as a legacy chart — `<a:graphicData>` still carries a
-            // `<c:chart r:id>` child (the transitional `c:` local name, not `cx:`)
-            // — but the `graphicData@uri` is the chartex extension URI instead of
-            // the DrawingML chart URI. Track it alongside `chart_rid` so the part
-            // is dispatched to `parse_chartex_part`, matching pptx's
-            // `uri.contains("chartex")` detection in shape.rs.
-            let mut is_chartex = false;
 
             for child in anchor.children() {
                 if !child.is_element() {
@@ -224,45 +307,6 @@ pub(crate) fn load_sheet_charts(
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(0);
                     }
-                    "graphicFrame" => {
-                        // ECMA-376 §20.1.2.2.8 CT_NonVisualDrawingProps@hidden:
-                        // a hidden chart's own `<xdr:nvGraphicFramePr>/<xdr:cNvPr
-                        // hidden="1">` marks it not rendered. This is the chart's
-                        // own graphicFrame walk (independent of the shared shape
-                        // walker in drawing.rs::collect_shapes), so it needs its
-                        // own check.
-                        if crate::drawing::xdr_node_hidden(&child) {
-                            continue;
-                        }
-                        // `<a:graphicData uri>` distinguishes a chartEx part
-                        // (`http://schemas.microsoft.com/office/drawing/2014/chartex`)
-                        // from a legacy DrawingML chart
-                        // (`http://schemas.openxmlformats.org/drawingml/2006/chart`).
-                        // Both wire the part through a `<c:chart r:id>` child, so
-                        // the rId resolution below is unchanged either way.
-                        if let Some(gd) = child
-                            .descendants()
-                            .find(|n| n.tag_name().name() == "graphicData")
-                        {
-                            if let Some(uri) = gd.attribute("uri") {
-                                is_chartex = uri.contains("chartex") || uri.contains("chartEx");
-                            }
-                        }
-                        // Look for a:graphic/a:graphicData/c:chart[@r:id]
-                        for gf_child in child.descendants() {
-                            if gf_child.tag_name().name() == "chart"
-                                && is_c_ns(gf_child.tag_name().namespace())
-                            {
-                                if let Some(rid) = gf_child
-                                    .attributes()
-                                    .find(|a| a.name() == "id" && is_r_ns(a.namespace()))
-                                    .map(|a| a.value().to_string())
-                                {
-                                    chart_rid = Some(rid);
-                                }
-                            }
-                        }
-                    }
                     _ => {}
                 }
             }
@@ -278,80 +322,149 @@ pub(crate) fn load_sheet_charts(
                 to_row_off = from_row_off + ext_cy;
             }
 
-            let Some(rid) = chart_rid else {
-                continue;
-            };
-            let Some(chart_target) = drawing_rels.get(&rid) else {
-                continue;
-            };
-            let chart_path = resolve_zip_path(drawing_dir, chart_target);
-            let Ok(chart_xml) = read_zip_string(archive, &chart_path) else {
-                continue;
-            };
-            // A chartEx part reads its title font size from the associated
-            // chartStyle sidecar (`styleN.xml`), reached via the chart part's
-            // OWN rels (`xl/charts/_rels/chartN.xml.rels`,
-            // `.../2011/relationships/chartStyle`). Read it best-effort now
-            // (before the chart doc is parsed, since both borrow `archive`);
-            // legacy `<c:>` charts ignore it (their title size is inline).
-            let style_xml = load_chart_style_xml(archive, &chart_path);
-            // Parse the chart directly through the shared `parse_chart_part`
-            // (the single superset parser for pptx + xlsx). The xlsx theme
-            // palette + major/minor Latin faces ride on the `XlsxColorResolver`,
-            // so no `ChartData` intermediate / `From` adapter is needed.
-            //
-            // A chartEx part (`is_chartex`) has a `<cx:chartSpace>` root instead
-            // of `<c:chartSpace>` and uses the shared
-            // `parse_chartex_part` structure walk (waterfall / boxWhisker /
-            // treemap / sunburst / … — ECMA-376 does not cover these; they are
-            // the Microsoft 2014 chartex extension). Same `ColorResolver`.
-            let Ok(chart_doc) = parse_guarded(&chart_xml) else {
-                continue;
-            };
-            let resolver = XlsxColorResolver {
-                theme_colors,
-                theme_major_font_latin: theme_fonts.0,
-                theme_minor_font_latin: theme_fonts.1,
-            };
-            let chart_opt = if is_chartex {
-                ooxml_common::chart::parse_chartex_part(
-                    chart_doc.root_element(),
-                    &resolver,
-                    style_xml.as_deref(),
-                )
-            } else if let Some(context) = reference_context.as_mut() {
-                let mut references = XlsxChartReferenceResolver {
-                    archive,
-                    materialized_rows: context.materialized_rows,
-                    sheet_name: context.sheet_name,
-                    sheets: context.sheets,
-                    workbook_rels: context.workbook_rels,
-                    shared_strings: context.shared_strings,
-                    session: context.session,
-                };
-                ooxml_common::chart::parse_chart_part_with_references(
-                    chart_doc.root_element(),
-                    &resolver,
-                    &mut references,
-                )
-            } else {
-                ooxml_common::chart::parse_chart_part(chart_doc.root_element(), &resolver)
-            };
-            let Some(chart) = chart_opt else {
-                continue;
-            };
+            // Excel wraps chartEx in MCE either directly under the anchor or
+            // inside an `xdr:grpSp`. Select the live Choice and
+            // recurse through groups without ever visiting its Fallback.
+            let mut graphic_frames = Vec::new();
+            collect_selected_graphic_frames(anchor, &mut graphic_frames);
+            for graphic_frame in graphic_frames {
+                // ECMA-376 §20.1.2.2.8 CT_NonVisualDrawingProps@hidden: a hidden
+                // chart's own graphicFrame is not rendered.
+                if crate::drawing::xdr_node_hidden(&graphic_frame) {
+                    continue;
+                }
 
-            all_charts.push(ChartAnchor {
-                from_col,
-                from_col_off,
-                from_row,
-                from_row_off,
-                to_col,
-                to_col_off,
-                to_row,
-                to_row_off,
-                chart,
-            });
+                // `<a:graphicData uri>` and its child namespace distinguish modern
+                // `<cx:chart>` from legacy `<c:chart>`.
+                let Some(graphic_data) = graphic_frame
+                    .descendants()
+                    .find(|n| n.is_element() && n.tag_name().name() == "graphicData")
+                else {
+                    continue;
+                };
+                let is_chartex = graphic_data
+                    .attribute("uri")
+                    .is_some_and(|uri| uri == CHARTEX_NS);
+                let chart_rid = graphic_data
+                    .descendants()
+                    .find(|n| {
+                        n.is_element()
+                            && n.tag_name().name() == "chart"
+                            && if is_chartex {
+                                n.tag_name().namespace() == Some(CHARTEX_NS)
+                            } else {
+                                is_c_ns(n.tag_name().namespace())
+                            }
+                    })
+                    .and_then(|chart| {
+                        chart
+                            .attributes()
+                            .find(|a| a.name() == "id" && is_r_ns(a.namespace()))
+                            .map(|a| a.value().to_string())
+                    });
+
+                let Some(rid) = chart_rid else {
+                    continue;
+                };
+                let Some(chart_target) = drawing_rels.get(&rid) else {
+                    continue;
+                };
+                let chart_path = resolve_zip_path(drawing_dir, chart_target);
+                let Ok(chart_xml) = read_zip_string(archive, &chart_path) else {
+                    continue;
+                };
+                // A chartEx part reads its title font size from the associated
+                // chartStyle sidecar (`styleN.xml`), reached via the chart part's
+                // OWN rels (`xl/charts/_rels/chartN.xml.rels`,
+                // `.../2011/relationships/chartStyle`). Read it best-effort now
+                // (before the chart doc is parsed, since both borrow `archive`);
+                // legacy `<c:>` charts ignore it (their title size is inline).
+                let style_xml = load_chart_style_xml(archive, &chart_path);
+                let user_shapes_xml = if is_chartex {
+                    None
+                } else {
+                    load_chart_user_shapes_xml(archive, &chart_path, &chart_xml)
+                };
+                // Parse the chart directly through the shared `parse_chart_part`
+                // (the single superset parser for pptx + xlsx). The xlsx theme
+                // palette + major/minor Latin faces ride on the `XlsxColorResolver`,
+                // so no `ChartData` intermediate / `From` adapter is needed.
+                //
+                // A chartEx part (`is_chartex`) has a `<cx:chartSpace>` root instead
+                // of `<c:chartSpace>` and uses the shared
+                // `parse_chartex_part` structure walk (waterfall / boxWhisker /
+                // treemap / sunburst / … — ECMA-376 does not cover these; they are
+                // the Microsoft 2014 chartex extension). Same `ColorResolver`.
+                let Ok(chart_doc) = parse_guarded(&chart_xml) else {
+                    continue;
+                };
+                let resolver = XlsxColorResolver {
+                    theme_colors,
+                    theme_major_font_latin: theme_fonts.0,
+                    theme_minor_font_latin: theme_fonts.1,
+                };
+                let chart_opt = if let Some(context) = reference_context.as_mut() {
+                    let mut references = XlsxChartReferenceResolver {
+                        archive,
+                        materialized_rows: context.materialized_rows,
+                        sheet_name: context.sheet_name,
+                        sheets: context.sheets,
+                        workbook_rels: context.workbook_rels,
+                        shared_strings: context.shared_strings,
+                        defined_names: context.defined_names,
+                        session: context.session,
+                    };
+                    if is_chartex {
+                        ooxml_common::chart::parse_chartex_part_with_references(
+                            chart_doc.root_element(),
+                            &resolver,
+                            style_xml.as_deref(),
+                            &mut references,
+                        )
+                    } else {
+                        ooxml_common::chart::parse_chart_part_with_references(
+                            chart_doc.root_element(),
+                            &resolver,
+                            &mut references,
+                        )
+                    }
+                } else if is_chartex {
+                    ooxml_common::chart::parse_chartex_part(
+                        chart_doc.root_element(),
+                        &resolver,
+                        style_xml.as_deref(),
+                    )
+                } else {
+                    ooxml_common::chart::parse_chart_part(chart_doc.root_element(), &resolver)
+                };
+                let Some(mut chart) = chart_opt else {
+                    continue;
+                };
+                if let Some(user_shapes_xml) = user_shapes_xml.as_deref() {
+                    if let Ok(user_shapes_doc) = parse_guarded(user_shapes_xml) {
+                        let text_boxes = ooxml_common::chart::parse_chart_user_shapes_for_chart(
+                            chart_doc.root_element(),
+                            user_shapes_doc.root_element(),
+                            &resolver,
+                        );
+                        if !text_boxes.is_empty() {
+                            chart.chart_text_boxes = Some(text_boxes);
+                        }
+                    }
+                }
+
+                all_charts.push(ChartAnchor {
+                    from_col,
+                    from_col_off,
+                    from_row,
+                    from_row_off,
+                    to_col,
+                    to_col_off,
+                    to_row,
+                    to_row_off,
+                    chart,
+                });
+            }
         }
     }
     all_charts
@@ -692,6 +805,35 @@ mod hidden_tests {
         crate::XlsxZip::new(Cursor::new(buf)).unwrap()
     }
 
+    fn archive_with_chart_user_shapes() -> crate::XlsxZip {
+        let mut chart_xml = minimal_chart_xml();
+        chart_xml = chart_xml.replace(
+            "</c:chartSpace>",
+            r#"<c:userShapes xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdUserShapes"/></c:chartSpace>"#,
+        );
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = SimpleFileOptions::default();
+            zw.start_file("xl/worksheets/_rels/sheet1.xml.rels", o)
+                .unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#).unwrap();
+            zw.start_file("xl/drawings/drawing1.xml", o).unwrap();
+            zw.write_all(drawing_xml("").as_bytes()).unwrap();
+            zw.start_file("xl/drawings/_rels/drawing1.xml.rels", o)
+                .unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#).unwrap();
+            zw.start_file("xl/charts/chart1.xml", o).unwrap();
+            zw.write_all(chart_xml.as_bytes()).unwrap();
+            zw.start_file("xl/charts/_rels/chart1.xml.rels", o).unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdUserShapes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartUserShapes" Target="../drawings/chartDrawing1.xml"/></Relationships>"#).unwrap();
+            zw.start_file("xl/drawings/chartDrawing1.xml", o).unwrap();
+            zw.write_all(br#"<c:userShapes xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:cdr="http://schemas.openxmlformats.org/drawingml/2006/chartDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><cdr:relSizeAnchor><cdr:from><cdr:x>0</cdr:x><cdr:y>0</cdr:y></cdr:from><cdr:to><cdr:x>1</cdr:x><cdr:y>0.1</cdr:y></cdr:to><cdr:sp><cdr:nvSpPr><cdr:cNvPr id="1" name="TitleBox"/><cdr:cNvSpPr txBox="1"/></cdr:nvSpPr><cdr:spPr/><cdr:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2000" b="1"/><a:t>User-shape title</a:t></a:r></a:p></cdr:txBody></cdr:sp></cdr:relSizeAnchor></c:userShapes>"#).unwrap();
+            zw.finish().unwrap();
+        }
+        crate::XlsxZip::new(Cursor::new(buf)).unwrap()
+    }
+
     #[test]
     fn hidden_chart_graphicframe_is_not_emitted() {
         for attr in [r#" hidden="1""#, r#" hidden="true""#] {
@@ -720,6 +862,27 @@ mod hidden_tests {
             );
             assert_eq!(charts.len(), 1, "visible chart dropped (attr={attr})");
         }
+    }
+
+    #[test]
+    fn chart_user_shapes_relationship_populates_shared_text_box_model() {
+        let mut archive = archive_with_chart_user_shapes();
+        let charts = load_sheet_charts(
+            &mut archive,
+            "worksheets/sheet1.xml",
+            None,
+            &theme(),
+            (None, None),
+        );
+        let boxes = charts[0]
+            .chart
+            .chart_text_boxes
+            .as_ref()
+            .expect("chart user-shape text boxes");
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].paragraphs[0].runs[0].text, "User-shape title");
+        assert_eq!(boxes[0].paragraphs[0].runs[0].font_size_hpt, Some(2000));
+        assert_eq!(boxes[0].paragraphs[0].runs[0].bold, Some(true));
     }
 }
 
@@ -823,6 +986,7 @@ mod worksheet_reference_tests {
                 sheets: &sheet_metas,
                 workbook_rels: &rels,
                 shared_strings: &[],
+                defined_names: &[],
                 session: &mut session,
             }),
             &theme,
@@ -874,16 +1038,12 @@ mod worksheet_reference_tests {
 }
 
 /// CH14 — chartEx (Microsoft 2014 `cx:` namespace) recognition for xlsx.
-/// `xdr:graphicFrame` wires a chartEx part through the SAME `<c:chart r:id>`
-/// child a legacy chart uses (the transitional `c:` local name, not `cx:`); only
-/// `<a:graphicData@uri>` distinguishes it
+/// `xdr:graphicFrame` wires a chartEx part through `<cx:chart r:id>`; the
+/// `<a:graphicData@uri>` and the child's namespace both distinguish it
 /// (`http://schemas.microsoft.com/office/drawing/2014/chartex` vs the
-/// DrawingML chart URI). No private xlsx fixture currently contains a chartEx
-/// part (`unzip -l ... | grep -i chartex` across every `packages/xlsx/public/
-/// private/*.xlsx` sample found none — all still use `<c:chartSpace>`), so this
-/// exercises the full zip → drawing → chartEx-part round trip with an inline
-/// waterfall fixture, mirroring `parse_chartex_part_waterfall_full_contract`
-/// in `ooxml-common`'s chart tests.
+/// DrawingML chart URI). This exercises the full zip → drawing → chartEx-part
+/// round trip with a self-contained inline waterfall fixture, mirroring
+/// `parse_chartex_part_waterfall_full_contract` in `ooxml-common`'s chart tests.
 #[cfg(test)]
 mod chartex_tests {
     use super::*;
@@ -942,16 +1102,28 @@ mod chartex_tests {
     /// `load_sheet_charts` now checks.
     fn chartex_drawing_xml() -> String {
         format!(
-            r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
+            r#"<xdr:wsDr {NS}
+              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+              xmlns:cx1="http://schemas.microsoft.com/office/drawing/2015/9/8/chartex">
+            <xdr:twoCellAnchor>
               <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
               <xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>16</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+              <xdr:grpSp>
+                <xdr:nvGrpSpPr><xdr:cNvPr id="1" name="Group 1"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>
+                <xdr:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="3000000"/><a:chOff x="0" y="0"/><a:chExt cx="4000000" cy="3000000"/></a:xfrm></xdr:grpSpPr>
+              <mc:AlternateContent>
+                <mc:Choice Requires="cx1">
               <xdr:graphicFrame>
                 <xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Chart 1"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
                 <xdr:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="3000000"/></xdr:xfrm>
                 <a:graphic><a:graphicData uri="{CX_NS}">
-                  <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdChart"/>
+                  <cx:chart xmlns:cx="{CX_NS}" r:id="rIdChart"/>
                 </a:graphicData></a:graphic>
               </xdr:graphicFrame>
+                </mc:Choice>
+                <mc:Fallback><xdr:pic/></mc:Fallback>
+              </mc:AlternateContent>
+              </xdr:grpSp>
               <xdr:clientData/>
             </xdr:twoCellAnchor></xdr:wsDr>"#,
             NS = NS,
@@ -960,8 +1132,8 @@ mod chartex_tests {
     }
 
     /// Builds the same `sheet1.xml.rels` → `drawing1.xml` → `drawing1.xml.rels`
-    /// → `charts/chart1.xml` chain as `hidden_tests::archive_with_chart`, but
-    /// with a chartEx part at the end instead of a legacy one.
+    /// → `charts/chartEx1.xml` chain Excel uses, including the Microsoft
+    /// `.../2014/relationships/chartEx` relationship type.
     fn archive_with_chartex_chart() -> crate::XlsxZip {
         let mut buf = Vec::new();
         {
@@ -977,9 +1149,9 @@ mod chartex_tests {
 
             zw.start_file("xl/drawings/_rels/drawing1.xml.rels", o)
                 .unwrap();
-            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#).unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.microsoft.com/office/2014/relationships/chartEx" Target="../charts/chartEx1.xml"/></Relationships>"#).unwrap();
 
-            zw.start_file("xl/charts/chart1.xml", o).unwrap();
+            zw.start_file("xl/charts/chartEx1.xml", o).unwrap();
             zw.write_all(waterfall_chartex_xml().as_bytes()).unwrap();
 
             zw.finish().unwrap();

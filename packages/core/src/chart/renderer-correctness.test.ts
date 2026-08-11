@@ -13,6 +13,7 @@ import { renderChart } from './renderer.js';
 import { formatChartValWithCode } from './chart-number-format.js';
 
 interface RectCall { x: number; y: number; w: number; h: number; fs: string }
+interface StrokeRectCall { x: number; y: number; w: number; h: number; ss: string; lw: number }
 interface TextCall {
   text: string;
   x: number;
@@ -21,11 +22,13 @@ interface TextCall {
   baseline: string;
   font?: string;
   width?: number;
+  fillStyle?: string;
 }
 
 interface Recorded {
   ctx: CanvasRenderingContext2D;
   rects: RectCall[];
+  strokeRects: StrokeRectCall[];
   texts: TextCall[];
 }
 
@@ -33,6 +36,7 @@ interface Recorded {
  *  handful of state props the renderer reads, and models text width. */
 function recordingCtx(): Recorded {
   const rects: RectCall[] = [];
+  const strokeRects: StrokeRectCall[] = [];
   const texts: TextCall[] = [];
   const state: Record<string, unknown> = {
     font: '10px sans-serif',
@@ -74,14 +78,18 @@ function recordingCtx(): Recorded {
               baseline: String(state.textBaseline),
               font: String(state.font),
               width: textWidth(text),
+              fillStyle: String(state.fillStyle),
             });
+        case 'strokeRect':
+          return (x: number, y: number, w: number, h: number) =>
+            strokeRects.push({ x, y, w, h, ss: String(state.strokeStyle), lw: Number(state.lineWidth) });
         case 'createLinearGradient':
         case 'createRadialGradient':
           return () => ({ addColorStop() {} });
         case 'save': case 'restore': case 'beginPath': case 'closePath':
         case 'fill': case 'stroke': case 'moveTo': case 'lineTo': case 'arc':
         case 'bezierCurveTo': case 'quadraticCurveTo': case 'rect':
-        case 'strokeRect': case 'clearRect': case 'strokeText': case 'setLineDash':
+        case 'clearRect': case 'strokeText': case 'setLineDash':
         case 'translate': case 'rotate': case 'scale': case 'clip':
         case 'setTransform': case 'resetTransform': case 'getTransform':
           return () => undefined;
@@ -91,7 +99,7 @@ function recordingCtx(): Recorded {
     },
     set(_t, prop: string, value) { state[prop] = value; return true; },
   };
-  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, rects, texts };
+  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, rects, strokeRects, texts };
 }
 
 function baseModel(over: Partial<ChartModel>): ChartModel {
@@ -132,6 +140,83 @@ function series(over: Partial<ChartSeries>): ChartSeries {
 }
 
 const RECT: ChartRect = { x: 0, y: 0, w: 640, h: 360 };
+
+describe('chart drawing user-shape text boxes', () => {
+  it('draws relative paragraphs with authored run formatting above the chart', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      categories: ['A'],
+      series: [series({ values: [1] })],
+      chartTextBoxes: [{
+        x: 0.1,
+        y: 0.05,
+        w: 0.8,
+        h: 0.15,
+        verticalAnchor: 'b',
+        paragraphs: [{
+          align: 'ctr',
+          runs: [
+            { text: 'Authored ', fontSizeHpt: 2000, bold: true, color: '1696D2', fontFace: 'Lato' },
+            { text: 'title', fontSizeHpt: 1200, fontFace: 'Arial' },
+          ],
+        }],
+      }],
+    }), RECT, 1);
+
+    const authored = rec.texts.find(text => text.text === 'Authored ');
+    const suffix = rec.texts.find(text => text.text === 'title');
+    expect(authored).toBeDefined();
+    expect(suffix).toBeDefined();
+    expect(authored?.font).toContain('bold 20px');
+    expect(authored?.font).toContain('Lato');
+    expect(authored?.fillStyle).toBe('#1696D2');
+    expect(suffix?.font).toContain('12px');
+    expect(suffix?.font).toContain('Arial');
+    expect(authored?.x).toBeGreaterThan(RECT.w * 0.1);
+    expect((suffix?.x ?? 0)).toBeGreaterThan(authored?.x ?? 0);
+    expect(authored?.y).toBeGreaterThan(RECT.h * 0.05);
+    expect(authored?.y).toBeLessThanOrEqual(RECT.h * 0.2);
+  });
+});
+
+describe('bar chart authored layout and fills', () => {
+  it('honors a manually positioned title instead of centering it over the chart', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      title: 'Readiness score',
+      titleManualLayout: { x: 0.13, y: 0.03, w: 0.5, h: 0.08, xMode: 'edge', yMode: 'edge' },
+      categories: ['A'],
+      series: [series({ name: 'S', values: [1] })],
+    }), RECT, 1);
+    const title = rec.texts.find(text => text.text === 'Readiness score');
+    expect(title).toBeDefined();
+    expect(title?.x).toBeCloseTo(RECT.w * (0.13 + 0.25), 4);
+    expect(title?.x).toBeLessThan(RECT.w / 2);
+  });
+
+  it('uses a series pattern fill for bars and legend swatches', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A'],
+      series: [series({
+        name: 'Patterned',
+        color: '111111',
+        values: [1],
+        fillPattern: { fillType: 'pattern', fg: '777777', bg: 'FFFFFF', preset: 'pct30' },
+        lineColor: '595959',
+        lineWidthEmu: 12700,
+      })],
+      showLegend: true,
+      legendPos: 'r',
+    }), RECT, 1);
+    // A headless test has no bitmap canvas, so resolveFill deliberately falls
+    // back to the pattern foreground. Both the bar and key must use it.
+    expect(rec.rects.filter(rect => rect.fs === 'rgba(119,119,119,1)').length).toBeGreaterThanOrEqual(2);
+    expect(rec.strokeRects.some(rect => rect.ss === '#595959' && rect.lw === 1)).toBe(true);
+  });
+});
 
 describe('CH1 — negative bar/column values extend from the zero line', () => {
   it('a column chart draws negative bars below the zero line and positive bars above', () => {
@@ -1670,6 +1755,7 @@ interface RingRecorded {
   arcs: RingArc[];
   fills: string[];
   fontTexts: FontText[];
+  rotates: number[];
 }
 
 /** Recording context that also captures arc() (radius + angles) and, for each
@@ -1680,6 +1766,7 @@ function ringRecordingCtx(): RingRecorded {
   const arcs: RingArc[] = [];
   const fills: string[] = [];
   const fontTexts: FontText[] = [];
+  const rotates: number[] = [];
   const state: Record<string, unknown> = {
     font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
@@ -1713,8 +1800,10 @@ function ringRecordingCtx(): RingRecorded {
         case 'save': case 'restore': case 'beginPath': case 'closePath':
         case 'stroke': case 'moveTo': case 'lineTo': case 'bezierCurveTo':
         case 'quadraticCurveTo': case 'rect': case 'fillRect': case 'strokeRect':
-        case 'clearRect': case 'strokeText': case 'setLineDash': case 'translate':
-        case 'rotate': case 'scale': case 'clip': case 'setTransform':
+        case 'clearRect': case 'strokeText': case 'setLineDash':
+        case 'translate': return () => undefined;
+        case 'rotate': return (angle: number) => rotates.push(angle);
+        case 'scale': case 'clip': case 'setTransform':
         case 'resetTransform': case 'getTransform':
           return () => undefined;
         default:
@@ -1723,7 +1812,7 @@ function ringRecordingCtx(): RingRecorded {
     },
     set(_t, prop: string, value) { state[prop] = value; return true; },
   };
-  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, arcs, fills, fontTexts };
+  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, arcs, fills, fontTexts, rotates };
 }
 
 /** Outer/inner ring radii for a pie/doughnut: the outer radius is the largest
@@ -2257,6 +2346,22 @@ describe('#744 — category-axis (vertical) major gridlines', () => {
       catAxisMajorGridlines: true,
     }), RECT, 1);
     expect(vertGridlines(on.segs).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('scatter chart draws X-axis major gridlines when declared', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'scatter',
+      categories: [],
+      series: [series({
+        name: 'S',
+        categories: ['0', '10', '20'],
+        values: [1, 2, 3],
+      })],
+      catAxisMajorGridlines: true,
+      catAxisGridlineColor: '8fa878',
+    }), RECT, 1);
+    expect(vertGridlines(rec.segs, '#8fa878').length).toBeGreaterThanOrEqual(3);
   });
 });
 
@@ -2946,6 +3051,86 @@ describe('CH15 — chartEx box-and-whisker', () => {
     expect(labels.some(l => Number(l) >= 130)).toBe(true);
   });
 
+  it('draws the authored value-axis title, rule, gridline style, and explicit 0.2 major unit', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      valMin: 1,
+      valMax: 3,
+      valAxisMajorUnit: 0.2,
+      valAxisFormatCode: '0.0',
+      valAxisTitle: 'A&R readiness score',
+      valAxisTitleFontSizeHpt: 900,
+      valAxisTitleFontBold: false,
+      valAxisTitleFontColor: '404040',
+      valAxisLineColor: 'BFBFBF',
+      valAxisLineWidthEmu: 9525,
+      valAxisMajorTickMark: 'out',
+      valAxisMajorGridlines: true,
+      valAxisGridlineColor: 'D9D9D9',
+      valAxisGridlineWidthEmu: 9525,
+    }), RECT, 1);
+
+    expect(rec.texts.some(text => text.text === 'A&R readiness score')).toBe(true);
+    expect(rec.texts.map(text => text.text)).toEqual(
+      expect.arrayContaining(['1.0', '1.2', '1.4', '1.6', '1.8', '2.0', '2.2', '2.4', '2.6', '2.8', '3.0']),
+    );
+    expect(rec.segs.some(segment =>
+      Math.abs(segment.x0 - segment.x1) < 0.5 &&
+      Math.abs(segment.y1 - segment.y0) > 100 &&
+      segment.ss.toLowerCase() === '#bfbfbf'
+    )).toBe(true);
+    expect(rec.segs.filter(segment =>
+      Math.abs(segment.y0 - segment.y1) < 0.5 &&
+      Math.abs(segment.x1 - segment.x0) > 100 &&
+      segment.ss.toLowerCase() === '#d9d9d9'
+    ).length).toBeGreaterThanOrEqual(10);
+  });
+
+  it('uses the authored ChartEx value-axis font size for numeric tick labels', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      valMin: 1,
+      valMax: 3,
+      valAxisMajorUnit: 0.2,
+      valAxisFormatCode: '0.0',
+      valAxisFontSizeHpt: 900,
+      valAxisFontFace: 'Calibri',
+    }), RECT, 1);
+
+    const tick = rec.fontTexts.find(text => text.text === '1.0');
+    expect(tick).toBeDefined();
+    expect(tick?.font).toContain('9px');
+    expect(tick?.font).toContain('Calibri');
+  });
+
+  it('places the value axis from measured tick-label width instead of a fixed chart-width gutter', () => {
+    const axisX = (formatCode: string): number => {
+      const rec = segRecordingCtx();
+      renderChart(rec.ctx, boxModel({
+        valMin: 1,
+        valMax: 3,
+        valAxisMajorUnit: 0.2,
+        valAxisFormatCode: formatCode,
+        valAxisFontSizeHpt: 900,
+        valAxisTitle: 'Score',
+        valAxisTitleFontSizeHpt: 900,
+        valAxisLineColor: 'BFBFBF',
+        valAxisLineWidthEmu: 9525,
+      }), RECT, 1);
+      const axis = rec.segs.find(segment =>
+        Math.abs(segment.x0 - segment.x1) < 0.5 &&
+        Math.abs(segment.y1 - segment.y0) > 100 &&
+        segment.ss.toLowerCase() === '#bfbfbf'
+      );
+      if (!axis) throw new Error('value axis not drawn');
+      return axis.x0;
+    };
+
+    const shortLabelsAxisX = axisX('0.0');
+    const longLabelsAxisX = axisX('0.00000000');
+    expect(longLabelsAxisX).toBeGreaterThan(shortLabelsAxisX + 20);
+  });
+
   it('draws exactly one IQR box rect and one outlier dot for a single box with one outlier', () => {
     const rec = markerRecordingCtx();
     renderChart(rec.ctx, boxModel(), RECT, 1);
@@ -2958,6 +3143,53 @@ describe('CH15 — chartEx box-and-whisker', () => {
     // The outlier dot sits ABOVE the box top (smaller y = higher value).
     const box = rec.fillRects[0];
     expect(rec.arcs[0].y).toBeLessThan(box.y);
+  });
+
+  it('draws every non-outlier sample point when the visibility flag is enabled', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexBox: {
+        categories: ['Category 1'],
+        series: [{
+          name: 'S1', color: 'ED7D31', valuesByCategory: [CAT1_ORANGE],
+          meanMarker: true, meanLine: false, showOutliers: true, showNonoutliers: true,
+          quartileMethod: 'exclusive',
+        }],
+      },
+    }), RECT, 1);
+    // Eight interior points plus the single outlier at 128.
+    expect(rec.arcs.length).toBe(CAT1_ORANGE.length);
+  });
+
+  it('uses median-of-halves quartiles for inclusive and exclusive methods', () => {
+    const values = [1, 2, 3, 4, 100];
+    const exclusive = markerRecordingCtx();
+    renderChart(exclusive.ctx, boxModel({
+      chartexBox: {
+        categories: ['Category 1'],
+        series: [{
+          name: 'S1', color: 'ED7D31', valuesByCategory: [values],
+          meanMarker: false, meanLine: false, showOutliers: true, showNonoutliers: false,
+          quartileMethod: 'exclusive',
+        }],
+      },
+    }), RECT, 1);
+    const inclusive = markerRecordingCtx();
+    renderChart(inclusive.ctx, boxModel({
+      chartexBox: {
+        categories: ['Category 1'],
+        series: [{
+          name: 'S1', color: 'ED7D31', valuesByCategory: [values],
+          meanMarker: false, meanLine: false, showOutliers: true, showNonoutliers: false,
+          quartileMethod: 'inclusive',
+        }],
+      },
+    }), RECT, 1);
+
+    // Inclusive includes the median in each half: Q3=4, so 100 is an outlier.
+    // Exclusive omits it: Q3=(4+100)/2, so the same point stays inside.
+    expect(exclusive.arcs).toHaveLength(0);
+    expect(inclusive.arcs).toHaveLength(1);
   });
 
   it('suppresses outlier dots when <cx:visibility outliers="0">', () => {
@@ -2989,6 +3221,70 @@ describe('CH15 — chartEx box-and-whisker', () => {
     expect(rec.fillRects.length).toBe(6);
   });
 
+  it('lays out formula-only one-box-per-series data as full slots with a legend', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      showLegend: true,
+      legendPos: 'r',
+      catAxisHidden: true,
+      chartexBox: {
+        categories: ['Foundations', 'Adaptation'],
+        series: [
+          { name: 'Foundations', color: '5B9BD5', valuesByCategory: [[1, 2, 3], []], meanMarker: true, meanLine: false, showOutliers: true, showNonoutliers: true, quartileMethod: 'exclusive' },
+          { name: 'Adaptation', color: 'ED7D31', valuesByCategory: [[], [4, 5, 6]], meanMarker: true, meanLine: false, showOutliers: true, showNonoutliers: true, quartileMethod: 'inclusive' },
+        ],
+      },
+    }), RECT, 1);
+
+    const boxes = rec.fillRects.filter(rect => rect.w > 40);
+    expect(boxes).toHaveLength(2);
+    expect(rec.texts.map(text => text.text)).toEqual(
+      expect.arrayContaining(['Foundations', 'Adaptation']),
+    );
+  });
+
+  it('reserves one category interval before the first box and after the last box', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      title: null,
+      valMin: 0,
+      valMax: 10,
+      valAxisMajorUnit: 2,
+      valAxisMajorGridlines: true,
+      chartexBox: {
+        categories: ['A', 'B', 'C'],
+        series: [
+          { name: 'A', color: '5B9BD5', valuesByCategory: [[1, 2, 3], [], []], meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false, quartileMethod: 'inclusive' },
+          { name: 'B', color: 'ED7D31', valuesByCategory: [[], [4, 5, 6], []], meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false, quartileMethod: 'inclusive' },
+          { name: 'C', color: 'A5A5A5', valuesByCategory: [[], [], [7, 8, 9]], meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false, quartileMethod: 'inclusive' },
+        ],
+      },
+    }), RECT, 1);
+
+    const horizontalSegments = rec.segments.flatMap(segment =>
+      segment.slice(1).map((point, index) => ({
+        x0: segment[index].x,
+        y0: segment[index].y,
+        x1: point.x,
+        y1: point.y,
+      })),
+    ).filter(segment => Math.abs(segment.y0 - segment.y1) < 0.5);
+    const plotRule = horizontalSegments.sort((a, b) =>
+      Math.abs(b.x1 - b.x0) - Math.abs(a.x1 - a.x0)
+    )[0];
+    if (!plotRule) throw new Error('plot gridline not drawn');
+
+    const centers = rec.fillRects
+      .map(rect => rect.x + rect.w / 2)
+      .sort((a, b) => a - b);
+    expect(centers).toHaveLength(3);
+    const interval = centers[1] - centers[0];
+    const plotLeft = Math.min(plotRule.x0, plotRule.x1);
+    const plotRight = Math.max(plotRule.x0, plotRule.x1);
+    expect(centers[0] - plotLeft).toBeCloseTo(interval, 5);
+    expect(plotRight - centers[2]).toBeCloseTo(interval, 5);
+  });
+
   it('strokes the box outline (median / whisker / mean ×) in the series accent × lumMod 80%', () => {
     // PowerPoint's default modern chart style darkens a boxWhisker series'
     // outline to its accent × 0.8 (`<cs:dataPoint>` line phClr + one variation
@@ -3003,6 +3299,19 @@ describe('CH15 — chartEx box-and-whisker', () => {
     expect(accentSegs.length).toBeGreaterThanOrEqual(5);
     // The un-darkened fill accent must never be a stroke color.
     expect(rec.segs.some(s => s.ss.toLowerCase() === '#ed7d31')).toBe(false);
+  });
+
+  it('honors an explicit ChartEx series outline color and width', () => {
+    const rec = segRecordingCtx();
+    const model = boxModel();
+    const firstSeries = model.chartexBox?.series[0];
+    if (!firstSeries) throw new Error('box series fixture missing');
+    firstSeries.lineColor = '404040';
+    firstSeries.lineWidthEmu = 25400;
+    renderChart(rec.ctx, model, RECT, 1);
+    const outlineSegments = rec.segs.filter(segment => segment.ss.toLowerCase() === '#404040');
+    expect(outlineSegments.length).toBeGreaterThanOrEqual(5);
+    expect(outlineSegments.every(segment => segment.lw === 2)).toBe(true);
   });
 
   it('sizes the title from titleFontSizeHpt (chartStyle part) rather than an area-proportional guess', () => {
@@ -3090,9 +3399,19 @@ describe('CH15 — chartEx sunburst', () => {
     renderChart(rec.ctx, sunburstModel(), RECT, 1);
     const whiteLabels = rec.fontTexts.filter(t => t.fill === '#ffffff').map(t => t.text);
     // Labels are word-wrapped, so assert on the first word of each name.
-    expect(whiteLabels.some(t => t.includes('Branch'))).toBe(true);
-    expect(whiteLabels.some(t => t.includes('Stem'))).toBe(true);
-    expect(whiteLabels.some(t => t.includes('Leaf'))).toBe(true);
+    const joined = whiteLabels.join('').replace(/\s/g, '');
+    expect(joined).toContain('Branch');
+    expect(joined).toContain('Stem');
+    expect(joined).toContain('Leaf');
+  });
+
+  it('orients category labels radially instead of tangentially', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel(), RECT, 1);
+    // Branch A owns 2/3 of the circle. Starting at -90°, its midpoint is 30°.
+    // Radial text rotates by that midpoint; the former tangential layout used
+    // 120° (midpoint + 90°).
+    expect(rec.rotates[0]).toBeCloseTo(Math.PI / 6, 5);
   });
 
   it('sweeps each branch proportional to its aggregated size (Branch A twice Branch B)', () => {
@@ -3106,6 +3425,44 @@ describe('CH15 — chartEx sunburst', () => {
     const sweeps = branchArcs.map(a => Math.abs(a.a1 - a.a0)).sort((x, y) => y - x);
     expect(sweeps.length).toBeGreaterThanOrEqual(2);
     expect(sweeps[0] / sweeps[1]).toBeCloseTo(2, 1);
+  });
+});
+
+// CH15 — chartEx treemap. The parser supplies the same root→leaf rows as
+// sunburst; the renderer must turn them into nested, area-proportional tiles.
+describe('CH15 — chartEx treemap', () => {
+  function treemapModel(): ChartModel {
+    return baseModel({
+      chartType: 'treemap',
+      title: 'regions',
+      chartexAccents: ['5B9BD5', 'ED7D31', 'A5A5A5', 'FFC000', '4472C4', '70AD47'],
+      chartexTreemap: {
+        parentLabelLayout: 'banner',
+        rows: [
+          { path: ['Americas', 'North'], size: 50 },
+          { path: ['Americas', 'South'], size: 30 },
+          { path: ['Asia', 'East'], size: 20 },
+        ],
+      },
+    });
+  }
+
+  it('draws nested branch and leaf rectangles instead of the unsupported-chart placeholder', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, treemapModel(), RECT, 1);
+    expect(rec.texts.map(t => t.text)).not.toContain('Chart: treemap');
+    expect(rec.texts.map(t => t.text)).toEqual(expect.arrayContaining(['Americas', 'Asia', 'North', 'South', 'East']));
+    // Two parent regions + three leaves. Parent banners may add a background,
+    // so assert a lower bound rather than an exact implementation count.
+    expect(rec.rects.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('uses one theme accent per top-level branch', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, treemapModel(), RECT, 1);
+    const fills = rec.rects.map(r => r.fs.toUpperCase());
+    expect(fills).toContain('#5B9BD5');
+    expect(fills).toContain('#ED7D31');
   });
 });
 

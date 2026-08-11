@@ -199,6 +199,8 @@ export interface ChartErrBars {
 export interface ChartexBoxSeries {
     name: string;
     color?: string | null;
+    lineColor?: string | null;
+    lineWidthEmu?: number | null;
     valuesByCategory: number[][];
     meanMarker: boolean;
     meanLine: boolean;
@@ -216,6 +218,10 @@ export interface ChartexSunburst {
 export interface ChartexSunburstRow {
     path: string[];
     size: number;
+}
+export interface ChartexTreemap {
+    rows: ChartexSunburstRow[];
+    parentLabelLayout?: string | null;
 }
 export interface ChartLabelBox {
     fill?: string;
@@ -236,6 +242,7 @@ export interface ChartModel {
     title: string | null;
     categories: string[];
     series: ChartSeries[];
+    chartTextBoxes?: ChartTextBox[] | null;
     varyColors?: boolean | null;
     showDataLabels: boolean;
     valMin: number | null;
@@ -271,6 +278,7 @@ export interface ChartModel {
     dataLabelPosition?: string | null;
     dataLabelFontColor?: string | null;
     dataLabelFormatCode?: string | null;
+    dataLabelFontBold?: boolean | null;
     titleFontBold?: boolean | null;
     catAxisFontBold?: boolean | null;
     valAxisFontBold?: boolean | null;
@@ -333,6 +341,7 @@ export interface ChartModel {
     stockUpDownBars?: boolean | null;
     chartexBox?: ChartexBoxWhisker | null;
     chartexSunburst?: ChartexSunburst | null;
+    chartexTreemap?: ChartexTreemap | null;
     chartexAccents?: string[] | null;
 }
 export interface ChartRect {
@@ -344,6 +353,9 @@ export interface ChartRect {
 export interface ChartSeries {
     name: string;
     color: string | null;
+    fillPattern?: PatternFill | null;
+    lineColor?: string | null;
+    lineWidthEmu?: number | null;
     values: (number | null)[];
     dataPointColors?: (string | null)[] | null;
     dataLabelColors?: (string | null)[] | null;
@@ -381,6 +393,25 @@ export interface ChartSeriesDataLabels {
     leaderLineColor?: string;
     leaderLineWidthEmu?: number;
 }
+export interface ChartTextBox {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    paragraphs: ChartTextParagraph[];
+    verticalAnchor?: 't' | 'ctr' | 'b' | 'just' | 'dist' | string | null;
+}
+export interface ChartTextParagraph {
+    runs: ChartTextRun[];
+    align?: 'l' | 'ctr' | 'r' | 'just' | 'dist' | string | null;
+}
+export interface ChartTextRun {
+    text: string;
+    fontSizeHpt?: number | null;
+    bold?: boolean | null;
+    color?: string | null;
+    fontFace?: string | null;
+}
 export interface ChartTrendline {
     trendlineType: string;
     order?: number | null;
@@ -393,7 +424,7 @@ export interface ChartTrendline {
     lineColor?: string | null;
     lineWidthEmu?: number | null;
 }
-export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | string;
+export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | 'treemap' | string;
 export interface ConditionalFormat {
     sqref: WorksheetCellRange[];
     rules: CfRule[];

@@ -53,13 +53,17 @@ fn vml_xdr_index(value: i64) -> u32 {
 }
 
 /// ECMA-376 Part 3 §9.3 "given application configuration" for the xlsx parser:
-/// the Microsoft 2010 drawing extensions (a14 — wraps ordinary shapes/charts and
-/// OMML `a14:m` equations) and the 2009/9 spreadsheet extensions (x14 — slicers
-/// and the OLE `objectPr` image preview). Both have real render paths here.
+/// the Microsoft chartEx extension (the 2014 payload namespace and Excel's
+/// 2015/9/8 MCE capability namespace), the 2010 drawing extensions (a14 — wraps
+/// ordinary shapes/charts and OMML `a14:m` equations), and the 2009/9
+/// spreadsheet extensions (x14 — slicers and the OLE `objectPr` image preview).
+/// All have real render paths here.
 pub(crate) fn xlsx_understands_ns(ns: &str) -> bool {
     matches!(
         ns,
-        "http://schemas.microsoft.com/office/drawing/2010/main"
+        "http://schemas.microsoft.com/office/drawing/2014/chartex"
+            | "http://schemas.microsoft.com/office/drawing/2015/9/8/chartex"
+            | "http://schemas.microsoft.com/office/drawing/2010/main"
             | "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"
     )
 }
