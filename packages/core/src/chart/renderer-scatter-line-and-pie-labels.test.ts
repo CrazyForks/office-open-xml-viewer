@@ -63,7 +63,15 @@ function series(over: Partial<ChartSeries>): ChartSeries {
   return { name: '', color: null, values: [], ...over };
 }
 
-interface TextCall { text: string; fillStyle: string; x: number; y: number }
+interface TextCall {
+  text: string;
+  fillStyle: string;
+  x: number;
+  y: number;
+  font: string;
+  textAlign: CanvasTextAlign;
+  textBaseline: CanvasTextBaseline;
+}
 
 /** Recording context that captures: (a) `stroke()` calls that follow a
  *  `moveTo`/`lineTo` path with ≥2 vertices AND whose strokeStyle is `matchColor`
@@ -141,7 +149,15 @@ function recordingCtx(matchColor = '#4f81bd'): {
           };
         case 'fillText':
           return (text: string, x: number, y: number) =>
-            texts.push({ text, fillStyle: String(state.fillStyle), x, y });
+            texts.push({
+              text,
+              fillStyle: String(state.fillStyle),
+              x,
+              y,
+              font: String(state.font),
+              textAlign: state.textAlign as CanvasTextAlign,
+              textBaseline: state.textBaseline as CanvasTextBaseline,
+            });
         case 'createLinearGradient':
         case 'createRadialGradient':
           return () => ({ addColorStop() {} });
@@ -359,6 +375,58 @@ describe('pie / doughnut ctr data-label radius (§21.2.2.48, PowerPoint layout)'
       const ratio = Math.hypot(l.x - cx, l.y - cy) / outerR;
       expect(ratio).toBeGreaterThan(1.0);
     }
+  });
+
+  it('keeps the complete outEnd text boxes outside the pie, not only their centers', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['Long right-side category', 'Long left-side category'],
+      plotAreaManualLayout: {
+        xMode: 'edge', yMode: 'edge', x: 0.3, y: 0.15, w: 0.4, h: 0.7,
+      },
+      series: [series({
+        name: 'Share',
+        values: [50, 50],
+        categories: ['Long right-side category', 'Long left-side category'],
+        seriesDataLabels: {
+          showVal: true, showCatName: true, showSerName: false, showPercent: false,
+          position: 'outEnd', separator: '\n', fontSizeHpt: 1200,
+        },
+      })],
+    }), RECT, 1);
+
+    const { cx, cy, outerR } = pieGeometry(rec.arcs);
+    const categoryLabels = rec.texts.filter(t => t.text.startsWith('Long '));
+    expect(categoryLabels).toHaveLength(2);
+    for (const label of categoryLabels) {
+      const fontPx = Number(/(\d+(?:\.\d+)?)px/.exec(label.font)?.[1] ?? 12);
+      const halfW = label.text.length * fontPx * 0.6 / 2;
+      const halfH = fontPx / 2;
+      const dx = Math.max(Math.abs(label.x - cx) - halfW, 0);
+      const dy = Math.max(Math.abs(label.y - cy) - halfH, 0);
+      expect(Math.hypot(dx, dy)).toBeGreaterThanOrEqual(outerR);
+    }
+  });
+
+  it('draws authored leader lines when outEnd labels are displaced to avoid overlap', () => {
+    const rec = recordingCtx('#777777');
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['First narrow slice', 'Second narrow slice', 'Remainder'],
+      series: [series({
+        name: 'Share',
+        values: [1, 1, 98],
+        categories: ['First narrow slice', 'Second narrow slice', 'Remainder'],
+        seriesDataLabels: {
+          showVal: false, showCatName: true, showSerName: false, showPercent: false,
+          position: 'outEnd', fontSizeHpt: 1200,
+          showLeaderLines: true, leaderLineColor: '777777', leaderLineWidthEmu: 12700,
+        },
+      })],
+    }), RECT, 1);
+
+    expect(rec.counts.polylineStrokes).toBeGreaterThan(0);
   });
 });
 

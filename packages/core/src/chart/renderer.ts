@@ -3496,7 +3496,12 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // slices. Only runs when a rich definition is present; the plain percent
   // labels above are byte-identical to the pre-CH8 pie.
   if (hasRichLabels) {
-    drawPieRichLabels(ctx, chart, richDef, s, cats, vals, total, cx2, cy2, outerR, innerR, startAngle, dLblFont, ptToPx, plotLeft, plotTop, pw, ph);
+    drawPieRichLabels(
+      ctx, chart, richDef, s, cats, vals, total,
+      cx2, cy2, outerR, innerR, startAngle, dLblFont, ptToPx,
+      plotLeft, plotTop, pw, ph,
+      x, y, w, h,
+    );
   }
 
   if (pieLeg) {
@@ -3525,8 +3530,9 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
  *  §21.2.2.197) the labels are drawn Word-style: each is a boxed callout placed
  *  OUTSIDE its slice at the slice mid-angle, with adjacent boxes pushed apart to
  *  avoid overlap (`bestFit`), and a leader line back to the rim for any box that
- *  ends up far from its slice. Without a box shape the historical plain-text
- *  layout is preserved byte-for-byte. */
+ *  ends up far from its slice. Plain `outEnd` labels use the same outside-rim
+ *  invariant without painting a box; the inside positions retain their radial
+ *  layout. */
 function drawPieRichLabels(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -3541,6 +3547,7 @@ function drawPieRichLabels(
   font: string,
   ptToPx: number,
   plotX: number, plotY: number, plotW: number, plotH: number,
+  chartX: number, chartY: number, chartW: number, chartH: number,
 ): void {
   // Callout mode: a `<c:spPr>` box shape on the dLbls (Word's boxed pie labels).
   // Labels de-overlap and clamp inside the PLOT rect (not the full chart rect),
@@ -3551,6 +3558,7 @@ function drawPieRichLabels(
   }
 
   const overrides = s.dataLabelOverrides ?? [];
+  const outsideLabels: PieOutsideLabel[] = [];
   let angle = startAngle;
   for (let i = 0; i < vals.length; i++) {
     const slice = (vals[i] / total) * Math.PI * 2;
@@ -3591,12 +3599,28 @@ function drawPieRichLabels(
     if (!text) continue;
     const pos = ov?.position ?? def.position ?? 'bestFit';
     const outside = pos === 'outEnd';
+    const sizeHpt = ov?.fontSizeHpt ?? def.fontSizeHpt;
+    const sizePx = sizeHpt ? sizeHpt / 100 : Math.max(8, outerR * 0.1);
+    const bold = ov?.fontBold ?? def.fontBold;
+    const fontColor = ov?.fontColor ?? def.fontColor;
+    const lines = text.split(/\r?\n/);
+    if (outside) {
+      ctx.font = `${bold ? 'bold ' : ''}${sizePx}px ${font}`;
+      const textW = lines.reduce((max, line) => Math.max(max, ctx.measureText(line).width), 0);
+      const lineHeight = sizePx * 1.15;
+      const textH = sizePx + Math.max(0, lines.length - 1) * lineHeight;
+      outsideLabels.push(createPieOutsideLabel(
+        lines, midAngle, cx2, cy2, outerR,
+        textW, textH, lineHeight, sizePx, bold ?? false,
+        fontColor ? `#${fontColor}` : '#333', ptToPx,
+      ));
+      continue;
+    }
     // §21.2.2.48 ST_DLblPos radial placement. The spec enumerates the positions
     // (bestFit / ctr / inEnd / outEnd …) but gives no geometry, so the inside
     // radii below reproduce PowerPoint's own layout, measured from sample-14.pdf
     // (PowerPoint's render of slide-7's pie + doughnut):
     //
-    //   • outEnd → just beyond the rim (leader-line territory).
     //   • DOUGHNUT (innerR > 0), ctr / inEnd / bestFit → the RING midpoint
     //     (innerR + outerR)/2. Verified on the 55%-hole doughnut: labels sit at
     //     0.772–0.778·outerR ≈ (0.55+1)/2 = 0.775. Byte-stable — unchanged.
@@ -3608,24 +3632,203 @@ function drawPieRichLabels(
     //     sector centroid. The 5% sliver rides marginally further out in
     //     PowerPoint; we do not model that per-slice nudge. This is an empirical
     //     approximation of an undocumented PowerPoint layout, not a spec formula.
-    const labelR = outside
-      ? outerR + Math.max(10, outerR * 0.12)
-      : innerR > 0.01
+    const labelR = innerR > 0.01
         ? (innerR + outerR) / 2
         : outerR * PIE_CTR_LABEL_RADIUS_FRAC;
     const lx2 = cx2 + Math.cos(midAngle) * labelR;
     const ly2 = cy2 + Math.sin(midAngle) * labelR;
-    const sizeHpt = ov?.fontSizeHpt ?? def.fontSizeHpt;
-    const sizePx = sizeHpt ? sizeHpt / 100 : Math.max(8, outerR * 0.1);
-    const bold = ov?.fontBold ?? def.fontBold;
-    const fontColor = ov?.fontColor ?? def.fontColor;
     ctx.font = `${bold ? 'bold ' : ''}${sizePx}px ${font}`;
-    ctx.fillStyle = fontColor ? `#${fontColor}` : (outside ? '#333' : '#fff');
+    ctx.fillStyle = fontColor ? `#${fontColor}` : '#fff';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const lines = text.split(/\r?\n/);
     const lineHeight = sizePx * 1.15;
     const firstY = ly2 - ((lines.length - 1) * lineHeight) / 2;
     lines.forEach((line, lineIndex) => ctx.fillText(line, lx2, firstY + lineIndex * lineHeight));
+  }
+
+  drawPieOutsideLabels(
+    ctx, def, outsideLabels, cx2, cy2, outerR, font, ptToPx,
+    chartX, chartY, chartW, chartH,
+  );
+}
+
+/** Plain `<c:dLblPos val="outEnd">` label block. `outEnd` gives a topological
+ * requirement (outside the pie) but no radial-distance formula. Keep the whole
+ * measured text rectangle outside the rim; placing only its centre outside lets
+ * long category names overlap the slices. */
+interface PieOutsideLabel {
+  lines: string[];
+  rimX: number;
+  rimY: number;
+  boxW: number;
+  boxH: number;
+  lineHeight: number;
+  fontPx: number;
+  bold: boolean;
+  fontColor: string;
+  cxBox: number;
+  cyBox: number;
+  initialCx: number;
+  initialCy: number;
+  leftSide: boolean;
+}
+
+function pointToRectDistance(
+  px: number, py: number,
+  rectCx: number, rectCy: number,
+  halfW: number, halfH: number,
+): number {
+  const dx = Math.max(Math.abs(rectCx - px) - halfW, 0);
+  const dy = Math.max(Math.abs(rectCy - py) - halfH, 0);
+  return Math.hypot(dx, dy);
+}
+
+/** Find the first point on a slice-midpoint ray whose complete text rectangle
+ * clears the pie. The monotone binary solve is geometry-only and avoids a
+ * label-length or slice-angle tuning constant. */
+function outsideLabelRadialDistance(
+  midAngle: number,
+  outerR: number,
+  halfW: number,
+  halfH: number,
+  clearance: number,
+): number {
+  const ux = Math.cos(midAngle);
+  const uy = Math.sin(midAngle);
+  const target = outerR + clearance;
+  let low = 0;
+  let high = target + Math.hypot(halfW, halfH);
+  for (let i = 0; i < 32; i++) {
+    const mid = (low + high) / 2;
+    const distance = pointToRectDistance(0, 0, ux * mid, uy * mid, halfW, halfH);
+    if (distance >= target) high = mid;
+    else low = mid;
+  }
+  return high;
+}
+
+function createPieOutsideLabel(
+  lines: string[],
+  midAngle: number,
+  pieCx: number,
+  pieCy: number,
+  outerR: number,
+  boxW: number,
+  boxH: number,
+  lineHeight: number,
+  fontPx: number,
+  bold: boolean,
+  fontColor: string,
+  ptToPx: number,
+): PieOutsideLabel {
+  // One typographic point prevents antialiasing at the tangent from visually
+  // merging the glyph edge with the slice. It is a rendering clearance, not an
+  // Office-layout estimate; the outside invariant itself comes from outEnd.
+  const clearance = ptToPx;
+  const distance = outsideLabelRadialDistance(
+    midAngle, outerR, boxW / 2, boxH / 2, clearance,
+  );
+  const cxBox = pieCx + Math.cos(midAngle) * distance;
+  const cyBox = pieCy + Math.sin(midAngle) * distance;
+  return {
+    lines,
+    rimX: pieCx + Math.cos(midAngle) * outerR,
+    rimY: pieCy + Math.sin(midAngle) * outerR,
+    boxW, boxH, lineHeight, fontPx, bold, fontColor,
+    cxBox, cyBox, initialCx: cxBox, initialCy: cyBox,
+    leftSide: Math.cos(midAngle) < 0,
+  };
+}
+
+/** Paint plain outEnd labels in the chart-space gutters around the authored
+ * plot rectangle. Collision adjustment is bounded by chart space, and after a
+ * vertical move the horizontal coordinate is solved again so the label cannot
+ * be pushed back across the pie rim. */
+function drawPieOutsideLabels(
+  ctx: CanvasRenderingContext2D,
+  def: ChartSeriesDataLabels,
+  labels: PieOutsideLabel[],
+  pieCx: number,
+  pieCy: number,
+  outerR: number,
+  font: string,
+  ptToPx: number,
+  boundsX: number,
+  boundsY: number,
+  boundsW: number,
+  boundsH: number,
+): void {
+  if (labels.length === 0) return;
+
+  const topLimit = boundsY;
+  const bottomLimit = boundsY + boundsH;
+  const separate = (column: PieOutsideLabel[]): void => {
+    column.sort((a, b) => a.cyBox - b.cyBox);
+    for (let i = 1; i < column.length; i++) {
+      const previous = column[i - 1];
+      const current = column[i];
+      const minY = previous.cyBox + (previous.boxH + current.boxH) / 2;
+      if (current.cyBox < minY) current.cyBox = minY;
+    }
+    if (column.length === 0) return;
+    const bottomOverflow = column[column.length - 1].cyBox
+      + column[column.length - 1].boxH / 2 - bottomLimit;
+    if (bottomOverflow > 0) for (const label of column) label.cyBox -= bottomOverflow;
+    const topOverflow = topLimit - (column[0].cyBox - column[0].boxH / 2);
+    if (topOverflow > 0) for (const label of column) label.cyBox += topOverflow;
+  };
+  separate(labels.filter(label => !label.leftSide));
+  separate(labels.filter(label => label.leftSide));
+
+  // Re-solve horizontal placement after collision movement. For a fixed label
+  // y-range, the nearest vertical distance to the pie centre determines the
+  // exact horizontal clearance required for the full rectangle.
+  const target = outerR + ptToPx;
+  for (const label of labels) {
+    const halfW = label.boxW / 2;
+    const halfH = label.boxH / 2;
+    const nearestDy = Math.max(Math.abs(label.cyBox - pieCy) - halfH, 0);
+    if (nearestDy < target) {
+      const requiredDx = Math.sqrt(Math.max(0, target * target - nearestDy * nearestDy));
+      label.cxBox = label.leftSide
+        ? Math.min(label.cxBox, pieCx - requiredDx - halfW)
+        : Math.max(label.cxBox, pieCx + requiredDx + halfW);
+    }
+
+    // Prefer keeping labels inside chart space, but never trade the outEnd
+    // invariant for a clamp that would put text back over the pie.
+    const clampedX = clamp(label.cxBox, boundsX + halfW, boundsX + boundsW - halfW);
+    if (pointToRectDistance(pieCx, pieCy, clampedX, label.cyBox, halfW, halfH) >= target) {
+      label.cxBox = clampedX;
+    }
+  }
+
+  const leaderColor = def.leaderLineColor ? `#${def.leaderLineColor}` : '#a6a6a6';
+  const leaderPx = def.leaderLineWidthEmu
+    ? Math.max(0.5, (def.leaderLineWidthEmu / EMU_PER_PT) * ptToPx)
+    : 1;
+  for (const label of labels) {
+    const moved = Math.abs(label.cxBox - label.initialCx) > 0.5
+      || Math.abs(label.cyBox - label.initialCy) > 0.5;
+    if (!def.showLeaderLines || !moved) continue;
+    const edgeX = clamp(label.rimX, label.cxBox - label.boxW / 2, label.cxBox + label.boxW / 2);
+    const edgeY = clamp(label.rimY, label.cyBox - label.boxH / 2, label.cyBox + label.boxH / 2);
+    ctx.beginPath();
+    ctx.moveTo(label.rimX, label.rimY);
+    ctx.lineTo(edgeX, edgeY);
+    ctx.strokeStyle = leaderColor;
+    ctx.lineWidth = leaderPx;
+    ctx.stroke();
+  }
+
+  for (const label of labels) {
+    ctx.font = `${label.bold ? 'bold ' : ''}${label.fontPx}px ${font}`;
+    ctx.fillStyle = label.fontColor;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const firstY = label.cyBox - ((label.lines.length - 1) * label.lineHeight) / 2;
+    for (let i = 0; i < label.lines.length; i++) {
+      ctx.fillText(label.lines[i], label.cxBox, firstY + i * label.lineHeight);
+    }
   }
 }
 
