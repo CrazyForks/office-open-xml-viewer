@@ -471,6 +471,81 @@ export function selectionOverlayStyle(color: string): { border: string; backgrou
   };
 }
 
+interface SelectionOverlayRect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly top: boolean;
+  readonly right: boolean;
+  readonly bottom: boolean;
+  readonly left: boolean;
+}
+
+interface SelectionBoundarySegment {
+  readonly axis: 'h' | 'v';
+  readonly fixed: number;
+  readonly start: number;
+  readonly end: number;
+}
+
+/**
+ * Build the single-Area outline from its visible frozen-pane fragments.
+ * Splitting collinear edges at every endpoint emits coincident fragment edges
+ * only once. Work is bounded by the visible fragment count, not sheet size.
+ */
+function selectionBoundaryPath(rects: readonly SelectionOverlayRect[]): string {
+  const raw: SelectionBoundarySegment[] = [];
+  for (const rect of rects) {
+    const x2 = rect.x + rect.width;
+    const y2 = rect.y + rect.height;
+    if (rect.top) raw.push({ axis: 'h', fixed: rect.y, start: rect.x, end: x2 });
+    if (rect.right) raw.push({ axis: 'v', fixed: x2, start: rect.y, end: y2 });
+    if (rect.bottom) raw.push({ axis: 'h', fixed: y2, start: rect.x, end: x2 });
+    if (rect.left) raw.push({ axis: 'v', fixed: rect.x, start: rect.y, end: y2 });
+  }
+
+  const groups = new Map<string, SelectionBoundarySegment[]>();
+  for (const segment of raw) {
+    const key = `${segment.axis}:${segment.fixed}`;
+    const group = groups.get(key);
+    if (group) group.push(segment);
+    else groups.set(key, [segment]);
+  }
+
+  const commands: string[] = [];
+  for (const segments of groups.values()) {
+    const points = [...new Set(segments.flatMap(({ start, end }) => [start, end]))]
+      .sort((a, b) => a - b);
+    let runStart: number | null = null;
+    let runEnd = 0;
+    const flush = () => {
+      if (runStart === null || runEnd <= runStart) return;
+      const { axis, fixed } = segments[0];
+      commands.push(axis === 'h'
+        ? `M${runStart} ${fixed}H${runEnd}`
+        : `M${fixed} ${runStart}V${runEnd}`);
+      runStart = null;
+    };
+    for (let index = 0; index + 1 < points.length; index++) {
+      const start = points[index];
+      const end = points[index + 1];
+      const covered = segments.some((segment) => segment.start < end && segment.end > start);
+      if (covered && runStart !== null && start === runEnd) {
+        runEnd = end;
+      } else {
+        flush();
+        if (covered) {
+          runStart = start;
+          runEnd = end;
+        }
+      }
+    }
+    flush();
+  }
+  return commands.join('');
+}
+
 const DEFAULT_FIND_HIGHLIGHT = 'color-mix(in srgb, #ffb300 8%, transparent)';
 const DEFAULT_FIND_ACTIVE_HIGHLIGHT = 'color-mix(in srgb, #fb8c00 8%, transparent)';
 
@@ -668,7 +743,9 @@ class XlsxViewerEngine implements ZoomableViewer {
   // touch/pen (swipe-to-scroll must not change the cell) and for mouse
   // presses inside the overlay-scrollbar band (a thumb drag must not select
   // the cell underneath).
-  private pendingTap: { x: number; y: number; shiftKey: boolean; pointerId: number } | null = null;
+  private pendingTap:
+    | { x: number; y: number; shiftKey: boolean; additiveKey: boolean; pointerId: number }
+    | null = null;
   // IX1 — mouse press bookkeeping for hyperlink activation: the down position and
   // the cell under it. On pointerup, if the pointer did not move beyond the tap
   // slop (a genuine click, not a drag-select), a hyperlink on that cell is
@@ -2603,12 +2680,11 @@ class XlsxViewerEngine implements ZoomableViewer {
           { first: effective.rows + 1, last: MAX_WORKSHEET_ROW, start: Math.min(height, headerH + frozenH), end: height },
         ]
       : [{ first: 1, last: MAX_WORKSHEET_ROW, start: headerH, end: height }];
-    const { border, background } = selectionOverlayStyle(
-      this.opts.selectionColor ?? DEFAULT_SELECTION_COLOR,
-    );
+    const selectionColor = this.opts.selectionColor ?? DEFAULT_SELECTION_COLOR;
+    const { background } = selectionOverlayStyle(selectionColor);
     const seenFragments = new Set<string>();
     const fillSubpaths: string[] = [];
-    const borderFragments: HTMLElement[] = [];
+    const overlayRects: SelectionOverlayRect[] = [];
 
     for (const area of state.areas) {
       const bounds = area.kind === 'cells'
@@ -2647,10 +2723,10 @@ class XlsxViewerEngine implements ZoomableViewer {
 
         // Only paint a border where the logical selection itself ends. Pane and
         // viewport clips are not selection edges and must not create fake lines.
-        const topBorder = bounds.topEdge && top === bounds.top && rawTop >= yp.start ? border : 'none';
-        const bottomBorder = bounds.bottomEdge && bottom === bounds.bottom && rawBottom <= yp.end ? border : 'none';
-        const leftBorder = bounds.leftEdge && left === bounds.left && rawLeft >= xp.start ? border : 'none';
-        const rightBorder = bounds.rightEdge && right === bounds.right && rawRight <= xp.end ? border : 'none';
+        const topBorder = bounds.topEdge && top === bounds.top && rawTop >= yp.start;
+        const bottomBorder = bounds.bottomEdge && bottom === bounds.bottom && rawBottom <= yp.end;
+        const leftBorder = bounds.leftEdge && left === bounds.left && rawLeft >= xp.start;
+        const rightBorder = bounds.rightEdge && right === bounds.right && rawRight <= xp.end;
         const screenLeft = this.screenX(x, fragmentW);
         const physicalLeftBorder = this.isRtl ? rightBorder : leftBorder;
         const physicalRightBorder = this.isRtl ? leftBorder : rightBorder;
@@ -2666,14 +2742,16 @@ class XlsxViewerEngine implements ZoomableViewer {
         fillSubpaths.push(
           `M${screenLeft} ${y}h${fragmentW}v${fragmentH}h${-fragmentW}Z`,
         );
-        const box = this.hostDocument.createElement('div');
-        box.setAttribute('data-xlsx-selection-fragment', area.kind);
-        box.style.cssText =
-          `position:absolute;left:${screenLeft}px;top:${y}px;width:${fragmentW}px;height:${fragmentH}px;` +
-          `box-sizing:border-box;border-top:${topBorder};border-right:${physicalRightBorder};` +
-          `border-bottom:${bottomBorder};border-left:${physicalLeftBorder};` +
-          'background:transparent;pointer-events:none;';
-        borderFragments.push(box);
+        overlayRects.push({
+          x: screenLeft,
+          y,
+          width: fragmentW,
+          height: fragmentH,
+          top: topBorder,
+          right: physicalRightBorder,
+          bottom: bottomBorder,
+          left: physicalLeftBorder,
+        });
       }
     }
 
@@ -2683,13 +2761,46 @@ class XlsxViewerEngine implements ZoomableViewer {
       svg.setAttribute('data-xlsx-selection-fill', '');
       svg.style.cssText =
         'position:absolute;inset:0;width:100%;height:100%;overflow:hidden;pointer-events:none;';
-      const path = this.hostDocument.createElementNS(svgNamespace, 'path');
-      path.setAttribute('d', fillSubpaths.join(''));
-      path.setAttribute('fill', background);
-      svg.appendChild(path);
+      const isMultipleAreaSelection = state.areas.length > 1;
+      const activeRect = this.getCellRect(state.activeCell.row, state.activeCell.col);
+      const fill = this.hostDocument.createElementNS(svgNamespace, 'path');
+      fill.setAttribute('d', fillSubpaths.join(''));
+      fill.setAttribute('fill', background);
+      svg.appendChild(fill);
+
+      const boundaryPath = isMultipleAreaSelection ? '' : selectionBoundaryPath(overlayRects);
+      if (boundaryPath) {
+        const boundary = this.hostDocument.createElementNS(svgNamespace, 'path');
+        boundary.setAttribute('data-xlsx-selection-border', '');
+        boundary.setAttribute('d', boundaryPath);
+        boundary.setAttribute('fill', 'none');
+        boundary.setAttribute('stroke', selectionColor);
+        boundary.setAttribute('stroke-width', '2');
+        boundary.setAttribute('stroke-linecap', 'square');
+        boundary.setAttribute('stroke-linejoin', 'miter');
+        svg.appendChild(boundary);
+      }
+      if (activeRect && isMultipleAreaSelection) {
+        for (const yp of yPanes) for (const xp of xPanes) {
+          const clippedX = Math.max(activeRect.x, xp.start);
+          const clippedY = Math.max(activeRect.y, yp.start);
+          const clippedX2 = Math.min(activeRect.x + activeRect.w, xp.end);
+          const clippedY2 = Math.min(activeRect.y + activeRect.h, yp.end);
+          if (clippedX2 <= clippedX || clippedY2 <= clippedY) continue;
+          const focus = this.hostDocument.createElementNS(svgNamespace, 'rect');
+          focus.setAttribute('data-xlsx-active-cell-border', '');
+          focus.setAttribute('x', String(this.screenX(clippedX, clippedX2 - clippedX)));
+          focus.setAttribute('y', String(clippedY));
+          focus.setAttribute('width', String(clippedX2 - clippedX));
+          focus.setAttribute('height', String(clippedY2 - clippedY));
+          focus.setAttribute('fill', 'none');
+          focus.setAttribute('stroke', selectionColor);
+          focus.setAttribute('stroke-width', '1');
+          svg.appendChild(focus);
+        }
+      }
       this.overlayHost.appendSelection(svg as unknown as HTMLElement);
     }
-    for (const fragment of borderFragments) this.overlayHost.appendSelection(fragment);
 
     // List data-validation dropdown arrow (ECMA-376 §18.3.1.33). Excel shows an
     // in-cell dropdown button only while the cell is *selected* and only for
@@ -3260,7 +3371,14 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.overlayHost.hideComment();
   }
 
-  private applyPointerSelection(clientX: number, clientY: number, shiftKey: boolean, pointerId: number, allowDrag: boolean): void {
+  private applyPointerSelection(
+    clientX: number,
+    clientY: number,
+    shiftKey: boolean,
+    additiveKey: boolean,
+    pointerId: number,
+    allowDrag: boolean,
+  ): void {
     const headerHit = this.getHeaderHit(clientX, clientY);
 
     if (headerHit) {
@@ -3272,8 +3390,10 @@ class XlsxViewerEngine implements ZoomableViewer {
         if (shiftKey && this.anchorCell && this.selectionMode === 'rows') {
           this.selectionController.extend({ row: headerHit.row, col: 1 });
         } else {
-          this.selectionController.select({ row: headerHit.row, col: 1 }, 'rows');
-          if (allowDrag) {
+          const selected = additiveKey
+            ? this.selectionController.add({ row: headerHit.row, col: 1 }, 'rows')
+            : (this.selectionController.select({ row: headerHit.row, col: 1 }, 'rows'), true);
+          if (allowDrag && selected) {
             this.beginSelectionDrag(pointerId);
             this.scrollHost.setPointerCapture(pointerId);
           }
@@ -3282,8 +3402,10 @@ class XlsxViewerEngine implements ZoomableViewer {
         if (shiftKey && this.anchorCell && this.selectionMode === 'cols') {
           this.selectionController.extend({ row: 1, col: headerHit.col });
         } else {
-          this.selectionController.select({ row: 1, col: headerHit.col }, 'cols');
-          if (allowDrag) {
+          const selected = additiveKey
+            ? this.selectionController.add({ row: 1, col: headerHit.col }, 'cols')
+            : (this.selectionController.select({ row: 1, col: headerHit.col }, 'cols'), true);
+          if (allowDrag && selected) {
             this.beginSelectionDrag(pointerId);
             this.scrollHost.setPointerCapture(pointerId);
           }
@@ -3298,12 +3420,15 @@ class XlsxViewerEngine implements ZoomableViewer {
     const cell = this.getCellAt(clientX, clientY);
     if (!cell) return;
 
+    let selected = true;
     if (shiftKey && this.anchorCell && this.selectionMode === 'cells') {
       this.selectionController.extend(cell);
     } else {
-      this.selectionController.select(cell, 'cells');
+      selected = additiveKey
+        ? this.selectionController.add(cell, 'cells')
+        : (this.selectionController.select(cell, 'cells'), true);
     }
-    if (allowDrag) {
+    if (allowDrag && selected) {
       this.beginSelectionDrag(pointerId);
       this.scrollHost.setPointerCapture(pointerId);
     }
@@ -3500,7 +3625,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     } else {
       this.setElementContext(null);
       if (!this.contextMenuTargetIsSelected(event.clientX, event.clientY)) {
-        this.applyPointerSelection(event.clientX, event.clientY, false, -1, false);
+        this.applyPointerSelection(event.clientX, event.clientY, false, false, -1, false);
       }
     }
     const context = this.getSelectionContext();
@@ -3605,7 +3730,13 @@ class XlsxViewerEngine implements ZoomableViewer {
       // Touch / pen: defer selection until pointerup so swipe-to-scroll doesn't change the cell.
       // Mouse: select immediately to preserve drag-to-extend behavior.
       if (e.pointerType !== 'mouse' || inOverlayBand) {
-        this.pendingTap = { x: e.clientX, y: e.clientY, shiftKey: e.shiftKey, pointerId: e.pointerId };
+        this.pendingTap = {
+          x: e.clientX,
+          y: e.clientY,
+          shiftKey: e.shiftKey,
+          additiveKey: e.ctrlKey || e.metaKey,
+          pointerId: e.pointerId,
+        };
         return;
       }
 
@@ -3617,7 +3748,14 @@ class XlsxViewerEngine implements ZoomableViewer {
         ? { x: e.clientX, y: e.clientY, pointerId: e.pointerId, cell: downCell }
         : null;
 
-      this.applyPointerSelection(e.clientX, e.clientY, e.shiftKey, e.pointerId, true);
+      this.applyPointerSelection(
+        e.clientX,
+        e.clientY,
+        e.shiftKey,
+        e.ctrlKey || e.metaKey,
+        e.pointerId,
+        true,
+      );
     });
 
     this.surface.on('blur', () => {
@@ -3723,7 +3861,14 @@ class XlsxViewerEngine implements ZoomableViewer {
         const dx = e.clientX - this.pendingTap.x;
         const dy = e.clientY - this.pendingTap.y;
         if (dx * dx + dy * dy <= TAP_SLOP * TAP_SLOP) {
-          this.applyPointerSelection(e.clientX, e.clientY, this.pendingTap.shiftKey, e.pointerId, false);
+          this.applyPointerSelection(
+            e.clientX,
+            e.clientY,
+            this.pendingTap.shiftKey,
+            this.pendingTap.additiveKey,
+            e.pointerId,
+            false,
+          );
           // Touch / pen have no hover, so surface the comment popup on a tap
           // (the active cell after the selection commit). Mouse uses hover.
           if (e.pointerType !== 'mouse' && this.activeCell) {
