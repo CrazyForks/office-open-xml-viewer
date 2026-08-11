@@ -7,8 +7,11 @@ import {
   colBands,
   summaryAfterFor,
   gutterExtentPx,
+  OUTLINE_BUTTON_GAP_PX,
+  OUTLINE_BUTTON_PX,
   OUTLINE_LANE_PX,
   outlineBracketSegments,
+  outlineLevelButtonCenterPx,
   outlinePaneClipRect,
   type BandOutline,
   type OutlineWorksheetLike,
@@ -257,5 +260,17 @@ describe('gutterExtentPx', () => {
     expect(gutterExtentPx(0)).toBe(0);
     expect(gutterExtentPx(1)).toBe(2 * OUTLINE_LANE_PX);
     expect(gutterExtentPx(3)).toBe(4 * OUTLINE_LANE_PX);
+  });
+});
+
+describe('outlineLevelButtonCenterPx', () => {
+  it('packs adjacent level buttons with the compact button-bank gap', () => {
+    const first = outlineLevelButtonCenterPx(1);
+    const second = outlineLevelButtonCenterPx(2);
+
+    expect(second - first).toBe(OUTLINE_BUTTON_PX + OUTLINE_BUTTON_GAP_PX);
+    expect(
+      (second - OUTLINE_BUTTON_PX / 2) - (first + OUTLINE_BUTTON_PX / 2),
+    ).toBe(OUTLINE_BUTTON_GAP_PX);
   });
 });

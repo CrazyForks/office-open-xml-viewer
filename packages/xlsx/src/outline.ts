@@ -37,6 +37,21 @@ export const OUTLINE_LANE_PX = 19;
  *  numbered "1 2 3" buttons that collapse the whole sheet to a level. */
 export const OUTLINE_BUTTON_PX = 12;
 
+/** Gap between adjacent numbered outline-level buttons. The level bank is
+ *  independent from the wider bracket lanes: Excel packs these buttons into a
+ *  compact strip instead of centering them in the 19px rail lanes. */
+export const OUTLINE_BUTTON_GAP_PX = 2;
+
+/** Leading inset of the numbered level-button bank. */
+export const OUTLINE_BUTTON_INSET_PX = 2;
+
+/** Center coordinate of a numbered outline-level button within its bank. */
+export function outlineLevelButtonCenterPx(level: number): number {
+  return OUTLINE_BUTTON_INSET_PX
+    + OUTLINE_BUTTON_PX / 2
+    + (level - 1) * (OUTLINE_BUTTON_PX + OUTLINE_BUTTON_GAP_PX);
+}
+
 /** Extent (px) of the gutter for an axis with `maxLevel` nesting levels, or 0
  *  when the axis has no outlining. The lanes hold the group brackets; one extra
  *  lane holds the numbered level buttons (levels 1..maxLevel+1). */

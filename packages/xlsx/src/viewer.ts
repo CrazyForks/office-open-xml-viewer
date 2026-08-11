@@ -64,7 +64,9 @@ import {
   summaryAfterFor,
   gutterExtentPx,
   outlineBracketSegments,
+  outlineLevelButtonCenterPx,
   outlinePaneClipRect,
+  OUTLINE_BUTTON_PX,
   OUTLINE_LANE_PX,
   type BandOutline,
   type OutlineGroup,
@@ -1355,12 +1357,12 @@ class XlsxViewerEngine implements ZoomableViewer {
     // made the row expand-all button unreachable.
     const bankCross = isRow ? (HEADER_H * cs) / 2 : (HEADER_W * cs) / 2;
     for (let l = 1; l <= layout.maxLevel + 1; l++) {
-      const laneCenter = (l - 0.5) * lanePx;
-      if (laneCenter + lanePx / 2 > (isRow ? cssW : cssH) + 0.5) break;
+      const buttonCenter = outlineLevelButtonCenterPx(l) * cs;
+      if (buttonCenter + (OUTLINE_BUTTON_PX * cs) / 2 > (isRow ? cssW : cssH) + 0.5) break;
       this.drawLevelButton(
         ctx,
-        isRow ? laneCenter : bankCross,
-        isRow ? bankCross : laneCenter,
+        isRow ? buttonCenter : bankCross,
+        isRow ? bankCross : buttonCenter,
         String(l),
         cs,
       );
@@ -1433,7 +1435,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     label: string,
     cs: number,
   ): void {
-    const s = Math.round(11 * cs);
+    const s = Math.round(OUTLINE_BUTTON_PX * cs);
     const x = Math.round(cx - s / 2);
     const y = Math.round(cy - s / 2);
     ctx.save();
@@ -1481,7 +1483,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const py = e.clientY - rect.top;
     const cs = this.viewport.scale;
     const lanePx = OUTLINE_LANE_PX * cs;
-    const hitR = 7 * cs; // generous grab radius around a button center
+    const hitR = 7 * cs; // generous grab radius around a +/- button center
 
     // Numbered level bank first: it lives in this gutter's header strip (row
     // bank beside the column-letter header, column bank above the row-number
@@ -1490,10 +1492,11 @@ class XlsxViewerEngine implements ZoomableViewer {
     const inBankStrip = (isRow ? py : px) <= (isRow ? HEADER_H : HEADER_W) * cs;
     if (inBankStrip) {
       for (let l = 1; l <= layout.maxLevel + 1; l++) {
-        const laneCenter = (l - 0.5) * lanePx;
-        const cx = isRow ? laneCenter : bankCross;
-        const cy = isRow ? bankCross : laneCenter;
-        if (Math.abs(px - cx) <= hitR && Math.abs(py - cy) <= hitR) {
+        const buttonCenter = outlineLevelButtonCenterPx(l) * cs;
+        const cx = isRow ? buttonCenter : bankCross;
+        const cy = isRow ? bankCross : buttonCenter;
+        const buttonHitR = (OUTLINE_BUTTON_PX * cs) / 2;
+        if (Math.abs(px - cx) <= buttonHitR && Math.abs(py - cy) <= buttonHitR) {
           e.preventDefault();
           this.applyLevelButton(l, axis);
           return;
