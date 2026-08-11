@@ -77,11 +77,14 @@ function recordingCtx(matchColor = '#4f81bd'): {
   counts: { polylineStrokes: number };
   texts: TextCall[];
   arcs: ArcCall[];
+  markerStrokes: Array<{ color: string; width: number }>;
 } {
   const texts: TextCall[] = [];
   const arcs: ArcCall[] = [];
+  const markerStrokes: Array<{ color: string; width: number }> = [];
   const counts = { polylineStrokes: 0 };
   let pathVerts = 0;
+  let pathHasArc = false;
   const state: Record<string, unknown> = {
     font: '10px sans-serif',
     fillStyle: '#000',
@@ -109,13 +112,16 @@ function recordingCtx(matchColor = '#4f81bd'): {
             return { width: w };
           };
         case 'beginPath':
-          return () => { pathVerts = 0; };
+          return () => { pathVerts = 0; pathHasArc = false; };
         // Pie/doughnut slices are drawn with `arc(cx, cy, r, …)`; recording the
         // centre + radius lets a test recover the exact pie geometry the renderer
         // used (the outermost rim is the max-radius arc) without duplicating the
         // frame math.
         case 'arc':
-          return (cx: number, cy: number, r: number) => { arcs.push({ cx, cy, r }); };
+          return (cx: number, cy: number, r: number) => {
+            pathHasArc = true;
+            arcs.push({ cx, cy, r });
+          };
         case 'moveTo':
         case 'lineTo':
         case 'bezierCurveTo':
@@ -126,6 +132,9 @@ function recordingCtx(matchColor = '#4f81bd'): {
         // is a connecting line (gridlines/axes stroke grey → excluded).
         case 'stroke':
           return () => {
+            if (pathHasArc) {
+              markerStrokes.push({ color: String(state.strokeStyle), width: Number(state.lineWidth) });
+            }
             if (pathVerts >= 2 && String(state.strokeStyle).toLowerCase() === matchColor.toLowerCase()) {
               counts.polylineStrokes += 1;
             }
@@ -147,6 +156,7 @@ function recordingCtx(matchColor = '#4f81bd'): {
     counts,
     texts,
     arcs,
+    markerStrokes,
   };
 }
 
@@ -188,6 +198,26 @@ describe('scatter series-line noFill overrides scatterStyle (§21.2.2.198)', () 
     const rec = recordingCtx();
     renderChart(rec.ctx, scatterModel(null), RECT, 1);
     expect(rec.counts.polylineStrokes).toBeGreaterThan(0);
+  });
+});
+
+describe('bubble series shape outline (§21.2.2.198)', () => {
+  it('uses the series spPr line color and authored EMU width', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['1'],
+      series: [series({
+        color: '4F81BD66',
+        lineColor: '4F81BD',
+        lineWidthEmu: 9525,
+        categories: ['1'],
+        values: [2],
+        bubbleSizes: [100],
+      })],
+    }), RECT, 4 / 3);
+
+    expect(rec.markerStrokes).toContainEqual({ color: '#4F81BD', width: 1 });
   });
 });
 
@@ -329,5 +359,46 @@ describe('pie / doughnut ctr data-label radius (§21.2.2.48, PowerPoint layout)'
       const ratio = Math.hypot(l.x - cx, l.y - cy) / outerR;
       expect(ratio).toBeGreaterThan(1.0);
     }
+  });
+});
+
+describe('authored radial and bubble geometry', () => {
+  it('honors plotArea manualLayout for pie center and radius', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['A', 'B'],
+      series: [series({ values: [60, 40] })],
+      plotAreaManualLayout: {
+        xMode: 'edge', yMode: 'edge', x: 0.1, y: 0.2, w: 0.4, h: 0.6,
+      },
+    }), RECT, 1);
+
+    const geometry = pieGeometry(rec.arcs);
+    expect(geometry.cx).toBeCloseTo(RECT.w * 0.3);
+    expect(geometry.cy).toBeCloseTo(RECT.h * 0.5);
+    expect(geometry.outerR).toBeCloseTo(Math.min(RECT.w * 0.4, RECT.h * 0.6) * 0.42);
+  });
+
+  it('applies bubbleScale to Office\'s one-third-plot default maximum diameter', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['0'],
+      series: [series({ values: [0], bubbleSizes: [100] })],
+      bubbleScale: 40,
+      catAxisMin: -1,
+      catAxisMax: 1,
+      valMin: -1,
+      valMax: 1,
+      plotAreaManualLayout: {
+        xMode: 'edge', yMode: 'edge', x: 0.25, y: 0.25, w: 0.5, h: 0.5,
+      },
+    }), RECT, 1);
+
+    const marker = rec.arcs.at(-1);
+    // Plot is 320×180. Office's default max diameter is 180/3=60px; authored
+    // bubbleScale=40% yields a 24px diameter / 12px radius.
+    expect(marker?.r).toBeCloseTo(12, 4);
   });
 });

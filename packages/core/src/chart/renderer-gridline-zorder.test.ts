@@ -226,4 +226,41 @@ describe('CH — value-axis gridlines paint under the data series', () => {
     expect(firstSeriesFill).toBeGreaterThanOrEqual(0);
     expect(firstGridline).toBeLessThan(firstSeriesFill);
   });
+
+  it('a horizontal bar/scatter dot plot paints category gridlines below its markers', () => {
+    const rec = orderedRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBarH',
+      categories: ['A', 'B'],
+      catAxisMajorGridlines: true,
+      catAxisGridlineColor: 'D9D9D9',
+      series: [
+        series({ name: 'range anchor', values: [0, 0] }),
+        series({
+          name: 'dot',
+          seriesType: 'scatter',
+          categories: ['2', '4'],
+          values: [1, 2],
+          markerSymbol: 'circle',
+          markerFill: '1696D2',
+        }),
+      ],
+      secondaryCatAxis: {
+        min: 0, max: 5, title: null, hidden: true, lineHidden: true, majorTickMark: 'none',
+      },
+      secondaryValAxis: {
+        min: 0, max: 3, title: null, hidden: true, lineHidden: true, majorTickMark: 'none',
+      },
+    }), RECT, 1);
+
+    const firstGridline = rec.events.findIndex(event =>
+      event.op === 'stroke' && event.strokeStyle.toLowerCase() === '#d9d9d9',
+    );
+    const firstMarker = rec.events.findIndex(event =>
+      event.op === 'fill' && event.fillStyle.toLowerCase() === '#1696d2',
+    );
+    expect(firstGridline).toBeGreaterThanOrEqual(0);
+    expect(firstMarker).toBeGreaterThanOrEqual(0);
+    expect(firstGridline).toBeLessThan(firstMarker);
+  });
 });

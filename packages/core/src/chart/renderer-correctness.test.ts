@@ -141,6 +141,20 @@ function series(over: Partial<ChartSeries>): ChartSeries {
 
 const RECT: ChartRect = { x: 0, y: 0, w: 640, h: 360 };
 
+describe('chart-space background', () => {
+  it('fills the complete chart rectangle, including the axis-label gutters', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      chartBg: 'F2F2F2',
+      categories: ['A', 'B'],
+      series: [series({ values: [1, 2] })],
+    }), RECT, 1);
+
+    expect(rec.rects[0]).toEqual({ x: 0, y: 0, w: 640, h: 360, fs: '#F2F2F2' });
+  });
+});
+
 describe('chart drawing user-shape text boxes', () => {
   it('draws relative paragraphs with authored run formatting above the chart', () => {
     const rec = recordingCtx();
@@ -227,6 +241,21 @@ describe('bar chart authored layout and fills', () => {
     expect(title).toBeDefined();
     expect(title?.x).toBeCloseTo(RECT.w * (0.13 + 0.25), 4);
     expect(title?.x).toBeLessThan(RECT.w / 2);
+  });
+
+  it('keeps automatic title width when manual layout supplies only an edge position', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      title: 'Readiness score by pillar',
+      titleManualLayout: { x: 0.13, y: 0.03, xMode: 'edge', yMode: 'edge' },
+      categories: ['A'],
+      series: [series({ name: 'S', values: [1] })],
+    }), RECT, 1);
+
+    const title = rec.texts.find(text => text.text === 'Readiness score by pillar');
+    expect(title).toBeDefined();
+    expect(title?.x).toBeCloseTo(RECT.w * 0.13 + (title?.width ?? 0) / 2, 4);
   });
 
   it('uses a series pattern fill for bars and legend swatches', () => {
@@ -572,6 +601,99 @@ describe('CH6 — negative bar data-label placement mirrors the positive convent
         }
       });
     }
+  });
+});
+
+describe('bar point styles, clustered order, and stacked labels', () => {
+  it('honors an explicit dPt fill even when varyColors is false', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['Overall', 'Other'],
+      series: [series({
+        color: '1696D2',
+        values: [8, 7],
+        dataPointColors: ['000000', null],
+      })],
+      varyColors: false,
+    }), RECT, 1);
+
+    expect(rec.rects.map(rect => rect.fs.toUpperCase())).toEqual(['#000000', '#1696D2']);
+  });
+
+  it('places series order zero above later series in a horizontal clustered bar', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBarH',
+      categories: ['Black'],
+      series: [
+        series({ name: 'Trust fund depleted', color: '1696D2', values: [16.2] }),
+        series({ name: 'Scheduled benefits', color: '000000', values: [9.9] }),
+      ],
+    }), RECT, 1);
+
+    const topToBottom = [...rec.rects].sort((a, b) => a.y - b.y);
+    expect(topToBottom.map(rect => rect.fs.toUpperCase())).toEqual(['#1696D2', '#000000']);
+  });
+
+  it('uses series dLbls and centers their values inside a stacked bar by default', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBarH',
+      categories: ['Northeast'],
+      series: [
+        series({
+          color: '1696D2',
+          values: [0.4],
+          valFormatCode: '0.0%',
+          seriesDataLabels: {
+            showVal: true,
+            showCatName: false,
+            showSerName: false,
+            showPercent: false,
+            fontColor: 'FFFFFF',
+          },
+        }),
+        series({ color: '000000', values: [0.6] }),
+      ],
+      // A series-local dLbls block remains operative when the chart-group
+      // default is false.
+      showDataLabels: false,
+      valMax: 1,
+    }), RECT, 1);
+
+    const label = rec.texts.find(text => text.text === '40.0%');
+    expect(label).toBeDefined();
+    const firstSegment = rec.rects[0];
+    expect(label?.x).toBeCloseTo(firstSegment.x + firstSegment.w / 2);
+    expect(label?.y).toBeCloseTo(firstSegment.y + firstSegment.h / 2);
+    expect(label?.align).toBe('center');
+    expect(label?.baseline).toBe('middle');
+  });
+
+  it('clips stacked geometry to an explicit value-axis maximum', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBarH',
+      categories: ['Exactly 100%', 'Rounded 101%'],
+      series: [
+        series({ values: [0.5, 0.5] }),
+        series({ values: [0.5, 0.51] }),
+      ],
+      valMin: 0,
+      valMax: 1,
+    }), RECT, 1);
+
+    const rows = new Map<number, RectCall[]>();
+    for (const rect of rec.rects) {
+      const key = Math.round(rect.y * 1000);
+      rows.set(key, [...(rows.get(key) ?? []), rect]);
+    }
+    const widths = [...rows.values()].map(row =>
+      Math.max(...row.map(rect => rect.x + rect.w)) - Math.min(...row.map(rect => rect.x)),
+    );
+    expect(widths).toHaveLength(2);
+    expect(widths[0]).toBeCloseTo(widths[1], 6);
   });
 });
 
@@ -1032,18 +1154,20 @@ describe('CH3 — labels are locale-independent (§18.8.30)', () => {
     expect(rec.texts.every(t => !t.text.includes('1,234,567'))).toBe(true);
   });
 
-  it('waterfall negative data labels keep the △ marker and honor the format code', () => {
+  it('waterfall negative data labels honor the authored negative number-format section', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
       chartType: 'waterfall',
       categories: ['Start', 'Drop', 'End'],
-      series: [series({ name: 'W', values: [2000000, -1234567, 765433] })],
+      series: [series({
+        name: 'W',
+        values: [2, -0.2, 1.8],
+        valFormatCode: '_(* #,##0.0_);_(* \\(#,##0.0\\);_(* "-"??_);_(@_)',
+      })],
       subtotalIndices: [2],
-      dataLabelFormatCode: '0',
     }), RECT, 1);
-    // Negative bar: △ prefix + un-grouped magnitude from the engine.
-    expect(rec.texts.some(t => t.text.includes('△') && t.text.includes('1234567'))).toBe(true);
-    expect(rec.texts.every(t => !t.text.includes('1,234,567'))).toBe(true);
+    expect(rec.texts.some(t => t.text.includes('(0.2)'))).toBe(true);
+    expect(rec.texts.every(t => !t.text.includes('△'))).toBe(true);
   });
 
   it('waterfall value-axis labels honor the format code (through the §18.8.30 engine)', () => {

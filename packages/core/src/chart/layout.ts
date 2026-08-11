@@ -370,7 +370,15 @@ export function computeChartFrame(
 
   let px0: number, py0: number, pw: number, ph: number;
 
-  if (params.radialGapFrac != null) {
+  const pml = params.honorPlotAreaManualLayout ? chart.plotAreaManualLayout : null;
+  if (pml && pml.w != null && pml.h != null) {
+    // Manual plot layout is common to all chart families (§21.2.2.32),
+    // including pie/doughnut. The authored rectangle is authoritative.
+    px0 = x + pml.x * w;
+    py0 = y + pml.y * h;
+    pw = pml.w * w;
+    ph = pml.h * h;
+  } else if (params.radialGapFrac != null) {
     // Radial (pie/radar): centre the plot in the leftover space. Verbatim from
     // the pie/radar inline math.
     const gap = h * params.radialGapFrac;
@@ -383,26 +391,10 @@ export function computeChartFrame(
     if (!pad) {
       throw new Error('computeChartFrame: cartesian frame requires params.pad');
     }
-    const pml = params.honorPlotAreaManualLayout ? chart.plotAreaManualLayout : null;
-    if (pml && pml.w != null && pml.h != null) {
-      const manualLeft = x + pml.x * w;
-      const manualTop = y + pml.y * h;
-      // ECMA-376 §21.2.2.89: layoutTarget="inner" means the authored
-      // rectangle is the plot area excluding axes and labels; "outer" includes
-      // them. In either case the manual rectangle is authoritative. The
-      // auto-layout pads describe a different layout mode and must not clamp
-      // or move an explicitly authored edge. Clamping an inner rectangle can
-      // shift stacked bars away from separately authored overlay labels.
-      px0 = manualLeft;
-      py0 = manualTop;
-      pw = pml.w * w;
-      ph = pml.h * h;
-    } else {
-      px0 = x + pad.l;
-      py0 = y + pad.t;
-      pw = w - pad.l - pad.r;
-      ph = h - pad.t - pad.b;
-    }
+    px0 = x + pad.l;
+    py0 = y + pad.t;
+    pw = w - pad.l - pad.r;
+    ph = h - pad.t - pad.b;
   }
 
   return {
