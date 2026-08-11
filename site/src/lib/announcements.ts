@@ -28,6 +28,62 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v078-chart-fidelity-and-multi-selection',
+    date: '2026-08-12',
+    label: 'Release note',
+    version: 'v0.78.0',
+    title: 'Chart fidelity and XLSX multi-selection in v0.78.0',
+    summary: 'v0.78.0 improves shared Chart and ChartEx rendering across Office formats and adds Excel-style multiple-area selection to the XLSX viewer.',
+    audience: 'Applications that display charts in DOCX, XLSX or PPTX files, or expose interactive worksheet selection. No application source changes are required when upgrading from v0.77.1.',
+    sections: [
+      {
+        title: 'In short',
+        modules: ['@silurus/ooxml-core', '@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx', 'office-open-xml-viewer (VS Code extension)'],
+        rationale: 'Charts embedded by Word, Excel and PowerPoint use the same DrawingML chart grammar, while worksheet selection needs one canonical model for areas, ActiveCell and extension anchors.',
+        kind: 'summary',
+        paragraphs: [
+          'This minor release changes rendering fidelity and adds worksheet interaction without removing or renaming public APIs. Existing single-area selection calls remain valid.',
+          'Chart parsing and paint improvements live in the shared OOXML and core packages, so supported chart features are not tied to one host format. XLSX multiple selection builds on the canonical v0.77 selection state instead of introducing a second selection model.',
+        ],
+        bullets: [
+          'Classic charts retain more authored axes, plot geometry, fills, labels, legends, series order and stacking behavior.',
+          'Modern ChartEx layouts improve waterfall, box-and-whisker, treemap and related style, hierarchy and label rendering.',
+          'Bubble charts honor chart-wide size normalization, sizeRepresents, bubbleScale and negative-bubble visibility.',
+          'Ctrl on Windows/Linux or Command on macOS adds worksheet areas while keeping ActiveCell and the extension anchor distinct.',
+          'Multiple areas use the configured selection color, with one active-cell outline and no doubled borders where areas touch.',
+        ],
+      },
+      {
+        title: 'Shared chart rendering improvements',
+        modules: ['@silurus/ooxml-core', '@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx'],
+        rationale: 'Chart XML, Chart Styles, Chart Colors and DrawingML paint are shared Office concepts and should resolve before host-specific layout places the chart.',
+        paragraphs: [
+          'The shared parser now retains additional chart layout, axis, label, fill, line and ChartEx style information instead of reconstructing appearance from sample-specific defaults. Linked Chart Style and Chart Colors parts resolve through the document theme, including placeholder colors and color transforms.',
+          'The core renderer applies those authored properties consistently to embedded charts. Improvements cover axis ranges and ticks, plot and chart backgrounds, category-label wrapping, data-label placement, legend keys, pattern fills, percentage stacking, bubble sizing, treemap hierarchy and box-and-whisker geometry.',
+          'Rendering work remains bounded: point overrides use indexed lookup, Bubble normalization is a shared linear pass, and Treemap layout and long-label wrapping avoid quadratic scans.',
+        ],
+      },
+      {
+        title: 'Multiple worksheet selection areas',
+        modules: ['@silurus/ooxml/xlsx', 'office-open-xml-viewer (VS Code extension)'],
+        rationale: 'Selected areas, the active area, ActiveCell and the Shift-extension anchor are related but separate worksheet state.',
+        paragraphs: [
+          'Hold Ctrl or Command while dragging to add another cell, row or column area. A single selection keeps the configured fill and outer border. With multiple areas, every area keeps the configured translucent fill and only the active cell receives a thin outline, preventing touching selections from producing doubled edges.',
+          'The interaction updates the existing XlsxSelectionState contract used by setSelection(), selectionState, onSelectionStateChange and selection context. Structured callers can therefore create or inspect the same state that pointer and keyboard interaction produces.',
+        ],
+      },
+      {
+        title: 'Compatibility and verification',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx'],
+        rationale: 'A rendering-focused minor release should not require application migration and must keep unrelated documents stable.',
+        paragraphs: [
+          'There is no migration guide for v0.78.0. Existing viewer construction, loading, rendering and single-selection code continues to work unchanged.',
+          'The release was checked with Rust parser tests, TypeScript renderer tests, type and public-API checks, independent adversarial design review, Office/PDF fidelity comparisons, and the complete private DOCX/XLSX/PPTX visual regression corpus against the previous renderer.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v0771-rendering-fidelity',
     date: '2026-08-11',
     label: 'Release note',
