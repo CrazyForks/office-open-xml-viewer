@@ -38,14 +38,27 @@ function reflectionBlurBands(
   const bottom = bounds.y + bounds.h;
   const bands: ReflectionBlurBand[] = [];
   for (let index = 0; index < count; index++) {
-    const near = index / count;
-    const far = (index + 1) / count;
+    // Quantise the quadratic radius curve by equal radius increments, then
+    // derive non-uniform spatial cells around those samples. Keeping radius
+    // deltas uniform avoids the large far-edge jumps (and visible horizontal
+    // seams) produced by evaluating distance² over uniformly-spaced bands.
+    const sample = Math.sqrt(index / (count - 1));
+    const previous = index === 0
+      ? 0
+      : Math.sqrt((index - 1) / (count - 1));
+    const next = index === count - 1
+      ? 1
+      : Math.sqrt((index + 1) / (count - 1));
+    const near = index === 0 ? 0 : (previous + sample) / 2;
+    const far = index === count - 1 ? 1 : (sample + next) / 2;
     const y = bottom - far * bounds.h;
     bands.push({
       y,
-      h: bottom - near * bounds.h - y,
+      h: (far - near) * bounds.h,
       // The first band touches the source and must remain sharp. The last band
-      // reaches the authored blur radius at the far edge.
+      // reaches the authored blur radius at the far edge. PowerPoint's floor
+      // reflection keeps the near field legible longer than a linear radius
+      // ramp; a quadratic ramp matches that observed depth-of-field falloff.
       radius: maxBlur * index / (count - 1),
     });
   }
