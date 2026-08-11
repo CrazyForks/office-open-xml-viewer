@@ -546,6 +546,8 @@ function selectionBoundaryPath(rects: readonly SelectionOverlayRect[]): string {
   return commands.join('');
 }
 
+let selectionMaskSequence = 0;
+
 const DEFAULT_FIND_HIGHLIGHT = 'color-mix(in srgb, #ffb300 8%, transparent)';
 const DEFAULT_FIND_ACTIVE_HIGHLIGHT = 'color-mix(in srgb, #fb8c00 8%, transparent)';
 
@@ -2763,9 +2765,50 @@ class XlsxViewerEngine implements ZoomableViewer {
         'position:absolute;inset:0;width:100%;height:100%;overflow:hidden;pointer-events:none;';
       const isMultipleAreaSelection = state.areas.length > 1;
       const activeRect = this.getCellRect(state.activeCell.row, state.activeCell.col);
-      const fill = this.hostDocument.createElementNS(svgNamespace, 'path');
-      fill.setAttribute('d', fillSubpaths.join(''));
+      const maskId = `xlsx-selection-mask-${++selectionMaskSequence}`;
+      const defs = this.hostDocument.createElementNS(svgNamespace, 'defs');
+      const mask = this.hostDocument.createElementNS(svgNamespace, 'mask');
+      mask.setAttribute('id', maskId);
+      mask.setAttribute('maskUnits', 'userSpaceOnUse');
+      mask.setAttribute('x', '0');
+      mask.setAttribute('y', '0');
+      mask.setAttribute('width', String(width));
+      mask.setAttribute('height', String(height));
+      const selectedPath = this.hostDocument.createElementNS(svgNamespace, 'path');
+      selectedPath.setAttribute('d', fillSubpaths.join(''));
+      selectedPath.setAttribute('fill', '#fff');
+      mask.appendChild(selectedPath);
+
+      // Excel leaves ActiveCell unshaded so it remains distinct from the
+      // selected cells. ActiveCell stays at the drag origin; only the Area's
+      // opposite corner changes during extension.
+      if (activeRect) {
+        for (const yp of yPanes) for (const xp of xPanes) {
+          const clippedX = Math.max(activeRect.x, xp.start);
+          const clippedY = Math.max(activeRect.y, yp.start);
+          const clippedX2 = Math.min(activeRect.x + activeRect.w, xp.end);
+          const clippedY2 = Math.min(activeRect.y + activeRect.h, yp.end);
+          if (clippedX2 <= clippedX || clippedY2 <= clippedY) continue;
+          const cutout = this.hostDocument.createElementNS(svgNamespace, 'rect');
+          cutout.setAttribute('data-xlsx-active-cell-cutout', '');
+          cutout.setAttribute('x', String(this.screenX(clippedX, clippedX2 - clippedX)));
+          cutout.setAttribute('y', String(clippedY));
+          cutout.setAttribute('width', String(clippedX2 - clippedX));
+          cutout.setAttribute('height', String(clippedY2 - clippedY));
+          cutout.setAttribute('fill', '#000');
+          mask.appendChild(cutout);
+        }
+      }
+      defs.appendChild(mask);
+      svg.appendChild(defs);
+
+      const fill = this.hostDocument.createElementNS(svgNamespace, 'rect');
+      fill.setAttribute('x', '0');
+      fill.setAttribute('y', '0');
+      fill.setAttribute('width', String(width));
+      fill.setAttribute('height', String(height));
       fill.setAttribute('fill', background);
+      fill.setAttribute('mask', `url(#${maskId})`);
       svg.appendChild(fill);
 
       const boundaryPath = isMultipleAreaSelection ? '' : selectionBoundaryPath(overlayRects);

@@ -677,6 +677,9 @@ describe('XlsxSheetViewer canvas mount', () => {
     const activeBorders = overlayDescendants.filter(
       (element) => element.getAttribute('data-xlsx-active-cell-border') !== null,
     );
+    const activeCutouts = overlayDescendants.filter(
+      (element) => element.getAttribute('data-xlsx-active-cell-cutout') !== null,
+    );
     const coloredPaths = overlayDescendants.filter(
       (element) => element.getAttribute('fill') ===
         'color-mix(in srgb, #765432 8%, transparent)',
@@ -684,6 +687,7 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(fills).toHaveLength(1);
     expect(borders).toHaveLength(0);
     expect(activeBorders).toHaveLength(1);
+    expect(activeCutouts).toHaveLength(1);
     expect(activeBorders[0].getAttribute('stroke-width')).toBe('1');
     expect(activeBorders[0].getAttribute('stroke')).toBe('#765432');
     expect(coloredPaths).toHaveLength(1);
