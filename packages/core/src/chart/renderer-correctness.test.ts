@@ -955,6 +955,59 @@ describe('CH3 — labels are locale-independent (§18.8.30)', () => {
     expect(rec.texts.every(t => !t.text.includes('1,000,000'))).toBe(true);
     expect(rec.texts.some(t => /^\d{4,}$/.test(t.text))).toBe(true);
   });
+
+  it('waterfall renders ChartEx titles, axis fonts, wrapped categories, and themed point roles', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'waterfall',
+      title: 'EBITDA bridge',
+      titleFontSizeHpt: 1400,
+      titleFontBold: false,
+      titleFontFace: 'Calibri',
+      valAxisTitle: '$ in million',
+      valAxisTitleFontSizeHpt: 900,
+      valAxisTitleFontBold: false,
+      valAxisTitleFontFace: 'Calibri',
+      valAxisFontSizeHpt: 900,
+      valAxisFontFace: 'Calibri',
+      catAxisFontSizeHpt: 900,
+      catAxisFontFace: 'Calibri',
+      dataLabelFontSizeHpt: 900,
+      dataLabelFontBold: false,
+      dataLabelFontFace: 'Calibri',
+      categories: [
+        'EBITDA FY21',
+        'Change in Revenues',
+        'Change in Variable costs',
+        'Change in Opex',
+        'EBITDA FY22',
+      ],
+      series: [series({ name: 'W', values: [4.2, 0.3, -0.2, 1.0, 5.3] })],
+      subtotalIndices: [4],
+      barGapWidth: 50,
+      chartexAccents: ['E6E7E8', 'F57A16', '1E8496', '000000', '000000', '000000'],
+    }), RECT, 1);
+
+    const fills = rec.rects.map(rect => rect.fs.toUpperCase());
+    expect(fills).toEqual(['#E6E7E8', '#E6E7E8', '#F57A16', '#E6E7E8', '#1E8496']);
+    expect(rec.texts.some(text =>
+      text.text === 'EBITDA bridge' &&
+      text.font?.includes('14px') &&
+      text.font.includes('Calibri')
+    )).toBe(true);
+    expect(rec.texts.some(text =>
+      text.text === '$ in million' &&
+      text.font?.includes('9px') &&
+      text.font.includes('Calibri')
+    )).toBe(true);
+    expect(rec.texts.some(text =>
+      text.text === '4.2' &&
+      text.font?.startsWith('9px') &&
+      text.font.includes('Calibri')
+    )).toBe(true);
+    expect(rec.texts.some(text => text.text.includes('Variable'))).toBe(true);
+    expect(rec.texts.some(text => text.text === 'costs')).toBe(true);
+  });
 });
 
 describe('scatter series data labels honor c:date1904 (§21.2.2.38)', () => {

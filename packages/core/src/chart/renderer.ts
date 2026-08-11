@@ -860,6 +860,50 @@ function axisLabelPx(sizeHpt: number | null | undefined, h: number, ptToPx: numb
   return Math.max(8, h * 0.045);
 }
 
+/** Wrap text against the active canvas font without discarding characters.
+ * Words are kept intact when possible; a single over-wide token is split at
+ * measured character boundaries. Used by chart families whose category-label
+ * band is an input to plot layout. */
+function wrapMeasuredText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+): string[] {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [''];
+  const lines: string[] = [];
+  let line = '';
+  const pushToken = (token: string): void => {
+    const trial = line ? `${line} ${token}` : token;
+    if (ctx.measureText(trial).width <= maxWidth) {
+      line = trial;
+      return;
+    }
+    if (line) {
+      lines.push(line);
+      line = '';
+    }
+    if (ctx.measureText(token).width <= maxWidth) {
+      line = token;
+      return;
+    }
+    let chunk = '';
+    for (const char of token) {
+      const next = chunk + char;
+      if (chunk && ctx.measureText(next).width > maxWidth) {
+        lines.push(chunk);
+        chunk = char;
+      } else {
+        chunk = next;
+      }
+    }
+    line = chunk;
+  };
+  for (const word of words) pushToken(word);
+  if (line) lines.push(line);
+  return lines.length ? lines : [''];
+}
+
 /** Whether the CATEGORY tick labels should be drawn. `<c:catAx><c:tickLblPos
  *  val="none">` (ECMA-376 §21.2.2.207) hides them; anything else (incl. absent)
  *  shows them, so the default is byte-stable. */
@@ -4468,49 +4512,24 @@ function drawCategoryDataLabels(
 // Waterfall chart — subtotal bars filled, delta bars outlined.
 // ═══════════════════════════════════════════════════════════════════════════
 
-function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect): void {
+function renderWaterfallChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+): void {
   const { x, y, w, h } = r;
-  // PowerPoint's chartEx waterfall uses very thin side margins when the
-  // value axis is hidden — there's no axis label area to reserve.
-  // An explicit plot-area layout wins, exactly as the other chart renderers
-  // do (ECMA-376 §21.2.2.32 `<c:plotArea><c:layout><c:manualLayout>`).
-  const pml = chart.plotAreaManualLayout;
-  let px0: number, py0: number, pw: number, ph: number;
-  if (pml && pml.w != null && pml.h != null) {
-    px0 = x + pml.x * w;
-    py0 = y + pml.y * h;
-    pw  = pml.w * w;
-    ph  = pml.h * h;
-  } else {
-    // Fallback plot insets when the chart gives no explicit layout. The side
-    // margins are principled (thin when the value axis is hidden, otherwise a
-    // value-label gutter). The top/bottom values are HEURISTIC: 0.12 / 0.14
-    // were tuned against sample-2 slide-8 (its callout tips assume a specific
-    // running-total line y) and are NOT a documented chartEx default. Replace
-    // once chartEx `<cx:plotArea><cx:layout>` is parsed or PowerPoint's default
-    // waterfall insets are confirmed. Tracked — do not extend this tuning.
-    const padL = chart.valAxisHidden ? w * 0.01 : w * 0.11;
-    const padR = w * 0.01;
-    const padT = h * 0.12;
-    const padB = h * 0.14;
-    px0 = x + padL;
-    py0 = y + padT;
-    pw  = w - padL - padR;
-    ph  = h - padT - padB;
-  }
-
   const vals = chart.series[0]?.values ?? [];
   const cats = chart.categories;
   const n = cats.length;
   if (n === 0) return;
 
   const subSet = new Set(chart.subtotalIndices);
-
   let running = 0;
   const bars: Array<{ start: number; end: number; isSub: boolean; isPos: boolean }> = [];
   for (let i = 0; i < n; i++) {
     const v = vals[i] ?? 0;
-    const isSub = i === 0 || subSet.has(i);
+    const isSub = subSet.has(i);
     if (isSub) {
       bars.push({ start: 0, end: v, isSub: true, isPos: true });
       running = v;
@@ -4526,38 +4545,116 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
   const allStarts = bars.map(b => b.start);
   const rawMax = Math.max(...allEnds, ...allStarts);
   const rawMin = Math.min(...allStarts, 0);
-  const dataRange = rawMax - rawMin;
-  if (dataRange <= 0) return;
-  // PowerPoint anchors waterfall bars to value=0 when all data is non-negative
-  // (the x-axis sits flush against the bar bases). Adding a 5% pad below 0
-  // would lift the bars off the axis. Only pad when there are actual negatives
-  // to display below zero.
-  const dataMin = rawMin < 0 ? rawMin - dataRange * 0.05 : 0;
-  const padded = (rawMax - dataMin) * 1.1;
-  const dataMax = dataMin + padded;
+  if (rawMax <= rawMin) return;
 
-  const step = niceStep(padded);
+  const titleBand = cartesianTitleBand(chart, h, ptToPx);
+  const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
+  const valFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
+  const catFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
+  const valFont = chartFontFamily(chart, chart.valAxisFontFace, 'minor');
+  const catFont = chartFontFamily(chart, chart.catAxisFontFace, 'minor');
+  const provisionalPlan = planValueAxis(chart, rawMin, rawMax, h / ptToPx);
+
   ctx.save();
-  const fontSize = Math.round(h * 0.042);
-  ctx.font = `${fontSize}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+  let valLabelBandW = 0;
+  if (!chart.valAxisHidden) {
+    ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${valFontPx}px ${valFont}`;
+    let maxWidth = 0;
+    for (const value of provisionalPlan.majorLines) {
+      maxWidth = Math.max(
+        maxWidth,
+        ctx.measureText(formatChartValWithCode(value, chart.valAxisFormatCode, chart.date1904)).width,
+      );
+    }
+    valLabelBandW = maxWidth + 8;
+  }
+
+  // Category labels participate in layout. Measure wrapped lines with the
+  // authored category-axis font and the available category interval rather
+  // than placing every word on its own line or reserving a height fraction.
+  const estimatedPlotW = Math.max(
+    1,
+    w - axBands.valBandW - valLabelBandW - w * 0.02,
+  );
+  const estimatedSlotW = estimatedPlotW / n;
+  ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${catFontPx}px ${catFont}`;
+  const wrappedCategories = cats.map(category =>
+    wrapMeasuredText(
+      ctx,
+      formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904),
+      Math.max(1, estimatedSlotW - 8),
+    )
+  );
+  const maxCategoryLines = Math.max(1, ...wrappedCategories.map(lines => lines.length));
+  const categoryLabelBandH = chart.catAxisHidden
+    ? 0
+    : maxCategoryLines * (catFontPx + 2) + 4;
+
+  const pad = {
+    t: titleBand.bandH + valFontPx / 2 + 2,
+    r: w * 0.02,
+    b: axBands.catBandH + categoryLabelBandH,
+    l: axBands.valBandW + (chart.valAxisHidden ? w * 0.02 : valLabelBandW),
+  };
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleBand,
+    legendSideReserveFrac: 0,
+    pad,
+  });
+  drawChartTitle(ctx, chart, x, y + frame.title.topPad, w, frame.title.fontPx);
+  const { px0, py0, pw, ph } = frame.plotRect;
+  const plan = planValueAxis(chart, rawMin, rawMax, ph / ptToPx);
+  const yOf = (value: number): number => py0 + ph - plan.frac(value) * ph;
+
+  const valAxisLine = resolveAxisLine(
+    chart.valAxisLineColor,
+    chart.valAxisLineWidthEmu,
+    ptToPx,
+  );
+  const catAxisLine = resolveAxisLine(
+    chart.catAxisLineColor,
+    chart.catAxisLineWidthEmu,
+    ptToPx,
+  );
+  const valGridline = resolveGridline(
+    chart.valAxisGridlineColor,
+    chart.valAxisGridlineWidthEmu,
+    ptToPx,
+  );
 
   // ECMA-376 / chartEx §axis@hidden: when the value axis is hidden, skip the
   // value-axis gridlines, tick labels and the left segment of the L-frame.
   // This is the canonical PowerPoint look for waterfall analyses where the
   // value scale is implicit in the data labels on each bar.
   if (!chart.valAxisHidden) {
-    ctx.strokeStyle = '#e8e8e8';
-    ctx.lineWidth = 0.7;
-    ctx.fillStyle = '#666';
+    ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${valFontPx}px ${valFont}`;
+    ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#595959';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    for (let v = Math.ceil(dataMin / step) * step; v <= dataMax; v += step) {
-      const gy = py0 + ph * (1 - (v - dataMin) / padded);
-      ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+    for (const value of plan.majorLines) {
+      const gy = yOf(value);
+      if (drawValMajorGridlines(chart)) {
+        ctx.strokeStyle = valGridline.color;
+        ctx.lineWidth = valGridline.width;
+        ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      }
       // Locale-independent §18.8.30 formatting (honoring `<c:valAx><c:numFmt>`),
       // matching the other renderers — `toLocaleString()` grouped by the
       // viewer's OS locale, so the same chart read differently across machines.
-      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 4, gy);
+      ctx.fillText(
+        formatChartValWithCode(value, chart.valAxisFormatCode, chart.date1904),
+        px0 - 4,
+        gy,
+      );
+      drawAxisTick(
+        ctx,
+        chart.valAxisMajorTickMark,
+        'val',
+        px0,
+        gy,
+        valAxisLine.color,
+        valAxisLine.width,
+      );
     }
   }
 
@@ -4566,24 +4663,21 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
   // `<c:spPr><a:ln><a:noFill>` (line-only hide).
   const drawValLine = !chart.valAxisHidden && !chart.valAxisLineHidden;
   const drawCatLine = !chart.catAxisHidden && !chart.catAxisLineHidden;
-  if (drawValLine || drawCatLine) {
-    ctx.strokeStyle = '#bbb';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    if (drawValLine) {
-      ctx.moveTo(px0, py0);
-      ctx.lineTo(px0, py0 + ph);
-      if (drawCatLine) ctx.lineTo(px0 + pw, py0 + ph);
-    } else if (drawCatLine) {
-      ctx.moveTo(px0, py0 + ph);
-      ctx.lineTo(px0 + pw, py0 + ph);
-    }
-    ctx.stroke();
+  if (drawValLine) {
+    ctx.strokeStyle = valAxisLine.color;
+    ctx.lineWidth = valAxisLine.width;
+    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+  }
+  if (drawCatLine) {
+    ctx.strokeStyle = catAxisLine.color;
+    ctx.lineWidth = catAxisLine.width;
+    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
   }
 
-  const colorSub = '#196ECA';
-  const colorPos = '#5BA4E6';
-  const colorNeg = '#E46970';
+  const accents = chart.chartexAccents;
+  const colorPos = `#${chart.series[0]?.color ?? accents?.[0] ?? '5B9BD5'}`;
+  const colorNeg = `#${accents?.[1] ?? 'ED7D31'}`;
+  const colorSub = `#${accents?.[2] ?? 'A5A5A5'}`;
 
   // ECMA-376 / chartEx §17.18.34 ST_GapAmount: gapWidth is the gap between
   // adjacent categories expressed as a percentage of the bar width
@@ -4597,30 +4691,22 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
 
   bars.forEach((bar, i) => {
     const bx = px0 + gapW * i + (gapW - barW) / 2;
-    const yTop = py0 + ph * (1 - (bar.end - dataMin) / padded);
-    const yBot = py0 + ph * (1 - (bar.start - dataMin) / padded);
+    const yTop = Math.min(yOf(bar.start), yOf(bar.end));
+    const yBot = Math.max(yOf(bar.start), yOf(bar.end));
     const bh = Math.max(1, yBot - yTop);
 
-    if (bar.isSub) {
-      ctx.fillStyle = colorSub;
-      ctx.fillRect(bx, yTop, barW, bh);
-    } else {
-      ctx.strokeStyle = bar.isPos ? colorPos : colorNeg;
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(bx + 0.75, yTop + 0.75, barW - 1.5, bh - 1.5);
-    }
+    ctx.fillStyle = bar.isSub ? colorSub : bar.isPos ? colorPos : colorNeg;
+    ctx.fillRect(bx, yTop, barW, bh);
 
     if (i < n - 1) {
       const nextBx = px0 + gapW * (i + 1) + (gapW - barW) / 2;
       const connY = bar.isPos ? yTop : yBot;
       ctx.strokeStyle = '#ccc';
       ctx.lineWidth = 0.8;
-      ctx.setLineDash([3, 3]);
       ctx.beginPath();
       ctx.moveTo(bx + barW, connY);
       ctx.lineTo(nextBx, connY);
       ctx.stroke();
-      ctx.setLineDash([]);
     }
 
     const rawVal = vals[i] ?? 0;
@@ -4643,7 +4729,8 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
         ? `#${chart.dataLabelFontColor}`
         : '#595959';
     ctx.fillStyle = labelColor;
-    ctx.font = `bold ${Math.round(h * 0.044)}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
+    const dataLabelFontPx = axisLabelPx(chart.dataLabelFontSizeHpt, h, ptToPx);
+    ctx.font = `${chart.dataLabelFontBold ? 'bold ' : ''}${dataLabelFontPx}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
     ctx.textAlign = 'center';
     // Negative bars: label sits BELOW the bar (`outEnd` for a negative value
     // points downward in chartEx). Positive bars and subtotals: label ABOVE.
@@ -4658,18 +4745,38 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
 
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillStyle = '#666';
+  ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#595959';
   // Category (transaction) labels below the bars → category-axis face.
-  ctx.font = `${Math.round(h * 0.038)}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+  ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${catFontPx}px ${catFont}`;
   const labelY = py0 + ph + 4;
   for (let i = 0; i < n; i++) {
     const ccx = px0 + gapW * i + gapW / 2;
-    // §21.2.2.71: format numeric-serial categories via the category-axis
-    // numFmt; string transaction labels pass through unchanged.
-    const label = formatCategoryLabel(cats[i], chart.catAxisFormatCode, chart.date1904);
-    const lines = label.split(/\s+/);
-    lines.forEach((line, li) => ctx.fillText(line, ccx, labelY + li * (fontSize + 2)));
+    const lines = wrapMeasuredText(
+      ctx,
+      formatCategoryLabel(cats[i], chart.catAxisFormatCode, chart.date1904),
+      Math.max(1, gapW - 8),
+    );
+    lines.forEach((line, lineIndex) =>
+      ctx.fillText(line, ccx, labelY + lineIndex * (catFontPx + 2))
+    );
   }
+
+  drawAxisTitles(
+    ctx,
+    chart,
+    x,
+    y,
+    w,
+    h,
+    px0,
+    py0,
+    pw,
+    ph,
+    0,
+    0,
+    axBands.catFontPx,
+    axBands.valFontPx,
+  );
 
   ctx.restore();
 }
@@ -5612,7 +5719,7 @@ export function renderChart(
       case 'bubble':
         renderScatterChart(ctx, chart, rect, ptToPx); break;
       case 'waterfall':
-        renderWaterfallChart(ctx, chart, rect); break;
+        renderWaterfallChart(ctx, chart, rect, ptToPx); break;
       case 'stock':
         renderStockChart(ctx, chart, rect, ptToPx); break;
       case 'boxWhisker':

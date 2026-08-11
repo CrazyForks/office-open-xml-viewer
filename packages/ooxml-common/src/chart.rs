@@ -2459,8 +2459,10 @@ pub fn parse_chartex_part_with_references(
         })
         .unwrap_or_else(|| vec![None; pt_count]);
 
-    // Subtotal indices (idx=0 is always implicit; add from cx:subtotals)
-    let mut subtotal_indices: Vec<u32> = vec![0];
+    // `<cx:subtotals><cx:idx val>` identifies only points explicitly marked as
+    // totals. The first waterfall point starts at zero geometrically, but it is
+    // still an ordinary increase/decrease point unless index 0 is present.
+    let mut subtotal_indices: Vec<u32> = Vec::new();
     if let Some(subtotals_node) = series_node
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "subtotals")
@@ -2470,7 +2472,7 @@ pub fn parse_chartex_part_with_references(
             .filter(|n| n.is_element() && n.tag_name().name() == "idx")
         {
             if let Some(v) = attr(&idx_node, "val").and_then(|v| v.parse::<u32>().ok()) {
-                if v != 0 {
+                if !subtotal_indices.contains(&v) {
                     subtotal_indices.push(v);
                 }
             }
@@ -7753,8 +7755,7 @@ mod tests {
         assert_eq!(dl[1], None);
         assert_eq!(dl[2].as_deref(), Some("4472C4"));
         assert_eq!(dl[3], None);
-        // Subtotal indices: idx0 always implicit, explicit idx3 added, the
-        // redundant explicit idx0 is de-duplicated away (0 is skipped).
+        // Both totals were explicitly authored; duplicates are de-duplicated.
         assert_eq!(m.subtotal_indices, vec![0, 3]);
         // gapWidth fraction 0.8 → legacy percent 80.
         assert_eq!(m.bar_gap_width, Some(80));
@@ -7824,8 +7825,9 @@ mod tests {
         assert_eq!(tm.rows[0].size, 50.0);
         assert_eq!(tm.rows[2].path, vec!["Asia", "East"]);
         assert_eq!(tm.rows[2].size, 20.0);
-        // No `<cx:subtotals>` → only the implicit idx 0.
-        assert_eq!(m.subtotal_indices, vec![0]);
+        // No `<cx:subtotals>` → no total points. Index 0 still begins at the
+        // zero baseline but keeps the ordinary positive/negative formatting.
+        assert!(m.subtotal_indices.is_empty());
         // No `<cx:catScaling gapWidth>` → unset (renderer default applies).
         assert_eq!(m.bar_gap_width, None);
         assert!(!m.cat_axis_hidden);
