@@ -371,6 +371,9 @@ set fillStyle=#333
 set textAlign=center
 set textBaseline=top
 fillText "Quarterly" 332,38.972 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+save
+set font=11px sans-serif
+restore
 set textBaseline=middle
 set font=10.725px sans-serif
 set fillStyle=#555
@@ -756,8 +759,10 @@ set fillStyle=#333
 set textAlign=center
 set textBaseline=top
 fillText "Combo" 332,38.972 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
-set textBaseline=middle
+save
 set font=11px sans-serif
+restore
+set textBaseline=middle
 set fillStyle=#555
 set strokeStyle=#aaa
 beginPath
@@ -2181,6 +2186,9 @@ set fillStyle=#333
 set textAlign=center
 set textBaseline=top
 fillText "Stacked" 332,38.972 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
+save
+set font=11px sans-serif
+restore
 set textBaseline=middle
 set font=10.385000000000002px sans-serif
 set fillStyle=#555
@@ -2301,8 +2309,10 @@ exports[`renderChart draw-call signature (characterization) > is stable for: sta
 "save
 set font=11px sans-serif
 set font=10px sans-serif
-set textBaseline=middle
+save
 set font=11px sans-serif
+restore
+set textBaseline=middle
 set fillStyle=#555
 set strokeStyle=#aaa
 beginPath

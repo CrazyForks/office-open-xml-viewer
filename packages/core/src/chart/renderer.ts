@@ -1557,7 +1557,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // data region; "outer" includes axes/labels. We treat both identically
   // because the inner padding stays the same either way. computeChartFrame
   // applies the pad → plot rect and the manual-layout override.
-  const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
     // The cartesian title band is already folded into `pad.t`; pass it so
     // `frame.title` (if read) matches the reserved band instead of a stale frac.
     titleBand,
@@ -1566,7 +1566,40 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     honorPlotAreaManualLayout: true,
     manualOuterInsets,
   });
+  const { px0, py0, pw } = frame.plotRect;
+  let { ph } = frame.plotRect;
   if (pw <= 0 || ph <= 0) return;
+
+  // Horizontal DrawingML category text (`wrap="square"`) wraps within its
+  // category slot. Measure the complete strings with the actual tick font and
+  // preserve every word instead of replacing most labels with an ellipsis.
+  // An authored inner plot rectangle already leaves its own label band; for an
+  // automatic/outer layout, move the plot bottom up by the additional wrapped
+  // lines so they remain inside the chart frame.
+  const catLabelRotation = catLabelRotationRad(chart);
+  const wrappedColumnCategories: string[][] = [];
+  if (!isH && !chart.catAxisHidden && catLabelsVisible(chart) && catLabelRotation === 0) {
+    const slotW = pw / n;
+    const wrapFontPx = chart.catAxisFontSizeHpt != null
+      ? catAxFontPx
+      : Math.max(8, Math.min(11, slotW * 0.5));
+    ctx.save();
+    ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${wrapFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+    for (const category of cats) {
+      wrappedColumnCategories.push(wrapMeasuredText(
+        ctx,
+        formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904),
+        Math.max(1, slotW),
+      ));
+    }
+    ctx.restore();
+    const maxLines = Math.max(1, ...wrappedColumnCategories.map(lines => lines.length));
+    const manualInner = chart.plotAreaManualLayout?.layoutTarget === 'inner' &&
+      chart.plotAreaManualLayout.w != null && chart.plotAreaManualLayout.h != null;
+    if (!manualInner && maxLines > 1) {
+      ph = Math.max(1, ph - (maxLines - 1) * (wrapFontPx + 2));
+    }
+  }
 
   if (chart.plotAreaBg) {
     ctx.fillStyle = `#${chart.plotAreaBg}`;
@@ -1938,7 +1971,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     const catSlotMaxPx = catGap - 4;
     const horizLabelMaxPx = (px0 - 4) - (x + legLeftW + valTitleW);
     // `<c:catAx><c:txPr><a:bodyPr rot>` rotates the column labels (0 = flat).
-    const rotRad = catLabelRotationRad(chart);
+    const rotRad = catLabelRotation;
     for (let ci = 0; ci < n; ci++) {
       // §21.2.2.71: a category-axis numFmt formats numeric-serial categories
       // (e.g. dateAx serials → real dates). No-op for string categories.
@@ -1946,13 +1979,20 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       if (!isH) {
         const lx = px0 + categorySlotIndex(ci) * catGap + catGap / 2;
         ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-        // Rotation elides against a longer diagonal budget; unrotated keeps the
-        // slot width and the byte-stable `fillText(text, x, y)` path.
+        // Rotation elides against a longer diagonal budget. Horizontal labels
+        // use the measured word-wrap computed from this category slot.
         const budget = rotRad === 0 ? catSlotMaxPx : ph * 0.4;
         const gap = chart.catAxisFontSizeHpt != null
           ? categoryTickLabelGapPx(drawnCatTickFontPx)
           : 3;
-        drawRotatedCatLabel(ctx, elideToWidth(ctx, raw, budget), lx, py0 + ph + gap, rotRad);
+        if (rotRad === 0) {
+          const lines = wrappedColumnCategories[ci] ?? [raw];
+          lines.forEach((line, lineIndex) => {
+            ctx.fillText(line, lx, py0 + ph + gap + lineIndex * (drawnCatTickFontPx + 2));
+          });
+        } else {
+          drawRotatedCatLabel(ctx, elideToWidth(ctx, raw, budget), lx, py0 + ph + gap, rotRad);
+        }
       } else {
         const ly = py0 + categorySlotIndex(ci) * catGap + catGap / 2;
         ctx.textAlign = 'right'; ctx.textBaseline = 'middle';

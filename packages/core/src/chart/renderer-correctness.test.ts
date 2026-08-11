@@ -3074,6 +3074,23 @@ describe('CH6 — category-axis label rotation + tickLblPos (commit 2)', () => {
     expect(rec.rotates.length).toBe(0);
   });
 
+  it('wraps long horizontal category labels without discarding words', () => {
+    const longLabel = 'Foundations: Economic growth and inclusive development';
+    const rec = recordingCtx();
+    renderChart(rec.ctx, colModel({
+      categories: [longLabel, 'Priority 1', 'Priority 2', 'Priority 3', 'Priority 4', 'Applications'],
+      series: [series({ name: 'S', values: [1, 2, 3, 4, 5, 6] })],
+      catAxisFontSizeHpt: 900,
+      catAxisLabelRotation: -60_000_000,
+    }), RECT, 1);
+
+    const lines = rec.texts.filter(text => longLabel.includes(text.text));
+    expect(lines.length).toBeGreaterThan(1);
+    expect(lines.map(line => line.text).join(' ')).toBe(longLabel);
+    expect(lines.some(line => line.text.includes('…'))).toBe(false);
+    expect(lines.map(line => line.y)).toEqual([...lines.map(line => line.y)].sort((a, b) => a - b));
+  });
+
   // #748: a rot outside the ST_FixedAngle (§20.1.10.23) (-90°,90°) text-rotation
   // range is not a valid axis-label rotation — Office draws such labels
   // horizontal. sample-24's cat/date/value axes all carry rot="-60000000"
