@@ -50,11 +50,30 @@ pub(crate) fn pptx_understands_ns(ns: &str) -> bool {
 /// has no chartStyle relationship or the part cannot be read (the chartEx
 /// title then falls back to its inline size, or the renderer's default).
 fn load_chart_style_xml(zip: &mut PptxZip, chart_path: &str) -> Option<String> {
+    load_chart_sidecar_xml(
+        zip,
+        chart_path,
+        ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX,
+    )
+}
+
+fn load_chart_color_style_xml(zip: &mut PptxZip, chart_path: &str) -> Option<String> {
+    load_chart_sidecar_xml(
+        zip,
+        chart_path,
+        ooxml_common::chart::CHART_COLOR_STYLE_REL_TYPE_SUFFIX,
+    )
+}
+
+fn load_chart_sidecar_xml(
+    zip: &mut PptxZip,
+    chart_path: &str,
+    relationship_suffix: &str,
+) -> Option<String> {
     let dir = chart_path.rsplit_once('/').map_or("", |(dir, _)| dir);
     let rels_path = relationship_part_path(chart_path);
     let rels_xml = read_zip_str(zip, &rels_path).ok()?;
-    let target =
-        find_rel_target_by_type(&rels_xml, ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)?;
+    let target = find_rel_target_by_type(&rels_xml, relationship_suffix)?;
     let style_path = resolve_path(dir, &target);
     read_zip_str(zip, &style_path).ok()
 }
@@ -2546,7 +2565,14 @@ pub(crate) fn parse_sp_tree_node(
                                 // (`styleN.xml`), reached via that part's OWN
                                 // rels. Read it best-effort before parsing.
                                 let style_xml = load_chart_style_xml(zip, &chart_path);
-                                parse_chartex(&chart_xml, style_xml.as_deref(), theme)
+                                let color_style_xml = load_chart_color_style_xml(zip, &chart_path);
+                                parse_chartex(
+                                    &chart_xml,
+                                    style_xml.as_deref(),
+                                    color_style_xml.as_deref(),
+                                    theme,
+                                    theme_source.format_scheme(),
+                                )
                             } else {
                                 let user_shapes_xml =
                                     load_chart_user_shapes_xml(zip, &chart_path, &chart_xml);

@@ -153,6 +153,7 @@ export interface CfValue {
     value: string | null;
 }
 export interface ChartAnchor {
+    zOrder?: number;
     fromCol: number;
     fromColOff: number;
     fromRow: number;
@@ -212,6 +213,18 @@ export interface ChartexBoxWhisker {
     categories: string[];
     series: ChartexBoxSeries[];
 }
+interface ChartExElementStyle {
+    fillColors?: Array<string | null> | null;
+    fillHidden?: boolean | null;
+    lineColors?: Array<string | null> | null;
+    lineWidthEmu?: number | null;
+    lineHidden?: boolean | null;
+    lineDash?: string | null;
+    lineCap?: string | null;
+    lineJoin?: string | null;
+    fillColorIndex?: number | null;
+    lineColorIndex?: number | null;
+}
 export interface ChartexSunburst {
     rows: ChartexSunburstRow[];
 }
@@ -229,8 +242,10 @@ export interface ChartLabelBox {
     borderWidthEmu?: number;
 }
 export interface ChartManualLayout {
-    xMode: string;
-    yMode: string;
+    xMode?: string;
+    yMode?: string;
+    wMode?: string;
+    hMode?: string;
     layoutTarget?: string;
     x: number;
     y: number;
@@ -240,6 +255,7 @@ export interface ChartManualLayout {
 export interface ChartModel {
     chartType: ChartType;
     title: string | null;
+    titlePresent?: boolean;
     categories: string[];
     series: ChartSeries[];
     chartTextBoxes?: ChartTextBox[] | null;
@@ -270,6 +286,7 @@ export interface ChartModel {
     catAxisFontColor?: string | null;
     valAxisFontColor?: string | null;
     dataLabelFontSizeHpt: number | null;
+    dataLabelFontBold?: boolean | null;
     subtotalIndices: number[];
     legendManualLayout?: LegendManualLayout | null;
     valAxisFormatCode?: string | null;
@@ -278,7 +295,6 @@ export interface ChartModel {
     dataLabelPosition?: string | null;
     dataLabelFontColor?: string | null;
     dataLabelFormatCode?: string | null;
-    dataLabelFontBold?: boolean | null;
     titleFontBold?: boolean | null;
     catAxisFontBold?: boolean | null;
     valAxisFontBold?: boolean | null;
@@ -316,8 +332,11 @@ export interface ChartModel {
     plotAreaManualLayout?: ChartManualLayout | null;
     scatterStyle?: string | null;
     bubbleScale?: number | null;
+    bubbleSizeRepresents?: 'area' | 'w' | null;
+    showNegativeBubbles?: boolean | null;
     radarStyle?: string | null;
     secondaryValAxis?: SecondaryValueAxis | null;
+    secondaryCatAxis?: SecondaryValueAxis | null;
     date1904?: boolean;
     holeSize?: number | null;
     firstSliceAngle?: number | null;
@@ -335,6 +354,8 @@ export interface ChartModel {
     valAxisOrientation?: 'minMax' | 'maxMin' | string | null;
     catAxisOrientation?: 'minMax' | 'maxMin' | string | null;
     catAxisTickLabelPos?: string | null;
+    catAxisTickLabelSkip?: number | null;
+    catAxisTickMarkSkip?: number | null;
     valAxisTickLabelPos?: string | null;
     catAxisLabelRotation?: number | null;
     stockHiLowLines?: boolean | null;
@@ -344,6 +365,11 @@ export interface ChartModel {
     chartexSunburst?: ChartexSunburst | null;
     chartexTreemap?: ChartexTreemap | null;
     chartexAccents?: string[] | null;
+    chartexColorPalette?: Array<string | null> | null;
+    chartexColorStyleMethod?: string | null;
+    chartexDataPointStyle?: ChartExElementStyle | null;
+    chartexDataPointLineStyle?: ChartExElementStyle | null;
+    chartexDataPointMarkerStyle?: ChartExElementStyle | null;
 }
 export interface ChartRect {
     x: number;
@@ -366,6 +392,8 @@ export interface ChartSeries {
     categories?: string[] | null;
     showMarker?: boolean | null;
     valFormatCode?: string | null;
+    catFormatCode?: string | null;
+    catFormatCodes?: (string | null)[] | null;
     markerSymbol?: string | null;
     markerSize?: number | null;
     markerFill?: string | null;
@@ -387,6 +415,7 @@ export interface ChartSeriesDataLabels {
     position?: string;
     fontColor?: string;
     formatCode?: string;
+    separator?: string;
     fontBold?: boolean;
     fontSizeHpt?: number;
     labelBox?: ChartLabelBox;
@@ -401,6 +430,7 @@ export interface ChartTextBox {
     h: number;
     paragraphs: ChartTextParagraph[];
     verticalAnchor?: 't' | 'ctr' | 'b' | 'just' | 'dist' | string | null;
+    wrap?: 'none' | 'square' | string | null;
 }
 export interface ChartTextParagraph {
     runs: ChartTextRun[];
@@ -525,6 +555,7 @@ export type HyperlinkTarget = {
     slideIndex?: number;
 };
 export interface ImageAnchor {
+    zOrder?: number;
     fromCol: number;
     fromColOff: number;
     fromRow: number;
@@ -559,8 +590,10 @@ interface ImageFill {
 }
 export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
 export interface LegendManualLayout {
-    xMode: string;
-    yMode: string;
+    xMode?: string;
+    yMode?: string;
+    wMode?: string;
+    hMode?: string;
     x: number;
     y: number;
     w: number;
@@ -1042,6 +1075,7 @@ export type ShapeGeom = {
     duotone?: Duotone;
 };
 export interface ShapeInfo {
+    zOrder?: number;
     x: number;
     y: number;
     w: number;

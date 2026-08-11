@@ -19,6 +19,7 @@ use std::collections::HashMap;
 /// `<a:solidFill>` text colors without owning the theme storage.
 pub(crate) struct PptxColorResolver<'a> {
     pub(crate) theme: &'a HashMap<String, String>,
+    pub(crate) theme_format_scheme: Option<&'a ooxml_common::theme::ThemeFormatScheme>,
 }
 
 impl ooxml_common::chart::ColorResolver for PptxColorResolver<'_> {
@@ -42,6 +43,10 @@ impl ooxml_common::chart::ColorResolver for PptxColorResolver<'_> {
 
     fn resolve_series_accent(&self, idx: usize) -> Option<String> {
         self.theme.get(&format!("accent{}", idx % 6 + 1)).cloned()
+    }
+
+    fn theme_format_scheme(&self) -> Option<&ooxml_common::theme::ThemeFormatScheme> {
+        self.theme_format_scheme
     }
 }
 
@@ -67,7 +72,10 @@ pub(crate) fn parse_legacy_chart_with_user_shapes(
 ) -> Option<ChartElement> {
     let doc = parse_preflighted_pptx_xml(xml).ok()?;
     let root = doc.root_element();
-    let resolver = PptxColorResolver { theme };
+    let resolver = PptxColorResolver {
+        theme,
+        theme_format_scheme: None,
+    };
     let mut chart = ooxml_common::chart::parse_chart_part(root, &resolver)?;
     if let Some(user_shapes_xml) = user_shapes_xml {
         if let Ok(user_shapes_doc) = parse_preflighted_pptx_xml(user_shapes_xml) {
@@ -104,18 +112,29 @@ pub(crate) fn parse_legacy_chart_with_user_shapes(
 pub(crate) fn parse_chartex(
     xml: &str,
     style_xml: Option<&str>,
+    color_style_xml: Option<&str>,
     theme: &HashMap<String, String>,
+    theme_format_scheme: Option<&ooxml_common::theme::ThemeFormatScheme>,
 ) -> Option<ChartElement> {
     let doc = parse_preflighted_pptx_xml(xml).ok()?;
     let root = doc.root_element();
-    let resolver = PptxColorResolver { theme };
+    let resolver = PptxColorResolver {
+        theme,
+        theme_format_scheme,
+    };
     // The shared chart grammar reparses the optional style XML. Admit it
     // through the PPTX-local node ceiling first so the second parse only ever
     // sees an already bounded document.
     let style_xml = style_xml.filter(|style| parse_preflighted_pptx_xml(style).is_ok());
+    let color_style_xml = color_style_xml.filter(|style| parse_preflighted_pptx_xml(style).is_ok());
     // chartEx (waterfall/boxWhisker/…) reads its title font size from the
     // associated chartStyle part when the `<cx:title>` itself carries none.
-    let chart = ooxml_common::chart::parse_chartex_part(root, &resolver, style_xml)?;
+    let chart = ooxml_common::chart::parse_chartex_part_with_style_parts(
+        root,
+        &resolver,
+        style_xml,
+        color_style_xml,
+    )?;
     Some(ChartElement {
         x: 0,
         y: 0,

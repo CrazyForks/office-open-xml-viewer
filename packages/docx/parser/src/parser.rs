@@ -4000,8 +4000,14 @@ fn load_chart_map(
         // `.../2011/relationships/chartStyle`). Resolve+read it best-effort;
         // legacy `<c:>` charts ignore it (their title size is inline).
         let style_xml = load_chart_style_xml(zip, &path);
+        let color_style_xml = load_chart_color_style_xml(zip, &path);
         let user_shapes_xml = load_chart_user_shapes_xml(zip, &path, &xml);
-        if let Some(mut chart) = parse_docx_chart(&xml, style_xml.as_deref(), theme) {
+        if let Some(mut chart) = parse_docx_chart_with_style_parts(
+            &xml,
+            style_xml.as_deref(),
+            color_style_xml.as_deref(),
+            theme,
+        ) {
             if let (Some(user_shapes_xml), Ok(chart_doc)) =
                 (user_shapes_xml.as_deref(), parse_guarded(&xml))
             {
@@ -4030,6 +4036,26 @@ fn load_chart_map(
 /// has no chartStyle relationship or the part cannot be read (the chartEx
 /// title then falls back to its inline size, or the renderer's default).
 fn load_chart_style_xml(zip: &mut Zip, chart_path: &str) -> Option<String> {
+    load_chart_sidecar_xml(
+        zip,
+        chart_path,
+        ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX,
+    )
+}
+
+fn load_chart_color_style_xml(zip: &mut Zip, chart_path: &str) -> Option<String> {
+    load_chart_sidecar_xml(
+        zip,
+        chart_path,
+        ooxml_common::chart::CHART_COLOR_STYLE_REL_TYPE_SUFFIX,
+    )
+}
+
+fn load_chart_sidecar_xml(
+    zip: &mut Zip,
+    chart_path: &str,
+    relationship_suffix: &str,
+) -> Option<String> {
     // Split `word/charts/chart6.xml` into dir (`word/charts`) + file
     // (`chart6.xml`) so the rels path is `word/charts/_rels/chart6.xml.rels`.
     let (dir, file) = match chart_path.rsplit_once('/') {
@@ -4038,8 +4064,7 @@ fn load_chart_style_xml(zip: &mut Zip, chart_path: &str) -> Option<String> {
     };
     let rels_path = format!("{}/_rels/{}.rels", dir, file);
     let rels_xml = read_zip_string(zip, &rels_path).ok()?;
-    let target =
-        find_rel_target_by_type(&rels_xml, ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)?;
+    let target = find_rel_target_by_type(&rels_xml, relationship_suffix)?;
     let style_path = ooxml_common::rels::resolve_target(&format!("{}/", dir), &target);
     read_zip_string(zip, &style_path).ok()
 }
@@ -11703,6 +11728,10 @@ impl ooxml_common::chart::ColorResolver for DocxColorResolver<'_> {
         let slot = format!("accent{}", (idx % 6) + 1);
         self.theme.resolve(&slot)
     }
+
+    fn theme_format_scheme(&self) -> Option<&ooxml_common::theme::ThemeFormatScheme> {
+        Some(&self.theme.format_scheme)
+    }
 }
 
 /// Parse a `word/charts/chartN.xml` part into the shared [`ChartModel`].
@@ -11719,9 +11748,19 @@ impl ooxml_common::chart::ColorResolver for DocxColorResolver<'_> {
 /// carries the same URI declaration). Theme colours/fonts resolve through
 /// [`DocxColorResolver`] either way. `None` when the XML is malformed or holds
 /// no recognized chart type.
+#[cfg(test)]
 fn parse_docx_chart(
     chart_xml: &str,
     style_xml: Option<&str>,
+    theme: &ThemeColors,
+) -> Option<ooxml_common::chart::ChartModel> {
+    parse_docx_chart_with_style_parts(chart_xml, style_xml, None, theme)
+}
+
+fn parse_docx_chart_with_style_parts(
+    chart_xml: &str,
+    style_xml: Option<&str>,
+    color_style_xml: Option<&str>,
     theme: &ThemeColors,
 ) -> Option<ooxml_common::chart::ChartModel> {
     let doc = parse_guarded(chart_xml).ok()?;
@@ -11734,7 +11773,12 @@ fn parse_docx_chart(
     if is_chartex {
         // chartEx (waterfall/boxWhisker/…) reads its title font size from the
         // associated chartStyle part when the `<cx:title>` itself carries none.
-        ooxml_common::chart::parse_chartex_part(root, &resolver, style_xml)
+        ooxml_common::chart::parse_chartex_part_with_style_parts(
+            root,
+            &resolver,
+            style_xml,
+            color_style_xml,
+        )
     } else {
         ooxml_common::chart::parse_chart_part(root, &resolver)
     }

@@ -324,6 +324,24 @@ export type ChartType =
   | 'boxWhisker' | 'sunburst' | 'treemap'
   | string;
 
+/** Effective paint for one role in an Office 2013+ Chart Style part. */
+export interface ChartExElementStyle {
+  /** Per-color-style-index fills after `phClr` substitution and transforms. */
+  fillColors?: Array<string | null> | null;
+  fillHidden?: boolean | null;
+  /** Per-color-style-index outlines after `phClr` substitution/transforms. */
+  lineColors?: Array<string | null> | null;
+  lineWidthEmu?: number | null;
+  lineHidden?: boolean | null;
+  lineDash?: string | null;
+  lineCap?: string | null;
+  lineJoin?: string | null;
+  /** Fixed zero-based Chart Colors index; absent means relative (`auto`). */
+  fillColorIndex?: number | null;
+  /** Fixed zero-based Chart Colors index; absent means relative (`auto`). */
+  lineColorIndex?: number | null;
+}
+
 export interface ChartModel {
   chartType: ChartType;
   title: string | null;
@@ -555,6 +573,17 @@ export interface ChartModel {
    */
   bubbleScale?: number | null;
   /**
+   * `<c:bubbleChart><c:sizeRepresents val>` (ECMA-376 §21.2.2.193,
+   * ST_SizeRepresents §21.2.3.43). `area` (the schema default) makes bubble
+   * area proportional to the value; `w` makes the radius proportional.
+   */
+  bubbleSizeRepresents?: 'area' | 'w' | null;
+  /**
+   * `<c:bubbleChart><c:showNegBubbles val>` (ECMA-376 §21.2.2.179).
+   * Absent means false; a present CT_Boolean without `val` means true.
+   */
+  showNegativeBubbles?: boolean | null;
+  /**
    * `<c:radarChart><c:radarStyle val>` (ECMA-376 §21.2.3.10). Controls
    * whether radar series render as line + markers ("standard" / "marker")
    * or as a closed polygon with area fill ("filled"). null = default
@@ -745,6 +774,16 @@ export interface ChartModel {
    * renderer then falls back to its own `CHART_PALETTE`.
    */
   chartexAccents?: string[] | null;
+  /** Total color set resolved from the linked Chart Colors part. */
+  chartexColorPalette?: Array<string | null> | null;
+  /** `<cs:colorStyle meth>`; unknown methods have `cycle` semantics. */
+  chartexColorStyleMethod?: string | null;
+  /** Effective `<cs:dataPoint>` style. */
+  chartexDataPointStyle?: ChartExElementStyle | null;
+  /** Effective `<cs:dataPointLine>` style for whiskers/median/connectors. */
+  chartexDataPointLineStyle?: ChartExElementStyle | null;
+  /** Effective `<cs:dataPointMarker>` style for raw/outlier/mean markers. */
+  chartexDataPointMarkerStyle?: ChartExElementStyle | null;
 }
 
 /** A formatted DrawingML run inside a chart-relative text box. */
@@ -783,8 +822,8 @@ export interface ChartTextBox {
 export interface ChartexBoxSeries {
   /** Series display name (`<cx:tx><cx:v>`). */
   name: string;
-  /** Fill (hex, no '#') — theme accent cycled by series index. null = fall
-   *  back to the renderer palette. */
+  /** Explicit `<cx:series><cx:spPr>` fill (hex, no '#'). null = resolve the
+   *  Chart Style / linked Chart Colors, then fall back to the theme palette. */
   color?: string | null;
   /** Explicit `<cx:series><cx:spPr><a:ln>` outline color (hex, no '#'). */
   lineColor?: string | null;

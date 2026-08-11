@@ -30,6 +30,11 @@ export const CHART_PALETTE = [
   'FFC000','9E480E','843C0C','636363','255E91','967300',
 ];
 
+/** Office 2013+ ChartEx fallback accents when no theme/colors sidecar resolves. */
+const CHARTEX_DEFAULT_PALETTE = [
+  '5B9BD5', 'ED7D31', 'A5A5A5', 'FFC000', '4472C4', '70AD47',
+] as const;
+
 function chartColor(idx: number, series?: { color?: string | null } | null): string {
   if (series?.color) return `#${series.color}`;
   return `#${CHART_PALETTE[idx % CHART_PALETTE.length]}`;
@@ -39,43 +44,6 @@ function pieSliceColor(idx: number, series: ChartSeries): string {
   const override = series.dataPointColors?.[idx];
   if (override) return `#${override}`;
   return `#${CHART_PALETTE[idx % CHART_PALETTE.length]}`;
-}
-
-/**
- * Scale a `#rrggbb` hex color's channels by `factor` (clamped 0..1), returning a
- * new `#rrggbb`. Used for the box-and-whisker outline: PowerPoint's default
- * modern chart style colors a boxWhisker series' outline (box edge / median /
- * whisker / mean marker) at the series accent darkened by `lumMod 80%` (its
- * `<cs:dataPoint>` line rides `phClr` and the style darkens it one variation
- * step). Measured on sample-24.pdf p.2 the accent2 orange fill `ED7D31`
- * darkens to `BE6427`, which is exactly a linear ×0.8 of each RGB channel
- * (`lumMod` on a fully-saturated accent reduces to an RGB scale here), so a
- * straight channel multiply reproduces Word's rendering. `#` prefix optional on
- * input; always present on output.
- */
-function scaleHexRgb(hex: string, factor: number): string {
-  const h = hex.startsWith('#') ? hex.slice(1) : hex;
-  if (h.length < 6) return `#${h}`;
-  const f = Math.max(0, Math.min(1, factor));
-  const r = Math.round(parseInt(h.slice(0, 2), 16) * f);
-  const g = Math.round(parseInt(h.slice(2, 4), 16) * f);
-  const b = Math.round(parseInt(h.slice(4, 6), 16) * f);
-  const to2 = (n: number): string => n.toString(16).padStart(2, '0');
-  return `#${to2(r)}${to2(g)}${to2(b)}`;
-}
-
-/** Mix a six-digit hex color toward white. Used to distinguish nested treemap
- * levels while keeping every tile visibly tied to its top-level branch. */
-function mixHexWithWhite(hex: string, amount: number): string {
-  const h = hex.startsWith('#') ? hex.slice(1) : hex;
-  if (h.length < 6) return `#${h}`;
-  const a = Math.max(0, Math.min(1, amount));
-  const mix = (start: number): number => {
-    const channel = parseInt(h.slice(start, start + 2), 16);
-    return Math.round(channel + (255 - channel) * a);
-  };
-  const to2 = (n: number): string => n.toString(16).padStart(2, '0');
-  return `#${to2(mix(0))}${to2(mix(2))}${to2(mix(4))}`;
 }
 
 // ─── Font-face resolution (CH10) ─────────────────────────────────────────────
@@ -952,17 +920,28 @@ function wrapMeasuredText(
       line = token;
       return;
     }
-    let chunk = '';
-    for (const char of token) {
-      const next = chunk + char;
-      if (chunk && ctx.measureText(next).width > maxWidth) {
-        lines.push(chunk);
-        chunk = char;
-      } else {
-        chunk = next;
+    // Find each largest fitting code-point prefix by binary search. Measuring
+    // every growing prefix makes a single long unbroken label quadratic.
+    const chars = Array.from(token);
+    let start = 0;
+    while (start < chars.length) {
+      let low = start + 1;
+      let high = chars.length;
+      let end = start + 1; // Always make progress, even if one glyph is wider.
+      while (low <= high) {
+        const mid = Math.floor((low + high) / 2);
+        if (ctx.measureText(chars.slice(start, mid).join('')).width <= maxWidth) {
+          end = mid;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
       }
+      const chunk = chars.slice(start, end).join('');
+      start = end;
+      if (start < chars.length) lines.push(chunk);
+      else line = chunk;
     }
-    line = chunk;
   };
   for (const word of words) pushToken(word);
   if (line) lines.push(line);
@@ -4297,22 +4276,73 @@ function scatterXValue(cats: string[], index: number, useIndexX: boolean): numbe
   return Number.isNaN(value) ? null : value;
 }
 
-/** `<c:bubbleScale>` scales the default bubble diameter, not its data area.
- * The schema default is 100%; the data value remains area-proportional, so the
- * per-point diameter is proportional to sqrt(value). */
+/** Return the linear bubble magnitude prescribed by ST_SizeRepresents.
+ * `area` is the schema default, hence sqrt(value); `w` makes radius linear. */
+function bubbleSizeMagnitude(chart: ChartModel, value: number): number {
+  return chart.bubbleSizeRepresents === 'w' ? value : Math.sqrt(value);
+}
+
+/** Apply CT_BubbleChart.showNegBubbles before chart-wide normalization. */
+function visibleBubbleSize(chart: ChartModel, value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value) || value === 0) return null;
+  if (value < 0 && chart.showNegativeBubbles !== true) return null;
+  return Math.abs(value);
+}
+
+type ScatterSeriesLayer = {
+  series: ChartSeries;
+  fallbackColor: string;
+  cats: string[];
+  pointOverrides: Map<number, NonNullable<ChartSeries['dataPointOverrides']>[number]>;
+};
+
+function makeScatterSeriesLayer(
+  chart: ChartModel,
+  series: ChartSeries,
+  index: number,
+): ScatterSeriesLayer {
+  return {
+    series,
+    fallbackColor: chartColor(index, series),
+    cats: series.categories ?? chart.categories,
+    pointOverrides: new Map((series.dataPointOverrides ?? []).map(point => [point.idx, point])),
+  };
+}
+
+/** One `<c:bubbleChart>` group has one size scale: every series must therefore
+ * be normalized against the same maximum bubble magnitude. */
 function bubbleSizeToDiameterScale(
   chart: ChartModel,
-  bubbleSizes: readonly (number | null)[],
+  layers: readonly ScatterSeriesLayer[],
+  useIndexX: boolean,
   pw: number,
   ph: number,
 ): number {
-  const maxSize = Math.max(0, ...bubbleSizes.filter((value): value is number => value != null));
-  if (maxSize <= 0) return 0;
-  const scalePercent = clamp(chart.bubbleScale ?? 100, 0, 300) / 100;
-  // Excel's vector output uses one third of the shorter plot dimension as the
-  // 100% default maximum diameter; `<c:bubbleScale>` scales that diameter.
-  const defaultMaxDiameterPx = Math.min(pw, ph) / 3;
-  return (defaultMaxDiameterPx * scalePercent) / Math.sqrt(maxSize);
+  const bubbleScale = clamp(chart.bubbleScale ?? 100, 0, 300);
+  if (bubbleScale <= 0) return 0;
+  let maxMagnitude = 0;
+  for (const { series, cats, pointOverrides } of layers) {
+    if (series.showMarker === false || series.markerSymbol === 'none') continue;
+    for (let index = 0; index < series.values.length; index++) {
+      if (series.values[index] == null || scatterXValue(cats, index, useIndexX) == null) continue;
+      if (pointOverrides.get(index)?.markerSymbol === 'none') continue;
+      const value = visibleBubbleSize(chart, series.bubbleSizes?.[index]);
+      if (value != null) {
+        maxMagnitude = Math.max(maxMagnitude, bubbleSizeMagnitude(chart, value));
+      }
+    }
+  }
+  if (maxMagnitude <= 0) return 0;
+  // ECMA-376 defines bubbleScale as 0..300% of an application-defined default,
+  // but intentionally leaves that default to the consumer. Excel's vector
+  // output across the complete 0/25/50/75/100/150/200/300 boundary set follows
+  // a bounded scale curve: 0 hides bubbles, 100 uses one quarter of the shorter
+  // plot dimension, and 300 approaches one half. The equivalent closed form is
+  // `shortSide * scale / (300 + scale)`. Keeping it here (rather than a sample-
+  // specific diameter constant) makes the Office compatibility rule depend
+  // only on the authored scale and the resolved plot geometry.
+  const maximumDiameterPx = Math.min(pw, ph) * bubbleScale / (300 + bubbleScale);
+  return maximumDiameterPx / maxMagnitude;
 }
 
 /** Paint scatter series into an already-computed plot rectangle. Axis/gridline
@@ -4334,11 +4364,10 @@ function drawScatterSeriesLayer(
   const drawLines = style === 'line' || style === 'lineMarker' || style === 'lineNoMarker';
   const drawSmooth = style === 'smooth' || style === 'smoothMarker' || style === 'smoothNoMarker';
   const hideMarkersByStyle = style === 'lineNoMarker' || style === 'smoothNoMarker';
-  const layers = entries.map(({ series, index }) => ({
-    series,
-    fallbackColor: chartColor(index, series),
-    cats: series.categories ?? chart.categories,
-  }));
+  const layers = entries.map(({ series, index }) => makeScatterSeriesLayer(chart, series, index));
+  const bubbleScale = isBubble
+    ? bubbleSizeToDiameterScale(chart, layers, useIndexX, pw, ph)
+    : 0;
 
   // Excel paints a scatter group by geometry phase, not one complete series at
   // a time: all series lines/error bars first, then all markers, then all data
@@ -4391,28 +4420,25 @@ function drawScatterSeriesLayer(
     }
   }
 
-  for (const { series: s, fallbackColor, cats } of layers) {
+  for (const { series: s, fallbackColor, cats, pointOverrides } of layers) {
     const hideMarkers = hideMarkersByStyle
       || s.showMarker === false
       || (typeof s.markerSymbol === 'string' && s.markerSymbol === 'none');
     if (!hideMarkers) {
-      let bubbleScale = 0;
-      if (isBubble && s.bubbleSizes?.length) {
-        bubbleScale = bubbleSizeToDiameterScale(chart, s.bubbleSizes, pw, ph);
-      }
       for (let ci = 0; ci < s.values.length; ci++) {
         const yv = s.values[ci];
         if (yv == null) continue;
         const xv = scatterXValue(cats, ci, useIndexX);
         if (xv == null) continue;
-        const dpt = (s.dataPointOverrides ?? []).find(point => point.idx === ci);
+        const dpt = pointOverrides.get(ci);
         const symbol = dpt?.markerSymbol ?? s.markerSymbol ?? 'circle';
+        if (symbol === 'none') continue;
         let sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
-        if (isBubble && bubbleScale > 0) {
-          const bubbleSize = s.bubbleSizes?.[ci];
-          if (bubbleSize != null && bubbleSize > 0) {
-            sizePt = (Math.sqrt(bubbleSize) * bubbleScale) / ptToPx;
-          }
+        if (isBubble) {
+          if (bubbleScale <= 0) continue;
+          const bubbleSize = visibleBubbleSize(chart, s.bubbleSizes?.[ci]);
+          if (bubbleSize == null) continue;
+          sizePt = (bubbleSizeMagnitude(chart, bubbleSize) * bubbleScale) / ptToPx;
         }
         const fill = dpt?.markerFill ?? dpt?.color ?? s.markerFill ?? fallbackColor;
         // Bubble geometry is the series shape itself, so its outline comes from
@@ -4716,15 +4742,16 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const drawLines     = style === 'line' || style === 'lineMarker' || style === 'lineNoMarker';
   const drawSmooth    = style === 'smooth' || style === 'smoothMarker' || style === 'smoothNoMarker';
   const hideMarkersByStyle = style === 'lineNoMarker' || style === 'smoothNoMarker';
+  const layers = chart.series.map((series, index) => makeScatterSeriesLayer(chart, series, index));
+  const bubbleScale = isBubble
+    ? bubbleSizeToDiameterScale(chart, layers, useIndexX, pw, ph)
+    : 0;
 
   // Render each series. Order: error bars (behind), connecting lines,
   // markers, then data labels (in front). dPt overrides apply per point
   // for color and marker shape; dLbl overrides apply per point for label
   // text and position.
-  for (let si = 0; si < chart.series.length; si++) {
-    const s = chart.series[si];
-    const fallbackColor = chartColor(si, s);
-    const cats = s.categories ?? chart.categories;
+  for (const { series: s, fallbackColor, cats, pointOverrides } of layers) {
 
     // Error bars (drawn first so markers overlay the bar tip).
     for (const eb of s.errBars ?? []) {
@@ -4779,29 +4806,21 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       || s.showMarker === false
       || (typeof s.markerSymbol === 'string' && s.markerSymbol === 'none');
     if (!hideMarkers) {
-      // Bubble size scaling. ECMA-376 §21.2.2.4 treats `<c:bubbleSize>` as an
-      // area-proportional value, so radius scales by sqrt. We pick a max
-      // diameter proportional to the plot's shorter side, then scaled by the
-      // authored `<c:bubbleScale>` percentage.
-      let bubbleScale = 0;
-      if (isBubble && s.bubbleSizes && s.bubbleSizes.length > 0) {
-        bubbleScale = bubbleSizeToDiameterScale(chart, s.bubbleSizes, pw, ph);
-      }
-
       for (let ci = 0; ci < s.values.length; ci++) {
         const yv = s.values[ci]; if (yv == null) continue;
         const xv = scatterXValue(cats, ci, useIndexX);
         if (xv == null) continue;
-        const dpt = (s.dataPointOverrides ?? []).find(d => d.idx === ci);
+        const dpt = pointOverrides.get(ci);
         const symbol = (dpt?.markerSymbol ?? s.markerSymbol ?? 'circle') as string;
+        if (symbol === 'none') continue;
         let sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
-        if (isBubble && bubbleScale > 0) {
-          const bsz = s.bubbleSizes?.[ci];
-          if (bsz != null && bsz > 0) {
-            // Convert resulting radius (px) back to pt so drawMarker's
-            // ptToPx multiplication gives the same px size.
-            sizePt = (Math.sqrt(bsz) * bubbleScale) / ptToPx;
-          }
+        if (isBubble) {
+          if (bubbleScale <= 0) continue;
+          const bsz = visibleBubbleSize(chart, s.bubbleSizes?.[ci]);
+          if (bsz == null) continue;
+          // Convert resulting radius (px) back to pt so drawMarker's
+          // ptToPx multiplication gives the same px size.
+          sizePt = (bubbleSizeMagnitude(chart, bsz) * bubbleScale) / ptToPx;
         }
         const fill = dpt?.markerFill
           ?? dpt?.color
@@ -5333,6 +5352,78 @@ function drawCategoryDataLabels(
 // Waterfall chart — subtotal bars filled, delta bars outlined.
 // ═══════════════════════════════════════════════════════════════════════════
 
+type ChartExStyle = NonNullable<ChartModel['chartexDataPointStyle']>;
+
+function chartExStyleColor(
+  _chart: ChartModel,
+  style: ChartExStyle | null | undefined,
+  kind: 'fill' | 'line',
+  index: number,
+  _count: number,
+): string | null {
+  const colors = kind === 'fill' ? style?.fillColors : style?.lineColors;
+  if (!colors?.length) return null;
+  const fixedIndex = kind === 'fill' ? style?.fillColorIndex : style?.lineColorIndex;
+  // Style-role colors are already effective: ooxml-common applies the Chart
+  // Colors base mapping before CT_StyleColor and style-matrix transforms.
+  return colors[(fixedIndex ?? index) % colors.length] ?? null;
+}
+
+function chartExPaletteColor(
+  chart: ChartModel,
+  colors: ReadonlyArray<string | null | undefined>,
+  colorIndex: number,
+  _count: number,
+): string | null {
+  if (!colors.length) return null;
+  const method = chart.chartexColorStyleMethod;
+  const knownMethod = method === 'withinLinear'
+    || method === 'acrossLinear'
+    || method === 'withinLinearReversed'
+    || method === 'acrossLinearReversed';
+  // MS-ODRAWXML §2.8.4.1: unknown method strings have cycle semantics.
+  if (!knownMethod) return colors[colorIndex % colors.length] ?? null;
+  const within = method === 'withinLinear' || method === 'withinLinearReversed';
+  // The specification defines which base color linear methods use, but does
+  // not define the brightness range or color space. Preserve the authored
+  // color here instead of inventing an Office compatibility curve. Once an
+  // observed/approved rule exists, brightness belongs before styleClr/style
+  // matrix transforms in the shared parser model, not as a post-paint tweak.
+  return colors[within ? 0 : colorIndex % colors.length] ?? null;
+}
+
+function chartExDataPointFill(chart: ChartModel, index: number, count: number): string {
+  return chartExStyleColor(chart, chart.chartexDataPointStyle, 'fill', index, count)
+    ?? (chart.chartexColorPalette
+      ? chartExPaletteColor(chart, chart.chartexColorPalette, index, count)
+      : null)
+    ?? chart.chartexAccents?.[index % (chart.chartexAccents.length || 1)]
+    ?? CHARTEX_DEFAULT_PALETTE[index % CHARTEX_DEFAULT_PALETTE.length];
+}
+
+function applyChartExLineStyle(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  style: ChartExStyle | null | undefined,
+  index: number,
+  count: number,
+  fallbackColor: string,
+  ptToPx: number,
+): boolean {
+  if (style?.lineHidden) return false;
+  const color = chartExStyleColor(chart, style, 'line', index, count) ?? fallbackColor;
+  ctx.strokeStyle = color.startsWith('#') ? color : `#${color}`;
+  ctx.lineWidth = style?.lineWidthEmu != null
+    ? axisLineWidthPx(style.lineWidthEmu, ptToPx)
+    : 1;
+  ctx.setLineDash(dashPatternForPreset(style?.lineDash ?? undefined));
+  ctx.lineCap = style?.lineCap === 'rnd' ? 'round' : style?.lineCap === 'sq' ? 'square' : 'butt';
+  ctx.lineJoin = style?.lineJoin === 'round' || style?.lineJoin === 'bevel'
+    ? style.lineJoin
+    : 'miter';
+  return true;
+}
+
 function renderWaterfallChart(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -5495,10 +5586,9 @@ function renderWaterfallChart(
     ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
   }
 
-  const accents = chart.chartexAccents;
-  const colorPos = `#${chart.series[0]?.color ?? accents?.[0] ?? '5B9BD5'}`;
-  const colorNeg = `#${accents?.[1] ?? 'ED7D31'}`;
-  const colorSub = `#${accents?.[2] ?? 'A5A5A5'}`;
+  const colorPos = `#${chart.series[0]?.color ?? chartExDataPointFill(chart, 0, 3)}`;
+  const colorNeg = `#${chartExDataPointFill(chart, 1, 3)}`;
+  const colorSub = `#${chartExDataPointFill(chart, 2, 3)}`;
 
   // ECMA-376 / chartEx §17.18.34 ST_GapAmount: gapWidth is the gap between
   // adjacent categories expressed as a percentage of the bar width
@@ -5516,18 +5606,44 @@ function renderWaterfallChart(
     const yBot = Math.max(yOf(bar.start), yOf(bar.end));
     const bh = Math.max(1, yBot - yTop);
 
-    ctx.fillStyle = bar.isSub ? colorSub : bar.isPos ? colorPos : colorNeg;
-    ctx.fillRect(bx, yTop, barW, bh);
+    if (!chart.chartexDataPointStyle?.fillHidden) {
+      ctx.fillStyle = bar.isSub ? colorSub : bar.isPos ? colorPos : colorNeg;
+      ctx.fillRect(bx, yTop, barW, bh);
+    }
+    const accentIndex = bar.isSub ? 2 : bar.isPos ? 0 : 1;
+    const lineColor = chartExStyleColor(chart, chart.chartexDataPointStyle, 'line', accentIndex, 3);
+    if (lineColor && applyChartExLineStyle(
+      ctx,
+      chart,
+      chart.chartexDataPointStyle,
+      accentIndex,
+      3,
+      lineColor,
+      ptToPx,
+    )) {
+      ctx.strokeRect(bx, yTop, barW, bh);
+    }
 
     if (i < n - 1) {
       const nextBx = px0 + gapW * (i + 1) + (gapW - barW) / 2;
       const connY = bar.isPos ? yTop : yBot;
-      ctx.strokeStyle = '#ccc';
-      ctx.lineWidth = 0.8;
-      ctx.beginPath();
-      ctx.moveTo(bx + barW, connY);
-      ctx.lineTo(nextBx, connY);
-      ctx.stroke();
+      ctx.save();
+      if (applyChartExLineStyle(
+        ctx,
+        chart,
+        chart.chartexDataPointLineStyle,
+        accentIndex,
+        3,
+        '#ccc',
+        ptToPx,
+      )) {
+        if (!chart.chartexDataPointLineStyle?.lineWidthEmu) ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(bx + barW, connY);
+        ctx.lineTo(nextBx, connY);
+        ctx.stroke();
+      }
+      ctx.restore();
     }
 
     const rawVal = vals[i] ?? 0;
@@ -5826,37 +5942,78 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
   const boxGutter = groupW * 0.06;
   const clusteredBoxW = (groupW - boxGutter * (nSer - 1)) / nSer;
   const paletteOf = (si: number): string => {
-    const accent = chart.chartexAccents?.[si % (chart.chartexAccents?.length ?? 1)];
-    const fill = box.series[si].color ?? accent ?? CHART_PALETTE[si % CHART_PALETTE.length];
+    const fill = box.series[si].color ?? chartExDataPointFill(chart, si, nSer);
     return `#${fill}`;
   };
-  // Outline color for the box edge / median / whisker / mean marker: an
-  // explicit chartEx series line wins. Otherwise use the series
-  // accent darkened by `lumMod 80%` — PowerPoint's default modern chart style
-  // (`<cs:dataPoint>` line = `phClr` + one variation step). On sample-24 p.2 the
-  // accent2 fill `ED7D31` darkens to `BE6427` (pixel-verified), which equals a
-  // linear RGB ×0.8, so `scaleHexRgb(fill, 0.8)` reproduces Word's outline. (The
-  // full style part isn't resolved here beyond the title size — this 80% is the
-  // documented boxWhisker constant; if a chart ever overrides the dataPoint line
-  // via `<cx:spPr>` that would need reading, none of the CH15 fixtures do.)
-  const LUM_MOD_80 = 0.8;
+  const statsBySeries = box.series.map(series => series.valuesByCategory.map(values => (
+    computeBoxStats(values, series.quartileMethod)
+  )));
+  const boxGeometry = (ci: number, si: number): { bx: number; boxW: number; cx: number } => {
+    const categoryCenterX = px0 + slotW * (ci + 1);
+    const slotLeft = categoryCenterX - groupW / 2;
+    const boxW = oneBoxPerSeries ? groupW : clusteredBoxW;
+    const bx = oneBoxPerSeries ? slotLeft : slotLeft + si * (boxW + boxGutter);
+    return { bx, boxW, cx: bx + boxW / 2 };
+  };
 
+  // `<cx:visibility meanLine>` connects the category means for one series.
+  // It is a data-point-line role, so it shares the whisker/median style.
+  for (let si = 0; si < nSer; si++) {
+    const series = box.series[si];
+    if (!series.meanLine) continue;
+    const lineStyle = chart.chartexDataPointLineStyle ?? chart.chartexDataPointStyle;
+    const fallback = series.lineColor ? `#${series.lineColor}` : paletteOf(si);
+    ctx.save();
+    const styleLineVisible = applyChartExLineStyle(ctx, chart, lineStyle, si, nSer, fallback, ptToPx);
+    if (styleLineVisible || series.lineColor != null) {
+      if (series.lineColor) ctx.strokeStyle = fallback;
+      if (series.lineWidthEmu) ctx.lineWidth = axisLineWidthPx(series.lineWidthEmu, ptToPx);
+      let open = false;
+      ctx.beginPath();
+      for (let ci = 0; ci < nCat; ci++) {
+        const stats = statsBySeries[si][ci];
+        if (!stats) {
+          open = false;
+          continue;
+        }
+        const { cx } = boxGeometry(ci, si);
+        const meanY = yOf(stats.mean);
+        if (open) ctx.lineTo(cx, meanY);
+        else ctx.moveTo(cx, meanY);
+        open = true;
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
   const catFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   for (let ci = 0; ci < nCat; ci++) {
     const categoryCenterX = px0 + slotW * (ci + 1);
-    const slotLeft = categoryCenterX - groupW / 2;
     for (let si = 0; si < nSer; si++) {
       const s = box.series[si];
-      const stats = computeBoxStats(s.valuesByCategory[ci] ?? [], s.quartileMethod);
+      const stats = statsBySeries[si][ci];
       if (!stats) continue;
-      const boxW = oneBoxPerSeries ? groupW : clusteredBoxW;
-      const bx = oneBoxPerSeries ? slotLeft : slotLeft + si * (boxW + boxGutter);
-      const cx = bx + boxW / 2;
+      const { bx, boxW, cx } = boxGeometry(ci, si);
       const fill = paletteOf(si);
-      const edge = s.lineColor ? `#${s.lineColor}` : scaleHexRgb(fill, LUM_MOD_80);
+      const pointStyle = chart.chartexDataPointStyle;
+      const lineStyle = chart.chartexDataPointLineStyle ?? pointStyle;
+      const markerStyle = chart.chartexDataPointMarkerStyle ?? pointStyle;
+      const styleLine = chartExStyleColor(chart, pointStyle, 'line', si, nSer);
+      const edge = s.lineColor ? `#${s.lineColor}` : styleLine ? `#${styleLine}` : fill;
       const edgeWidth = s.lineWidthEmu
         ? axisLineWidthPx(s.lineWidthEmu, ptToPx)
-        : 1;
+        : pointStyle?.lineWidthEmu != null
+          ? axisLineWidthPx(pointStyle.lineWidthEmu, ptToPx)
+          : 1;
+      const lineEdge = chartExStyleColor(chart, lineStyle, 'line', si, nSer);
+      const markerFill = chartExStyleColor(chart, markerStyle, 'fill', si, nSer);
+      const markerEdge = chartExStyleColor(chart, markerStyle, 'line', si, nSer);
+      const applySeriesLine = (style: ChartExStyle | null | undefined, fallback: string): boolean => {
+        const visible = applyChartExLineStyle(ctx, chart, style, si, nSer, fallback, ptToPx);
+        if (s.lineColor) ctx.strokeStyle = edge;
+        if (s.lineWidthEmu) ctx.lineWidth = edgeWidth;
+        return visible || s.lineColor != null;
+      };
       const yQ1 = yOf(stats.q1);
       const yQ3 = yOf(stats.q3);
       const boxTop = Math.min(yQ1, yQ3);
@@ -5864,45 +6021,46 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
 
       // Whiskers: vertical line from box edges to whisker ends, with end caps.
       const capW = boxW * 0.4;
-      ctx.strokeStyle = edge;
-      ctx.lineWidth = edgeWidth;
-      ctx.beginPath();
-      ctx.moveTo(cx, yOf(stats.whiskerHi)); ctx.lineTo(cx, yQ3);
-      ctx.moveTo(cx, yQ1); ctx.lineTo(cx, yOf(stats.whiskerLo));
-      ctx.moveTo(cx - capW / 2, yOf(stats.whiskerHi)); ctx.lineTo(cx + capW / 2, yOf(stats.whiskerHi));
-      ctx.moveTo(cx - capW / 2, yOf(stats.whiskerLo)); ctx.lineTo(cx + capW / 2, yOf(stats.whiskerLo));
-      ctx.stroke();
+      if (applySeriesLine(lineStyle, lineEdge ?? edge)) {
+        ctx.beginPath();
+        ctx.moveTo(cx, yOf(stats.whiskerHi)); ctx.lineTo(cx, yQ3);
+        ctx.moveTo(cx, yQ1); ctx.lineTo(cx, yOf(stats.whiskerLo));
+        ctx.moveTo(cx - capW / 2, yOf(stats.whiskerHi)); ctx.lineTo(cx + capW / 2, yOf(stats.whiskerHi));
+        ctx.moveTo(cx - capW / 2, yOf(stats.whiskerLo)); ctx.lineTo(cx + capW / 2, yOf(stats.whiskerLo));
+        ctx.stroke();
+      }
 
       // IQR box: solid accent fill + a thin accent×0.8 edge.
-      ctx.fillStyle = fill;
-      ctx.fillRect(bx, boxTop, boxW, boxH);
-      ctx.strokeStyle = edge;
-      ctx.lineWidth = edgeWidth;
-      ctx.strokeRect(
-        bx + edgeWidth / 2,
-        boxTop + edgeWidth / 2,
-        boxW - edgeWidth,
-        boxH - edgeWidth,
-      );
+      if (!pointStyle?.fillHidden) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(bx, boxTop, boxW, boxH);
+      }
+      if (applySeriesLine(pointStyle, edge)) {
+        ctx.strokeRect(
+          bx + edgeWidth / 2,
+          boxTop + edgeWidth / 2,
+          boxW - edgeWidth,
+          boxH - edgeWidth,
+        );
+      }
 
       // Median line across the box.
       const yMed = yOf(stats.median);
-      ctx.strokeStyle = edge;
-      ctx.lineWidth = edgeWidth;
-      ctx.beginPath(); ctx.moveTo(bx, yMed); ctx.lineTo(bx + boxW, yMed); ctx.stroke();
+      if (applySeriesLine(lineStyle, lineEdge ?? edge)) {
+        ctx.beginPath(); ctx.moveTo(bx, yMed); ctx.lineTo(bx + boxW, yMed); ctx.stroke();
+      }
 
       // Interior sample points. Excel overlays the raw non-outlier values on
       // the box/whiskers when cx:visibility@nonoutliers is enabled.
       if (s.showNonoutliers) {
         const pR = Math.max(1.25, boxW * 0.045);
-        ctx.fillStyle = fill;
-        ctx.strokeStyle = edge;
-        ctx.lineWidth = edgeWidth;
+        ctx.fillStyle = markerFill ? `#${markerFill}` : fill;
+        const markerLineVisible = applySeriesLine(markerStyle, markerEdge ?? edge);
         for (const point of stats.inner) {
           ctx.beginPath();
           ctx.arc(cx, yOf(point), pR, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.stroke();
+          if (!markerStyle?.fillHidden) ctx.fill();
+          if (markerLineVisible) ctx.stroke();
         }
       }
 
@@ -5910,20 +6068,23 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
       if (s.meanMarker) {
         const mY = yOf(stats.mean);
         const mR = Math.max(2, boxW * 0.14);
-        ctx.strokeStyle = edge;
-        ctx.lineWidth = edgeWidth;
-        ctx.beginPath();
-        ctx.moveTo(cx - mR, mY - mR); ctx.lineTo(cx + mR, mY + mR);
-        ctx.moveTo(cx + mR, mY - mR); ctx.lineTo(cx - mR, mY + mR);
-        ctx.stroke();
+        if (applySeriesLine(markerStyle, markerEdge ?? edge)) {
+          ctx.beginPath();
+          ctx.moveTo(cx - mR, mY - mR); ctx.lineTo(cx + mR, mY + mR);
+          ctx.moveTo(cx + mR, mY - mR); ctx.lineTo(cx - mR, mY + mR);
+          ctx.stroke();
+        }
       }
 
       // Outlier dots.
       if (s.showOutliers) {
-        ctx.fillStyle = fill;
+        ctx.fillStyle = markerFill ? `#${markerFill}` : fill;
+        const markerLineVisible = applySeriesLine(markerStyle, markerEdge ?? edge);
         const oR = Math.max(1.5, boxW * 0.06);
         for (const o of stats.outliers) {
-          ctx.beginPath(); ctx.arc(cx, yOf(o), oR, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          ctx.beginPath(); ctx.arc(cx, yOf(o), oR, 0, Math.PI * 2);
+          if (!markerStyle?.fillHidden) ctx.fill();
+          if (markerLineVisible) ctx.stroke();
         }
       }
     }
@@ -5960,10 +6121,10 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
 
   const legendChart: ChartModel = {
     ...chart,
-    series: box.series.map(series => ({
+    series: box.series.map((series, index) => ({
       name: series.name,
       values: [],
-      color: series.color ?? null,
+      color: series.color ?? chartExDataPointFill(chart, index, nSer),
     })),
   };
   drawLegendForLayout(
@@ -6015,11 +6176,19 @@ function buildSunburstTree(rows: { path: string[]; size: number }[]): SunburstNo
   const root: SunburstNode = {
     label: '', value: 0, depth: -1, children: [], branchIndex: -1, labelIndex: -1, a0: 0, a1: 0,
   };
+  // Construction-only indexes keep sibling interning O(1) per path segment;
+  // the WeakMap dies with this function and does not pollute the paint model.
+  const childIndexes = new WeakMap<SunburstNode, Map<string, SunburstNode>>();
   for (const row of rows) {
     let node = root;
     for (let d = 0; d < row.path.length; d++) {
       const label = row.path[d];
-      let child = node.children.find(c => c.label === label);
+      let index = childIndexes.get(node);
+      if (!index) {
+        index = new Map();
+        childIndexes.set(node, index);
+      }
+      let child = index.get(label);
       if (!child) {
         child = {
           label,
@@ -6033,6 +6202,7 @@ function buildSunburstTree(rows: { path: string[]; size: number }[]): SunburstNo
           a0: 0, a1: 0,
         };
         node.children.push(child);
+        index.set(label, child);
       }
       child.value += row.size;
       node = child;
@@ -6127,9 +6297,8 @@ function renderSunburstChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r
   const innerR = outerR * 0.18;
   const ringBand = (outerR - innerR) / ringCount;
 
-  const accents = chart.chartexAccents;
   const branchColor = (bi: number): string => {
-    const hex = accents?.[bi % accents.length] ?? CHART_PALETTE[bi % CHART_PALETTE.length];
+    const hex = chartExDataPointFill(chart, bi, root.children.length);
     return `#${hex}`;
   };
 
@@ -6156,11 +6325,21 @@ function renderSunburstChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r
       ctx.arc(cx, cy, rOuter, node.a0, node.a1);
       ctx.arc(cx, cy, rInner, node.a1, node.a0, true);
       ctx.closePath();
-      ctx.fillStyle = branchColor(node.branchIndex);
-      ctx.fill();
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1;
-      ctx.stroke();
+      if (!chart.chartexDataPointStyle?.fillHidden) {
+        ctx.fillStyle = branchColor(node.branchIndex);
+        ctx.fill();
+      }
+      if (applyChartExLineStyle(
+        ctx,
+        chart,
+        chart.chartexDataPointStyle,
+        node.branchIndex,
+        root.children.length,
+        '#ffffff',
+        ptToPx,
+      )) {
+        ctx.stroke();
+      }
 
       // Excel's sunburst category labels run along the radius (not around the
       // circumference). Center the text at the wedge mid-radius and wrap it to
@@ -6258,19 +6437,18 @@ function layoutTreemapTiles(nodes: SunburstNode[], rect: TreemapRect): TreemapTi
   const tiles: TreemapTile[] = [];
   let remaining = { ...rect };
   let row: typeof entries = [];
+  let rowArea = 0;
+  let rowMin = Number.POSITIVE_INFINITY;
+  let rowMax = 0;
 
-  const worstRatio = (items: typeof entries, shortSide: number): number => {
-    if (items.length === 0 || shortSide <= 0) return Number.POSITIVE_INFINITY;
-    const sum = items.reduce((s, item) => s + item.area, 0);
-    const max = Math.max(...items.map(item => item.area));
-    const min = Math.min(...items.map(item => item.area));
+  const worstRatio = (sum: number, min: number, max: number, shortSide: number): number => {
+    if (sum <= 0 || min <= 0 || shortSide <= 0) return Number.POSITIVE_INFINITY;
     const side2 = shortSide * shortSide;
     return Math.max((side2 * max) / (sum * sum), (sum * sum) / (side2 * min));
   };
 
-  const placeRow = (items: typeof entries): void => {
+  const placeRow = (items: typeof entries, area: number): void => {
     if (items.length === 0) return;
-    const area = items.reduce((sum, item) => sum + item.area, 0);
     if (remaining.w >= remaining.h) {
       const colW = remaining.h > 0 ? area / remaining.h : 0;
       let y = remaining.y;
@@ -6296,15 +6474,26 @@ function layoutTreemapTiles(nodes: SunburstNode[], rect: TreemapRect): TreemapTi
   while (index < entries.length) {
     const next = entries[index];
     const side = Math.min(remaining.w, remaining.h);
-    if (row.length === 0 || worstRatio([...row, next], side) <= worstRatio(row, side)) {
+    const nextArea = rowArea + next.area;
+    const nextMin = Math.min(rowMin, next.area);
+    const nextMax = Math.max(rowMax, next.area);
+    if (row.length === 0
+      || worstRatio(nextArea, nextMin, nextMax, side)
+        <= worstRatio(rowArea, rowMin, rowMax, side)) {
       row.push(next);
+      rowArea = nextArea;
+      rowMin = nextMin;
+      rowMax = nextMax;
       index++;
     } else {
-      placeRow(row);
+      placeRow(row, rowArea);
       row = [];
+      rowArea = 0;
+      rowMin = Number.POSITIVE_INFINITY;
+      rowMax = 0;
     }
   }
-  placeRow(row);
+  placeRow(row, rowArea);
   return tiles;
 }
 
@@ -6326,7 +6515,6 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const root = buildSunburstTree(treemap.rows);
   if (root.value <= 0 || root.children.length === 0) return;
 
-  const accents = chart.chartexAccents?.length ? chart.chartexAccents : CHART_PALETTE;
   const fontFamily = chartFontFamily(chart, chart.dataLabelFontFace, 'minor');
   const parentMode = treemap.parentLabelLayout ?? 'overlapping';
   const labelDef = chart.series[0]?.seriesDataLabels;
@@ -6334,13 +6522,17 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     ? (labelDef.fontSizeHpt / 100) * ptToPx
     : Math.max(8, Math.min(13, frame.plotRect.ph * 0.025));
   const labelColor = labelDef?.fontColor ? `#${labelDef.fontColor}` : '#ffffff';
-  const labelOverrides = chart.series[0]?.dataLabelOverrides ?? [];
+  const labelOverrides = new Map(
+    (chart.series[0]?.dataLabelOverrides ?? []).map(override => [override.idx, override]),
+  );
 
   const paint = (node: SunburstNode, tile: TreemapRect): void => {
     if (tile.w < 0.5 || tile.h < 0.5) return;
-    const base = accents[node.branchIndex % accents.length];
-    const color = node.depth === 0 ? `#${base}` : mixHexWithWhite(base, Math.min(0.42, node.depth * 0.16));
-    const labelOverride = labelOverrides.find(override => override.idx === node.labelIndex);
+    const base = chartExDataPointFill(chart, node.branchIndex, root.children.length);
+    // Every descendant of a top-level branch uses that branch's exact accent.
+    // Hierarchy depth does not tint or whiten ChartEx treemap data points.
+    const color = `#${base}`;
+    const labelOverride = labelOverrides.get(node.labelIndex);
     const nodeLabelColor = labelOverride?.fontColor ? `#${labelOverride.fontColor}` : labelColor;
     const nodeLabelFontPx = labelOverride?.fontSizeHpt
       ? (labelOverride.fontSizeHpt / 100) * ptToPx
@@ -6348,7 +6540,12 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     const nodeLabelBold = labelOverride?.fontBold ?? labelDef?.fontBold ?? false;
 
     if (node.children.length > 0) {
-      const showParent = parentMode !== 'none';
+      // Office vector output across a three-level hierarchy boundary set shows
+      // `overlapping` captions only for top-level branches. Intermediate nodes
+      // still partition their children but do not place another caption at the
+      // same tile origin. `banner` remains separate because it reserves a band.
+      const showParent = parentMode !== 'none'
+        && (parentMode !== 'overlapping' || node.depth === 0);
       const fontPx = nodeLabelFontPx;
       const bannerH = parentMode === 'banner' && showParent
         ? Math.min(tile.h * 0.28, fontPx + 7)
@@ -6358,7 +6555,7 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       // create an additional painted parent rectangle; doing so here produced
       // a hairline frame around each branch. Banner mode alone reserves and
       // paints a caption band.
-      if (bannerH > 0) {
+      if (bannerH > 0 && !chart.chartexDataPointStyle?.fillHidden) {
         ctx.fillStyle = color;
         ctx.fillRect(tile.x, tile.y, tile.w, bannerH);
       }
@@ -6381,11 +6578,23 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       return;
     }
 
-    ctx.fillStyle = color;
-    ctx.fillRect(tile.x, tile.y, tile.w, tile.h);
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(tile.x + 0.5, tile.y + 0.5, Math.max(0, tile.w - 1), Math.max(0, tile.h - 1));
+    if (!chart.chartexDataPointStyle?.fillHidden) {
+      ctx.fillStyle = color;
+      ctx.fillRect(tile.x, tile.y, tile.w, tile.h);
+    }
+    if (applyChartExLineStyle(
+      ctx,
+      chart,
+      chart.chartexDataPointStyle,
+      node.branchIndex,
+      root.children.length,
+      '#ffffff',
+      ptToPx,
+    )) {
+      // ChartEx outlines are centered on the tile boundary. An inset stroke
+      // creates a second visible outer frame that Excel does not paint.
+      ctx.strokeRect(tile.x, tile.y, tile.w, tile.h);
+    }
 
     const fontPx = nodeLabelFontPx;
     if (tile.w <= fontPx * 1.2 || tile.h <= fontPx * 1.2) return;
@@ -6404,30 +6613,42 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
         ));
       }
     }
-    const lines = parts.join(labelDef?.separator ?? ' ').split(/\r?\n/);
+    const lines = parts
+      .join(labelDef?.separator ?? ' ')
+      .split(/\r?\n/)
+      .flatMap(line => wrapMeasuredText(ctx, line, Math.max(1, tile.w - 8)));
     const lineH = fontPx * 1.1;
     const position = labelDef?.position ?? 'ctr';
+    const maxLines = Math.max(0, Math.floor((tile.h - 6) / lineH));
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(tile.x, tile.y, tile.w, tile.h);
+    ctx.clip();
     if (position === 'inEnd') {
       ctx.textAlign = 'left';
       ctx.textBaseline = 'bottom';
-      const lastY = tile.y + tile.h - 5;
-      lines.forEach((line, index) => {
-        const shown = elideToWidth(ctx, line, tile.w - 10);
-        if (shown) ctx.fillText(shown, tile.x + 5, lastY - (lines.length - 1 - index) * lineH);
+      const visibleLines = lines.slice(Math.max(0, lines.length - maxLines));
+      const lastY = tile.y + tile.h - 4;
+      visibleLines.forEach((line, index) => {
+        if (line) ctx.fillText(line, tile.x + 4, lastY - (visibleLines.length - 1 - index) * lineH);
       });
     } else {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const firstY = tile.y + tile.h / 2 - ((lines.length - 1) * lineH) / 2;
-      lines.forEach((line, index) => {
-        const shown = elideToWidth(ctx, line, tile.w - 6);
-        if (shown) ctx.fillText(shown, tile.x + tile.w / 2, firstY + index * lineH);
+      const visibleLines = lines.slice(0, maxLines);
+      const firstY = tile.y + tile.h / 2 - ((visibleLines.length - 1) * lineH) / 2;
+      visibleLines.forEach((line, index) => {
+        if (line) ctx.fillText(line, tile.x + tile.w / 2, firstY + index * lineH);
       });
     }
+    ctx.restore();
   };
 
   ctx.save();
   const { px0, py0, pw, ph } = frame.plotRect;
+  ctx.beginPath();
+  ctx.rect(px0, py0, pw, ph);
+  ctx.clip();
   for (const tile of layoutTreemapTiles(root.children, { x: px0, y: py0, w: pw, h: ph })) {
     paint(tile.node, tile.rect);
   }

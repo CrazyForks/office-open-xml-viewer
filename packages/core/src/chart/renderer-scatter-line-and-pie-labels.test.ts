@@ -448,7 +448,7 @@ describe('authored radial and bubble geometry', () => {
     expect(geometry.outerR).toBeCloseTo(Math.min(RECT.w * 0.4, RECT.h * 0.6) * 0.42);
   });
 
-  it('applies bubbleScale to Office\'s one-third-plot default maximum diameter', () => {
+  it('applies Office\'s bounded bubbleScale curve to the shorter plot dimension', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
       chartType: 'bubble',
@@ -465,8 +465,8 @@ describe('authored radial and bubble geometry', () => {
     }), RECT, 1);
 
     const marker = rec.arcs.at(-1);
-    // Plot is 320×180. Office's default max diameter is 180/3=60px; authored
-    // bubbleScale=40% yields a 24px diameter / 12px radius.
-    expect(marker?.r).toBeCloseTo(12, 4);
+    // Plot is 320×180. Excel's curve is shortSide*scale/(300+scale), so an
+    // authored bubbleScale=40 gives a 21.176px diameter / 10.588px radius.
+    expect(marker?.r).toBeCloseTo(10.588235, 4);
   });
 });

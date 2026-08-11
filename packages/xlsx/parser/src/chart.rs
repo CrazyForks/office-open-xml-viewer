@@ -258,11 +258,30 @@ impl ooxml_common::chart::ChartReferenceResolver for XlsxChartReferenceResolver<
 /// has no chartStyle relationship or the part cannot be read (the chartEx
 /// title then falls back to its inline size, or the renderer's default).
 fn load_chart_style_xml(archive: &mut crate::XlsxZip, chart_path: &str) -> Option<String> {
+    load_chart_sidecar_xml(
+        archive,
+        chart_path,
+        ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX,
+    )
+}
+
+fn load_chart_color_style_xml(archive: &mut crate::XlsxZip, chart_path: &str) -> Option<String> {
+    load_chart_sidecar_xml(
+        archive,
+        chart_path,
+        ooxml_common::chart::CHART_COLOR_STYLE_REL_TYPE_SUFFIX,
+    )
+}
+
+fn load_chart_sidecar_xml(
+    archive: &mut crate::XlsxZip,
+    chart_path: &str,
+    relationship_suffix: &str,
+) -> Option<String> {
     let (dir, file) = chart_path.rsplit_once('/')?;
     let rels_path = format!("{}/_rels/{}.rels", dir, file);
     let rels_xml = read_zip_string(archive, &rels_path).ok()?;
-    let target =
-        find_rel_target_by_type(&rels_xml, ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)?;
+    let target = find_rel_target_by_type(&rels_xml, relationship_suffix)?;
     let style_path = resolve_zip_path(dir, &target);
     read_zip_string(archive, &style_path).ok()
 }
@@ -299,6 +318,7 @@ pub(crate) fn load_sheet_charts(
     mut reference_context: Option<ChartReferenceContext<'_, '_, '_>>,
     theme_colors: &[String],
     theme_fonts: (Option<&str>, Option<&str>),
+    theme_format_scheme: Option<&ooxml_common::theme::ThemeFormatScheme>,
 ) -> Vec<ChartAnchor> {
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
         return Vec::new();
@@ -490,6 +510,7 @@ pub(crate) fn load_sheet_charts(
                 // (before the chart doc is parsed, since both borrow `archive`);
                 // legacy `<c:>` charts ignore it (their title size is inline).
                 let style_xml = load_chart_style_xml(archive, &chart_path);
+                let color_style_xml = load_chart_color_style_xml(archive, &chart_path);
                 let user_shapes_xml = if is_chartex {
                     None
                 } else {
@@ -512,6 +533,7 @@ pub(crate) fn load_sheet_charts(
                     theme_colors,
                     theme_major_font_latin: theme_fonts.0,
                     theme_minor_font_latin: theme_fonts.1,
+                    theme_format_scheme,
                 };
                 let chart_opt = if let Some(context) = reference_context.as_mut() {
                     let mut references = XlsxChartReferenceResolver {
@@ -525,10 +547,11 @@ pub(crate) fn load_sheet_charts(
                         session: context.session,
                     };
                     if is_chartex {
-                        ooxml_common::chart::parse_chartex_part_with_references(
+                        ooxml_common::chart::parse_chartex_part_with_references_and_style_parts(
                             chart_doc.root_element(),
                             &resolver,
                             style_xml.as_deref(),
+                            color_style_xml.as_deref(),
                             &mut references,
                         )
                     } else {
@@ -539,10 +562,11 @@ pub(crate) fn load_sheet_charts(
                         )
                     }
                 } else if is_chartex {
-                    ooxml_common::chart::parse_chartex_part(
+                    ooxml_common::chart::parse_chartex_part_with_style_parts(
                         chart_doc.root_element(),
                         &resolver,
                         style_xml.as_deref(),
+                        color_style_xml.as_deref(),
                     )
                 } else {
                     ooxml_common::chart::parse_chart_part(chart_doc.root_element(), &resolver)
@@ -589,6 +613,7 @@ struct XlsxColorResolver<'a> {
     theme_colors: &'a [String],
     theme_major_font_latin: Option<&'a str>,
     theme_minor_font_latin: Option<&'a str>,
+    theme_format_scheme: Option<&'a ooxml_common::theme::ThemeFormatScheme>,
 }
 
 impl ooxml_common::chart::ColorResolver for XlsxColorResolver<'_> {
@@ -631,6 +656,10 @@ impl ooxml_common::chart::ColorResolver for XlsxColorResolver<'_> {
 
     fn theme_minor_font_latin(&self) -> Option<String> {
         self.theme_minor_font_latin.map(|s| s.to_string())
+    }
+
+    fn theme_format_scheme(&self) -> Option<&ooxml_common::theme::ThemeFormatScheme> {
+        self.theme_format_scheme
     }
 
     /// Excel paints an opaque-white chart area when the file omits
@@ -787,6 +816,7 @@ mod solid_fill_color_tests {
             theme_colors: &colors,
             theme_major_font_latin: None,
             theme_minor_font_latin: None,
+            theme_format_scheme: None,
         };
         let chart = ooxml_common::chart::parse_chart_part(doc.root_element(), &resolver).unwrap();
         assert_eq!(chart.series[0].color.as_deref(), Some("A6A6A6"));
@@ -815,6 +845,7 @@ mod solid_fill_color_tests {
             theme_colors: &palette,
             theme_major_font_latin: None,
             theme_minor_font_latin: None,
+            theme_format_scheme: None,
         };
         let doc = Document::parse(&xml).expect("chartSpace fixture");
 
@@ -955,6 +986,7 @@ mod hidden_tests {
                 None,
                 &theme(),
                 (None, None),
+                None,
             );
             assert!(charts.is_empty(), "hidden chart emitted (attr={attr})");
         }
@@ -970,6 +1002,7 @@ mod hidden_tests {
                 None,
                 &theme(),
                 (None, None),
+                None,
             );
             assert_eq!(charts.len(), 1, "visible chart dropped (attr={attr})");
         }
@@ -984,6 +1017,7 @@ mod hidden_tests {
             None,
             &theme(),
             (None, None),
+            None,
         );
         let boxes = charts[0]
             .chart
@@ -1104,6 +1138,7 @@ mod worksheet_reference_tests {
             }),
             &theme,
             (None, None),
+            None,
         );
         assert_eq!(charts.len(), 1);
         charts.into_iter().next().unwrap().chart
@@ -1308,6 +1343,7 @@ mod chartex_tests {
             None,
             &theme(),
             (None, None),
+            None,
         );
         assert_eq!(
             charts.len(),

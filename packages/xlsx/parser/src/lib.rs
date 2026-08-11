@@ -581,6 +581,7 @@ fn finalize_projected_sheet(
             shared.theme_fonts.0.as_deref(),
             shared.theme_fonts.1.as_deref(),
         ),
+        Some(shared.theme_format_scheme.as_ref()),
     );
     ws.charts = charts;
     ws.shape_groups = load_sheet_shape_groups(
