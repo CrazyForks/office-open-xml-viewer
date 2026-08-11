@@ -101,6 +101,7 @@ import type { WarpEnvelope, WarpGlyphTransform } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
+import { paintDistanceAwareReflectionBlur } from './reflection-blur';
 import { classifyPptxHyperlink } from './hyperlink';
 import { drawPlayBadge } from './media-chrome';
 import {
@@ -632,13 +633,12 @@ function applyTextRunReflection(
   const cropBottom = Math.min(deviceH, Math.ceil(bbox.y + bbox.h + margin));
   const cropW = Math.max(1, cropRight - cropX);
   const cropH = Math.max(1, cropBottom - cropY);
-  const aux = createAuxCanvas(cropW, cropH);
-  const auxCtx = aux?.getContext('2d') as CanvasRenderingContext2D | null;
-  if (!aux || !auxCtx) return;
+  const source = createAuxCanvas(cropW, cropH);
+  const sourceCtx = source?.getContext('2d') as CanvasRenderingContext2D | null;
+  if (!source || !sourceCtx) return;
 
-  auxCtx.save();
-  if (blur > 0) auxCtx.filter = `blur(${blur}px)`;
-  auxCtx.setTransform(
+  sourceCtx.save();
+  sourceCtx.setTransform(
     liveTransform.a,
     liveTransform.b,
     liveTransform.c,
@@ -646,11 +646,30 @@ function applyTextRunReflection(
     liveTransform.e - cropX,
     liveTransform.f - cropY,
   );
-  paintText(auxCtx);
-  auxCtx.restore();
+  paintText(sourceCtx);
+  sourceCtx.restore();
 
   const localTop = bbox.y - cropY;
   const localBottom = localTop + bbox.h;
+  let aux = source;
+  let auxCtx = sourceCtx;
+  if (blur > 0) {
+    const progressive = createAuxCanvas(cropW, cropH);
+    const progressiveCtx = progressive?.getContext('2d') as CanvasRenderingContext2D | null;
+    if (progressive && progressiveCtx) {
+      aux = progressive;
+      auxCtx = progressiveCtx;
+    }
+  }
+  if (aux !== source) {
+    paintDistanceAwareReflectionBlur(
+      auxCtx,
+      source,
+      { x: bbox.x - cropX, y: localTop, w: bbox.w, h: bbox.h },
+      blur,
+      cropW,
+    );
+  }
   const stPos = Math.max(0, Math.min(1, reflection.stPos));
   const endPos = Math.max(0, Math.min(1, reflection.endPos));
   // Chromium's OffscreenCanvas clears the destination for a gradient-filled
