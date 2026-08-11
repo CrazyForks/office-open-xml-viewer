@@ -63,6 +63,7 @@ export type {
   MathStyle,
   MathSvg,
   MatchRunSlice,
+  PatternFill,
   SecondaryValueAxis,
   TextSelectionContextOptions,
   TileInfo,

@@ -1185,7 +1185,7 @@ export type PathCmd = {
 } | {
     cmd: 'close';
 };
-interface PatternFill {
+export interface PatternFill {
     fillType: 'pattern';
     fg: string;
     bg: string;
