@@ -2290,6 +2290,17 @@ pub fn extract_chartex_axis_hidden(root: Node) -> (bool, bool) {
     (cat_hidden, val_hidden)
 }
 
+/// ChartEx `<cx:axis><cx:majorTickMarks|minorTickMarks type>`
+/// (MS-ODRAWXML §2.24.3.89 CT_TickMarks). Unlike the classic chart axis,
+/// ChartEx has no schema default that creates tick marks: an omitted element
+/// or omitted `type` therefore resolves to `none`.
+pub fn extract_chartex_axis_tick_mark(axis: Option<Node>, name: &str) -> String {
+    axis.and_then(|axis| child(axis, name))
+        .and_then(|tick_marks| tick_marks.attribute("type"))
+        .unwrap_or("none")
+        .to_string()
+}
+
 /// Text saved by chartEx in either DrawingML-rich or compact `txData/v` form.
 fn chartex_text(container: Node) -> Option<String> {
     if let Some(rich) = container
@@ -2663,6 +2674,8 @@ pub fn parse_chartex_part_with_references(
                 .children()
                 .any(|child| child.is_element() && child.tag_name().name() == "valScaling")
     });
+    let cat_axis_major_tick_mark = extract_chartex_axis_tick_mark(cat_axis, "majorTickMarks");
+    let val_axis_major_tick_mark = extract_chartex_axis_tick_mark(val_axis, "majorTickMarks");
     let val_scaling = val_axis.and_then(|axis| child(axis, "valScaling"));
     let val_min = val_scaling
         .and_then(|scaling| attr(&scaling, "min"))
@@ -2864,8 +2877,8 @@ pub fn parse_chartex_part_with_references(
         },
         show_legend,
         cat_axis_cross_between: "between".to_string(),
-        val_axis_major_tick_mark: "cross".to_string(),
-        cat_axis_major_tick_mark: "cross".to_string(),
+        val_axis_major_tick_mark,
+        cat_axis_major_tick_mark,
         title_font_size_hpt: chartex_title_font_size_hpt,
         title_font_color: chartex_title_font_color,
         title_font_face: chartex_title_font_face,
@@ -6227,6 +6240,31 @@ mod tests {
     }
 
     #[test]
+    fn chartex_axis_tick_marks_require_an_authored_type() {
+        let xml = r#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex">
+            <cx:axis id="0"><cx:catScaling/><cx:majorTickMarks type="out"/></cx:axis>
+            <cx:axis id="1"><cx:valScaling/></cx:axis>
+        </cx:chartSpace>"#;
+        let d = root_of(xml);
+        let cat_axis = d
+            .root_element()
+            .descendants()
+            .find(|node| node.is_element() && child(*node, "catScaling").is_some());
+        let val_axis = d
+            .root_element()
+            .descendants()
+            .find(|node| node.is_element() && child(*node, "valScaling").is_some());
+        assert_eq!(
+            extract_chartex_axis_tick_mark(cat_axis, "majorTickMarks"),
+            "out"
+        );
+        assert_eq!(
+            extract_chartex_axis_tick_mark(val_axis, "majorTickMarks"),
+            "none"
+        );
+    }
+
+    #[test]
     fn chart_title_text_size_bold_srgb() {
         let xml = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
             <c:title><c:tx><c:rich>
@@ -8651,6 +8689,10 @@ mod tests {
         assert!(!m.val_axis_line_hidden);
         assert_eq!(m.val_axis_gridline_color.as_deref(), Some("D9D9D9"));
         assert_eq!(m.val_axis_gridline_width_emu, Some(9525));
+        // ChartEx does not inherit the classic chart-axis tick default. With
+        // no `<cx:majorTickMarks>` element, Excel draws no tick marks.
+        assert_eq!(m.val_axis_major_tick_mark, "none");
+        assert_eq!(m.cat_axis_major_tick_mark, "none");
         assert!(m.show_legend);
         assert_eq!(m.legend_pos.as_deref(), Some("r"));
         assert_eq!(m.legend_font_size_hpt, Some(900));
