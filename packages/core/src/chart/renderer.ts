@@ -13,6 +13,7 @@ import {
   chartLegendBands,
   chartAxisTitleBands,
   axisTitleMargin,
+  resolveManualLayoutRect,
   type ChartLegendReserve,
 } from './layout.js';
 import { niceStep, valueAxisScale, axisFraction, logAxisScale, fitTrendline } from './axis-scale.js';
@@ -565,38 +566,29 @@ function drawLegendForLayout(
   // §21.2.2.227 varyColors single-series bar: the legend lists one entry per
   // data point (colored like each bar), so the legend and the plot fill agree.
   const varyByPoint = chartVariesColorsByPoint(chart);
-  // `<c:legend><c:manualLayout>` (§21.2.2.31) wins over the default side-based
-  // rectangle. We honor the `edge` placement mode — fractions are measured
-  // from the top-left of the chart space — which matches what Excel's built-in
-  // templates emit. `factor` mode (offset from default) is rarer; fall back to
-  // the reserved band in that case rather than guess.
+  const defaultBox = leg.side === 'r'
+    ? { x: x + w - leg.reserveW + 4, y: py0, w: leg.reserveW - 8, h: ph }
+    : leg.side === 'l'
+      ? { x: x + 4, y: py0, w: leg.reserveW - 8, h: ph }
+      : leg.side === 't'
+        ? { x: px0, y: y + topBand, w: pw, h: leg.reserveH }
+        : { x: px0, y: y + h - leg.reserveH, w: pw, h: leg.reserveH };
+  const defaultOrientation = leg.side === 't' || leg.side === 'b' ? 'horizontal' : 'vertical';
+  // `<c:legend><c:manualLayout>` (§21.2.2.31) wins over the side-based
+  // rectangle. The shared resolver applies all four factor/edge modes relative
+  // to this automatic box, including the schema's omitted-mode=factor default.
   const ml = chart.legendManualLayout;
-  if (ml && ml.xMode === 'edge' && ml.yMode === 'edge' && ml.w > 0 && ml.h > 0) {
-    const lx = x + ml.x * w;
-    const ly = y + ml.y * h;
-    const lw = ml.w * w;
-    const lh = ml.h * h;
-    // Legend is always a horizontal strip when placed on top/bottom; vertical
-    // when on left/right. A manual box wider than tall implies horizontal —
-    // matches Excel's one-row legend rendering for top/bottom manual layouts.
-    const orient = lw >= lh ? 'horizontal' : 'vertical';
-    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient, chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx);
+  const manualBox = ml && ml.w > 0 && ml.h > 0
+    ? resolveManualLayoutRect(ml, { x, y, w, h }, defaultBox)
+    : null;
+  if (manualBox) {
+    const orient = manualBox.w >= manualBox.h ? 'horizontal' : 'vertical';
+    drawLegend(ctx, chart.series, manualBox.x, manualBox.y, manualBox.w, manualBox.h, orient, chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx);
     return;
   }
-  switch (leg.side) {
-    case 'r':
-      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx);
-      break;
-    case 'l':
-      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx);
-      break;
-    case 't':
-      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx);
-      break;
-    case 'b':
-      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx);
-      break;
-  }
+  drawLegend(ctx, chart.series, defaultBox.x, defaultBox.y, defaultBox.w, defaultBox.h,
+    defaultOrientation, chart.chartType, legStyle, chart.scatterStyle, varyByPoint,
+    chart.categories, ptToPx);
 }
 
 function drawAxisTick(
@@ -1173,10 +1165,9 @@ function drawChartTitle(
   ctx.fillText(chart.title, x + w / 2, y);
 }
 
-/** Draw the title at its authored manual-layout edge when present. ECMA-376
- * §21.2.2.27 permits x/y without w/h. In that form Office keeps the title's
- * automatic content width, so `x` is the left edge of the measured one-line
- * title rather than the left edge of an arbitrary half-chart box. */
+/** Draw the title at its authored manual-layout position. Office ignores w/h
+ * for title descendants and fits the box to text (MS-OI29500 §2.1.1573), while
+ * x/y still use the shared factor/edge rules. */
 function drawChartTitleForLayout(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -1186,20 +1177,26 @@ function drawChartTitleForLayout(
 ): void {
   if (!chart.title) return;
   const ml = chart.titleManualLayout;
-  if (ml && ml.xMode === 'edge' && ml.yMode === 'edge') {
+  if (ml) {
     const titleFace = resolveThemeFontRef(chart, chart.titleFontFace);
     const face = titleFace ? `"${titleFace}", Calibri, Arial, sans-serif` : 'Calibri, Arial, sans-serif';
     ctx.font = `${(chart.titleFontBold ?? true) ? 'bold ' : ''}${fontSize}px ${face}`;
     const autoWidth = ctx.measureText(chart.title).width;
-    drawChartTitle(
-      ctx,
-      chart,
-      x + ml.x * w,
-      y + ml.y * h,
-      ml.w != null ? ml.w * w : autoWidth,
-      fontSize,
+    const automatic = {
+      x: x + (w - autoWidth) / 2,
+      y: defaultY,
+      w: autoWidth,
+      h: fontSize,
+    };
+    const resolved = resolveManualLayoutRect(
+      { ...ml, w: undefined, h: undefined },
+      { x, y, w, h },
+      automatic,
     );
-    return;
+    if (resolved) {
+      drawChartTitle(ctx, chart, resolved.x, resolved.y, resolved.w, fontSize);
+      return;
+    }
   }
   drawChartTitle(ctx, chart, x, defaultY, w, fontSize);
 }

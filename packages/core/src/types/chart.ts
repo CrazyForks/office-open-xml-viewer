@@ -887,8 +887,10 @@ export interface SecondaryValueAxis {
  * fraction offset from default position.
  */
 export interface ChartManualLayout {
-  xMode: string;
-  yMode: string;
+  xMode?: string;
+  yMode?: string;
+  wMode?: string;
+  hMode?: string;
   layoutTarget?: string;
   x: number;
   y: number;
@@ -899,8 +901,10 @@ export interface ChartManualLayout {
 export interface LegendManualLayout {
   /** `"edge"` = `x`/`y` are fractions from top-left of chart space;
    *  `"factor"` = fractions offset from the default position. */
-  xMode: string;
-  yMode: string;
+  xMode?: string;
+  yMode?: string;
+  wMode?: string;
+  hMode?: string;
   /** Fractions of chart space width/height. */
   x: number;
   y: number;

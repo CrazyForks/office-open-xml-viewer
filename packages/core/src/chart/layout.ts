@@ -21,7 +21,7 @@
 // The per-family MARK drawing (bars, lines, slices, points) stays in
 // renderer.ts; only the frame is shared.
 
-import type { ChartModel } from '../types/chart';
+import type { ChartManualLayout, ChartModel } from '../types/chart';
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -338,6 +338,52 @@ export interface FrameParams {
   manualOuterInsets?: ChartPad;
 }
 
+export interface ManualLayoutRect {
+  readonly x: number;
+  readonly y: number;
+  readonly w: number;
+  readonly h: number;
+}
+
+/**
+ * Resolve CT_ManualLayout against an element's automatic position.
+ *
+ * ECMA-376 §21.2.2.229/232/235 and CT_LayoutMode define factor dimensions as
+ * chart-space fractions and edge dimensions as right/bottom coordinates.
+ * MS-OI29500 §2.1.1587 further defines factor x/y as offsets from the default
+ * element position, again in chart-space fractions. CT_LayoutMode@val defaults
+ * to factor, including a present mode element with an omitted val attribute.
+ */
+export function resolveManualLayoutRect(
+  manual: ChartManualLayout,
+  chartRect: ManualLayoutRect,
+  defaultRect: ManualLayoutRect,
+): ManualLayoutRect | null {
+  const xMode = manual.xMode || 'factor';
+  const yMode = manual.yMode || 'factor';
+  const wMode = manual.wMode || 'factor';
+  const hMode = manual.hMode || 'factor';
+  const x = xMode === 'edge'
+    ? chartRect.x + manual.x * chartRect.w
+    : defaultRect.x + manual.x * chartRect.w;
+  const y = yMode === 'edge'
+    ? chartRect.y + manual.y * chartRect.h
+    : defaultRect.y + manual.y * chartRect.h;
+  const rightOrWidth = manual.w == null
+    ? defaultRect.w
+    : wMode === 'edge'
+      ? chartRect.x + manual.w * chartRect.w - x
+      : manual.w * chartRect.w;
+  const bottomOrHeight = manual.h == null
+    ? defaultRect.h
+    : hMode === 'edge'
+      ? chartRect.y + manual.h * chartRect.h - y
+      : manual.h * chartRect.h;
+  if (![x, y, rightOrWidth, bottomOrHeight].every(Number.isFinite) ||
+      rightOrWidth <= 0 || bottomOrHeight <= 0) return null;
+  return { x, y, w: rightOrWidth, h: bottomOrHeight };
+}
+
 /**
  * Compute a chart's outer frame: title band, legend reserve, axis-title bands,
  * and the plot rectangle. This is the single home for the frame geometry that
@@ -376,26 +422,10 @@ export function computeChartFrame(
 
   let px0: number, py0: number, pw: number, ph: number;
 
-  const pml = params.honorPlotAreaManualLayout ? chart.plotAreaManualLayout : null;
-  if (pml && pml.w != null && pml.h != null) {
-    // Manual plot layout is common to all chart families (§21.2.2.32),
-    // including pie/doughnut. `layoutTarget` defaults to `outer` in the
-    // CT_LayoutTarget schema. An outer rectangle includes tick marks and axis
-    // labels, so convert it to the inner data region with caller-measured
-    // insets; an explicitly-authored `inner` rectangle is already the data
-    // region and remains verbatim.
-    const outerX = x + pml.x * w;
-    const outerY = y + pml.y * h;
-    const outerW = pml.w * w;
-    const outerH = pml.h * h;
-    const inset = pml.layoutTarget === 'inner'
-      ? { t: 0, r: 0, b: 0, l: 0 }
-      : (params.manualOuterInsets ?? { t: 0, r: 0, b: 0, l: 0 });
-    px0 = outerX + inset.l;
-    py0 = outerY + inset.t;
-    pw = outerW - inset.l - inset.r;
-    ph = outerH - inset.t - inset.b;
-  } else if (params.radialGapFrac != null) {
+  // First compute the automatic inner plot rectangle. Factor-mode x/y are
+  // offsets from this default position, so manual layout cannot be resolved
+  // correctly before the automatic frame exists.
+  if (params.radialGapFrac != null) {
     // Radial (pie/radar): centre the plot in the leftover space. Verbatim from
     // the pie/radar inline math.
     const gap = h * params.radialGapFrac;
@@ -412,6 +442,32 @@ export function computeChartFrame(
     py0 = y + pad.t;
     pw = w - pad.l - pad.r;
     ph = h - pad.t - pad.b;
+  }
+
+  const pml = params.honorPlotAreaManualLayout ? chart.plotAreaManualLayout : null;
+  if (pml) {
+    const inset = pml.layoutTarget === 'inner'
+      ? { t: 0, r: 0, b: 0, l: 0 }
+      : (params.manualOuterInsets ?? { t: 0, r: 0, b: 0, l: 0 });
+    const defaultTarget = pml.layoutTarget === 'inner'
+      ? { x: px0, y: py0, w: pw, h: ph }
+      : {
+          x: px0 - inset.l,
+          y: py0 - inset.t,
+          w: pw + inset.l + inset.r,
+          h: ph + inset.t + inset.b,
+        };
+    const resolved = resolveManualLayoutRect(
+      pml,
+      { x, y, w, h },
+      defaultTarget,
+    );
+    if (resolved && resolved.w > inset.l + inset.r && resolved.h > inset.t + inset.b) {
+      px0 = resolved.x + inset.l;
+      py0 = resolved.y + inset.t;
+      pw = resolved.w - inset.l - inset.r;
+      ph = resolved.h - inset.t - inset.b;
+    }
   }
 
   return {

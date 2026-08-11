@@ -811,6 +811,8 @@ pub struct ChartexTreemap {
 pub struct ChartManualLayout {
     pub x_mode: String,
     pub y_mode: String,
+    pub w_mode: String,
+    pub h_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout_target: Option<String>,
     pub x: f64,
@@ -827,6 +829,8 @@ pub struct ChartManualLayout {
 pub struct LegendManualLayout {
     pub x_mode: String,
     pub y_mode: String,
+    pub w_mode: String,
+    pub h_mode: String,
     pub x: f64,
     pub y: f64,
     pub w: f64,
@@ -1349,8 +1353,12 @@ pub fn extract_radar_style(root: Node) -> Option<String> {
 /// when absent.
 pub fn extract_manual_layout(layout_node: Node) -> Option<ChartManualLayout> {
     let manual = child(layout_node, "manualLayout")?;
-    let mut x_mode = "edge".to_string();
-    let mut y_mode = "edge".to_string();
+    // CT_LayoutMode@val defaults to factor in both Strict and Transitional
+    // dml-chart.xsd. The element may also be present with no val attribute.
+    let mut x_mode = "factor".to_string();
+    let mut y_mode = "factor".to_string();
+    let mut w_mode = "factor".to_string();
+    let mut h_mode = "factor".to_string();
     let mut layout_target = Some("outer".to_string());
     let mut x = 0.0_f64;
     let mut y = 0.0_f64;
@@ -1367,6 +1375,16 @@ pub fn extract_manual_layout(layout_node: Node) -> Option<ChartManualLayout> {
             "yMode" => {
                 if let Some(v) = val_str {
                     y_mode = v;
+                }
+            }
+            "wMode" => {
+                if let Some(v) = val_str {
+                    w_mode = v;
+                }
+            }
+            "hMode" => {
+                if let Some(v) = val_str {
+                    h_mode = v;
                 }
             }
             "layoutTarget" => {
@@ -1394,6 +1412,8 @@ pub fn extract_manual_layout(layout_node: Node) -> Option<ChartManualLayout> {
     Some(ChartManualLayout {
         x_mode,
         y_mode,
+        w_mode,
+        h_mode,
         layout_target,
         x,
         y,
@@ -1408,22 +1428,16 @@ pub fn extract_manual_layout(layout_node: Node) -> Option<ChartManualLayout> {
 /// `legend_node` is the `<c:legend>` element. `None` when it has no manual layout.
 pub fn extract_legend_manual_layout(legend_node: Node) -> Option<LegendManualLayout> {
     let layout = child(legend_node, "layout")?;
-    let manual = child(layout, "manualLayout")?;
-    let val = |tag: &str| {
-        child(manual, tag).and_then(|n| n.attribute("val").and_then(|v| v.parse::<f64>().ok()))
-    };
-    let mode = |tag: &str| {
-        child(manual, tag)
-            .and_then(|n| n.attribute("val").map(|v| v.to_string()))
-            .unwrap_or_else(|| "edge".to_string())
-    };
+    let manual = extract_manual_layout(layout)?;
     Some(LegendManualLayout {
-        x_mode: mode("xMode"),
-        y_mode: mode("yMode"),
-        x: val("x").unwrap_or(0.0),
-        y: val("y").unwrap_or(0.0),
-        w: val("w").unwrap_or(0.0),
-        h: val("h").unwrap_or(0.0),
+        x_mode: manual.x_mode,
+        y_mode: manual.y_mode,
+        w_mode: manual.w_mode,
+        h_mode: manual.h_mode,
+        x: manual.x,
+        y: manual.y,
+        w: manual.w.unwrap_or(0.0),
+        h: manual.h.unwrap_or(0.0),
     })
 }
 
@@ -5164,72 +5178,12 @@ pub fn parse_chart_part_with_references(
     let secondary_val_axis = secondary_val_ax.map(&parse_auxiliary_value_axis);
     let secondary_cat_axis = secondary_cat_ax.map(parse_auxiliary_value_axis);
 
-    // `<c:plotArea><c:layout><c:manualLayout>` — explicit plot-area rectangle
-    // (fractions of chart space). ECMA-376 §21.2.2.32. Sample-2 slide-16 uses
-    // this to keep its horizontal bar chart from spilling into the side
-    // annotation column. We parse the same shape xlsx already exposes
-    // (xMode, yMode, layoutTarget, x, y, w?, h?).
+    // `<c:plotArea><c:layout><c:manualLayout>` — use the shared parser so
+    // schema defaults and all four layout modes cannot diverge by host format.
     let plot_area_manual_layout = plot_area
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "layout")
-        .and_then(|layout| {
-            layout
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "manualLayout")
-        })
-        .map(|ml| {
-            let mut x_mode = "edge".to_string();
-            let mut y_mode = "edge".to_string();
-            let mut layout_target = Some("outer".to_string());
-            let mut x = 0.0_f64;
-            let mut y = 0.0_f64;
-            let mut w: Option<f64> = None;
-            let mut h: Option<f64> = None;
-            for ch in ml.children().filter(|n| n.is_element()) {
-                let val_str = attr(&ch, "val");
-                match ch.tag_name().name() {
-                    "xMode" => {
-                        if let Some(v) = val_str {
-                            x_mode = v;
-                        }
-                    }
-                    "yMode" => {
-                        if let Some(v) = val_str {
-                            y_mode = v;
-                        }
-                    }
-                    "layoutTarget" => {
-                        layout_target = val_str;
-                    }
-                    "x" => {
-                        if let Some(v) = val_str.and_then(|s| s.parse::<f64>().ok()) {
-                            x = v;
-                        }
-                    }
-                    "y" => {
-                        if let Some(v) = val_str.and_then(|s| s.parse::<f64>().ok()) {
-                            y = v;
-                        }
-                    }
-                    "w" => {
-                        w = val_str.and_then(|s| s.parse::<f64>().ok());
-                    }
-                    "h" => {
-                        h = val_str.and_then(|s| s.parse::<f64>().ok());
-                    }
-                    _ => {}
-                }
-            }
-            ChartManualLayout {
-                x_mode,
-                y_mode,
-                layout_target,
-                x,
-                y,
-                w,
-                h,
-            }
-        });
+        .and_then(extract_manual_layout);
 
     // `<c:scatterChart><c:scatterStyle val>` — ECMA-376 §21.2.2.42. Lives
     // directly under scatterChart, so a plot_area descendant walk is enough.
@@ -8158,6 +8112,8 @@ mod tests {
         let layout = extract_manual_layout(d.root_element()).expect("manualLayout present");
         assert_eq!(layout.x_mode, "edge");
         assert_eq!(layout.y_mode, "edge");
+        assert_eq!(layout.w_mode, "factor");
+        assert_eq!(layout.h_mode, "factor");
         assert_eq!(layout.layout_target.as_deref(), Some("inner"));
         assert_eq!(layout.x, 0.1);
         assert_eq!(layout.y, 0.2);
@@ -8174,6 +8130,20 @@ mod tests {
         let omitted_target = extract_manual_layout(omitted_target_doc.root_element())
             .expect("manualLayout present");
         assert_eq!(omitted_target.layout_target.as_deref(), Some("outer"));
+
+        let all_modes_xml = format!(
+            r#"<c:layout xmlns:c="{C_NS}"><c:manualLayout>
+              <c:wMode val="edge"/><c:hMode val="edge"/>
+              <c:x val="0.1"/><c:y val="0.2"/><c:w val="0.5"/><c:h val="0.6"/>
+            </c:manualLayout></c:layout>"#
+        );
+        let all_modes_doc = root_of(&all_modes_xml);
+        let all_modes = extract_manual_layout(all_modes_doc.root_element())
+            .expect("manualLayout present");
+        assert_eq!(all_modes.x_mode, "factor");
+        assert_eq!(all_modes.y_mode, "factor");
+        assert_eq!(all_modes.w_mode, "edge");
+        assert_eq!(all_modes.h_mode, "edge");
     }
 
     #[test]

@@ -228,7 +228,7 @@ describe('chart drawing user-shape text boxes', () => {
 });
 
 describe('bar chart authored layout and fills', () => {
-  it('honors a manually positioned title instead of centering it over the chart', () => {
+  it('honors a manually positioned title and ignores its authored width', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
       chartType: 'clusteredBar',
@@ -239,7 +239,7 @@ describe('bar chart authored layout and fills', () => {
     }), RECT, 1);
     const title = rec.texts.find(text => text.text === 'Readiness score');
     expect(title).toBeDefined();
-    expect(title?.x).toBeCloseTo(RECT.w * (0.13 + 0.25), 4);
+    expect(title?.x).toBeCloseTo(RECT.w * 0.13 + (title?.width ?? 0) / 2, 4);
     expect(title?.x).toBeLessThan(RECT.w / 2);
   });
 

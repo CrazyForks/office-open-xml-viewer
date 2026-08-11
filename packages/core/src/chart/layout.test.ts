@@ -14,9 +14,34 @@ import {
   chartLegendBands,
   chartAxisTitleBands,
   chartTitleFontPx,
+  resolveManualLayoutRect,
   TITLE_TOP_PAD_FONT_FRAC,
   type FrameParams,
 } from './layout.js';
+
+describe('resolveManualLayoutRect', () => {
+  const chart = { x: 10, y: 20, w: 400, h: 200 };
+  const automatic = { x: 70, y: 55, w: 250, h: 120 };
+
+  it('defaults omitted modes to factor and offsets x/y from automatic layout', () => {
+    expect(resolveManualLayoutRect(
+      { x: 0.1, y: -0.05, w: 0.5, h: 0.4 },
+      chart,
+      automatic,
+    )).toEqual({ x: 110, y: 45, w: 200, h: 80 });
+  });
+
+  it('resolves edge width and height as right and bottom chart coordinates', () => {
+    expect(resolveManualLayoutRect(
+      {
+        xMode: 'edge', yMode: 'edge', wMode: 'edge', hMode: 'edge',
+        x: 0.1, y: 0.2, w: 0.8, h: 0.9,
+      },
+      chart,
+      automatic,
+    )).toEqual({ x: 50, y: 60, w: 280, h: 140 });
+  });
+});
 
 function model(over: Partial<ChartModel>): ChartModel {
   return {
