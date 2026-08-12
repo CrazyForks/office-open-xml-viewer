@@ -1149,7 +1149,8 @@ pub(crate) struct TextRunData {
     /// "none" | "small" | "all". None = inherit / no transform.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) caps: Option<String>,
-    /// Letter spacing (rPr @spc). 100ths of a point. Positive = looser, negative = tighter.
+    /// Letter spacing in points after converting DrawingML `rPr@spc` from
+    /// 100ths of a point. Positive = looser, negative = tighter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) letter_spacing: Option<f64>,
     /// Set for OOXML field elements (e.g. "slidenum" for slide number fields)
