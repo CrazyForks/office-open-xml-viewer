@@ -1329,6 +1329,16 @@ mod chartex_tests {
             zw.start_file("xl/charts/chartEx1.xml", o).unwrap();
             zw.write_all(waterfall_chartex_xml().as_bytes()).unwrap();
 
+            zw.start_file("xl/charts/_rels/chartEx1.xml.rels", o)
+                .unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyle" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="style1.xml"/><Relationship Id="rIdColors" Type="http://schemas.microsoft.com/office/2011/relationships/chartColorStyle" Target="colors1.xml"/></Relationships>"#).unwrap();
+
+            zw.start_file("xl/charts/style1.xml", o).unwrap();
+            zw.write_all(br#"<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><cs:dataPoint><cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef><cs:spPr><a:pattFill prst="diagCross"><a:fgClr><a:schemeClr val="phClr"/></a:fgClr><a:bgClr><a:srgbClr val="FFFFFF"/></a:bgClr></a:pattFill></cs:spPr></cs:dataPoint></cs:chartStyle>"#).unwrap();
+
+            zw.start_file("xl/charts/colors1.xml", o).unwrap();
+            zw.write_all(br#"<cs:colorStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" meth="cycle"><a:srgbClr val="336699"/></cs:colorStyle>"#).unwrap();
+
             zw.finish().unwrap();
         }
         crate::XlsxZip::new(Cursor::new(buf)).unwrap()
@@ -1357,5 +1367,19 @@ mod chartex_tests {
             chart.categories,
             vec!["Start".to_string(), "Change".to_string(), "End".to_string()]
         );
+        assert_eq!(
+            chart.chartex_color_palette.as_deref(),
+            Some(&[Some("336699".to_string())][..]),
+        );
+        assert!(matches!(
+            chart
+                .chartex_data_point_style
+                .as_ref()
+                .and_then(|style| style.fill_paints.as_ref())
+                .and_then(|paints| paints.first())
+                .and_then(Option::as_ref),
+            Some(ooxml_common::chart::ChartStyleFill::Pattern { fg, bg, preset })
+                if fg == "336699" && bg == "FFFFFF" && preset == "diagCross"
+        ));
     }
 }

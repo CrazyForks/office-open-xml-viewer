@@ -19411,6 +19411,66 @@ mod anchor_image_relative_from_tests {
         assert_eq!(chart.series.len(), 1);
     }
 
+    #[test]
+    fn docx_package_loads_chartex_style_and_color_sidecars() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let document_xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="4000000" cy="3000000"/><wp:docPr id="1" name="Chart 1"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/drawing/2014/chartex"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#;
+        let document_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.microsoft.com/office/2014/relationships/chartEx" Target="charts/chartEx1.xml"/></Relationships>"#;
+        let chart_xml = r#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"><cx:chartData><cx:data id="0"><cx:strDim type="cat"><cx:lvl ptCount="1"><cx:pt idx="0">A</cx:pt></cx:lvl></cx:strDim><cx:numDim type="val"><cx:lvl ptCount="1"><cx:pt idx="0">1</cx:pt></cx:lvl></cx:numDim></cx:data></cx:chartData><cx:chart><cx:plotArea><cx:plotAreaRegion><cx:series layoutId="boxWhisker"/></cx:plotAreaRegion></cx:plotArea></cx:chart></cx:chartSpace>"#;
+        let chart_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyle" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="style1.xml"/><Relationship Id="rIdColors" Type="http://schemas.microsoft.com/office/2011/relationships/chartColorStyle" Target="colors1.xml"/></Relationships>"#;
+        let style_xml = r#"<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><cs:dataPoint><cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef><cs:spPr><a:pattFill prst="diagCross"><a:fgClr><a:schemeClr val="phClr"/></a:fgClr><a:bgClr><a:srgbClr val="FFFFFF"/></a:bgClr></a:pattFill></cs:spPr></cs:dataPoint></cs:chartStyle>"#;
+        let colors_xml = r#"<cs:colorStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" meth="cycle"><a:srgbClr val="336699"/></cs:colorStyle>"#;
+
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = SimpleFileOptions::default();
+            for (path, xml) in [
+                ("word/document.xml", document_xml),
+                ("word/_rels/document.xml.rels", document_rels),
+                ("word/charts/chartEx1.xml", chart_xml),
+                ("word/charts/_rels/chartEx1.xml.rels", chart_rels),
+                ("word/charts/style1.xml", style_xml),
+                ("word/charts/colors1.xml", colors_xml),
+            ] {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(xml.as_bytes()).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        let document = parse_from_bytes(&bytes).expect("DOCX package parses");
+        let chart = document
+            .body
+            .iter()
+            .find_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => {
+                    paragraph.runs.iter().find_map(|run| match run {
+                        DocRun::Chart(chart) => Some(&chart.chart),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("ChartEx run");
+        assert_eq!(
+            chart.chartex_color_palette.as_deref(),
+            Some(&[Some("336699".to_string())][..]),
+        );
+        assert!(matches!(
+            chart
+                .chartex_data_point_style
+                .as_ref()
+                .and_then(|style| style.fill_paints.as_ref())
+                .and_then(|paints| paints.first())
+                .and_then(Option::as_ref),
+            Some(ooxml_common::chart::ChartStyleFill::Pattern { fg, bg, preset })
+                if fg == "336699" && bg == "FFFFFF" && preset == "diagCross"
+        ));
+    }
+
     /// CH14 — the inline-drawing chart gate accepts the chartex
     /// `<a:graphicData uri>` (Microsoft 2014 extension) alongside the legacy
     /// DrawingML chart uri. Mirrors Word's actual sample-24 wire format

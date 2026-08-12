@@ -36,6 +36,11 @@ use serde::{Deserialize, Serialize};
 /// parts contain 6 base colors × at most 9 variations; this bound prevents an
 /// adversarial colors×variations product from amplifying a bounded XML tree.
 const MAX_CHART_COLOR_STYLE_ENTRIES: usize = 4096;
+/// Aggregate structured-fill components retained after expanding one Chart
+/// Style role across the linked Chart Colors palette. A gradient contributes
+/// one component per stop; solid and pattern fills contribute one. This bounds
+/// the otherwise multiplicative `palette entries × gradient stops` wire model.
+const MAX_CHART_STYLE_PAINT_COMPONENTS: usize = 1_048_576;
 /// Maximum cache width accepted from `<c:ptCount>` / `<cx:lvl ptCount>`.
 /// Chart data originates in worksheet ranges, whose largest single dimension
 /// is 1,048,576 rows. Rejecting wider sparse caches prevents an XML attribute
@@ -69,6 +74,11 @@ const MAX_CHART_CACHE_POINTS: usize = 1_048_576;
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartExElementStyle {
+    /// Per-color-style-index DrawingML fill recipes after `phClr`
+    /// substitution. Solid fills remain duplicated in `fill_colors` for wire
+    /// compatibility; gradient and pattern fills are retained only here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_paints: Option<Vec<Option<ChartStyleFill>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill_colors: Option<Vec<Option<String>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +101,50 @@ pub struct ChartExElementStyle {
     pub fill_color_index: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_color_index: Option<usize>,
+}
+
+/// DrawingML fill recipe retained from a Chart Style role. Chart Style parts
+/// use the same CT_GradientFillProperties and CT_PatternFillProperties grammar
+/// as shapes, so this wire shape intentionally mirrors core's shared `Fill`
+/// discriminated union instead of introducing chart-specific paint semantics.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "fillType", rename_all = "camelCase")]
+pub enum ChartStyleFill {
+    #[serde(rename = "solid")]
+    Solid { color: String },
+    #[serde(rename = "gradient")]
+    Gradient {
+        stops: Vec<crate::fill::GradStop>,
+        angle: f64,
+        #[serde(rename = "gradType")]
+        grad_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scaled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(
+            rename = "fillToRect",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        fill_to_rect: Option<crate::fill::FillRect>,
+        #[serde(rename = "tileRect", default, skip_serializing_if = "Option::is_none")]
+        tile_rect: Option<crate::fill::FillRect>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flip: Option<String>,
+        #[serde(
+            rename = "rotWithShape",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        rot_with_shape: Option<bool>,
+    },
+    #[serde(rename = "pattern")]
+    Pattern {
+        fg: String,
+        bg: String,
+        preset: String,
+    },
 }
 
 /// Mirror of TS `ChartModel`. Built by each parser and emitted as the single
@@ -2228,10 +2282,10 @@ fn resolve_chart_style_color(
     crate::color::parse_color_node(color_container, &style_resolver, resolver.tint_mode())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum ChartStylePaint {
     NoFill,
-    Solid(Option<String>),
+    Fill(Option<ChartStyleFill>),
 }
 
 fn chart_style_reference_color(
@@ -2338,11 +2392,75 @@ fn parse_chart_style_paint(
     resolver: &dyn ColorResolver,
     placeholder: Option<&str>,
 ) -> Option<ChartStylePaint> {
+    let adapter = ColorResolverThemeAdapter(resolver);
+    let style_resolver = crate::color::StyleMatrixColorResolver::new(&adapter, placeholder);
     if child(container, "noFill").is_some() {
         return Some(ChartStylePaint::NoFill);
     }
-    child(container, "solidFill")
-        .map(|fill| ChartStylePaint::Solid(resolve_chart_style_color(fill, resolver, placeholder)))
+    if let Some(fill) = child(container, "solidFill") {
+        return Some(ChartStylePaint::Fill(
+            resolve_chart_style_color(fill, resolver, placeholder)
+                .map(|color| ChartStyleFill::Solid { color }),
+        ));
+    }
+    if let Some(fill) = child(container, "gradFill") {
+        return Some(ChartStylePaint::Fill(
+            crate::fill::parse_grad_fill(fill, &style_resolver, resolver.tint_mode()).map(
+                |gradient| ChartStyleFill::Gradient {
+                    stops: gradient.stops,
+                    angle: gradient.angle,
+                    grad_type: gradient.grad_type,
+                    scaled: gradient.scaled,
+                    path: gradient.path,
+                    fill_to_rect: gradient.fill_to_rect,
+                    tile_rect: gradient.tile_rect,
+                    flip: gradient.flip,
+                    rot_with_shape: gradient.rot_with_shape,
+                },
+            ),
+        ));
+    }
+    child(container, "pattFill").map(|fill| {
+        let pattern = crate::fill::parse_patt_fill(fill, &style_resolver, resolver.tint_mode());
+        ChartStylePaint::Fill(Some(ChartStyleFill::Pattern {
+            fg: pattern.fg,
+            bg: pattern.bg,
+            preset: pattern.preset,
+        }))
+    })
+}
+
+/// Returns the structured-fill component count without resolving colors or
+/// sorting gradient stops. Chart Style expands one authored recipe over every
+/// Chart Colors entry, so this preflight must run before the palette loop.
+fn chart_style_paint_component_count(container: Node) -> Option<usize> {
+    if child(container, "noFill").is_some() {
+        return Some(0);
+    }
+    if child(container, "solidFill").is_some() || child(container, "pattFill").is_some() {
+        return Some(1);
+    }
+    child(container, "gradFill").map(|gradient| {
+        child(gradient, "gsLst")
+            .map(|list| {
+                list.children()
+                    .filter(|node| node.is_element() && node.tag_name().name() == "gs")
+                    .count()
+            })
+            .unwrap_or(0)
+    })
+}
+
+fn chart_style_paint_entry_limit(
+    component_count: Option<usize>,
+    palette_entries: usize,
+    component_budget: usize,
+) -> usize {
+    let palette_entries = palette_entries.min(MAX_CHART_COLOR_STYLE_ENTRIES);
+    match component_count {
+        Some(components) if components > 0 => palette_entries.min(component_budget / components),
+        _ => palette_entries,
+    }
 }
 
 fn chart_style_fill_ref_xml(
@@ -2428,37 +2546,71 @@ fn parse_chartex_element_style(
     let line_recipe_xml = line_recipe.as_ref().and_then(|recipe| recipe.as_ref().ok());
     let line_recipe_doc = line_recipe_xml.and_then(|xml| roxmltree::Document::parse(xml).ok());
     let local_sp_pr = child(style_node, "spPr");
-    let fills = placeholders
+    let fill_component_count = local_sp_pr
+        .and_then(chart_style_paint_component_count)
+        .or_else(|| match fill_recipe.as_ref() {
+            Some(Err(())) => Some(0),
+            Some(Ok(_)) => fill_recipe_doc
+                .as_ref()
+                .and_then(|document| chart_style_paint_component_count(document.root_element())),
+            None => None,
+        });
+    let fill_entry_count = placeholders.len().min(MAX_CHART_COLOR_STYLE_ENTRIES);
+    let parsed_fill_entries = chart_style_paint_entry_limit(
+        fill_component_count,
+        fill_entry_count,
+        MAX_CHART_STYLE_PAINT_COMPONENTS,
+    );
+    let mut fills = Vec::with_capacity(fill_entry_count);
+    for (index, accent) in placeholders
         .iter()
-        .map(|accent| {
-            let placeholder =
-                chart_style_placeholder(fill_ref, resolver, *accent, accents, color_style_method);
-            local_sp_pr
-                .and_then(|sp_pr| parse_chart_style_paint(sp_pr, resolver, placeholder.as_deref()))
-                .or_else(|| match fill_recipe.as_ref() {
-                    Some(Err(())) => Some(ChartStylePaint::NoFill),
-                    Some(Ok(_)) => fill_recipe_doc.as_ref().and_then(|document| {
-                        parse_chart_style_paint(
-                            document.root_element(),
-                            resolver,
-                            placeholder.as_deref(),
-                        )
-                    }),
-                    None => None,
-                })
-        })
         .take(MAX_CHART_COLOR_STYLE_ENTRIES)
-        .collect::<Vec<_>>();
+        .enumerate()
+    {
+        if index >= parsed_fill_entries {
+            fills.push(None);
+            continue;
+        }
+        let placeholder =
+            chart_style_placeholder(fill_ref, resolver, *accent, accents, color_style_method);
+        let paint = local_sp_pr
+            .and_then(|sp_pr| parse_chart_style_paint(sp_pr, resolver, placeholder.as_deref()))
+            .or_else(|| match fill_recipe.as_ref() {
+                Some(Err(())) => Some(ChartStylePaint::NoFill),
+                Some(Ok(_)) => fill_recipe_doc.as_ref().and_then(|document| {
+                    parse_chart_style_paint(
+                        document.root_element(),
+                        resolver,
+                        placeholder.as_deref(),
+                    )
+                }),
+                None => None,
+            });
+        fills.push(paint);
+    }
     let fill_hidden = fills
         .iter()
         .all(|paint| matches!(paint, Some(ChartStylePaint::NoFill)))
         .then_some(true);
+    let fill_paints = (!fill_hidden.unwrap_or(false))
+        .then(|| {
+            fills
+                .iter()
+                .map(|paint| match paint {
+                    Some(ChartStylePaint::Fill(fill)) => fill.clone(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|paints| paints.iter().any(Option::is_some));
     let fill_colors = (!fill_hidden.unwrap_or(false))
         .then(|| {
             fills
                 .iter()
                 .map(|paint| match paint {
-                    Some(ChartStylePaint::Solid(color)) => color.clone(),
+                    Some(ChartStylePaint::Fill(Some(ChartStyleFill::Solid { color }))) => {
+                        Some(color.clone())
+                    }
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -2530,6 +2682,7 @@ fn parse_chartex_element_style(
     });
 
     ChartExElementStyle {
+        fill_paints,
         fill_colors,
         fill_hidden,
         line_colors,
@@ -8987,6 +9140,110 @@ mod tests {
                 .fill_hidden,
             Some(true)
         );
+    }
+
+    #[test]
+    fn parse_chartex_style_retains_shared_gradient_and_pattern_fill_recipes() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                <cx:series layoutId="boxWhisker"/>
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let gradient_style = format!(
+            r#"<cs:chartStyle xmlns:cs="{CS_NS}" xmlns:a="{A_NS}">
+              <cs:dataPoint>
+                <cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef>
+                <cs:spPr><a:gradFill rotWithShape="0">
+                  <a:gsLst>
+                    <a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>
+                    <a:gs pos="100000"><a:schemeClr val="lt1"/></a:gs>
+                  </a:gsLst>
+                  <a:lin ang="5400000" scaled="1"/>
+                </a:gradFill></cs:spPr>
+              </cs:dataPoint>
+            </cs:chartStyle>"#
+        );
+        let document = chart_space_of(&xml);
+        let gradient_model = parse_chartex_part(
+            document.root_element(),
+            &FixtureResolver,
+            Some(&gradient_style),
+        )
+        .expect("gradient Chart Style parses");
+        let gradient_paints = gradient_model
+            .chartex_data_point_style
+            .expect("point style")
+            .fill_paints
+            .expect("gradient paints");
+        assert_eq!(gradient_paints.len(), 6);
+        assert!(matches!(
+            gradient_paints[0].as_ref(),
+            Some(ChartStyleFill::Gradient {
+                stops,
+                angle,
+                grad_type,
+                scaled: Some(true),
+                rot_with_shape: Some(false),
+                ..
+            }) if stops[0].color == "5B9BD5"
+                && stops[1].color == "FFFFFF"
+                && (*angle - 90.0).abs() < 1e-9
+                && grad_type == "linear"
+        ));
+
+        let pattern_style = gradient_style.replace(
+            r#"<a:gradFill rotWithShape="0">
+                  <a:gsLst>
+                    <a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>
+                    <a:gs pos="100000"><a:schemeClr val="lt1"/></a:gs>
+                  </a:gsLst>
+                  <a:lin ang="5400000" scaled="1"/>
+                </a:gradFill>"#,
+            r#"<a:pattFill prst="diagCross">
+                  <a:fgClr><a:schemeClr val="phClr"/></a:fgClr>
+                  <a:bgClr><a:schemeClr val="lt1"/></a:bgClr>
+                </a:pattFill>"#,
+        );
+        let pattern_model = parse_chartex_part(
+            document.root_element(),
+            &FixtureResolver,
+            Some(&pattern_style),
+        )
+        .expect("pattern Chart Style parses");
+        let pattern_paints = pattern_model
+            .chartex_data_point_style
+            .expect("point style")
+            .fill_paints
+            .expect("pattern paints");
+        assert!(matches!(
+            pattern_paints[0].as_ref(),
+            Some(ChartStyleFill::Pattern { fg, bg, preset })
+                if fg == "5B9BD5" && bg == "FFFFFF" && preset == "diagCross"
+        ));
+    }
+
+    #[test]
+    fn chart_style_fill_preflight_limits_palette_expansion_before_gradient_parse() {
+        let document = roxmltree::Document::parse(
+            r#"<a:spPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:gradFill><a:gsLst>
+                <a:gs pos="0"><a:srgbClr val="000000"/></a:gs>
+                <a:gs pos="50000"><a:srgbClr val="808080"/></a:gs>
+                <a:gs pos="100000"><a:srgbClr val="FFFFFF"/></a:gs>
+              </a:gsLst></a:gradFill>
+            </a:spPr>"#,
+        )
+        .expect("gradient style XML");
+        assert_eq!(
+            chart_style_paint_component_count(document.root_element()),
+            Some(3)
+        );
+        assert_eq!(chart_style_paint_entry_limit(Some(3), 4, 6), 2);
+        assert_eq!(chart_style_paint_entry_limit(Some(7), 4, 6), 0);
+        assert_eq!(chart_style_paint_entry_limit(Some(0), 4, 0), 4);
+        assert_eq!(chart_style_paint_entry_limit(None, 4, 0), 4);
     }
 
     #[test]

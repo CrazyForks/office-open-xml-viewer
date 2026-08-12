@@ -105,6 +105,7 @@ export interface ChartexBoxWhisker {
     series: ChartexBoxSeries[];
 }
 interface ChartExElementStyle {
+    fillPaints?: Array<SolidFill | GradientFill | PatternFill | null> | null;
     fillColors?: Array<string | null> | null;
     fillHidden?: boolean | null;
     lineColors?: Array<string | null> | null;
@@ -115,6 +116,26 @@ interface ChartExElementStyle {
     lineJoin?: string | null;
     fillColorIndex?: number | null;
     lineColorIndex?: number | null;
+}
+interface GradientFill {
+    fillType: 'gradient';
+    stops: GradientStop__emitterCollision1[];
+    angle: number;
+    gradType: string;
+    scaled?: boolean;
+    path?: 'shape' | 'circle' | 'rect' | string;
+    fillToRect?: FillRect;
+    tileRect?: FillRect;
+    flip?: 'none' | 'x' | 'y' | 'xy' | string;
+    rotWithShape?: boolean;
+}
+interface GradientStop__emitterCollision1 {
+    position: number;
+    color: string;
+}
+interface SolidFill {
+    fillType: 'solid';
+    color: string;
 }
 export interface ChartexSunburst {
     rows: ChartexSunburstRow[];

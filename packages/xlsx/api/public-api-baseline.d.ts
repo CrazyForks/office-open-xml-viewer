@@ -214,6 +214,7 @@ export interface ChartexBoxWhisker {
     series: ChartexBoxSeries[];
 }
 interface ChartExElementStyle {
+    fillPaints?: Array<SolidFill | GradientFill | PatternFill | null> | null;
     fillColors?: Array<string | null> | null;
     fillHidden?: boolean | null;
     lineColors?: Array<string | null> | null;

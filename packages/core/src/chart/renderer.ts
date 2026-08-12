@@ -4,7 +4,7 @@
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
 import type { ChartDataLabelOverride, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, ChartTextBox, SecondaryValueAxis } from '../types/chart';
-import type { PatternFill } from '../types/common';
+import type { Fill } from '../types/common';
 import {
   computeChartFrame,
   cartesianTitleBand,
@@ -305,10 +305,11 @@ function drawLegendSwatch(
   color: string,
   x: number, y: number, w: number, h: number,
   marker: LegendMarker | null = null,
-  fillPattern: PatternFill | null = null,
+  fillPaint: Fill | null = null,
   outlineColor: string | null = null,
   outlineWidthEmu: number | null = null,
   ptToPx = 1,
+  shapeRotationDeg = 0,
 ): void {
   // A line/scatter series with markers shows the same compound key as Excel:
   // connecting stroke first, then the marker centered on it. Markers-only
@@ -336,8 +337,10 @@ function drawLegendSwatch(
       drawMarker(ctx, x + w / 2, y + h / 2, marker.symbol, h * 0.58, marker.fill, marker.line, 1);
     }
   } else {
-    if (fillPattern) {
-      ctx.fillStyle = resolveFill(fillPattern, ctx, x, y, w, h) ?? color;
+    if (fillPaint) {
+      ctx.fillStyle = fillPaint.fillType === 'solid'
+        ? (fillPaint.color.startsWith('#') ? fillPaint.color : `#${fillPaint.color}`)
+        : (resolveFill(fillPaint, ctx, x, y, w, h, shapeRotationDeg) ?? color);
     }
     ctx.fillRect(x, y, w, h);
     if (outlineColor) {
@@ -365,7 +368,7 @@ interface LegendEntry {
   color: string;
   marker: LegendMarker | null;
   swatchStyle: LegendSwatchStyle;
-  fillPattern: PatternFill | null;
+  fillPaint: Fill | null;
   outlineColor: string | null;
   outlineWidthEmu: number | null;
 }
@@ -379,6 +382,7 @@ function buildLegendEntries(
   scatterStyle?: string | null,
   varyByPoint = false,
   chartCategories: string[] = [],
+  fillPaints: ReadonlyArray<Fill | null | undefined> = [],
 ): LegendEntry[] {
   if (varyByPoint || legendIsCategoryDriven(chartType)) {
     // Category-driven: one entry per data point of the first series, labeled by
@@ -392,7 +396,7 @@ function buildLegendEntries(
       color: legendEntryColor(chartType, series, i, varyByPoint),
       marker: null, // pie/doughnut/varyColors keys are always filled swatches.
       swatchStyle: legendSwatchStyle(chartType),
-      fillPattern: null,
+      fillPaint: fillPaints[i] ?? null,
       outlineColor: null,
       outlineWidthEmu: null,
     }));
@@ -404,7 +408,7 @@ function buildLegendEntries(
     // A combo chart has multiple chart groups under one plotArea. The legend
     // key describes the individual series' group, not the first/primary group.
     swatchStyle: legendSwatchStyle(s.seriesType ?? chartType),
-    fillPattern: s.fillPattern ?? null,
+    fillPaint: fillPaints[i] ?? s.fillPattern ?? null,
     outlineColor: s.lineHidden === true ? null : (s.lineColor ?? null),
     outlineWidthEmu: s.lineWidthEmu ?? null,
   }));
@@ -439,9 +443,18 @@ function drawLegend(
   varyByPoint = false,
   chartCategories: string[] = [],
   ptToPx = 1,
+  fillPaints: ReadonlyArray<Fill | null | undefined> = [],
+  shapeRotationDeg = 0,
 ): void {
   const gap = 4;
-  const entries = buildLegendEntries(series, chartType, scatterStyle, varyByPoint, chartCategories);
+  const entries = buildLegendEntries(
+    series,
+    chartType,
+    scatterStyle,
+    varyByPoint,
+    chartCategories,
+    fillPaints,
+  );
   const boldPrefix = style.bold ? 'bold ' : '';
   if (orient === 'horizontal') {
     // Excel lays a bottom/top legend as a single horizontal row, centered.
@@ -469,8 +482,8 @@ function drawLegend(
       drawLegendSwatch(
         ctx, entries[i].swatchStyle, entries[i].color,
         rx, ry - fontSize / 2, sw, fontSize,
-        entries[i].marker, entries[i].fillPattern,
-        entries[i].outlineColor, entries[i].outlineWidthEmu, ptToPx,
+        entries[i].marker, entries[i].fillPaint,
+        entries[i].outlineColor, entries[i].outlineWidthEmu, ptToPx, shapeRotationDeg,
       );
       ctx.fillStyle = style.color; ctx.textAlign = 'left';
       ctx.fillText(labels[i], rx + sw + gap, ry);
@@ -492,8 +505,8 @@ function drawLegend(
     drawLegendSwatch(
       ctx, entries[i].swatchStyle, entries[i].color,
       lx, ry, sw, fontSize,
-      entries[i].marker, entries[i].fillPattern,
-      entries[i].outlineColor, entries[i].outlineWidthEmu, ptToPx,
+      entries[i].marker, entries[i].fillPaint,
+      entries[i].outlineColor, entries[i].outlineWidthEmu, ptToPx, shapeRotationDeg,
     );
     ctx.fillStyle = style.color; ctx.textAlign = 'left';
     ctx.fillText(elideToWidth(ctx, entries[i].label, maxTextPx), lx + sw + gap, ry + fontSize / 2);
@@ -528,6 +541,8 @@ function drawLegendForLayout(
   px0: number, py0: number, pw: number, ph: number,
   topBand: number,
   ptToPx: number,
+  fillPaints: ReadonlyArray<Fill | null | undefined> = [],
+  shapeRotationDeg = 0,
 ): void {
   if (!leg) return;
   const legStyle = legendTextStyle(chart);
@@ -551,12 +566,12 @@ function drawLegendForLayout(
     : null;
   if (manualBox) {
     const orient = manualBox.w >= manualBox.h ? 'horizontal' : 'vertical';
-    drawLegend(ctx, chart.series, manualBox.x, manualBox.y, manualBox.w, manualBox.h, orient, chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx);
+    drawLegend(ctx, chart.series, manualBox.x, manualBox.y, manualBox.w, manualBox.h, orient, chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx, fillPaints, shapeRotationDeg);
     return;
   }
   drawLegend(ctx, chart.series, defaultBox.x, defaultBox.y, defaultBox.w, defaultBox.h,
     defaultOrientation, chart.chartType, legStyle, chart.scatterStyle, varyByPoint,
-    chart.categories, ptToPx);
+    chart.categories, ptToPx, fillPaints, shapeRotationDeg);
 }
 
 function drawAxisTick(
@@ -5401,6 +5416,39 @@ function chartExDataPointFill(chart: ChartModel, index: number, count: number): 
     ?? CHARTEX_DEFAULT_PALETTE[index % CHARTEX_DEFAULT_PALETTE.length];
 }
 
+function chartExStyleFillPaint(
+  style: ChartExStyle | null | undefined,
+  index: number,
+): Fill | null {
+  const paints = style?.fillPaints;
+  if (!paints?.length) return null;
+  return paints[(style?.fillColorIndex ?? index) % paints.length] ?? null;
+}
+
+function chartExDataPointPaint(chart: ChartModel, index: number, count: number): Fill {
+  return chartExStyleFillPaint(chart.chartexDataPointStyle, index)
+    ?? { fillType: 'solid', color: chartExDataPointFill(chart, index, count) };
+}
+
+function chartExFillStyle(
+  ctx: CanvasRenderingContext2D,
+  paint: Fill,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  fallbackColor: string,
+  shapeRotationDeg = 0,
+): string | CanvasGradient | CanvasPattern {
+  // Keep solid ChartEx paints byte-compatible with the renderer's historical
+  // `#RRGGBB` path. The shared resolver is needed only for structured fills;
+  // routing solids through it would rewrite equivalent colors as rgba().
+  if (paint.fillType === 'solid') {
+    return paint.color.startsWith('#') ? paint.color : `#${paint.color}`;
+  }
+  return resolveFill(paint, ctx, x, y, w, h, shapeRotationDeg) ?? fallbackColor;
+}
+
 function applyChartExLineStyle(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -5429,6 +5477,7 @@ function renderWaterfallChart(
   chart: ChartModel,
   r: ChartRect,
   ptToPx: number,
+  shapeRotationDeg: number,
 ): void {
   const { x, y, w, h } = r;
   const vals = chart.series[0]?.values ?? [];
@@ -5589,6 +5638,11 @@ function renderWaterfallChart(
   const colorPos = `#${chart.series[0]?.color ?? chartExDataPointFill(chart, 0, 3)}`;
   const colorNeg = `#${chartExDataPointFill(chart, 1, 3)}`;
   const colorSub = `#${chartExDataPointFill(chart, 2, 3)}`;
+  const paintPos: Fill = chart.series[0]?.color
+    ? { fillType: 'solid', color: chart.series[0].color }
+    : chartExDataPointPaint(chart, 0, 3);
+  const paintNeg = chartExDataPointPaint(chart, 1, 3);
+  const paintSub = chartExDataPointPaint(chart, 2, 3);
 
   // ECMA-376 / chartEx §17.18.34 ST_GapAmount: gapWidth is the gap between
   // adjacent categories expressed as a percentage of the bar width
@@ -5607,7 +5661,9 @@ function renderWaterfallChart(
     const bh = Math.max(1, yBot - yTop);
 
     if (!chart.chartexDataPointStyle?.fillHidden) {
-      ctx.fillStyle = bar.isSub ? colorSub : bar.isPos ? colorPos : colorNeg;
+      const paint = bar.isSub ? paintSub : bar.isPos ? paintPos : paintNeg;
+      const fallback = bar.isSub ? colorSub : bar.isPos ? colorPos : colorNeg;
+      ctx.fillStyle = chartExFillStyle(ctx, paint, bx, yTop, barW, bh, fallback, shapeRotationDeg);
       ctx.fillRect(bx, yTop, barW, bh);
     }
     const accentIndex = bar.isSub ? 2 : bar.isPos ? 0 : 1;
@@ -5786,7 +5842,13 @@ function computeBoxStats(values: number[], method: string): BoxStats | null {
  * (`chart.chartexAccents`, cycled by series) — the blue/orange/gray Office
  * default — falling back to `CHART_PALETTE` when a resolver supplies no palette.
  */
-function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
+function renderBoxWhiskerChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+  shapeRotationDeg: number,
+): void {
   const box = chart.chartexBox;
   if (!box || box.categories.length === 0 || box.series.length === 0) return;
   const { x, y, w, h } = r;
@@ -5945,6 +6007,9 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
     const fill = box.series[si].color ?? chartExDataPointFill(chart, si, nSer);
     return `#${fill}`;
   };
+  const paintOf = (si: number): Fill => box.series[si].color
+    ? { fillType: 'solid', color: box.series[si].color as string }
+    : chartExDataPointPaint(chart, si, nSer);
   const statsBySeries = box.series.map(series => series.valuesByCategory.map(values => (
     computeBoxStats(values, series.quartileMethod)
   )));
@@ -5995,6 +6060,7 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
       if (!stats) continue;
       const { bx, boxW, cx } = boxGeometry(ci, si);
       const fill = paletteOf(si);
+      const fillPaint = paintOf(si);
       const pointStyle = chart.chartexDataPointStyle;
       const lineStyle = chart.chartexDataPointLineStyle ?? pointStyle;
       const markerStyle = chart.chartexDataPointMarkerStyle ?? pointStyle;
@@ -6007,6 +6073,7 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
           : 1;
       const lineEdge = chartExStyleColor(chart, lineStyle, 'line', si, nSer);
       const markerFill = chartExStyleColor(chart, markerStyle, 'fill', si, nSer);
+      const markerFillPaint = chartExStyleFillPaint(markerStyle, si) ?? fillPaint;
       const markerEdge = chartExStyleColor(chart, markerStyle, 'line', si, nSer);
       const applySeriesLine = (style: ChartExStyle | null | undefined, fallback: string): boolean => {
         const visible = applyChartExLineStyle(ctx, chart, style, si, nSer, fallback, ptToPx);
@@ -6032,7 +6099,16 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
 
       // IQR box: solid accent fill + a thin accent×0.8 edge.
       if (!pointStyle?.fillHidden) {
-        ctx.fillStyle = fill;
+        ctx.fillStyle = chartExFillStyle(
+          ctx,
+          fillPaint,
+          bx,
+          boxTop,
+          boxW,
+          boxH,
+          fill,
+          shapeRotationDeg,
+        );
         ctx.fillRect(bx, boxTop, boxW, boxH);
       }
       if (applySeriesLine(pointStyle, edge)) {
@@ -6054,11 +6130,21 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
       // the box/whiskers when cx:visibility@nonoutliers is enabled.
       if (s.showNonoutliers) {
         const pR = Math.max(1.25, boxW * 0.045);
-        ctx.fillStyle = markerFill ? `#${markerFill}` : fill;
         const markerLineVisible = applySeriesLine(markerStyle, markerEdge ?? edge);
         for (const point of stats.inner) {
+          const pointY = yOf(point);
+          ctx.fillStyle = chartExFillStyle(
+            ctx,
+            markerFillPaint,
+            cx - pR,
+            pointY - pR,
+            pR * 2,
+            pR * 2,
+            markerFill ? `#${markerFill}` : fill,
+            shapeRotationDeg,
+          );
           ctx.beginPath();
-          ctx.arc(cx, yOf(point), pR, 0, Math.PI * 2);
+          ctx.arc(cx, pointY, pR, 0, Math.PI * 2);
           if (!markerStyle?.fillHidden) ctx.fill();
           if (markerLineVisible) ctx.stroke();
         }
@@ -6078,11 +6164,21 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
 
       // Outlier dots.
       if (s.showOutliers) {
-        ctx.fillStyle = markerFill ? `#${markerFill}` : fill;
         const markerLineVisible = applySeriesLine(markerStyle, markerEdge ?? edge);
         const oR = Math.max(1.5, boxW * 0.06);
         for (const o of stats.outliers) {
-          ctx.beginPath(); ctx.arc(cx, yOf(o), oR, 0, Math.PI * 2);
+          const outlierY = yOf(o);
+          ctx.fillStyle = chartExFillStyle(
+            ctx,
+            markerFillPaint,
+            cx - oR,
+            outlierY - oR,
+            oR * 2,
+            oR * 2,
+            markerFill ? `#${markerFill}` : fill,
+            shapeRotationDeg,
+          );
+          ctx.beginPath(); ctx.arc(cx, outlierY, oR, 0, Math.PI * 2);
           if (!markerStyle?.fillHidden) ctx.fill();
           if (markerLineVisible) ctx.stroke();
         }
@@ -6141,6 +6237,8 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
     ph,
     titleBand.bandH + 2,
     ptToPx,
+    box.series.map((_, index) => paintOf(index)),
+    shapeRotationDeg,
   );
 }
 
@@ -6254,7 +6352,13 @@ function sunburstMaxDepth(node: SunburstNode): number {
  * Office default). Labels are drawn white and centered in each segment, rotated
  * to follow the arc and elided when the wedge is too small.
  */
-function renderSunburstChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
+function renderSunburstChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+  shapeRotationDeg: number,
+): void {
   const sb = chart.chartexSunburst;
   if (!sb || sb.rows.length === 0) return;
   const { x, y, w, h } = r;
@@ -6301,6 +6405,11 @@ function renderSunburstChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r
     const hex = chartExDataPointFill(chart, bi, root.children.length);
     return `#${hex}`;
   };
+  const branchPaint = (bi: number): Fill => chartExDataPointPaint(
+    chart,
+    bi,
+    root.children.length,
+  );
 
   const labelFont = chartFontFamily(chart, chart.dataLabelFontFace, 'minor');
   const labelPx = Math.max(7, Math.min(13, outerR * 0.075));
@@ -6326,7 +6435,16 @@ function renderSunburstChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r
       ctx.arc(cx, cy, rInner, node.a1, node.a0, true);
       ctx.closePath();
       if (!chart.chartexDataPointStyle?.fillHidden) {
-        ctx.fillStyle = branchColor(node.branchIndex);
+        ctx.fillStyle = chartExFillStyle(
+          ctx,
+          branchPaint(node.branchIndex),
+          cx - rOuter,
+          cy - rOuter,
+          rOuter * 2,
+          rOuter * 2,
+          branchColor(node.branchIndex),
+          shapeRotationDeg,
+        );
         ctx.fill();
       }
       if (applyChartExLineStyle(
@@ -6501,7 +6619,13 @@ function layoutTreemapTiles(nodes: SunburstNode[], rect: TreemapRect): TreemapTi
  * The chartEx hierarchy is shared with sunburst; `parentLabelLayout="banner"`
  * reserves a header inside each parent, `none` suppresses parent captions, and
  * the other/absent modes overlay the caption without changing tile area. */
-function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
+function renderTreemapChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+  shapeRotationDeg: number,
+): void {
   const treemap = chart.chartexTreemap;
   if (!treemap || treemap.rows.length === 0) return;
 
@@ -6532,6 +6656,7 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     // Every descendant of a top-level branch uses that branch's exact accent.
     // Hierarchy depth does not tint or whiten ChartEx treemap data points.
     const color = `#${base}`;
+    const fillPaint = chartExDataPointPaint(chart, node.branchIndex, root.children.length);
     const labelOverride = labelOverrides.get(node.labelIndex);
     const nodeLabelColor = labelOverride?.fontColor ? `#${labelOverride.fontColor}` : labelColor;
     const nodeLabelFontPx = labelOverride?.fontSizeHpt
@@ -6556,7 +6681,16 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       // a hairline frame around each branch. Banner mode alone reserves and
       // paints a caption band.
       if (bannerH > 0 && !chart.chartexDataPointStyle?.fillHidden) {
-        ctx.fillStyle = color;
+        ctx.fillStyle = chartExFillStyle(
+          ctx,
+          fillPaint,
+          tile.x,
+          tile.y,
+          tile.w,
+          bannerH,
+          color,
+          shapeRotationDeg,
+        );
         ctx.fillRect(tile.x, tile.y, tile.w, bannerH);
       }
       const content = {
@@ -6579,7 +6713,16 @@ function renderTreemapChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     }
 
     if (!chart.chartexDataPointStyle?.fillHidden) {
-      ctx.fillStyle = color;
+      ctx.fillStyle = chartExFillStyle(
+        ctx,
+        fillPaint,
+        tile.x,
+        tile.y,
+        tile.w,
+        tile.h,
+        color,
+        shapeRotationDeg,
+      );
       ctx.fillRect(tile.x, tile.y, tile.w, tile.h);
     }
     if (applyChartExLineStyle(
@@ -6800,6 +6943,11 @@ export function renderChart(
    * XML-specified sizes are in OOXML hundredths of a point.
    */
   ptToPx: number = PT_TO_PX,
+  /**
+   * Rotation already applied by the host frame transform. DrawingML gradient
+   * fills with `rotWithShape="0"` counter-rotate by this amount.
+   */
+  shapeRotationDeg = 0,
 ): void {
   // The per-family renderers (and the early-return/default text paths below)
   // mutate shared canvas state — textAlign, textBaseline, font, fillStyle,
@@ -6877,15 +7025,15 @@ export function renderChart(
       case 'bubble':
         renderScatterChart(ctx, chart, rect, ptToPx); break;
       case 'waterfall':
-        renderWaterfallChart(ctx, chart, rect, ptToPx); break;
+        renderWaterfallChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'stock':
         renderStockChart(ctx, chart, rect, ptToPx); break;
       case 'boxWhisker':
-        renderBoxWhiskerChart(ctx, chart, rect, ptToPx); break;
+        renderBoxWhiskerChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'sunburst':
-        renderSunburstChart(ctx, chart, rect, ptToPx); break;
+        renderSunburstChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'treemap':
-        renderTreemapChart(ctx, chart, rect, ptToPx); break;
+        renderTreemapChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       default:
         ctx.fillStyle = '#888';
         ctx.font = '11px sans-serif';

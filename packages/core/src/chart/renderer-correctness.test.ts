@@ -31,6 +31,7 @@ interface Recorded {
   strokeRects: StrokeRectCall[];
   texts: TextCall[];
   clips: Array<{ x: number; y: number; w: number; h: number }>;
+  gradients: Array<{ args: number[]; stops: Array<{ position: number; color: string }> }>;
 }
 
 /** Minimal recording 2D context: captures fillRect + fillText, tracks the
@@ -40,6 +41,7 @@ function recordingCtx(): Recorded {
   const strokeRects: StrokeRectCall[] = [];
   const texts: TextCall[] = [];
   const clips: Array<{ x: number; y: number; w: number; h: number }> = [];
+  const gradients: Recorded['gradients'] = [];
   let pathRect: { x: number; y: number; w: number; h: number } | null = null;
   const state: Record<string, unknown> = {
     font: '10px sans-serif',
@@ -88,7 +90,15 @@ function recordingCtx(): Recorded {
             strokeRects.push({ x, y, w, h, ss: String(state.strokeStyle), lw: Number(state.lineWidth) });
         case 'createLinearGradient':
         case 'createRadialGradient':
-          return () => ({ addColorStop() {} });
+          return (...args: number[]) => {
+            const gradient = { args, stops: [] as Array<{ position: number; color: string }> };
+            gradients.push(gradient);
+            return {
+              addColorStop(position: number, color: string) {
+                gradient.stops.push({ position, color });
+              },
+            };
+          };
         case 'beginPath':
           return () => { pathRect = null; };
         case 'rect':
@@ -108,7 +118,14 @@ function recordingCtx(): Recorded {
     },
     set(_t, prop: string, value) { state[prop] = value; return true; },
   };
-  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, rects, strokeRects, texts, clips };
+  return {
+    ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D,
+    rects,
+    strokeRects,
+    texts,
+    clips,
+    gradients,
+  };
 }
 
 function baseModel(over: Partial<ChartModel>): ChartModel {
@@ -4075,6 +4092,49 @@ describe('CH15 — chartEx box-and-whisker', () => {
     expect(rec.rects.filter(rect => rect.fs.toUpperCase() === '#8064A2').length).toBeGreaterThanOrEqual(2);
   });
 
+  it('uses one shared DrawingML gradient recipe for a box and legend and honors rotWithShape', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, boxModel({
+      showLegend: true,
+      legendPos: 'r',
+      chartexDataPointStyle: {
+        fillPaints: [{
+          fillType: 'gradient',
+          stops: [
+            { position: 0, color: '4472C4' },
+            { position: 1, color: 'FFFFFF' },
+          ],
+          angle: 90,
+          gradType: 'linear',
+          rotWithShape: false,
+        }],
+      },
+      chartexBox: {
+        categories: ['A'],
+        series: [{
+          name: 'Gradient', color: null, valuesByCategory: [[1, 2, 3]],
+          meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false,
+          quartileMethod: 'inclusive',
+        }],
+      },
+    }), RECT, 1, 30);
+    expect(rec.rects.filter(rect => rect.fs === '[object Object]').length).toBeGreaterThanOrEqual(2);
+    expect(rec.gradients.length).toBeGreaterThanOrEqual(2);
+    for (const gradient of rec.gradients) {
+      const [x1, y1, x2, y2] = gradient.args;
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      // The host frame is already rotated 30°. rotWithShape=false therefore
+      // counter-rotates the authored 90° gradient to 60° in local coordinates.
+      expect(dx).toBeGreaterThan(0);
+      expect(dy / dx).toBeCloseTo(Math.sqrt(3), 5);
+      expect(gradient.stops).toEqual([
+        { position: 0, color: 'rgba(68,114,196,1)' },
+        { position: 1, color: 'rgba(255,255,255,1)' },
+      ]);
+    }
+  });
+
   it('honors an explicit ChartEx series outline color and width', () => {
     const rec = segRecordingCtx();
     const model = boxModel();
@@ -4312,6 +4372,19 @@ describe('CH15 — chartEx treemap', () => {
       '#112233',
       '#445566',
     ]);
+  });
+
+  it('uses the shared DrawingML pattern fill for treemap data points', () => {
+    const rec = recordingCtx();
+    const model = treemapModel();
+    model.chartexDataPointStyle = {
+      fillPaints: [{ fillType: 'pattern', fg: '777777', bg: 'FFFFFF', preset: 'pct30' }],
+    };
+    renderChart(rec.ctx, model, RECT, 1);
+
+    // The headless recording context has no auxiliary bitmap canvas, so the
+    // shared pattern resolver falls back to its authored foreground color.
+    expect(rec.rects.every(rect => rect.fs === 'rgba(119,119,119,1)')).toBe(true);
   });
 
   it('suppresses treemap outlines for an explicit ChartEx data-point noFill', () => {
