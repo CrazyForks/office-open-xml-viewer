@@ -171,6 +171,8 @@ export interface ChartDataLabelOverride {
     fontColor?: string;
     fontSizeHpt?: number;
     fontBold?: boolean;
+    formatCode?: string;
+    separator?: string;
     labelBox?: ChartLabelBox;
     showVal?: boolean;
     showCatName?: boolean;
@@ -181,6 +183,11 @@ export interface ChartDataLabelOverride {
 export interface ChartDataPointOverride {
     idx: number;
     color?: string;
+    fillHidden?: boolean;
+    lineColor?: string;
+    lineWidthEmu?: number;
+    lineDash?: string;
+    lineHidden?: boolean;
     markerSymbol?: string;
     markerSize?: number;
     markerFill?: string;
@@ -199,9 +206,11 @@ export interface ChartErrBars {
 }
 export interface ChartexBoxSeries {
     name: string;
+    chartexFormatIdx?: number | null;
     color?: string | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
+    chartexStyle?: ChartExElementStyle | null;
     valuesByCategory: number[][];
     meanMarker: boolean;
     meanLine: boolean;
@@ -217,9 +226,11 @@ export interface ChartExElementStyle {
     fillPaints?: Array<SolidFill | GradientFill | PatternFill | null> | null;
     fillColors?: Array<string | null> | null;
     fillHidden?: boolean | null;
+    fillNoStyle?: boolean | null;
     lineColors?: Array<string | null> | null;
     lineWidthEmu?: number | null;
     lineHidden?: boolean | null;
+    lineNoStyle?: boolean | null;
     lineDash?: string | null;
     lineCap?: string | null;
     lineJoin?: string | null;
@@ -346,11 +357,22 @@ export interface ChartModel {
     catAxisMajorGridlines?: boolean | null;
     valAxisGridlineColor?: string | null;
     valAxisGridlineWidthEmu?: number | null;
+    valAxisGridlineDash?: string | null;
     catAxisGridlineColor?: string | null;
     catAxisGridlineWidthEmu?: number | null;
+    catAxisGridlineDash?: string | null;
     valAxisMinorGridlines?: boolean | null;
+    valAxisMinorGridlineColor?: string | null;
+    valAxisMinorGridlineWidthEmu?: number | null;
+    valAxisMinorGridlineDash?: string | null;
+    catAxisMinorGridlines?: boolean | null;
+    catAxisMinorGridlineColor?: string | null;
+    catAxisMinorGridlineWidthEmu?: number | null;
+    catAxisMinorGridlineDash?: string | null;
     valAxisMajorUnit?: number | null;
     valAxisMinorUnit?: number | null;
+    catAxisMajorUnit?: number | null;
+    catAxisMinorUnit?: number | null;
     valAxisLogBase?: number | null;
     valAxisOrientation?: 'minMax' | 'maxMin' | string | null;
     catAxisOrientation?: 'minMax' | 'maxMin' | string | null;
@@ -371,6 +393,9 @@ export interface ChartModel {
     chartexDataPointStyle?: ChartExElementStyle | null;
     chartexDataPointLineStyle?: ChartExElementStyle | null;
     chartexDataPointMarkerStyle?: ChartExElementStyle | null;
+    chartexMarkerSizePt?: number | null;
+    chartexMarkerSymbol?: string | null;
+    chartexConnectorLines?: boolean | null;
 }
 export interface ChartRect {
     x: number;
@@ -380,8 +405,10 @@ export interface ChartRect {
 }
 export interface ChartSeries {
     name: string;
+    chartexFormatIdx?: number | null;
     color: string | null;
     fillPattern?: PatternFill | null;
+    chartexStyle?: ChartExElementStyle | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
     values: (number | null)[];
@@ -459,6 +486,8 @@ export interface ChartTrendline {
     dispEq?: boolean | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
+    lineDash?: string | null;
+    lineHidden?: boolean | null;
 }
 export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | 'treemap' | string;
 export interface ConditionalFormat {
@@ -1030,14 +1059,18 @@ export interface SecondaryValueAxis {
     formatCode?: string | null;
     fontColor?: string | null;
     fontSizeHpt?: number | null;
+    fontFace?: string | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
     lineHidden: boolean;
     majorTickMark: string;
+    minorTickMark?: string | null;
     majorUnit?: number | null;
+    minorUnit?: number | null;
     titleFontSizeHpt?: number | null;
     titleFontBold?: boolean | null;
     titleFontColor?: string | null;
+    titleFontFace?: string | null;
 }
 export interface ShapeAnchor {
     fromCol: number;

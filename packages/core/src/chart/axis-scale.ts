@@ -163,6 +163,49 @@ export function logAxisScale(
  *  when the type is unsupported or there is too little data to fit. */
 export interface TrendlinePoints { xs: number[]; ys: number[] }
 
+/** Least-squares coefficients and coefficient of determination for a linear
+ * trendline. This is kept separate from the sampled line points because
+ * `<c:dispEq>` / `<c:dispRSqr>` expose the fitted values as chart text. */
+export interface LinearTrendlineStats {
+  slope: number;
+  intercept: number;
+  rSquared: number;
+}
+
+export function linearTrendlineStats(
+  xs: readonly number[],
+  ys: readonly number[],
+  forcedIntercept?: number | null,
+): LinearTrendlineStats | null {
+  const n = Math.min(xs.length, ys.length);
+  if (n < 2) return null;
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (let i = 0; i < n; i++) {
+    sx += xs[i]; sy += ys[i]; sxx += xs[i] * xs[i]; sxy += xs[i] * ys[i];
+  }
+  let slope: number;
+  let intercept: number;
+  if (forcedIntercept != null && isFinite(forcedIntercept)) {
+    slope = sxx === 0 ? 0 : (sxy - forcedIntercept * sx) / sxx;
+    intercept = forcedIntercept;
+  } else {
+    const denom = n * sxx - sx * sx;
+    slope = denom === 0 ? 0 : (n * sxy - sx * sy) / denom;
+    intercept = (sy - slope * sx) / n;
+  }
+  const mean = sy / n;
+  let residual = 0;
+  let total = 0;
+  for (let i = 0; i < n; i++) {
+    const error = ys[i] - (slope * xs[i] + intercept);
+    residual += error * error;
+    const centered = ys[i] - mean;
+    total += centered * centered;
+  }
+  const rSquared = total === 0 ? (residual === 0 ? 1 : 0) : 1 - residual / total;
+  return { slope, intercept, rSquared };
+}
+
 /** Fit a trendline to `(xs, ys)` data points (nulls already filtered by the
  *  caller). Implements the two most common ECMA-376 `ST_TrendlineType`
  *  (§21.2.3.50) styles:
@@ -179,23 +222,13 @@ export function fitTrendline(
   const n = Math.min(xs.length, ys.length);
   if (n < 2) return { xs: [], ys: [] };
   if (type === 'linear') {
-    // Least squares. With a forced intercept b0, fit only the slope through
-    // the shifted data: m = Σ x(y-b0) / Σ x².
-    const forced = opts?.intercept;
-    let sx = 0, sy = 0, sxx = 0, sxy = 0;
-    for (let i = 0; i < n; i++) { sx += xs[i]; sy += ys[i]; sxx += xs[i] * xs[i]; sxy += xs[i] * ys[i]; }
-    let m: number, b: number;
-    if (forced != null && isFinite(forced)) {
-      const sxx0 = sxx; const sxy0 = sxy - forced * sx;
-      m = sxx0 === 0 ? 0 : sxy0 / sxx0;
-      b = forced;
-    } else {
-      const denom = n * sxx - sx * sx;
-      m = denom === 0 ? 0 : (n * sxy - sx * sy) / denom;
-      b = (sy - m * sx) / n;
-    }
+    const stats = linearTrendlineStats(xs, ys, opts?.intercept);
+    if (!stats) return { xs: [], ys: [] };
     const x0 = xs[0]; const x1 = xs[n - 1];
-    return { xs: [x0, x1], ys: [m * x0 + b, m * x1 + b] };
+    return {
+      xs: [x0, x1],
+      ys: [stats.slope * x0 + stats.intercept, stats.slope * x1 + stats.intercept],
+    };
   }
   if (type === 'movingAvg') {
     const period = Math.max(2, Math.round(opts?.period ?? 2));
