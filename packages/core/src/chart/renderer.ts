@@ -34,6 +34,7 @@ import {
   boxWhiskerPointCount,
   computeBoxWhiskerStats,
 } from './box-whisker.js';
+import { planParetoLayout } from './pareto-layout.js';
 import { hexToRgba, resolveFill } from '../shape/paint.js';
 import {
   DEFAULT_TEXT_INSET_LR_EMU,
@@ -1403,7 +1404,10 @@ function renderBarChart(
   chart: ChartModel,
   r: ChartRect,
   ptToPx: number,
-  gapPolicy: CategoryGapPolicy = 'legacy',
+  options: {
+    gapPolicy?: CategoryGapPolicy;
+    semanticLineNoStyleFallback?: boolean;
+  } = {},
 ): void {
   const { x, y, w, h } = r;
   const isH = chart.chartType === 'clusteredBarH' || chart.chartType === 'stackedBarH' || chart.chartType === 'stackedBarHPct';
@@ -1965,7 +1969,10 @@ function renderBarChart(
     : (catRev ? n - 1 - ci : ci);
   const nSeriesEffective = stacked ? 1 : Math.max(1, barSeries.length);
   const overlapPct  = stacked ? 0 : (chart.barOverlap ?? 0);
-  const gapWidthPct = resolveCategoryGapWidthPercent(chart.barGapWidth, gapPolicy);
+  const gapWidthPct = resolveCategoryGapWidthPercent(
+    chart.barGapWidth,
+    options.gapPolicy ?? 'legacy',
+  );
   const denom = 1 + (nSeriesEffective - 1) * (1 - overlapPct / 100) + gapWidthPct / 100;
   const barW  = catGap / denom;
   // Pitch between bars within a cluster (not the gap — the left-edge to
@@ -2236,7 +2243,29 @@ function renderBarChart(
       // Series bound to the secondary axis map through its scale; others use
       // the primary (bar) value axis.
       const yOf = sec && s.useSecondaryAxis === true ? toYSecondary : toYPrimaryLine;
-      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash([]);
+      const hasAuthoredLine = s.chartexStyle != null
+        || s.lineHidden != null
+        || s.lineColor != null
+        || s.lineWidthEmu != null
+        || chart.chartexDataPointLineStyle != null;
+      const paintLine = hasAuthoredLine
+        ? applyChartExSeriesLineStyle(
+          ctx,
+          chart,
+          chart.chartexDataPointLineStyle,
+          s,
+          chartExSeriesFormatIndex(s, chart.series.indexOf(s)),
+          lineSeries.length,
+          color,
+          ptToPx,
+          { linkedNoStyleFallback: options.semanticLineNoStyleFallback },
+        )
+        : true;
+      if (!hasAuthoredLine) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([]);
+      }
       ctx.beginPath();
       let started = false;
       for (let ci = 0; ci < n; ci++) {
@@ -2246,7 +2275,7 @@ function renderBarChart(
         const ly = yOf(v);
         if (!started) { ctx.moveTo(lx, ly); started = true; } else ctx.lineTo(lx, ly);
       }
-      ctx.stroke();
+      if (paintLine) ctx.stroke();
       if (s.showMarker !== false) {
         for (let ci = 0; ci < n; ci++) {
           const v = s.values[ci];
@@ -5755,6 +5784,7 @@ function resolveChartExLabel(
   value: number,
   defaults: { visible: boolean; showVal: boolean; showCatName: boolean; showSerName?: boolean },
   overrideLookup?: ReadonlyMap<number, NonNullable<ChartSeries['dataLabelOverrides']>[number]>,
+  suppressValue = false,
 ): ResolvedChartExLabel | null {
   if (!series) return null;
   const definition = series.seriesDataLabels;
@@ -5762,7 +5792,8 @@ function resolveChartExLabel(
     ?? series.dataLabelOverrides?.find(item => item.idx === index);
   if (override?.deleted) return null;
   if (!definition && !override && !defaults.visible) return null;
-  const showVal = override?.showVal ?? definition?.showVal ?? defaults.showVal;
+  const showVal = !suppressValue
+    && (override?.showVal ?? definition?.showVal ?? defaults.showVal);
   const showCatName = override?.showCatName ?? definition?.showCatName ?? defaults.showCatName;
   const showSerName = override?.showSerName
     ?? definition?.showSerName
@@ -5974,6 +6005,9 @@ function applyChartExSeriesLineStyle(
     || series?.lineColor != null
     || series?.lineWidthEmu != null;
   if (!hasLegacyLocalLine) {
+    // NoStyle means the linked role supplies no decorative override. Layouts
+    // with a semantic line may opt back into their automatic fallback; an
+    // explicit linked noFill remains authoritative because lineNoStyle is false.
     if (style?.lineNoStyle && options.linkedNoStyleFallback) {
       return applyChartExLineStyle(ctx, chart, null, index, count, fallbackColor, ptToPx);
     }
@@ -6029,7 +6063,7 @@ function renderHistogramChart(
     chartType: 'clusteredBar',
     categories: plan.categories,
     series: [{ ...source, categories: undefined, values: plan.counts }],
-  }, rect, ptToPx, 'chartex');
+  }, rect, ptToPx, { gapPolicy: 'chartex' });
 }
 
 function renderWaterfallChart(
@@ -6050,28 +6084,66 @@ function renderWaterfallChart(
   if (rejectOversizedCanvasChart(ctx, r, n)) return;
 
   const subSet = new Set(chart.subtotalIndices);
+  let cumulativeOverflow = false;
+  const safeAdd = (left: number, right: number): number => {
+    const sum = left + right;
+    if (Number.isFinite(sum)) return sum;
+    cumulativeOverflow = true;
+    return sum < 0 ? -Number.MAX_VALUE : Number.MAX_VALUE;
+  };
   let running = 0;
-  const bars: Array<{ start: number; end: number; isSub: boolean; isPos: boolean }> = [];
+  const bars: Array<{
+    start: number;
+    end: number;
+    isSub: boolean;
+    isPos: boolean;
+    hasValue: boolean;
+    paintSlot: boolean;
+  }> = [];
   let rawMax = Number.NEGATIVE_INFINITY;
   let rawMin = 0;
   for (let i = 0; i < n; i++) {
-    const v = vals[i] ?? 0;
+    const authoredValue = vals[i];
+    const hasValue = authoredValue != null && Number.isFinite(authoredValue);
+    // A missing dimension point still owns its authored category slot (the
+    // historical zero-height placeholder). A present but non-finite value is
+    // invalid numeric input and must not reach axis or Canvas geometry.
+    const paintSlot = authoredValue == null || hasValue;
+    const v = hasValue ? authoredValue as number : 0;
     const isSub = subSet.has(i);
     if (isSub) {
-      const bar = { start: 0, end: v, isSub: true, isPos: true };
+      const bar = { start: 0, end: v, isSub: true, isPos: true, hasValue, paintSlot };
       bars.push(bar);
-      rawMax = Math.max(rawMax, bar.start, bar.end);
-      rawMin = Math.min(rawMin, bar.start, bar.end);
-      running = v;
+      if (paintSlot) {
+        rawMax = Math.max(rawMax, bar.start, bar.end);
+        rawMin = Math.min(rawMin, bar.start, bar.end);
+      }
+      if (hasValue) {
+        running = v;
+      }
     } else {
-      const start = v >= 0 ? running : running + v;
-      const end   = v >= 0 ? running + v : running;
-      const bar = { start, end, isSub: false, isPos: v >= 0 };
+      const next = safeAdd(running, v);
+      const start = v >= 0 ? running : next;
+      const end   = v >= 0 ? next : running;
+      const bar = { start, end, isSub: false, isPos: v >= 0, hasValue, paintSlot };
       bars.push(bar);
-      rawMax = Math.max(rawMax, bar.start, bar.end);
-      rawMin = Math.min(rawMin, bar.start, bar.end);
-      running += v;
+      if (paintSlot) {
+        rawMax = Math.max(rawMax, bar.start, bar.end);
+        rawMin = Math.min(rawMin, bar.start, bar.end);
+      }
+      if (hasValue) {
+        running = next;
+      }
     }
+  }
+
+  if (cumulativeOverflow) {
+    ctx.fillStyle = '#888';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('(chart values out of range)', x + w / 2, y + h / 2);
+    return;
   }
 
   if (rawMax <= rawMin) return;
@@ -6247,13 +6319,13 @@ function renderWaterfallChart(
 
     const paint = bar.isSub ? paintSub : bar.isPos ? paintPos : paintNeg;
     const fallback = bar.isSub ? colorSub : bar.isPos ? colorPos : colorNeg;
-    if (paint) {
+    if (bar.paintSlot && paint) {
       ctx.fillStyle = chartExFillStyle(ctx, paint, bx, yTop, barW, bh, fallback, shapeRotationDeg);
       ctx.fillRect(bx, yTop, barW, bh);
     }
     const accentIndex = bar.isSub ? 2 : bar.isPos ? 0 : 1;
     const lineColor = chartExStyleColor(chart, chart.chartexDataPointStyle, 'line', accentIndex, 3);
-    if (applyChartExSeriesLineStyle(
+    if (bar.paintSlot && applyChartExSeriesLineStyle(
       ctx,
       chart,
       chart.chartexDataPointStyle,
@@ -6266,7 +6338,8 @@ function renderWaterfallChart(
       ctx.strokeRect(bx, yTop, barW, bh);
     }
 
-    if (i < n - 1 && chart.chartexConnectorLines !== false) {
+    if (bar.paintSlot && bars[i + 1]?.paintSlot
+      && i < n - 1 && chart.chartexConnectorLines !== false) {
       const nextBx = px0 + gapW * (i + 1) + (gapW - barW) / 2;
       const connY = bar.isPos ? yTop : yBot;
       ctx.save();
@@ -6289,10 +6362,12 @@ function renderWaterfallChart(
       ctx.restore();
     }
 
-    const rawVal = vals[i] ?? 0;
+    const rawVal = bar.hasValue ? vals[i] as number : 0;
     const label = resolveChartExLabel(
       chart, series, i, cats[i] ?? '', rawVal,
       { visible: true, showVal: true, showCatName: false },
+      undefined,
+      !bar.hasValue,
     );
     if (label) {
       const perPointColor = series?.dataLabelColors?.[i] ?? label.fontColor ?? null;
@@ -6311,7 +6386,7 @@ function renderWaterfallChart(
       if (label.position === 'ctr') {
         ctx.textBaseline = 'middle';
         ctx.fillText(label.text, bx + barW / 2, (yTop + yBot) / 2);
-      } else if (rawVal < 0) {
+      } else if (bar.hasValue && rawVal < 0) {
         ctx.textBaseline = 'top';
         ctx.fillText(label.text, bx + barW / 2, yBot + 3);
       } else {
@@ -6472,23 +6547,102 @@ function renderParetoLineChart(
 ): void {
   const source = chart.series[0];
   if (!source) return;
-  const raw = source.values.map(value => Math.max(0, value ?? 0));
-  const total = raw.reduce((sum, value) => sum + value, 0);
-  if (!(total > 0)) return;
-  let sum = 0;
-  const cumulative = raw.map(value => (sum += value) / total);
+  const pointCount = Math.max(
+    chart.categories.length,
+    source.categories?.length ?? 0,
+    source.values.length,
+  );
+  if (rejectOversizedCanvasChart(ctx, r, pointCount)) return;
+  const layout = planParetoLayout(source, chart.categories);
+  if (layout.points.length === 0) return;
   renderLineChart(ctx, {
     ...chart,
     chartType: 'line',
-    categories: cumulative.map((_value, index) => String(index + 1)),
-    series: [{ ...source, values: cumulative, showMarker: false }],
+    categories: layout.categories,
+    series: [{ ...layout.series, showMarker: false }],
     // Pareto's ordinal category labels are suppressed, but its authored
     // category-axis rule remains visible. Keep those two concerns separate.
     catAxisHidden: false,
     catAxisTickLabelPos: 'none',
     showLegend: false,
     valMin: 0,
+    valMax: chart.valMax ?? 1,
+    valAxisFormatCode: chart.valAxisFormatCode ?? '0%',
   }, r, ptToPx);
+}
+
+/** Owner-backed ChartEx Pareto: sorted frequency columns plus cumulative line. */
+function renderParetoChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+): void {
+  const owner = chart.series[0];
+  if (!owner) return;
+  const pointCount = Math.max(
+    chart.categories.length,
+    owner.categories?.length ?? 0,
+    owner.values.length,
+  );
+  if (rejectOversizedCanvasChart(ctx, r, pointCount)) return;
+  const layout = planParetoLayout(owner, chart.categories);
+  if (layout.points.length === 0) return;
+
+  const authoredLine = chart.series.find(series => series.seriesType === 'line');
+  const lineStyleIndex = authoredLine?.chartexFormatIdx
+    ?? owner.chartexFormatIdx
+    ?? 0;
+  const cumulativeLine: ChartSeries = {
+    ...(authoredLine ?? layout.series),
+    name: authoredLine?.name || 'Cumulative %',
+    values: layout.series.values,
+    categories: layout.categories,
+    color: authoredLine?.color
+      ?? chartExStyleColor(
+        chart, chart.chartexDataPointLineStyle, 'line', lineStyleIndex, 1,
+      )
+      ?? owner.lineColor
+      ?? owner.color,
+    seriesType: 'line',
+    useSecondaryAxis: true,
+    showMarker: false,
+  };
+  const secondaryAxis: SecondaryValueAxis = {
+    min: chart.secondaryValAxis?.min ?? 0,
+    max: chart.secondaryValAxis?.max ?? 1,
+    title: chart.secondaryValAxis?.title ?? null,
+    hidden: chart.secondaryValAxis?.hidden ?? false,
+    formatCode: chart.secondaryValAxis?.formatCode ?? '0%',
+    fontColor: chart.secondaryValAxis?.fontColor ?? null,
+    fontSizeHpt: chart.secondaryValAxis?.fontSizeHpt ?? null,
+    fontFace: chart.secondaryValAxis?.fontFace ?? null,
+    lineColor: chart.secondaryValAxis?.lineColor ?? null,
+    lineWidthEmu: chart.secondaryValAxis?.lineWidthEmu ?? null,
+    lineHidden: chart.secondaryValAxis?.lineHidden ?? false,
+    majorTickMark: chart.secondaryValAxis?.majorTickMark ?? 'out',
+    minorTickMark: chart.secondaryValAxis?.minorTickMark ?? null,
+    majorUnit: chart.secondaryValAxis?.majorUnit ?? null,
+    minorUnit: chart.secondaryValAxis?.minorUnit ?? null,
+    titleFontSizeHpt: chart.secondaryValAxis?.titleFontSizeHpt ?? null,
+    titleFontBold: chart.secondaryValAxis?.titleFontBold ?? null,
+    titleFontColor: chart.secondaryValAxis?.titleFontColor ?? null,
+    titleFontFace: chart.secondaryValAxis?.titleFontFace ?? null,
+  };
+
+  renderBarChart(ctx, {
+    ...chart,
+    chartType: 'clusteredBar',
+    categories: layout.categories,
+    series: [
+      { ...layout.orderedSeries, seriesType: null, useSecondaryAxis: false },
+      cumulativeLine,
+    ],
+    secondaryValAxis: secondaryAxis,
+  }, r, ptToPx, {
+    gapPolicy: 'chartex',
+    semanticLineNoStyleFallback: true,
+  });
 }
 
 // ─── chartEx: box-and-whisker (CH15, MS 2014 chartex ext) ────────────────────
@@ -7959,7 +8113,7 @@ export function renderChart(
           { ...chart, chartType: 'clusteredBar' },
           rect,
           ptToPx,
-          'chartex',
+          { gapPolicy: 'chartex' },
         ); break;
       case 'histogram':
         renderHistogramChart(ctx, chart, rect, ptToPx); break;
@@ -7967,6 +8121,8 @@ export function renderChart(
         renderFunnelChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'paretoLine':
         renderParetoLineChart(ctx, chart, rect, ptToPx); break;
+      case 'pareto':
+        renderParetoChart(ctx, chart, rect, ptToPx); break;
       case 'stock':
         renderStockChart(ctx, chart, rect, ptToPx); break;
       case 'boxWhisker':

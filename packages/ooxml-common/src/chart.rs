@@ -3484,16 +3484,39 @@ pub fn parse_chartex_part_with_references_and_style_parts(
             })
             .unwrap_or(0)
     };
-    let series_node = *series_nodes.first()?;
+    // A Pareto plot is represented by an ordinary owner series plus an
+    // auxiliary `paretoLine` whose `ownerIdx` names the owner's original
+    // document-order series index (CT_Series@ownerIdx, [MS-ODRAWXML]
+    // 2.24.3.77). This is independent of `formatIdx`; select the linked owner
+    // even when a hidden or auxiliary series appears first.
+    let pareto_pair = series_nodes.iter().copied().find_map(|pareto| {
+        if attr(&pareto, "layoutId").as_deref() != Some("paretoLine") {
+            return None;
+        }
+        let owner_idx = attr(&pareto, "ownerIdx")?.parse::<usize>().ok()?;
+        let owner = *all_series_nodes.get(owner_idx)?;
+        let owner_is_hidden = attr(&owner, "hidden")
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        (owner != pareto
+            && !owner_is_hidden
+            && attr(&owner, "layoutId").as_deref() != Some("paretoLine"))
+        .then_some((owner, pareto))
+    });
+    let (series_node, pareto_series_node) = pareto_pair
+        .map(|(owner, pareto)| (owner, Some(pareto)))
+        .unwrap_or((*series_nodes.first()?, None));
     let layout_id = attr(&series_node, "layoutId").unwrap_or_default();
     // [MS-ODRAWXML] represents a histogram as a clusteredColumn series with a
     // CT_Binning child; `histogram` is not an ST_SeriesLayout enumeration.
     // Normalize the semantic family here so raw observations cannot reach the
     // ordinary clustered-column renderer.
-    let chartex_histogram_binning = (layout_id == "clusteredColumn")
+    let chartex_histogram_binning = (pareto_series_node.is_none()
+        && layout_id == "clusteredColumn")
         .then(|| parse_chartex_histogram_binning(series_node))
         .flatten();
-    let chart_type = if chartex_histogram_binning.is_some() {
+    let chart_type = if pareto_series_node.is_some() {
+        "pareto".to_string()
+    } else if chartex_histogram_binning.is_some() {
         "histogram".to_string()
     } else {
         layout_id
@@ -3662,27 +3685,29 @@ pub fn parse_chartex_part_with_references_and_style_parts(
         .unwrap_or_else(|| vec![None; pt_count]);
     let source_number_format = chartex_number_format(primary_data, &["size", "val"], references);
 
-    let series_name = series_node
-        .descendants()
-        .find(|node| node.is_element() && node.tag_name().name() == "txData")
-        .and_then(|tx_data| {
-            child(tx_data, "v")
-                .and_then(|value| value.text())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .or_else(|| {
-                    child(tx_data, "f")
-                        .and_then(|formula| formula.text())
-                        .map(str::trim)
-                        .filter(|formula| !formula.is_empty())
-                        .and_then(|formula| references.resolve_strings(formula))
-                        .and_then(|values| {
-                            values.into_iter().find(|value| !value.trim().is_empty())
-                        })
-                })
-        })
-        .unwrap_or_default();
+    let series_name_for = |node: Node, references: &mut dyn ChartReferenceResolver| {
+        node.descendants()
+            .find(|child_node| child_node.is_element() && child_node.tag_name().name() == "txData")
+            .and_then(|tx_data| {
+                child(tx_data, "v")
+                    .and_then(|value| value.text())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .or_else(|| {
+                        child(tx_data, "f")
+                            .and_then(|formula| formula.text())
+                            .map(str::trim)
+                            .filter(|formula| !formula.is_empty())
+                            .and_then(|formula| references.resolve_strings(formula))
+                            .and_then(|values| {
+                                values.into_iter().find(|value| !value.trim().is_empty())
+                            })
+                    })
+            })
+            .unwrap_or_default()
+    };
+    let series_name = series_name_for(series_node, references);
 
     // `<cx:subtotals><cx:idx val>` identifies only points explicitly marked as
     // totals. The first waterfall point starts at zero geometrically, but it is
@@ -3768,6 +3793,52 @@ pub fn parse_chartex_part_with_references_and_style_parts(
         line_hidden,
     }];
 
+    // Preserve the authored Pareto line as a style carrier. Its cached values
+    // are retained on the wire for diagnostics, while the core derives stable
+    // cumulative fractions from the owner values so invalid/negative filtering
+    // and source-identity remapping happen exactly once.
+    if let Some(pareto_node) = pareto_series_node {
+        let pareto_data = data_for_series(pareto_node);
+        let pareto_values = pareto_data
+            .and_then(|data| chartex_number_values(data, &["val"], references))
+            .unwrap_or_default();
+        let pareto_color =
+            child(pareto_node, "spPr").and_then(|shape| resolver.resolve_shape_fill(shape));
+        let (pareto_line_color, pareto_line_width_emu, pareto_line_no_fill) =
+            extract_sp_pr_ln_style(pareto_node, resolver);
+        let pareto_chartex_style = child(pareto_node, "spPr")
+            .map(|_| parse_chartex_element_style(pareto_node, resolver, None, None));
+        let mut pareto_series = series[0].clone();
+        pareto_series.name = series_name_for(pareto_node, references);
+        pareto_series.chartex_format_idx = Some(series_format_index(pareto_node));
+        pareto_series.values = pareto_values;
+        pareto_series.categories = None;
+        pareto_series.color = pareto_line_color.clone().or(pareto_color);
+        pareto_series.chartex_style = pareto_chartex_style;
+        pareto_series.line_color = pareto_line_color;
+        pareto_series.line_width_emu = pareto_line_width_emu;
+        pareto_series.line_hidden = if pareto_line_no_fill {
+            Some(true)
+        } else if pareto_series.line_color.is_some() || pareto_series.line_width_emu.is_some() {
+            Some(false)
+        } else {
+            None
+        };
+        pareto_series.series_type = Some("line".to_string());
+        pareto_series.use_secondary_axis = Some(true);
+        pareto_series.show_marker = Some(false);
+        pareto_series.data_point_overrides = {
+            let overrides = parse_chartex_data_point_overrides(pareto_node, resolver);
+            (!overrides.is_empty()).then_some(overrides)
+        };
+        let (label_colors, label_overrides, label_defaults) =
+            parse_chartex_series_labels(pareto_node, pareto_series.values.len(), resolver);
+        pareto_series.data_label_colors = label_colors;
+        pareto_series.data_label_overrides = label_overrides;
+        pareto_series.series_data_labels = label_defaults;
+        series.push(pareto_series);
+    }
+
     // A flat clustered-column ChartEx plot may contain several CT_Series, each
     // selecting its own CT_Data through dataId. Preserve every visible series
     // rather than silently collapsing the plot to the first one.
@@ -3786,27 +3857,7 @@ pub fn parse_chartex_part_with_references_and_style_parts(
             let extra_categories = chartex_string_levels(extra_data, references)
                 .and_then(|levels| levels.into_iter().next())
                 .unwrap_or_default();
-            let extra_name = extra_node
-                .descendants()
-                .find(|node| node.is_element() && node.tag_name().name() == "txData")
-                .and_then(|tx_data| {
-                    child(tx_data, "v")
-                        .and_then(|value| value.text())
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(ToOwned::to_owned)
-                        .or_else(|| {
-                            child(tx_data, "f")
-                                .and_then(|formula| formula.text())
-                                .map(str::trim)
-                                .filter(|formula| !formula.is_empty())
-                                .and_then(|formula| references.resolve_strings(formula))
-                                .and_then(|values| {
-                                    values.into_iter().find(|value| !value.trim().is_empty())
-                                })
-                        })
-                })
-                .unwrap_or_default();
+            let extra_name = series_name_for(extra_node, references);
             let extra_color =
                 child(extra_node, "spPr").and_then(|shape| resolver.resolve_shape_fill(shape));
             let (extra_line_color, extra_line_width_emu, extra_line_no_fill) =
@@ -10436,7 +10487,7 @@ mod tests {
                     <cx:dataLabelHidden idx="1"/>
                   </cx:dataLabels><cx:dataId val="2"/>
                 </cx:series>
-                <cx:series layoutId="paretoLine" ownerIdx="0"><cx:dataId val="3"/></cx:series>
+                <cx:series layoutId="paretoLine" ownerIdx="99"><cx:dataId val="3"/></cx:series>
               </cx:plotAreaRegion></cx:plotArea></cx:chart>
             </cx:chartSpace>"#
         );
@@ -10489,6 +10540,88 @@ mod tests {
         assert_eq!(hidden_point.idx, 1);
         assert_eq!(hidden_point.fill_hidden, Some(true));
         assert_eq!(hidden_point.line_hidden, Some(true));
+    }
+
+    #[test]
+    fn parse_chartex_invalid_pareto_owners_remain_bounded() {
+        let ordinary_series = (0..512)
+            .map(|_| r#"<cx:series layoutId="clusteredColumn"><cx:dataId val="0"/></cx:series>"#)
+            .collect::<String>();
+        let invalid_pareto_series = (0..512)
+            .map(|_| {
+                r#"<cx:series layoutId="paretoLine" ownerIdx="999999"><cx:dataId val="0"/></cx:series>"#
+            })
+            .collect::<String>();
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}">
+              <cx:chartData><cx:data id="0">
+                <cx:strDim type="cat"><cx:lvl ptCount="1"><cx:pt idx="0">A</cx:pt></cx:lvl></cx:strDim>
+                <cx:numDim type="val"><cx:lvl ptCount="1"><cx:pt idx="0">1</cx:pt></cx:lvl></cx:numDim>
+              </cx:data></cx:chartData>
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                {ordinary_series}{invalid_pareto_series}
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let document = chart_space_of(&xml);
+        let model = parse_chartex_part(document.root_element(), &FixtureResolver, None)
+            .expect("ordinary series remain selectable");
+
+        assert_eq!(model.chart_type, "clusteredColumn");
+        assert_eq!(model.series.len(), 512);
+    }
+
+    #[test]
+    fn parse_chartex_pareto_line_keeps_its_owner_and_direct_line_style() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chartData>
+                <cx:data id="0">
+                  <cx:strDim type="cat"><cx:lvl ptCount="3">
+                    <cx:pt idx="0">Five</cx:pt><cx:pt idx="1">Twenty</cx:pt><cx:pt idx="2">Ten</cx:pt>
+                  </cx:lvl></cx:strDim>
+                  <cx:numDim type="val"><cx:lvl ptCount="3">
+                    <cx:pt idx="0">5</cx:pt><cx:pt idx="1">20</cx:pt><cx:pt idx="2">10</cx:pt>
+                  </cx:lvl></cx:numDim>
+                </cx:data>
+                <cx:data id="1"><cx:numDim type="val"><cx:lvl ptCount="3">
+                  <cx:pt idx="0">0.142857</cx:pt><cx:pt idx="1">0.714286</cx:pt><cx:pt idx="2">1</cx:pt>
+                </cx:lvl></cx:numDim></cx:data>
+              </cx:chartData>
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                <cx:series layoutId="waterfall" hidden="1" formatIdx="1"/>
+                <cx:series layoutId="clusteredColumn" formatIdx="7">
+                  <cx:tx><cx:txData><cx:v>Frequency</cx:v></cx:txData></cx:tx>
+                  <cx:dataPt idx="1"><cx:spPr><a:solidFill><a:srgbClr val="00AA00"/></a:solidFill></cx:spPr></cx:dataPt>
+                  <cx:dataId val="0"/>
+                </cx:series>
+                <cx:series layoutId="paretoLine" ownerIdx="1" formatIdx="8">
+                  <cx:tx><cx:txData><cx:v>Cumulative %</cx:v></cx:txData></cx:tx>
+                  <cx:spPr><a:ln w="25400"><a:solidFill><a:srgbClr val="333333"/></a:solidFill></a:ln></cx:spPr>
+                  <cx:dataId val="1"/>
+                </cx:series>
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let document = chart_space_of(&xml);
+        let model = parse_chartex_part(document.root_element(), &FixtureResolver, None)
+            .expect("owner-backed Pareto parse");
+
+        assert_eq!(model.chart_type, "pareto");
+        assert_eq!(model.categories, vec!["Five", "Twenty", "Ten"]);
+        assert_eq!(model.series.len(), 2);
+        assert_eq!(model.series[0].name, "Frequency");
+        assert_eq!(model.series[0].chartex_format_idx, Some(7));
+        assert_eq!(
+            model.series[0].values,
+            vec![Some(5.0), Some(20.0), Some(10.0)]
+        );
+        assert_eq!(model.series[1].name, "Cumulative %");
+        assert_eq!(model.series[1].chartex_format_idx, Some(8));
+        assert_eq!(model.series[1].series_type.as_deref(), Some("line"));
+        assert_eq!(model.series[1].use_secondary_axis, Some(true));
+        assert_eq!(model.series[1].color.as_deref(), Some("333333"));
+        assert_eq!(model.series[1].line_width_emu, Some(25400));
     }
 
     #[test]
