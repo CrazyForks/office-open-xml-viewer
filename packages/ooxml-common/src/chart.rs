@@ -9876,10 +9876,7 @@ mod tests {
             .expect("dataPoint style");
         let placeholder_fills = placeholder_style.fill_colors.expect("phClr fills");
         let placeholder_lines = placeholder_style.line_colors.expect("phClr lines");
-        assert_eq!(
-            placeholder_lines,
-            placeholder_fills.iter().cloned().collect::<Vec<_>>()
-        );
+        assert_eq!(placeholder_lines, placeholder_fills.to_vec());
         assert_ne!(
             placeholder_fills[0].as_deref(),
             Some(raw_accents[0].as_str())

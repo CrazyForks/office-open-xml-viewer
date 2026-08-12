@@ -58,6 +58,7 @@ impl ooxml_common::chart::ColorResolver for PptxColorResolver<'_> {
 /// wraps the resulting [`ChartModel`] in a pptx [`ChartElement`] graphic frame.
 /// The frame geometry (`x`/`y`/`width`/`height`) is filled in by the caller
 /// from the slide's `<p:graphicFrame><a:xfrm>`; here it defaults to 0.
+#[cfg(test)]
 pub(crate) fn parse_legacy_chart(
     xml: &str,
     theme: &HashMap<String, String>,
