@@ -48,6 +48,13 @@ import {
 } from './box-whisker.js';
 import { planParetoLayout } from './pareto-layout.js';
 import { placeTrendlineLabel } from './trendline-label.js';
+import {
+  boundDataLabelText,
+  fitDataLabelLines,
+  resolveDataLabelPlacement,
+  type DataLabelAnchor,
+  type DataLabelRect,
+} from './data-label-layout.js';
 import { hexToRgba, resolveFill } from '../shape/paint.js';
 import {
   DEFAULT_TEXT_INSET_LR_EMU,
@@ -1659,6 +1666,54 @@ function chartCategories(chart: ChartModel): string[] {
   return n > 0 ? Array.from({ length: n }, (_, i) => String(i + 1)) : [];
 }
 
+interface EffectiveDataLabelTextOptions {
+  customText?: string | null;
+  showCategory?: boolean;
+  showSeries?: boolean;
+  showValue?: boolean;
+  showPercent?: boolean;
+  category?: string;
+  seriesName?: string;
+  sourceValue?: number;
+  percentRatio?: number;
+  formatCode?: string | null;
+  percentFormatCode?: string | null;
+  date1904?: boolean;
+  separator?: string | null;
+  defaultSeparator?: string;
+}
+
+/** Compose authored data-label content once, independently from its anchor. */
+function effectiveDataLabelText(options: EffectiveDataLabelTextOptions): string {
+  if (options.customText) return options.customText;
+  const parts: string[] = [];
+  if (options.showCategory && options.category) parts.push(options.category);
+  if (options.showSeries && options.seriesName) parts.push(options.seriesName);
+  if (options.showValue && options.sourceValue != null) {
+    parts.push(formatChartValWithCode(
+      options.sourceValue, options.formatCode ?? null, options.date1904,
+    ));
+  }
+  if (options.showPercent && options.percentRatio != null) {
+    parts.push(formatChartValWithCode(
+      options.percentRatio,
+      options.percentFormatCode ?? options.formatCode ?? '0%',
+      options.date1904,
+    ));
+  }
+  return parts.filter(part => part !== '').join(
+    options.separator ?? options.defaultSeparator ?? ' ',
+  );
+}
+
+function dataLabelRectIntersection(a: DataLabelRect, b: DataLabelRect): DataLabelRect | null {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.w, b.x + b.w);
+  const bottom = Math.min(a.y + a.h, b.y + b.h);
+  return right > x && bottom > y ? { x, y, w: right - x, h: bottom - y } : null;
+}
+
 /**
  * Draw a bar data label with the ECMA-376 §21.2.2.16 `dLblPos` semantics.
  *
@@ -1677,54 +1732,25 @@ function drawBarDataLabel(
   orient: 'vertical' | 'horizontal',
   position: string | null,
   color: string | null,
+  fontSizePx: number,
+  bounds: DataLabelRect,
+  layoutReferenceRect: DataLabelRect,
+  manualLayout?: ChartDataLabelOverride['manualLayout'],
   negative = false,
 ): void {
-  const pos = (position ?? 'outEnd');
-  const fill = color ? `#${color}` : '#333';
-  ctx.fillStyle = fill;
-  if (orient === 'vertical') {
-    // bx/by = top-left of bar rect, barL = bar height, barW = bar width. For a
-    // positive column the value END is the TOP edge (`by`) and the BASE the
-    // bottom (`by + barL`); for a negative column those swap (the bar hangs
-    // below the zero line, so its end is the bottom).
-    const cx = bx + barW / 2;
-    const endY  = negative ? by + barL : by;         // the far (value) edge
-    const baseY = negative ? by : by + barL;          // the zero-line edge
-    if (pos === 'inBase') {
-      ctx.textAlign = 'center'; ctx.textBaseline = negative ? 'top' : 'bottom';
-      ctx.fillText(text, cx, negative ? baseY + 2 : baseY - 2);
-    } else if (pos === 'inEnd') {
-      ctx.textAlign = 'center'; ctx.textBaseline = negative ? 'bottom' : 'top';
-      ctx.fillText(text, cx, negative ? endY - 2 : endY + 2);
-    } else if (pos === 'ctr') {
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(text, cx, by + barL / 2);
-    } else {
-      // outEnd / default: just beyond the value edge.
-      ctx.textAlign = 'center'; ctx.textBaseline = negative ? 'top' : 'bottom';
-      ctx.fillText(text, cx, negative ? endY + 1 : endY - 1);
-    }
-  } else {
-    // Horizontal: positive bars grow to the RIGHT from bx, negative bars to the
-    // left (so the value END is the LEFT edge `bx` and the BASE the right edge).
-    const cy = by + barW / 2;
-    const endX  = negative ? bx : bx + barL;          // the far (value) edge
-    const baseX = negative ? bx + barL : bx;          // the zero-line edge
-    if (pos === 'inBase') {
-      ctx.textAlign = negative ? 'right' : 'left'; ctx.textBaseline = 'middle';
-      ctx.fillText(text, negative ? baseX - 4 : baseX + 4, cy);
-    } else if (pos === 'inEnd') {
-      ctx.textAlign = negative ? 'left' : 'right'; ctx.textBaseline = 'middle';
-      ctx.fillText(text, negative ? endX + 4 : endX - 4, cy);
-    } else if (pos === 'ctr') {
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(text, bx + barL / 2, cy);
-    } else {
-      // outEnd / default: just past the value edge.
-      ctx.textAlign = negative ? 'right' : 'left'; ctx.textBaseline = 'middle';
-      ctx.fillText(text, negative ? endX - 2 : endX + 2, cy);
-    }
-  }
+  const rect = orient === 'vertical'
+    ? { x: bx, y: by, w: barW, h: barL }
+    : { x: bx, y: by, w: barL, h: barW };
+  drawBoundedDataLabelText(
+    ctx,
+    text,
+    { kind: 'bar', rect, orientation: orient, negative, position: position ?? 'outEnd' },
+    bounds,
+    fontSizePx,
+    color ? `#${color}` : '#333',
+    manualLayout,
+    layoutReferenceRect,
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2460,9 +2486,15 @@ function renderBarChart(
         }
         const seriesLabels = s.seriesDataLabels;
         const label = resolveChartExLabel(
-          chart, s, ci, s.categories?.[ci] ?? cats[ci] ?? '', sv,
-          { visible: chart.showDataLabels, showVal: chart.showDataLabels, showCatName: false },
+          chart, s, ci, s.categories?.[ci] ?? cats[ci] ?? '', raw,
+          {
+            visible: chart.showDataLabels,
+            showVal: chart.showDataLabels && !pct,
+            showPercent: chart.showDataLabels && pct,
+            showCatName: false,
+          },
           labelOverrides[si],
+          pct ? sv / 100 : undefined,
         );
         if (label) {
           // ECMA-376 §21.2.2.30 / §21.1.2.3.2 — data label font size comes from
@@ -2477,9 +2509,6 @@ function renderBarChart(
           const bold = label.fontBold
             || (seriesLabels?.fontBold == null && authoredLabel?.fontBold == null);
           ctx.font = `${bold ? 'bold ' : ''}${lsz}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
-          const text = pct && authoredLabel?.text == null
-            ? `${Math.round(sv)}%`
-            : label.text;
           // drawBarDataLabel takes (bx, by, barL=length, barW=thickness). For
           // a vertical column bar, "length" is the bar's height and
           // "thickness" is its horizontal width — pass them in that order.
@@ -2488,11 +2517,15 @@ function renderBarChart(
           // inside the helper) use the bar's HEIGHT instead of its width,
           // pushing data labels far to the right of the bar.
           drawBarDataLabel(
-            ctx, text,
+            ctx, label.text,
             bx, by, barH, barW,
             'vertical',
             label.position ?? chart.dataLabelPosition ?? (stacked ? 'ctr' : null),
             s.dataLabelColors?.[ci] ?? label.fontColor ?? s.labelColor ?? chart.dataLabelFontColor ?? null,
+            lsz,
+            { x: px0, y: py0, w: pw, h: ph },
+            { x, y, w, h },
+            authoredLabel?.manualLayout,
             negative,
           );
         }
@@ -2528,9 +2561,15 @@ function renderBarChart(
         }
         const seriesLabels = s.seriesDataLabels;
         const label = resolveChartExLabel(
-          chart, s, ci, s.categories?.[ci] ?? cats[ci] ?? '', sv,
-          { visible: chart.showDataLabels, showVal: chart.showDataLabels, showCatName: false },
+          chart, s, ci, s.categories?.[ci] ?? cats[ci] ?? '', raw,
+          {
+            visible: chart.showDataLabels,
+            showVal: chart.showDataLabels && !pct,
+            showPercent: chart.showDataLabels && pct,
+            showCatName: false,
+          },
           labelOverrides[si],
+          pct ? sv / 100 : undefined,
         );
         if (label) {
           const sizeHpt = label.fontSizeHpt ?? chart.dataLabelFontSizeHpt;
@@ -2541,15 +2580,16 @@ function renderBarChart(
           const bold = label.fontBold
             || (seriesLabels?.fontBold == null && authoredLabel?.fontBold == null);
           ctx.font = `${bold ? 'bold ' : ''}${lsz}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
-          const text = pct && authoredLabel?.text == null
-            ? `${Math.round(sv)}%`
-            : label.text;
           drawBarDataLabel(
-            ctx, text,
+            ctx, label.text,
             bx, by, barL, barW,
             'horizontal',
             label.position ?? chart.dataLabelPosition ?? (stacked ? 'ctr' : null),
             s.dataLabelColors?.[ci] ?? label.fontColor ?? s.labelColor ?? chart.dataLabelFontColor ?? null,
+            lsz,
+            { x: px0, y: py0, w: pw, h: ph },
+            { x, y, w, h },
+            authoredLabel?.manualLayout,
             negative,
           );
         }
@@ -2716,6 +2756,7 @@ function renderBarChart(
         ptToPx,
         false,
         chart.scatterStyle ?? 'marker',
+        { x, y, w, h },
       );
     }
   }
@@ -3138,6 +3179,11 @@ function renderLineChart(
       // the chart-level position, else PowerPoint's line-chart default `'r'`
       // (right of the point).
       chart.dataLabelPosition ?? 'r',
+      { x: px0, y: py0, w: pw, h: ph },
+      { x, y, w, h },
+      pct && pctTotals
+        ? ci => (s.values[ci] ?? 0) / pctTotals[ci]
+        : undefined,
     );
     if (perPointLabels) ctx.fillStyle = color;
     for (let ci = 0; ci < n; ci++) {
@@ -3167,10 +3213,11 @@ function renderLineChart(
         // clears the dot (2px when there is no marker), matching the prior clear
         // distance but now direction-aware.
         drawDataLabelText(
-          ctx, toX(ci), yOf(pv), formatChartVal(pv),
+          ctx, toX(ci), yOf(pv), formatChartVal(s.values[ci] ?? 0),
           chart.dataLabelPosition ?? 'r', dataLabelPx, undefined, false,
           chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
           drawMarkers ? markerR + 1 : 2,
+          { x: px0, y: py0, w: pw, h: ph },
         );
         ctx.fillStyle = color;
       }
@@ -3874,6 +3921,11 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
         // area-chart default `'ctr'` (centered on the point, ECMA-376 default
         // for the areaChart group).
         chart.dataLabelPosition ?? 'ctr',
+        { x: px0, y: py0, w: pw, h: ph },
+        { x, y, w, h },
+        pct && pctTotals
+          ? ci => (s.values[ci] ?? 0) / pctTotals[ci]
+          : undefined,
       );
     }
   }
@@ -3930,6 +3982,8 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     drawCategoryDataLabels(
       ctx, s, cats, n, toX, yOf, plottedOf, ph, ptToPx, chart.date1904 ?? false, false,
       chartFontFamily(chart, chart.dataLabelFontFace, 'minor'), chart.dataLabelPosition ?? 'r',
+      { x: px0, y: py0, w: pw, h: ph },
+      { x, y, w, h },
     );
     drawSeriesTrendlines(
       ctx, s, stroke, toX, yOf, ptToPx, undefined,
@@ -4118,9 +4172,16 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // `<c:dLbls>` definition; the rich labels are drawn in a separate pass after
   // all slices. Keeping the legacy path inline preserves the historical
   // draw-call order for a plain pie/doughnut (byte-stable).
-  const richDef = s.seriesDataLabels;
-  const hasRichLabels = richDef != null &&
-    (richDef.showVal || richDef.showCatName || richDef.showSerName || richDef.showPercent);
+  const richDef: ChartSeriesDataLabels = s.seriesDataLabels ?? {
+    showVal: false,
+    showCatName: false,
+    showSerName: false,
+    showPercent: false,
+  };
+  // A point-level dLbl is independently authored and must not depend on a
+  // series dLbls default existing. Even a delete-only override participates in
+  // rich dispatch so the legacy chart-wide percent path cannot resurrect it.
+  const hasRichLabels = s.seriesDataLabels != null || (s.dataLabelOverrides?.length ?? 0) > 0;
   const legacyLabels = chart.showDataLabels && !hasRichLabels;
   const dLblFont = chartFontFamily(chart, chart.dataLabelFontFace, 'minor');
 
@@ -4176,9 +4237,10 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // slices. Only runs when a rich definition is present; the plain percent
   // labels above are byte-identical to the pre-CH8 pie.
   if (hasRichLabels) {
+    const outerRingInnerR = isDoughnut ? outerR - ringBand : 0;
     drawPieRichLabels(
       ctx, chart, richDef, s, cats, vals, total,
-      cx2, cy2, outerR, innerR, startAngle, dLblFont, ptToPx,
+      cx2, cy2, outerR, outerRingInnerR, startAngle, dLblFont, ptToPx,
       plotLeft, plotTop, pw, ph,
       x, y, w, h,
     );
@@ -4228,21 +4290,30 @@ function drawPieRichLabels(
   plotX: number, plotY: number, plotW: number, plotH: number,
   chartX: number, chartY: number, chartW: number, chartH: number,
 ): void {
-  // Callout mode: a `<c:spPr>` box shape on the dLbls (Word's boxed pie labels).
-  // Labels de-overlap and clamp inside the PLOT rect (not the full chart rect),
-  // so the topmost box cannot ride up into the title band above the plot.
-  if (def.labelBox) {
-    drawPieCalloutLabels(ctx, chart, def, s, cats, vals, total, cx2, cy2, outerR, startAngle, font, ptToPx, plotX, plotW, plotY, plotH);
-    return;
+  const overrides = s.dataLabelOverrides ?? [];
+  const calloutIndices = new Set<number>();
+  for (let index = 0; index < vals.length; index++) {
+    const override = overrides.find(item => item.idx === index);
+    if (override?.labelBox || def.labelBox) calloutIndices.add(index);
+  }
+  // Boxed labels have their own paint/collision pass, but only those points are
+  // dispatched to it. A per-point spPr must not turn every sibling into a
+  // callout or change the sibling's authored radial position.
+  if (calloutIndices.size > 0) {
+    drawPieCalloutLabels(
+      ctx, chart, def, s, cats, vals, total, cx2, cy2, outerR, innerR, startAngle,
+      font, ptToPx, plotX, plotW, plotY, plotH, chartX, chartY, chartW, chartH,
+      calloutIndices,
+    );
   }
 
-  const overrides = s.dataLabelOverrides ?? [];
   const outsideLabels: PieOutsideLabel[] = [];
   let angle = startAngle;
   for (let i = 0; i < vals.length; i++) {
     const slice = (vals[i] / total) * Math.PI * 2;
     const midAngle = angle + slice / 2;
     angle += slice;
+    if (calloutIndices.has(i)) continue;
     // A per-point `<c:dLbl idx>` (§21.2.2.47) overrides the series-level
     // `<c:dLbls>` (§21.2.2.49) for this one slice. Its show-flags, font color /
     // size / bold, and position each fall back to the series default when the
@@ -4264,34 +4335,69 @@ function drawPieRichLabels(
     // override text) wins outright; otherwise compose from the resolved flags.
     // Positioning is handled below (§21.2.2.48 `dLblPos`). Percent is the
     // slice's share of the total.
-    let text: string;
-    if (ov && ov.text) {
-      text = ov.text;
-    } else {
-      const parts: string[] = [];
-      if (showCatName) parts.push((cats[i] ?? '').toString());
-      if (showSerName) parts.push(s.name);
-      if (showVal) parts.push(formatChartValWithCode(vals[i], def.formatCode ?? s.valFormatCode ?? null, chart.date1904 ?? false));
-      if (showPercent) parts.push(`${Math.round((vals[i] / total) * 100)}%`);
-      text = parts.filter(Boolean).join(def.separator ?? ' ');
-    }
+    const text = effectiveDataLabelText({
+      customText: ov?.text,
+      showCategory: showCatName,
+      showSeries: showSerName,
+      showValue: showVal,
+      showPercent,
+      category: (cats[i] ?? '').toString(),
+      seriesName: s.name,
+      sourceValue: vals[i],
+      percentRatio: vals[i] / total,
+      formatCode: ov?.formatCode ?? def.formatCode ?? s.valFormatCode ?? null,
+      percentFormatCode: ov?.formatCode ?? def.formatCode ?? '0%',
+      date1904: chart.date1904 ?? false,
+      separator: ov?.separator ?? def.separator,
+    });
     if (!text) continue;
     const pos = ov?.position ?? def.position ?? 'bestFit';
     const outside = pos === 'outEnd';
     const sizeHpt = ov?.fontSizeHpt ?? def.fontSizeHpt;
-    const sizePx = sizeHpt ? sizeHpt / 100 : Math.max(8, outerR * 0.1);
+    const sizePx = sizeHpt ? (sizeHpt / 100) * ptToPx : Math.max(8, outerR * 0.1);
     const bold = ov?.fontBold ?? def.fontBold;
     const fontColor = ov?.fontColor ?? def.fontColor;
-    const lines = text.split(/\r?\n/);
+    const automaticLabelR = innerR > 0.01
+      ? (innerR + outerR) / 2
+      : outerR * PIE_CTR_LABEL_RADIUS_FRAC;
+    if (ov?.manualLayout) {
+      ctx.font = `${bold ? 'bold ' : ''}${sizePx}px ${font}`;
+      drawBoundedDataLabelText(
+        ctx,
+        text,
+        {
+          kind: 'point',
+          x: cx2 + Math.cos(midAngle) * automaticLabelR,
+          y: cy2 + Math.sin(midAngle) * automaticLabelR,
+          position: 'ctr',
+        },
+        { x: plotX, y: plotY, w: plotW, h: plotH },
+        sizePx,
+        fontColor ? `#${fontColor}` : '#fff',
+        ov.manualLayout,
+        { x: chartX, y: chartY, w: chartW, h: chartH },
+      );
+      continue;
+    }
     if (outside) {
       ctx.font = `${bold ? 'bold ' : ''}${sizePx}px ${font}`;
-      const textW = lines.reduce((max, line) => Math.max(max, ctx.measureText(line).width), 0);
       const lineHeight = sizePx * 1.15;
-      const textH = sizePx + Math.max(0, lines.length - 1) * lineHeight;
+      const fittedLines = fitDataLabelLines(
+        text,
+        Math.max(0, chartW - sizePx),
+        Math.max(0, chartH - sizePx),
+        lineHeight,
+        value => ctx.measureText(value).width,
+      );
+      if (fittedLines.length === 0) continue;
+      const textW = fittedLines.reduce(
+        (max, line) => Math.max(max, ctx.measureText(line).width), 0,
+      );
+      const textH = sizePx + Math.max(0, fittedLines.length - 1) * lineHeight;
       outsideLabels.push(createPieOutsideLabel(
-        lines, midAngle, cx2, cy2, outerR,
+        fittedLines, midAngle, cx2, cy2, outerR,
         textW, textH, lineHeight, sizePx, bold ?? false,
-        fontColor ? `#${fontColor}` : '#333', ptToPx,
+        fontColor ? `#${fontColor}` : '#333',
       ));
       continue;
     }
@@ -4311,17 +4417,36 @@ function drawPieRichLabels(
     //     sector centroid. The 5% sliver rides marginally further out in
     //     PowerPoint; we do not model that per-slice nudge. This is an empirical
     //     approximation of an undocumented PowerPoint layout, not a spec formula.
-    const labelR = innerR > 0.01
-        ? (innerR + outerR) / 2
-        : outerR * PIE_CTR_LABEL_RADIUS_FRAC;
+    const labelR = automaticLabelR;
     const lx2 = cx2 + Math.cos(midAngle) * labelR;
     const ly2 = cy2 + Math.sin(midAngle) * labelR;
     ctx.font = `${bold ? 'bold ' : ''}${sizePx}px ${font}`;
-    ctx.fillStyle = fontColor ? `#${fontColor}` : '#fff';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const lineHeight = sizePx * 1.15;
-    const firstY = ly2 - ((lines.length - 1) * lineHeight) / 2;
-    lines.forEach((line, lineIndex) => ctx.fillText(line, lx2, firstY + lineIndex * lineHeight));
+    const tangentialCapacity = 2 * labelR * Math.sin(Math.min(Math.PI, Math.abs(slice)) / 2)
+      - sizePx;
+    const radialCapacity = innerR > 0.01
+      ? outerR - innerR - sizePx
+      : outerR - sizePx;
+    if (!(tangentialCapacity > 0) || !(radialCapacity > 0)) continue;
+    const sliceBounds = dataLabelRectIntersection(
+      {
+        x: lx2 - tangentialCapacity / 2,
+        y: ly2 - radialCapacity / 2,
+        w: tangentialCapacity,
+        h: radialCapacity,
+      },
+      { x: plotX, y: plotY, w: plotW, h: plotH },
+    );
+    if (!sliceBounds) continue;
+    drawBoundedDataLabelText(
+      ctx,
+      text,
+      { kind: 'point', x: lx2, y: ly2, position: 'ctr' },
+      sliceBounds,
+      sizePx,
+      fontColor ? `#${fontColor}` : '#fff',
+      undefined,
+      { x: chartX, y: chartY, w: chartW, h: chartH },
+    );
   }
 
   drawPieOutsideLabels(
@@ -4397,12 +4522,8 @@ function createPieOutsideLabel(
   fontPx: number,
   bold: boolean,
   fontColor: string,
-  ptToPx: number,
 ): PieOutsideLabel {
-  // One typographic point prevents antialiasing at the tangent from visually
-  // merging the glyph edge with the slice. It is a rendering clearance, not an
-  // Office-layout estimate; the outside invariant itself comes from outEnd.
-  const clearance = ptToPx;
+  const clearance = fontPx * 0.5;
   const distance = outsideLabelRadialDistance(
     midAngle, outerR, boxW / 2, boxH / 2, clearance,
   );
@@ -4461,8 +4582,8 @@ function drawPieOutsideLabels(
   // Re-solve horizontal placement after collision movement. For a fixed label
   // y-range, the nearest vertical distance to the pie centre determines the
   // exact horizontal clearance required for the full rectangle.
-  const target = outerR + ptToPx;
   for (const label of labels) {
+    const target = outerR + label.fontPx * 0.5;
     const halfW = label.boxW / 2;
     const halfH = label.boxH / 2;
     const nearestDy = Math.max(Math.abs(label.cyBox - pieCy) - halfH, 0);
@@ -4481,6 +4602,10 @@ function drawPieOutsideLabels(
     }
   }
 
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(boundsX, boundsY, boundsW, boundsH);
+  ctx.clip();
   const leaderColor = def.leaderLineColor ? `#${def.leaderLineColor}` : '#a6a6a6';
   const leaderPx = def.leaderLineWidthEmu
     ? Math.max(0.5, (def.leaderLineWidthEmu / EMU_PER_PT) * ptToPx)
@@ -4509,12 +4634,14 @@ function drawPieOutsideLabels(
       ctx.fillText(label.lines[i], label.cxBox, firstY + i * label.lineHeight);
     }
   }
+  ctx.restore();
 }
 
 /** One laid-out pie callout label: its wrapped text lines, box rectangle, the
  *  rim anchor point on its slice, and the resolved per-point style. */
 interface PieCalloutLabel {
   lines: string[];
+  lineHeight: number;
   /** Slice mid-angle (canvas radians) — the leader-line target direction. */
   midAngle: number;
   /** Rim anchor point (on the outer arc at `midAngle`). */
@@ -4534,6 +4661,10 @@ interface PieCalloutLabel {
   boxBorderPx: number;
   fontPx: number;
   bold: boolean;
+  /** An authored inside position keeps the box at its slice anchor. */
+  inside: boolean;
+  /** Explicit per-point manual layout is never moved by the auto collision pass. */
+  manualClip?: DataLabelRect;
 }
 
 /** Word-style boxed pie/doughnut callout labels (`bestFit`). Each label is a
@@ -4553,22 +4684,22 @@ function drawPieCalloutLabels(
   vals: number[],
   total: number,
   cx2: number, cy2: number,
-  outerR: number,
+  outerR: number, innerR: number,
   startAngle: number,
   font: string,
   ptToPx: number,
   boundsX: number, boundsW: number, boundsY: number, boundsH: number,
+  chartX: number, chartY: number, chartW: number, chartH: number,
+  indices: ReadonlySet<number>,
 ): void {
   const overrides = s.dataLabelOverrides ?? [];
   const findOverride = (i: number): ChartDataLabelOverride | undefined =>
     overrides.find(o => o.idx === i);
 
   // Base font size: series default (hpt → px) or a radius-relative fallback.
-  const baseFontPx = def.fontSizeHpt ? def.fontSizeHpt / 100 : Math.max(9, outerR * 0.09);
-  // Box padding around the text block (px). Geometry, not a spec constant.
-  const padX = Math.max(4, baseFontPx * 0.45);
-  const padY = Math.max(2, baseFontPx * 0.28);
-  const lineGap = baseFontPx * 0.22;
+  const baseFontPx = def.fontSizeHpt
+    ? (def.fontSizeHpt / 100) * ptToPx
+    : Math.max(9, outerR * 0.09);
 
   const seriesBox = def.labelBox;
 
@@ -4580,6 +4711,7 @@ function drawPieCalloutLabels(
     const midAngle = angle + slice / 2;
     angle += slice;
     if (slice <= 0) continue;
+    if (!indices.has(i)) continue;
 
     const ov = findOverride(i);
     // A genuine `<c:delete val="1"/>` (§21.2.2.43) skips the label; a per-point
@@ -4595,19 +4727,8 @@ function drawPieCalloutLabels(
     const showSerName = ov?.showSerName ?? def.showSerName;
     const showVal     = ov?.showVal ?? def.showVal;
     const showPercent = ov?.showPercent ?? def.showPercent;
-    const lines: string[] = [];
-    if (ov && ov.text) {
-      lines.push(ov.text);
-    } else {
-      if (showCatName) { const c = (cats[i] ?? '').toString(); if (c) lines.push(c); }
-      if (showSerName && s.name) lines.push(s.name);
-      if (showVal) lines.push(formatChartValWithCode(vals[i], def.formatCode ?? s.valFormatCode ?? null, chart.date1904 ?? false));
-      if (showPercent) lines.push(`${Math.round((vals[i] / total) * 100)}%`);
-    }
-    if (lines.length === 0) continue;
-
     // Per-point overrides (font colour/size/bold + box), else series defaults.
-    const fontPx = ov?.fontSizeHpt ? ov.fontSizeHpt / 100 : baseFontPx;
+    const fontPx = ov?.fontSizeHpt ? (ov.fontSizeHpt / 100) * ptToPx : baseFontPx;
     const bold = ov?.fontBold ?? def.fontBold ?? false;
     const fontColor = ov?.fontColor ? `#${ov.fontColor}` : (def.fontColor ? `#${def.fontColor}` : '#000');
     const box = ov?.labelBox ?? seriesBox;
@@ -4616,28 +4737,139 @@ function drawPieCalloutLabels(
     const boxBorderPx = box?.borderWidthEmu
       ? Math.max(0.75, (box.borderWidthEmu / EMU_PER_PT) * ptToPx)
       : 1;
+    const position = ov?.position ?? def.position ?? 'bestFit';
 
-    // Measure the widest line to size the box.
+    const text = effectiveDataLabelText({
+      customText: ov?.text,
+      showCategory: showCatName,
+      showSeries: showSerName,
+      showValue: showVal,
+      showPercent,
+      category: (cats[i] ?? '').toString(),
+      seriesName: s.name,
+      sourceValue: vals[i],
+      percentRatio: vals[i] / total,
+      formatCode: ov?.formatCode ?? def.formatCode ?? s.valFormatCode ?? null,
+      percentFormatCode: ov?.formatCode ?? def.formatCode ?? '0%',
+      date1904: chart.date1904 ?? false,
+      separator: ov?.separator ?? def.separator,
+      defaultSeparator: '\n',
+    });
+    if (!text) continue;
+
+    const padX = Math.max(4, fontPx * 0.45);
+    const padY = Math.max(2, fontPx * 0.28);
+    const lineGap = fontPx * 0.22;
+    const lineH = fontPx + lineGap;
     ctx.font = `${bold ? 'bold ' : ''}${fontPx}px ${font}`;
+    let lines = fitDataLabelLines(
+      text,
+      Math.max(0, boundsW - padX * 2),
+      Math.max(0, boundsH - padY * 2),
+      lineH,
+      value => ctx.measureText(value).width,
+    );
+    if (lines.length === 0) continue;
     let textW = 0;
     for (const ln of lines) textW = Math.max(textW, ctx.measureText(ln).width);
-    const lineH = fontPx + lineGap;
-    const boxW = textW + padX * 2;
-    const boxH = lines.length * lineH - lineGap + padY * 2;
+    let boxW = textW + padX * 2;
+    let boxH = lines.length * lineH - lineGap + padY * 2;
 
     const rimX = cx2 + Math.cos(midAngle) * outerR;
     const rimY = cy2 + Math.sin(midAngle) * outerR;
-    const leftSide = Math.cos(midAngle) < 0;
+    let leftSide = Math.cos(midAngle) < 0;
 
     // Initial box centre: outside the rim along the mid-angle. The gap scales
     // with the box so small slices get pulled further out (Word `bestFit`).
     const outGap = Math.max(boxW, boxH) * 0.55 + outerR * 0.06;
-    const cxBox = rimX + Math.cos(midAngle) * outGap;
-    const cyBox = rimY + Math.sin(midAngle) * outGap;
+    let cxBox = rimX + Math.cos(midAngle) * outGap;
+    let cyBox = rimY + Math.sin(midAngle) * outGap;
+    let manualClip: DataLabelRect | undefined;
+    let inside = false;
+    if (ov?.manualLayout) {
+      const manual = resolveDataLabelPlacement(
+        { kind: 'point', x: cxBox, y: cyBox, position: 'ctr' },
+        { x: boundsX, y: boundsY, w: boundsW, h: boundsH },
+        { w: boxW, h: boxH },
+        fontPx,
+        ov.manualLayout,
+        { x: chartX, y: chartY, w: chartW, h: chartH },
+      );
+      if (!manual) continue;
+      boxW = manual.rect.w;
+      boxH = manual.rect.h;
+      lines = fitDataLabelLines(
+        text,
+        Math.max(0, boxW - padX * 2),
+        Math.max(0, boxH - padY * 2),
+        lineH,
+        value => ctx.measureText(value).width,
+      );
+      if (lines.length === 0) continue;
+      cxBox = manual.rect.x + manual.rect.w / 2;
+      cyBox = manual.rect.y + manual.rect.h / 2;
+      leftSide = cxBox < cx2;
+      manualClip = manual.clip;
+    } else if (position !== 'bestFit' && position !== 'outEnd') {
+      const labelR = innerR > 0.01
+        ? (innerR + outerR) / 2
+        : outerR * PIE_CTR_LABEL_RADIUS_FRAC;
+      const labelX = cx2 + Math.cos(midAngle) * labelR;
+      const labelY = cy2 + Math.sin(midAngle) * labelR;
+      const tangentialCapacity = 2 * labelR
+        * Math.sin(Math.min(Math.PI, Math.abs(slice)) / 2) - fontPx;
+      const radialCapacity = innerR > 0.01
+        ? outerR - innerR - fontPx
+        : outerR - fontPx;
+      const sliceBounds = dataLabelRectIntersection(
+        {
+          x: labelX - tangentialCapacity / 2,
+          y: labelY - radialCapacity / 2,
+          w: tangentialCapacity,
+          h: radialCapacity,
+        },
+        { x: boundsX, y: boundsY, w: boundsW, h: boundsH },
+      );
+      if (!sliceBounds) continue;
+      lines = fitDataLabelLines(
+        text,
+        Math.max(0, sliceBounds.w - padX * 2),
+        Math.max(0, sliceBounds.h - padY * 2),
+        lineH,
+        value => ctx.measureText(value).width,
+      );
+      if (lines.length === 0) continue;
+      textW = lines.reduce((width, line) => Math.max(width, ctx.measureText(line).width), 0);
+      boxW = textW + padX * 2;
+      boxH = lines.length * lineH - lineGap + padY * 2;
+      const anchorPosition = position === 'inBase' || position === 'inEnd'
+        ? 'ctr'
+        : position;
+      const placement = resolveDataLabelPlacement(
+        { kind: 'point', x: labelX, y: labelY, position: anchorPosition },
+        sliceBounds,
+        { w: boxW, h: boxH },
+        fontPx,
+      );
+      if (!placement) continue;
+      cxBox = placement.textAlign === 'left'
+        ? placement.x + boxW / 2
+        : placement.textAlign === 'right'
+          ? placement.x - boxW / 2
+          : placement.x;
+      cyBox = placement.textBaseline === 'top'
+        ? placement.y + boxH / 2
+        : placement.textBaseline === 'bottom'
+          ? placement.y - boxH / 2
+          : placement.y;
+      leftSide = cxBox < cx2;
+      manualClip = placement.clip;
+      inside = true;
+    }
 
     labels.push({
-      lines, midAngle, rimX, rimY, boxW, boxH, cxBox, cyBox,
-      leftSide, fontColor, boxFill, boxBorder, boxBorderPx, fontPx, bold,
+      lines, lineHeight: lineH, midAngle, rimX, rimY, boxW, boxH, cxBox, cyBox,
+      leftSide, fontColor, boxFill, boxBorder, boxBorderPx, fontPx, bold, inside, manualClip,
     });
   }
 
@@ -4708,8 +4940,8 @@ function drawPieCalloutLabels(
     const topUnderflow = topLimit - (col[0].cyBox - col[0].boxH / 2);
     if (topUnderflow > 0) for (const l of col) l.cyBox += topUnderflow;
   };
-  separate(labels.filter(l => !l.leftSide));
-  separate(labels.filter(l => l.leftSide));
+  separate(labels.filter(l => !l.manualClip && !l.leftSide));
+  separate(labels.filter(l => !l.manualClip && l.leftSide));
 
   // Final round-trip clamp (both edges): guarantee no box escapes the plot rect
   // vertically, independent of which separate() branch ran. In the fits case the
@@ -4721,6 +4953,7 @@ function drawPieCalloutLabels(
   // then bottom so a box taller than the band (degenerate) pins to the TOP edge
   // rather than escaping upward.
   for (const l of labels) {
+    if (l.manualClip) continue;
     l.cyBox = Math.max(topLimit + l.boxH / 2, l.cyBox);
     l.cyBox = Math.min(bottomLimit - l.boxH / 2, l.cyBox);
   }
@@ -4729,12 +4962,17 @@ function drawPieCalloutLabels(
   const leftLimit = boundsX + 2;
   const rightLimit = boundsX + boundsW - 2;
   for (const l of labels) {
+    if (l.manualClip) continue;
     const half = l.boxW / 2;
     if (l.cxBox - half < leftLimit) l.cxBox = leftLimit + half;
     if (l.cxBox + half > rightLimit) l.cxBox = rightLimit - half;
   }
 
   // ── Draw leader lines first (under the boxes), then boxes + text ─────────
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(boundsX, boundsY, boundsW, boundsH);
+  ctx.clip();
   const leaderColor = def.leaderLineColor ? `#${def.leaderLineColor}` : '#a6a6a6';
   const leaderPx = def.leaderLineWidthEmu
     ? Math.max(0.5, (def.leaderLineWidthEmu / EMU_PER_PT) * ptToPx)
@@ -4749,7 +4987,7 @@ function drawPieCalloutLabels(
     const dx = edgeX - l.rimX;
     const dy = edgeY - l.rimY;
     const dist = Math.hypot(dx, dy);
-    if (def.showLeaderLines && dist > l.fontPx * 0.9) {
+    if (!l.inside && def.showLeaderLines && dist > l.fontPx * 0.9) {
       ctx.beginPath();
       ctx.moveTo(l.rimX, l.rimY);
       ctx.lineTo(edgeX, edgeY);
@@ -4760,6 +4998,12 @@ function drawPieCalloutLabels(
   }
 
   for (const l of labels) {
+    if (l.manualClip) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(l.manualClip.x, l.manualClip.y, l.manualClip.w, l.manualClip.h);
+      ctx.clip();
+    }
     const bx = l.cxBox - l.boxW / 2;
     const by = l.cyBox - l.boxH / 2;
     // Box fill + border (§21.2.2.197 spPr). Fill may carry an 8-digit RGBA hex
@@ -4775,12 +5019,14 @@ function drawPieCalloutLabels(
     ctx.fillStyle = l.fontColor;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    const lineH = l.fontPx + lineGap;
-    const blockTop = l.cyBox - (l.lines.length * lineH - lineGap) / 2 + l.fontPx / 2;
+    const lineGap = l.lineHeight - l.fontPx;
+    const blockTop = l.cyBox - (l.lines.length * l.lineHeight - lineGap) / 2 + l.fontPx / 2;
     for (let li = 0; li < l.lines.length; li++) {
-      ctx.fillText(l.lines[li], l.cxBox, blockTop + li * lineH);
+      ctx.fillText(l.lines[li], l.cxBox, blockTop + li * l.lineHeight);
     }
+    if (l.manualClip) ctx.restore();
   }
+  ctx.restore();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5108,6 +5354,7 @@ function drawScatterSeriesLayer(
   ptToPx: number,
   isBubble: boolean,
   style: string,
+  layoutReferenceRect: DataLabelRect,
 ): void {
   const drawLines = style === 'line' || style === 'lineMarker' || style === 'lineNoMarker';
   const drawSmooth = style === 'smooth' || style === 'smoothMarker' || style === 'smoothNoMarker';
@@ -5214,6 +5461,8 @@ function drawScatterSeriesLayer(
       chart.date1904,
       chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
       chart.dataLabelPosition ?? 'r',
+      { x: px0, y: py0, w: pw, h: ph },
+      layoutReferenceRect,
     );
   }
 
@@ -5622,6 +5871,8 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       // §21.2.2.48 `<c:dLblPos>`: chart-level position, else the scatter default
       // `'r'` (right of the marker) — unchanged from the previous hardcoded 'r'.
       chart.dataLabelPosition ?? 'r',
+      { x: px0, y: py0, w: pw, h: ph },
+      { x, y, w, h },
     );
 
     if (s.trendLines && s.trendLines.length > 0) {
@@ -5842,6 +6093,8 @@ function drawSeriesDataLabels(
    *  the series-level block sets one: the chart-level position, else the
    *  per-chart-type default (scatter defaults to `'r'`). */
   defaultPos = 'r',
+  bounds: DataLabelRect = { x: -1e6, y: -1e6, w: 2e6, h: 2e6 },
+  layoutReferenceRect: DataLabelRect = bounds,
 ): void {
   const overrides = s.dataLabelOverrides ?? [];
   if (overrides.length === 0 && !s.seriesDataLabels) return;
@@ -5859,27 +6112,21 @@ function drawSeriesDataLabels(
     const showCatName = ovr?.showCatName ?? seriesDef?.showCatName;
     const showSerName = ovr?.showSerName ?? seriesDef?.showSerName;
     const showVal     = ovr?.showVal ?? seriesDef?.showVal;
-    let text: string;
-    if (ovr?.text) {
-      text = ovr.text;
-    } else if (showVal || showSerName || showCatName) {
-      const parts: string[] = [];
-      if (showCatName && !useIndexX) {
-        parts.push(formatChartValWithCode(
-          xv,
-          s.catFormatCodes?.[i] ?? s.catFormatCode ?? null,
-          date1904,
-        ));
-      }
-      if (showSerName) parts.push(s.name);
-      if (showVal) {
-        parts.push(formatChartValWithCode(yv, seriesDef?.formatCode ?? null, date1904));
-      }
-      text = parts.filter(Boolean).join(' ');
-      if (!text) continue;
-    } else {
-      continue;
-    }
+    const text = effectiveDataLabelText({
+      customText: ovr?.text,
+      showCategory: showCatName && !useIndexX,
+      showSeries: showSerName,
+      showValue: showVal,
+      category: formatChartValWithCode(
+        xv, s.catFormatCodes?.[i] ?? s.catFormatCode ?? null, date1904,
+      ),
+      seriesName: s.name,
+      sourceValue: yv,
+      formatCode: ovr?.formatCode ?? seriesDef?.formatCode ?? null,
+      date1904,
+      separator: ovr?.separator ?? seriesDef?.separator,
+    });
+    if (!text) continue;
     const pos = ovr?.position ?? seriesDef?.position ?? defaultPos;
     const sizeHpt = ovr?.fontSizeHpt ?? seriesDef?.fontSizeHpt;
     const fontSizePx = sizeHpt
@@ -5887,7 +6134,11 @@ function drawSeriesDataLabels(
       : Math.max(9, Math.min(11, ph / 25));
     const color = ovr?.fontColor ?? seriesDef?.fontColor;
     const bold = ovr?.fontBold ?? seriesDef?.fontBold ?? false;
-    drawDataLabelText(ctx, toX(xv), toY(yv), text, pos, fontSizePx, color, bold, fontFamily);
+    drawDataLabelText(
+      ctx, toX(xv), toY(yv), text, pos, fontSizePx, color, bold, fontFamily, 0,
+      bounds, ovr?.manualLayout,
+      layoutReferenceRect,
+    );
   }
 }
 
@@ -5901,45 +6152,76 @@ function drawDataLabelText(
   bold: boolean,
   fontFamily = 'sans-serif',
   /** Extra gap (px) added to the text offset in the label's direction so the
-   *  text clears an anchor glyph (e.g. a line-chart marker). 0 keeps the
-   *  historical `fontSizePx * 0.6` offset (byte-stable for scatter/area). */
+   *  text clears an anchor glyph (e.g. a line-chart marker). The shared base
+   *  inset is one half-em; markerGap is added outside that inset. */
   markerGap = 0,
+  bounds: DataLabelRect = { x: -1e6, y: -1e6, w: 2e6, h: 2e6 },
+  manualLayout?: ChartDataLabelOverride['manualLayout'],
+  layoutReferenceRect: DataLabelRect = bounds,
 ): void {
   ctx.save();
   ctx.font = `${bold ? 'bold ' : ''}${fontSizePx}px ${fontFamily}`;
-  ctx.fillStyle = color ? `#${color}` : '#333';
-  const offset = fontSizePx * 0.6 + markerGap;
-  let tx = cx, ty = cy;
-  switch (position) {
-    case 'l':
-      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-      tx = cx - offset; break;
-    case 'r':
-      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-      tx = cx + offset; break;
-    case 't':
-      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-      ty = cy - offset; break;
-    case 'b':
-      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-      ty = cy + offset; break;
-    case 'ctr':
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      break;
-    default:
-      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-      tx = cx + offset; break;
-  }
-  // Multi-line labels: split on newline and stack vertically.
-  const lines = text.split(/\r?\n/);
-  const lineH = fontSizePx * 1.15;
-  const totalH = lineH * lines.length;
-  let lineY = ty;
-  if (ctx.textBaseline === 'middle') lineY = ty - (totalH - lineH) / 2;
-  else if (ctx.textBaseline === 'bottom') lineY = ty - (totalH - lineH);
-  for (const line of lines) {
-    ctx.fillText(line, tx, lineY);
-    lineY += lineH;
+  drawBoundedDataLabelText(
+    ctx,
+    text,
+    { kind: 'point', x: cx, y: cy, position, markerGap },
+    bounds,
+    fontSizePx,
+    color ? `#${color}` : '#333',
+    manualLayout,
+    layoutReferenceRect,
+  );
+  ctx.restore();
+}
+
+/** Measure, fit, clip, and paint one label through the shared pure resolver. */
+function drawBoundedDataLabelText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  anchor: DataLabelAnchor,
+  bounds: DataLabelRect,
+  fontSizePx: number,
+  color: string,
+  manualLayout?: ChartDataLabelOverride['manualLayout'],
+  layoutReferenceRect: DataLabelRect = bounds,
+): void {
+  if (!text || !Number.isFinite(fontSizePx) || fontSizePx <= 0) return;
+  const lineHeight = fontSizePx * 1.15;
+  const sourceLines = boundDataLabelText(text).value.split(/\r?\n/);
+  const measuredW = sourceLines.reduce((max, line) => Math.max(max, ctx.measureText(line).width), 0);
+  const measuredH = Math.max(lineHeight, sourceLines.length * lineHeight);
+  let placement = resolveDataLabelPlacement(
+    anchor, bounds, { w: measuredW, h: measuredH }, fontSizePx, manualLayout,
+    layoutReferenceRect,
+  );
+  if (!placement) return;
+  const measure = (value: string): number => ctx.measureText(value).width;
+  const lines = fitDataLabelLines(
+    text, placement.maxWidth, placement.maxHeight, lineHeight, measure,
+  );
+  if (lines.length === 0) return;
+  const fittedW = lines.reduce((max, line) => Math.max(max, measure(line)), 0);
+  const fittedH = lines.length * lineHeight;
+  placement = resolveDataLabelPlacement(
+    anchor, bounds, { w: fittedW, h: fittedH }, fontSizePx, manualLayout,
+    layoutReferenceRect,
+  );
+  if (!placement) return;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(placement.clip.x, placement.clip.y, placement.clip.w, placement.clip.h);
+  ctx.clip();
+  ctx.fillStyle = color;
+  ctx.textAlign = placement.textAlign;
+  ctx.textBaseline = placement.textBaseline;
+  const firstY = placement.textBaseline === 'middle'
+    ? placement.y - ((lines.length - 1) * lineHeight) / 2
+    : placement.textBaseline === 'bottom'
+      ? placement.y - ((lines.length - 1) * lineHeight)
+      : placement.y;
+  for (let index = 0; index < lines.length; index++) {
+    ctx.fillText(lines[index], placement.x, firstY + index * lineHeight);
   }
   ctx.restore();
 }
@@ -6091,13 +6373,17 @@ function drawCategoryDataLabels(
    *  per-chart-type default. Line defaults to `'r'` (PowerPoint), area to
    *  `'ctr'`. */
   defaultPos = 't',
+  bounds: DataLabelRect = { x: -1e6, y: -1e6, w: 2e6, h: 2e6 },
+  layoutReferenceRect: DataLabelRect = bounds,
+  percentRatioAt?: (index: number) => number,
 ): boolean {
   const overrides = s.dataLabelOverrides ?? [];
   const seriesDef = s.seriesDataLabels;
   if (overrides.length === 0 && !seriesDef) return false;
   for (let ci = 0; ci < n; ci++) {
     if (s.values[ci] == null && !plotNullAsZero) continue;
-    const pv = plotted(ci);
+    const anchorValue = plotted(ci);
+    const sourceValue = s.values[ci] ?? 0;
     const ovr = overrides.find(o => o.idx === ci);
     // Genuine `<c:delete val="1"/>` (§21.2.2.43) skips; a style/flag-only
     // override is not a delete. Per-point show-flags (§21.2.2.47) win over the
@@ -6106,25 +6392,32 @@ function drawCategoryDataLabels(
     const showCatName = ovr?.showCatName ?? seriesDef?.showCatName;
     const showSerName = ovr?.showSerName ?? seriesDef?.showSerName;
     const showVal     = ovr?.showVal ?? seriesDef?.showVal;
-    let text: string;
-    if (ovr?.text) {
-      text = ovr.text;
-    } else if (showVal || showSerName || showCatName) {
-      const parts: string[] = [];
-      if (showCatName) parts.push(cats[ci] ?? '');
-      if (showSerName) parts.push(s.name);
-      if (showVal) parts.push(formatChartValWithCode(pv, seriesDef?.formatCode ?? null, date1904));
-      text = parts.filter(Boolean).join(' ');
-      if (!text) continue;
-    } else {
-      continue;
-    }
+    const showPercent = ovr?.showPercent ?? seriesDef?.showPercent;
+    const text = effectiveDataLabelText({
+      customText: ovr?.text,
+      showCategory: showCatName,
+      showSeries: showSerName,
+      showValue: showVal,
+      showPercent,
+      category: cats[ci] ?? '',
+      seriesName: s.name,
+      sourceValue,
+      percentRatio: percentRatioAt?.(ci),
+      formatCode: ovr?.formatCode ?? seriesDef?.formatCode ?? null,
+      date1904,
+      separator: ovr?.separator ?? seriesDef?.separator,
+    });
+    if (!text) continue;
     const pos = ovr?.position ?? seriesDef?.position ?? defaultPos;
     const sizeHpt = ovr?.fontSizeHpt ?? seriesDef?.fontSizeHpt;
     const fontSizePx = sizeHpt ? (sizeHpt / 100) * ptToPx : Math.max(9, Math.min(11, ph / 25));
     const color = ovr?.fontColor ?? seriesDef?.fontColor;
     const bold = ovr?.fontBold ?? seriesDef?.fontBold ?? false;
-    drawDataLabelText(ctx, xAt(ci), yAt(pv), text, pos, fontSizePx, color, bold, fontFamily);
+    drawDataLabelText(
+      ctx, xAt(ci), yAt(anchorValue), text, pos, fontSizePx, color, bold, fontFamily, 0,
+      bounds, ovr?.manualLayout,
+      layoutReferenceRect,
+    );
   }
   return true;
 }
@@ -6140,7 +6433,8 @@ interface ResolvedChartExLabel {
   position?: string;
   fontColor?: string;
   fontSizeHpt?: number;
-  fontBold: boolean;
+  fontBold?: boolean;
+  manualLayout?: ChartDataLabelOverride['manualLayout'];
 }
 
 /** Effective CT_Series formatting index. The shared parser preserves authored
@@ -6163,9 +6457,15 @@ function resolveChartExLabel(
   index: number,
   category: string,
   value: number,
-  defaults: { visible: boolean; showVal: boolean; showCatName: boolean; showSerName?: boolean },
+  defaults: {
+    visible: boolean;
+    showVal: boolean;
+    showCatName: boolean;
+    showSerName?: boolean;
+    showPercent?: boolean;
+  },
   overrideLookup?: ReadonlyMap<number, NonNullable<ChartSeries['dataLabelOverrides']>[number]>,
-  suppressValue = false,
+  valueOption?: boolean | number,
 ): ResolvedChartExLabel | null {
   if (!series) return null;
   const definition = series.seriesDataLabels;
@@ -6173,6 +6473,8 @@ function resolveChartExLabel(
     ?? series.dataLabelOverrides?.find(item => item.idx === index);
   if (override?.deleted) return null;
   if (!definition && !override && !defaults.visible) return null;
+  const suppressValue = typeof valueOption === 'boolean' ? valueOption : false;
+  const percentRatio = typeof valueOption === 'number' ? valueOption : undefined;
   const showVal = !suppressValue
     && (override?.showVal ?? definition?.showVal ?? defaults.showVal);
   const showCatName = override?.showCatName ?? definition?.showCatName ?? defaults.showCatName;
@@ -6180,31 +6482,37 @@ function resolveChartExLabel(
     ?? definition?.showSerName
     ?? defaults.showSerName
     ?? false;
-  let text = override?.text ?? '';
-  if (!text) {
-    const parts: string[] = [];
-    if (showCatName && category) parts.push(category);
-    if (showSerName && series.name) parts.push(series.name);
-    if (showVal) {
-      parts.push(formatChartValWithCode(
-        value,
-        override?.formatCode
-          ?? definition?.formatCode
-          ?? chart.dataLabelFormatCode
-          ?? series.valFormatCode
-          ?? null,
-        chart.date1904,
-      ));
-    }
-    text = parts.join(override?.separator ?? definition?.separator ?? ' ');
-  }
+  const showPercent = override?.showPercent
+    ?? definition?.showPercent
+    ?? defaults.showPercent
+    ?? false;
+  const authoredFormatCode = override?.formatCode
+    ?? definition?.formatCode
+    ?? chart.dataLabelFormatCode
+    ?? null;
+  const text = effectiveDataLabelText({
+    customText: override?.text,
+    showCategory: showCatName,
+    showSeries: showSerName,
+    showValue: showVal,
+    showPercent,
+    category,
+    seriesName: series.name,
+    sourceValue: value,
+    percentRatio,
+    formatCode: authoredFormatCode ?? series.valFormatCode ?? null,
+    percentFormatCode: authoredFormatCode ?? '0%',
+    date1904: chart.date1904,
+    separator: override?.separator ?? definition?.separator,
+  });
   if (!text) return null;
   return {
     text,
     position: override?.position ?? definition?.position,
     fontColor: override?.fontColor ?? definition?.fontColor,
     fontSizeHpt: override?.fontSizeHpt ?? definition?.fontSizeHpt,
-    fontBold: override?.fontBold ?? definition?.fontBold ?? false,
+    fontBold: override?.fontBold ?? definition?.fontBold,
+    manualLayout: override?.manualLayout,
   };
 }
 
@@ -6761,7 +7069,7 @@ function renderWaterfallChart(
     );
     if (label) {
       const perPointColor = series?.dataLabelColors?.[i] ?? label.fontColor ?? null;
-      ctx.fillStyle = perPointColor
+      const labelColor = perPointColor
         ? `#${perPointColor}`
         : chart.dataLabelFontColor
           ? `#${chart.dataLabelFontColor}`
@@ -6769,20 +7077,24 @@ function renderWaterfallChart(
       const dataLabelFontPx = label.fontSizeHpt
         ? (label.fontSizeHpt / 100) * ptToPx
         : axisLabelPx(chart.dataLabelFontSizeHpt, h, ptToPx);
-      ctx.font = `${label.fontBold || chart.dataLabelFontBold ? 'bold ' : ''}${dataLabelFontPx}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
-      ctx.textAlign = 'center';
-      // Negative bars: label sits below the bar; positive bars and subtotals
-      // place it above the bar unless an authored position requests center.
-      if (label.position === 'ctr') {
-        ctx.textBaseline = 'middle';
-        ctx.fillText(label.text, bx + barW / 2, (yTop + yBot) / 2);
-      } else if (bar.hasValue && rawVal < 0) {
-        ctx.textBaseline = 'top';
-        ctx.fillText(label.text, bx + barW / 2, yBot + 3);
-      } else {
-        ctx.textBaseline = 'bottom';
-        ctx.fillText(label.text, bx + barW / 2, yTop - 3);
-      }
+      const dataLabelBold = label.fontBold ?? chart.dataLabelFontBold ?? false;
+      ctx.font = `${dataLabelBold ? 'bold ' : ''}${dataLabelFontPx}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
+      drawBoundedDataLabelText(
+        ctx,
+        label.text,
+        {
+          kind: 'bar',
+          rect: { x: bx, y: yTop, w: barW, h: bh },
+          orientation: 'vertical',
+          negative: rawVal < 0,
+          position: label.position ?? 'outEnd',
+        },
+        { x: px0, y: py0, w: pw, h: ph },
+        dataLabelFontPx,
+        labelColor,
+        label.manualLayout,
+        { x, y, w, h },
+      );
     }
   });
 
@@ -6908,10 +7220,22 @@ function renderFunnelChart(
         ? (label.fontSizeHpt / 100) * ptToPx
         : axisLabelPx(chart.dataLabelFontSizeHpt, h, ptToPx);
       ctx.font = `${label.fontBold ? 'bold ' : ''}${fontPx}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
-      ctx.fillStyle = label.fontColor ? `#${label.fontColor}` : '#ffffff';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(label.text, bx + barW / 2, by + barH / 2);
+      drawBoundedDataLabelText(
+        ctx,
+        label.text,
+        {
+          kind: 'bar',
+          rect: { x: bx, y: by, w: barW, h: barH },
+          orientation: 'horizontal',
+          negative: false,
+          position: label.position ?? 'ctr',
+        },
+        { x: px0, y: py0, w: pw, h: ph },
+        fontPx,
+        label.fontColor ? `#${label.fontColor}` : '#ffffff',
+        label.manualLayout,
+        { x, y, w, h },
+      );
     }
   }
   if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
@@ -7840,10 +8164,28 @@ function renderSunburstChart(
       // Tangential arc length at the mid radius.
       const arcLen = sweep * midR;
       // Skip labels that plainly cannot fit even one glyph.
-      if (radialRoom < nodeLabelPx * 0.9 && arcLen < nodeLabelPx * 0.9) continue;
+      if (!label.manualLayout &&
+          radialRoom < nodeLabelPx * 0.9 && arcLen < nodeLabelPx * 0.9) continue;
+
+      const labelX = cx + Math.cos(midA) * midR;
+      const labelY = cy + Math.sin(midA) * midR;
+      ctx.font = `${label.fontBold ? 'bold ' : ''}${nodeLabelPx}px ${labelFont}`;
+      if (label.manualLayout) {
+        drawBoundedDataLabelText(
+          ctx,
+          labelText,
+          { kind: 'point', x: labelX, y: labelY, position: label.position ?? 'ctr' },
+          { x: px0, y: py0, w: pw, h: ph },
+          nodeLabelPx,
+          nodeLabelColor,
+          label.manualLayout,
+          { x, y, w, h },
+        );
+        continue;
+      }
 
       ctx.save();
-      ctx.translate(cx + Math.cos(midA) * midR, cy + Math.sin(midA) * midR);
+      ctx.translate(labelX, labelY);
       // Orient the text along the radius and flip on the left half so it stays
       // readable instead of becoming upside-down.
       let rot = midA;
@@ -7851,53 +8193,14 @@ function renderSunburstChart(
       if (deg > 90 || deg < -90) rot += Math.PI;
       ctx.rotate(rot);
       ctx.font = `${label.fontBold ? 'bold ' : ''}${nodeLabelPx}px ${labelFont}`;
-      ctx.fillStyle = nodeLabelColor;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      // The rotated frame's x-axis is radial: width is the ring band and the
-      // available line stack is the wedge's tangential arc length.
-      const words = labelText.split(/\s+/).filter(Boolean);
-      const maxLineW = radialRoom - 2;
-      const lines: string[] = [];
-      let cur = '';
-      for (const word of words) {
-        const trial = cur ? `${cur} ${word}` : word;
-        if (ctx.measureText(trial).width <= maxLineW) {
-          cur = trial;
-          continue;
-        }
-        if (cur) {
-          lines.push(cur);
-          cur = '';
-        }
-        if (ctx.measureText(word).width <= maxLineW) {
-          cur = word;
-          continue;
-        }
-        // Narrow outer rings may require a break inside a long category name.
-        // Retain every character instead of eliding the label.
-        let chunk = '';
-        for (const char of word) {
-          const next = chunk + char;
-          if (chunk && ctx.measureText(next).width > maxLineW) {
-            lines.push(chunk);
-            chunk = char;
-          } else {
-            chunk = next;
-          }
-        }
-        cur = chunk;
-      }
-      if (cur) lines.push(cur);
-      // Cap the number of lines to what the tangential arc holds.
-      const lineH = nodeLabelPx * 1.05;
-      const maxLines = Math.max(1, Math.floor(arcLen / lineH));
-      const shown = lines.slice(0, maxLines).map(l => elideToWidth(ctx, l, maxLineW));
-      const totalH = shown.length * lineH;
-      shown.forEach((line, li) => {
-        if (line === '') return;
-        ctx.fillText(line, 0, -totalH / 2 + lineH / 2 + li * lineH);
-      });
+      drawBoundedDataLabelText(
+        ctx,
+        labelText,
+        { kind: 'point', x: 0, y: 0, position: label.position ?? 'ctr' },
+        { x: -radialRoom / 2, y: -arcLen / 2, w: radialRoom, h: arcLen },
+        nodeLabelPx,
+        nodeLabelColor,
+      );
       ctx.restore();
     }
   }
@@ -8048,6 +8351,8 @@ function renderTreemapChart(
     radialGapFrac: 0.015,
   });
   drawChartTitleForLayout(ctx, chart, r.x, r.y, r.w, r.h, r.y + frame.title.topPad, frame.title.fontPx);
+  const { px0, py0, pw, ph } = frame.plotRect;
+  const plotBounds = { x: px0, y: py0, w: pw, h: ph };
 
   const fontFamily = chartFontFamily(chart, chart.dataLabelFontFace, 'minor');
   const parentMode = treemap.parentLabelLayout ?? 'overlapping';
@@ -8124,13 +8429,24 @@ function renderTreemapChart(
       };
       for (const child of layoutTreemapTiles(node.children, content)) paint(child.node, child.rect);
 
-      if (showParent && tile.w > fontPx * 2 && tile.h > fontPx + 4) {
+      if (showParent && (parentLabel.manualLayout || (tile.w > fontPx * 2 && tile.h > fontPx + 4))) {
         ctx.font = `${nodeLabelBold ? 'bold ' : ''}${fontPx}px ${fontFamily}`;
-        ctx.fillStyle = nodeLabelColor;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        const shown = elideToWidth(ctx, parentLabel?.text ?? '', tile.w - 8);
-        if (shown) ctx.fillText(shown, tile.x + 4, tile.y + 3);
+        const labelRect = bannerH > 0
+          ? { x: tile.x, y: tile.y, w: tile.w, h: bannerH }
+          : tile;
+        const automaticBounds = labelRect;
+        drawBoundedDataLabelText(
+          ctx,
+          parentLabel.text,
+          parentLabel.manualLayout
+            ? { kind: 'point', x: tile.x + tile.w / 2, y: tile.y + tile.h / 2, position: parentLabel.position ?? 'inBase' }
+            : { kind: 'box', rect: automaticBounds, position: parentLabel.position ?? 'inBase' },
+          parentLabel.manualLayout ? plotBounds : automaticBounds,
+          fontPx,
+          nodeLabelColor,
+          parentLabel.manualLayout,
+          r,
+        );
       }
       return;
     }
@@ -8173,49 +8489,24 @@ function renderTreemapChart(
     const fontPx = leafLabel.fontSizeHpt
       ? (leafLabel.fontSizeHpt / 100) * ptToPx
       : nodeLabelFontPx;
-    if (tile.w <= fontPx * 1.2 || tile.h <= fontPx * 1.2) return;
+    if (!leafLabel.manualLayout && (tile.w <= fontPx * 1.2 || tile.h <= fontPx * 1.2)) return;
     ctx.font = `${leafLabel.fontBold ? 'bold ' : ''}${fontPx}px ${fontFamily}`;
-    ctx.fillStyle = leafLabel.fontColor ? `#${leafLabel.fontColor}` : nodeLabelColor;
-    const lineH = fontPx * 1.1;
-    const position = leafLabel.position ?? 'ctr';
-    const inset = position === 'inEnd' ? 4 : fontPx * 0.5;
-    const availableWidth = tile.w - inset * 2;
-    const availableHeight = tile.h - inset * 2;
-    if (availableWidth <= 0 || availableHeight <= 0) return;
-    const lines = leafLabel.text
-      .split(/\r?\n/)
-      .flatMap(line => wrapMeasuredText(ctx, line, availableWidth))
-      // `wrapMeasuredText` deliberately emits one over-wide glyph to guarantee
-      // progress. A treemap label must instead omit a line that cannot fit
-      // completely inside the tile's content box.
-      .filter(line => ctx.measureText(line).width <= availableWidth + 1e-6);
-    const maxLines = Math.max(0, Math.floor(availableHeight / lineH));
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(tile.x, tile.y, tile.w, tile.h);
-    ctx.clip();
-    if (position === 'inEnd') {
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'bottom';
-      const visibleLines = lines.slice(Math.max(0, lines.length - maxLines));
-      const lastY = tile.y + tile.h - inset;
-      visibleLines.forEach((line, index) => {
-        if (line) ctx.fillText(line, tile.x + inset, lastY - (visibleLines.length - 1 - index) * lineH);
-      });
-    } else {
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const visibleLines = lines.slice(0, maxLines);
-      const firstY = tile.y + tile.h / 2 - ((visibleLines.length - 1) * lineH) / 2;
-      visibleLines.forEach((line, index) => {
-        if (line) ctx.fillText(line, tile.x + tile.w / 2, firstY + index * lineH);
-      });
-    }
-    ctx.restore();
+    const automaticBounds = tile;
+    drawBoundedDataLabelText(
+      ctx,
+      leafLabel.text,
+      leafLabel.manualLayout
+        ? { kind: 'point', x: tile.x + tile.w / 2, y: tile.y + tile.h / 2, position: leafLabel.position ?? 'ctr' }
+        : { kind: 'box', rect: automaticBounds, position: leafLabel.position ?? 'ctr' },
+      leafLabel.manualLayout ? plotBounds : automaticBounds,
+      fontPx,
+      leafLabel.fontColor ? `#${leafLabel.fontColor}` : nodeLabelColor,
+      leafLabel.manualLayout,
+      r,
+    );
   };
 
   ctx.save();
-  const { px0, py0, pw, ph } = frame.plotRect;
   ctx.beginPath();
   ctx.rect(px0, py0, pw, ph);
   ctx.clip();

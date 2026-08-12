@@ -173,6 +173,7 @@ export interface ChartDataLabelOverride {
     fontBold?: boolean;
     formatCode?: string;
     separator?: string;
+    manualLayout?: ChartManualLayout;
     labelBox?: ChartLabelBox;
     showVal?: boolean;
     showCatName?: boolean;

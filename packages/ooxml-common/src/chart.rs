@@ -783,6 +783,12 @@ pub struct ChartDataLabelOverride {
     pub format_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub separator: Option<String>,
+    /// Per-point `<c:dLbl><c:layout><c:manualLayout>` (§21.2.2.47/§21.2.2.88).
+    /// The application chooses automatic label geometry when this is absent;
+    /// when authored, preserve it so the shared renderer can resolve it against
+    /// the same bounded chart rectangle as the automatic anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_layout: Option<ChartManualLayout>,
     /// Per-point label callout box style (`<c:dLbl>` §21.2.2.47 `<c:spPr>`
     /// §21.2.2.197): background fill / border, mirroring the series-level
     /// defaults. Present only when the point's `<c:spPr>` overrides the shape
@@ -3666,6 +3672,7 @@ fn parse_chartex_series_labels(
             separator: child(label, "separator")
                 .and_then(|node| node.text())
                 .map(ToOwned::to_owned),
+            manual_layout: None,
             label_box: None,
             show_val: label_visibility.and_then(|node| chart_text_bool_attr(node, "value")),
             show_cat_name: label_visibility
@@ -3695,6 +3702,7 @@ fn parse_chartex_series_labels(
                 font_bold: None,
                 format_code: None,
                 separator: None,
+                manual_layout: None,
                 label_box: None,
                 show_val: None,
                 show_cat_name: None,
@@ -5378,6 +5386,7 @@ pub fn parse_series_data_labels(
             separator: child(dl, "separator")
                 .and_then(|node| node.text())
                 .map(ToOwned::to_owned),
+            manual_layout: child(dl, "layout").and_then(extract_manual_layout),
             label_box,
             show_val: opt_bool_flag("showVal"),
             show_cat_name: opt_bool_flag("showCatName"),
@@ -9681,6 +9690,11 @@ mod tests {
                   <c:idx val="1"/>
                   <c:tx><c:rich><a:p><a:r><a:t>Custom</a:t></a:r></a:p></c:rich></c:tx>
                   <c:dLblPos val="outEnd"/>
+                  <c:layout><c:manualLayout>
+                    <c:xMode val="edge"/><c:yMode val="edge"/>
+                    <c:x val="0.25"/><c:y val="0.4"/>
+                    <c:w val="0.2"/><c:h val="0.1"/>
+                  </c:manualLayout></c:layout>
                 </c:dLbl>
                 <c:showVal val="1"/>
                 <c:showCatName val="0"/>
@@ -9707,6 +9721,20 @@ mod tests {
         assert_eq!(o.idx, 1);
         assert_eq!(o.text, "Custom");
         assert_eq!(o.position.as_deref(), Some("outEnd"));
+        assert_eq!(
+            o.manual_layout,
+            Some(ChartManualLayout {
+                x_mode: "edge".to_string(),
+                y_mode: "edge".to_string(),
+                w_mode: "factor".to_string(),
+                h_mode: "factor".to_string(),
+                layout_target: Some("outer".to_string()),
+                x: 0.25,
+                y: 0.4,
+                w: Some(0.2),
+                h: Some(0.1),
+            })
+        );
     }
 
     #[test]

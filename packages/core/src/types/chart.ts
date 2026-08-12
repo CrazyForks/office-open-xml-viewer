@@ -260,6 +260,9 @@ export interface ChartDataLabelOverride {
   formatCode?: string;
   /** Per-point component separator; undefined inherits the series default. */
   separator?: string;
+  /** Authored `<c:dLbl><c:layout><c:manualLayout>` geometry. Automatic label
+   *  placement is used when absent; explicit layout takes precedence when set. */
+  manualLayout?: ChartManualLayout;
   /** Per-point callout box (`<c:dLbl><c:spPr>`, ECMA-376 §21.2.2.47/§21.2.2.197):
    *  overrides the series-default box for this one slice. */
   labelBox?: ChartLabelBox;

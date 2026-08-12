@@ -32,6 +32,7 @@ interface Recorded {
   texts: TextCall[];
   clips: Array<{ x: number; y: number; w: number; h: number }>;
   gradients: Array<{ args: number[]; stops: Array<{ position: number; color: string }> }>;
+  arcs: Array<{ x: number; y: number; r: number }>;
 }
 
 /** Minimal recording 2D context: captures fillRect + fillText, tracks the
@@ -42,6 +43,7 @@ function recordingCtx(): Recorded {
   const texts: TextCall[] = [];
   const clips: Array<{ x: number; y: number; w: number; h: number }> = [];
   const gradients: Recorded['gradients'] = [];
+  const arcs: Recorded['arcs'] = [];
   let pathRect: { x: number; y: number; w: number; h: number } | null = null;
   const state: Record<string, unknown> = {
     font: '10px sans-serif',
@@ -105,8 +107,10 @@ function recordingCtx(): Recorded {
           return (x: number, y: number, w: number, h: number) => { pathRect = { x, y, w, h }; };
         case 'clip':
           return () => { if (pathRect) clips.push(pathRect); };
+        case 'arc':
+          return (x: number, y: number, r: number) => { arcs.push({ x, y, r }); };
         case 'save': case 'restore': case 'closePath':
-        case 'fill': case 'stroke': case 'moveTo': case 'lineTo': case 'arc':
+        case 'fill': case 'stroke': case 'moveTo': case 'lineTo':
         case 'bezierCurveTo': case 'quadraticCurveTo':
         case 'clearRect': case 'strokeText': case 'setLineDash':
         case 'translate': case 'rotate': case 'scale':
@@ -125,6 +129,7 @@ function recordingCtx(): Recorded {
     texts,
     clips,
     gradients,
+    arcs,
   };
 }
 
@@ -1919,6 +1924,65 @@ describe('ChartEx flat layouts dispatch to semantic renderers', () => {
   );
 
   it.each(['waterfall', 'funnel'])(
+    '%s routes authored labels through the shared four-line bounded layout',
+    chartType => {
+      const rec = recordingCtx();
+      const authored = `A  ${'word '.repeat(1200)}`;
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A'],
+        catAxisHidden: true,
+        valAxisHidden: true,
+        series: [series({
+          values: [10],
+          dataLabelOverrides: [{ idx: 0, text: authored, position: 'ctr', fontColor: '123456' }],
+        })],
+      }), RECT, 1);
+
+      const labels = rec.texts.filter(text => text.fillStyle === '#123456');
+      expect(labels.length).toBeGreaterThan(0);
+      expect(labels.length).toBeLessThanOrEqual(4);
+      expect(labels.map(text => text.text).join('')).toContain('A  ');
+      expect(labels.map(text => text.text)).not.toContain(authored);
+    },
+  );
+
+  it('applies ChartEx funnel manual label layout in chart coordinates', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'funnel',
+      categories: ['A'],
+      catAxisHidden: true,
+      series: [series({
+        values: [10],
+        dataLabelOverrides: [{
+          idx: 0,
+          text: 'manual funnel',
+          fontColor: '123456',
+          manualLayout: { xMode: 'edge', yMode: 'edge', x: 0.5, y: 0.2, w: 0.2, h: 0.1 },
+        }],
+      })],
+    }), RECT, 1);
+
+    expect(rec.texts.find(text => text.text === 'manual funnel')).toMatchObject({ x: 384, y: 90 });
+  });
+
+  it('keeps a point-level waterfall fontBold=false authoritative', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'waterfall',
+      categories: ['A'],
+      dataLabelFontBold: true,
+      series: [series({
+        values: [10],
+        dataLabelOverrides: [{ idx: 0, text: 'not bold', fontBold: false }],
+      })],
+    }), RECT, 1);
+
+    expect(rec.texts.find(text => text.text === 'not bold')?.font).not.toMatch(/^bold /);
+  });
+
+  it.each(['waterfall', 'funnel'])(
     '%s preserves category-only point slots when the string dimension is longer',
     chartType => {
       const rec = recordingCtx();
@@ -2972,6 +3036,109 @@ describe('CH9 — line/area per-point data labels (§21.2.2.45)', () => {
       expect(rec.texts.some(t => t.text === '7')).toBe(true);
     });
   }
+
+  for (const chartType of ['stackedLine', 'stackedArea'] as const) {
+    it(`${chartType}: showVal uses the source value while the anchor stays cumulative`, () => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A'],
+        series: [
+          series({
+            name: 'Lower', values: [10],
+            seriesDataLabels: {
+              showVal: true, showCatName: false, showSerName: false, showPercent: false,
+              fontColor: 'FF0000', position: 'ctr',
+            },
+          }),
+          series({
+            name: 'Upper', values: [40],
+            seriesDataLabels: {
+              showVal: true, showCatName: false, showSerName: false, showPercent: false,
+              fontColor: '0000FF', position: 'ctr',
+            },
+          }),
+        ],
+      }), RECT, 1);
+      expect(rec.texts.find(text => text.fillStyle === '#FF0000')?.text).toBe('10');
+      const upper = rec.texts.find(text => text.fillStyle === '#0000FF');
+      expect(upper?.text).toBe('40');
+      const cumulativeTick = rec.texts.find(text => text.text === '50');
+      expect(cumulativeTick).toBeDefined();
+      expect(upper?.y).toBeCloseTo(cumulativeTick?.y as number, 6);
+    });
+  }
+
+  for (const chartType of ['stackedLinePct', 'stackedAreaPct'] as const) {
+    it(`${chartType}: showPercent uses the source contribution and authored numFmt`, () => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A'],
+        series: [
+          series({
+            values: [1],
+            seriesDataLabels: {
+              showVal: false, showCatName: false, showSerName: false, showPercent: true,
+              formatCode: '0.0%', fontColor: 'FF0000', position: 'ctr',
+            },
+          }),
+          series({ values: [2] }),
+        ],
+      }), RECT, 1);
+      expect(rec.texts.find(text => text.fillStyle === '#FF0000')?.text).toBe('33.3%');
+    });
+  }
+
+  it('percent-stacked labels use authored composition, separator, and number format', () => {
+    const rec = recordingCtx();
+    const labels = {
+      showVal: false, showCatName: true, showSerName: false, showPercent: true,
+      separator: '  ', formatCode: '0.0%', position: 'ctr',
+    };
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBarPct', categories: ['A'],
+      series: [
+        series({ name: 'One', values: [1], seriesDataLabels: labels }),
+        series({ name: 'Two', values: [2], seriesDataLabels: labels }),
+      ],
+    }), RECT, 1);
+    expect(rec.texts.some(text => text.text === 'A  33.3%')).toBe(true);
+    expect(rec.texts.some(text => text.text === '33%')).toBe(false);
+  });
+
+  it('per-point text/manual layout/style wins while format, separator, and delete stay indexed', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B'],
+      series: [series({
+        name: 'S',
+        values: [42, 7],
+        seriesDataLabels: {
+          showVal: true, showCatName: true, showSerName: false, showPercent: false,
+          formatCode: '0', separator: ' ', position: 'r',
+        },
+        dataLabelOverrides: [
+          {
+            idx: 0, text: '', showVal: true, showCatName: true,
+            formatCode: '0.0', separator: '|', position: 'l',
+            fontColor: 'FF0000', fontBold: true, fontSizeHpt: 1200,
+            manualLayout: {
+              xMode: 'edge', yMode: 'edge', x: 0.5, y: 0.5, w: 0.1, h: 0.1,
+            },
+          },
+          { idx: 1, text: 'HIDDEN', deleted: true },
+        ],
+      })],
+    }), RECT, 1);
+
+    const label = rec.texts.find(text => text.text === 'A|42.0');
+    expect(label).toMatchObject({ align: 'center', baseline: 'middle', fillStyle: '#FF0000' });
+    expect(label?.font).toContain('bold 12px');
+    expect(rec.texts.some(text => text.text === 'HIDDEN' || text.text === 'B 7')).toBe(false);
+    expect(rec.clips.some(clip => clip.w > 0 && clip.h > 0 && clip.w < RECT.w / 2)).toBe(true);
+  });
 });
 
 describe('CH11 — line/area/scatter data labels honor <c:dLblPos> (§21.2.2.48)', () => {
@@ -3280,7 +3447,7 @@ describe('CH9 — dispBlanksAs="zero" applies to per-point data labels too (§21
 // ─── CH8 — pie / doughnut geometry ───────────────────────────────────────────
 
 interface RingArc { x: number; y: number; r: number; a0: number; a1: number; ccw: boolean }
-interface FontText { text: string; font: string; fill: string }
+interface FontText { text: string; font: string; fill: string; x: number; y: number }
 
 interface RingRecorded {
   ctx: CanvasRenderingContext2D;
@@ -3326,8 +3493,8 @@ function ringRecordingCtx(): RingRecorded {
         case 'fill':
           return () => fills.push(String(state.fillStyle));
         case 'fillText':
-          return (text: string) =>
-            fontTexts.push({ text, font: String(state.font), fill: String(state.fillStyle) });
+          return (text: string, x: number, y: number) =>
+            fontTexts.push({ text, font: String(state.font), fill: String(state.fillStyle), x, y });
         case 'createLinearGradient':
         case 'createRadialGradient':
           return () => ({ addColorStop() {} });
@@ -3557,6 +3724,57 @@ describe('CH8 — pie / doughnut geometry', () => {
     expect(texts).toContain('Alpha');
     expect(texts).toContain('43%');
     expect(texts).not.toContain('Alpha 0.43');
+  });
+
+  it('rich pie percent labels honor authored numFmt and display scale', () => {
+    const model = pieModel({
+      series: [series({
+        name: 'S', categories: ['A', 'B'], values: [1, 2],
+        seriesDataLabels: {
+          showVal: false, showCatName: false, showSerName: false, showPercent: true,
+          formatCode: '0.0%', fontSizeHpt: 1200, position: 'ctr',
+        },
+      })],
+    });
+    const normal = ringRecordingCtx();
+    renderChart(normal.ctx, model, RECT, 1);
+    const scaled = ringRecordingCtx();
+    renderChart(scaled.ctx, model, RECT, 2);
+    expect(normal.fontTexts.some(text => text.text === '33.3%' && text.font.includes('12px')))
+      .toBe(true);
+    expect(scaled.fontTexts.some(text => text.text === '33.3%' && text.font.includes('24px')))
+      .toBe(true);
+  });
+
+  it('inside pie labels respect tiny-slice capacity', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, pieModel({
+      series: [series({
+        name: 'S', categories: ['TINY_LABEL_LONG', 'Large'], values: [1, 999],
+        seriesDataLabels: {
+          showVal: false, showCatName: true, showSerName: false, showPercent: false,
+          position: 'ctr',
+        },
+      })],
+    }), RECT, 1);
+    expect(rec.fontTexts.some(text => text.text === 'TINY_LABEL_LONG')).toBe(false);
+  });
+
+  it('outside pie labels are bounded, elided, and clipped to chart space', () => {
+    const rec = recordingCtx();
+    const long = 'Outside '.repeat(300);
+    renderChart(rec.ctx, pieModel({
+      series: [series({
+        name: 'S', categories: [long, 'B'], values: [1, 1],
+        seriesDataLabels: {
+          showVal: false, showCatName: true, showSerName: false, showPercent: false,
+          position: 'outEnd',
+        },
+      })],
+    }), RECT, 1);
+    expect(rec.texts.some(text => text.text === long)).toBe(false);
+    expect(rec.texts.some(text => text.text.includes('…'))).toBe(true);
+    expect(rec.clips).toContainEqual(RECT);
   });
 });
 
@@ -4976,6 +5194,132 @@ function pieCalloutModel(over: Partial<ChartModel> = {}): ChartModel {
 }
 
 describe('CH14 — pie callout data labels', () => {
+  it('enters rich pie label layout for a per-point label without series defaults', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['Only'],
+      series: [series({
+        values: [1],
+        dataLabelOverrides: [{
+          idx: 0,
+          text: 'point only',
+          showVal: false,
+          showCatName: false,
+          showSerName: false,
+          showPercent: false,
+          labelBox: { fill: 'ABCDEF' },
+        }],
+      })],
+    }), RECT, 1);
+
+    expect(rec.texts.map(text => text.text)).toContain('point only');
+    expect(rec.rects.some(rect => rect.fs === '#ABCDEF')).toBe(true);
+  });
+
+  it.each(['ctr', 'inEnd'])(
+    'keeps a point-only callout at its authored %s anchor without boxing siblings',
+    position => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'pie',
+        categories: ['A', 'B'],
+        series: [series({
+          values: [1, 1],
+          seriesDataLabels: {
+            showVal: false,
+            showCatName: true,
+            showSerName: false,
+            showPercent: false,
+            position: 'outEnd',
+          },
+          dataLabelOverrides: [{
+            idx: 0,
+            text: 'A',
+            position,
+            labelBox: { fill: 'ABCDEF' },
+          }],
+        })],
+      }), RECT, 1);
+
+      const boxes = rec.rects.filter(rect => rect.fs === '#ABCDEF');
+      expect(boxes).toHaveLength(1);
+      const box = boxes[0];
+      const center = rec.arcs[0];
+      const outerR = Math.max(...rec.arcs.map(arc => arc.r));
+      const boxDistance = Math.hypot(
+        box.x + box.w / 2 - center.x,
+        box.y + box.h / 2 - center.y,
+      );
+      expect(boxDistance).toBeLessThan(outerR);
+      const sibling = rec.texts.find(text => text.text === 'B');
+      expect(sibling).toBeDefined();
+      expect(Math.hypot(sibling!.x - center.x, sibling!.y - center.y)).toBeGreaterThan(outerR);
+    },
+  );
+
+  it('composes a per-point show flag without series label defaults', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['Only'],
+      series: [series({ values: [1], dataLabelOverrides: [{ idx: 0, text: '', showPercent: true }] })],
+    }), RECT, 1);
+    expect(rec.texts.map(text => text.text)).toContain('100%');
+  });
+
+  it('applies a per-point manual pie layout without series label defaults', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['Only'],
+      series: [series({
+        values: [1],
+        dataLabelOverrides: [{
+          idx: 0,
+          text: 'manual point',
+          manualLayout: { xMode: 'edge', yMode: 'edge', x: 0.5, y: 0.5, w: 0.2, h: 0.1 },
+        }],
+      })],
+    }), RECT, 1);
+    expect(rec.texts.find(text => text.text === 'manual point')).toMatchObject({ x: 384, y: 198 });
+  });
+
+  it('keeps a per-point delete from falling back to legacy pie percentages', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      showDataLabels: true,
+      categories: ['Only'],
+      series: [series({ values: [1], dataLabelOverrides: [{ idx: 0, text: '', deleted: true }] })],
+    }), RECT, 1);
+    expect(rec.texts.map(text => text.text)).not.toContain('100%');
+  });
+
+  it('anchors an outer-ring doughnut label in that ring rather than the full doughnut band', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'doughnut',
+      holeSize: 50,
+      categories: ['A', 'B'],
+      series: [
+        series({
+          name: 'Outer',
+          values: [1, 1],
+          dataLabelOverrides: [{ idx: 0, text: 'outer-ring' }],
+        }),
+        series({ name: 'Inner', values: [1, 1] }),
+      ],
+    }), RECT, 1);
+
+    const radii = [...new Set(rec.arcs.map(arc => arc.r))].sort((a, b) => b - a);
+    const outerLabel = rec.fontTexts.find(text => text.text === 'outer-ring');
+    expect(radii.length).toBeGreaterThanOrEqual(3);
+    expect(outerLabel).toBeDefined();
+    const centerX = rec.arcs[0].x;
+    expect(outerLabel!.x - centerX).toBeCloseTo((radii[0] + radii[1]) / 2, 3);
+  });
+
   it('draws a filled callout box per slice (category name + percent on separate lines)', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, pieCalloutModel(), RECT, 1);
@@ -5030,6 +5374,28 @@ describe('CH14 — pie callout data labels', () => {
     // leader; assert at least one leader segment exists in that color.
     const leaders = rec.segs.filter(s => s.ss === '#A6A6A6');
     expect(leaders.length).toBeGreaterThan(0);
+  });
+
+  it('applies authored manual width and height to callout paint and text bounds', () => {
+    const rec = recordingCtx();
+    const model = pieCalloutModel();
+    model.series[0].dataLabelOverrides = [{
+      idx: 0,
+      text: 'A long manually sized callout label',
+      manualLayout: {
+        xMode: 'edge', yMode: 'edge', x: 0.25, y: 0.25, w: 0.2, h: 0.1,
+      },
+      labelBox: { fill: 'FFFFFF', borderColor: '4472C4', borderWidthEmu: 12700 },
+    }];
+    renderChart(rec.ctx, model, RECT, 1);
+    expect(rec.rects.some(box =>
+      box.fs === '#FFFFFF'
+      && Math.abs(box.x - 160) < 1e-6
+      && Math.abs(box.y - 90) < 1e-6
+      && Math.abs(box.w - 128) < 1e-6
+      && Math.abs(box.h - 36) < 1e-6
+    )).toBe(true);
+    expect(rec.texts.some(text => text.text.includes('…'))).toBe(true);
   });
 
   it('keeps plain-text labels (no boxes) when the dLbls carries no box shape', () => {
@@ -6119,6 +6485,40 @@ describe('CH15 — chartEx sunburst', () => {
     expect(rec.rotates[0]).toBeCloseTo(Math.PI / 6, 5);
   });
 
+  it('bounds a long authored sunburst label and preserves whitespace', () => {
+    const rec = ringRecordingCtx();
+    const authored = `A  ${'x'.repeat(5000)}`;
+    renderChart(rec.ctx, sunburstModel({
+      series: [series({
+        values: [],
+        dataLabelOverrides: [{ idx: 0, text: authored, fontColor: '123456', position: 'ctr' }],
+      })],
+    }), RECT, 1);
+
+    const labels = rec.fontTexts.filter(text => text.fill === '#123456');
+    expect(labels.length).toBeGreaterThan(0);
+    expect(labels.length).toBeLessThanOrEqual(4);
+    expect(labels.map(text => text.text).join('')).toContain('A  ');
+    expect(labels.map(text => text.text)).not.toContain(authored);
+  });
+
+  it('applies authored sunburst manual layout in chart coordinates', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, sunburstModel({
+      series: [series({
+        values: [],
+        dataLabelOverrides: [{
+          idx: 0,
+          text: 'manual sunburst',
+          fontColor: '123456',
+          manualLayout: { xMode: 'edge', yMode: 'edge', x: 0.5, y: 0.5, w: 0.2, h: 0.1 },
+        }],
+      })],
+    }), RECT, 1);
+
+    expect(rec.texts.find(text => text.text === 'manual sunburst')).toMatchObject({ x: 384, y: 198 });
+  });
+
   it('sweeps each branch proportional to its aggregated size (Branch A twice Branch B)', () => {
     const rec = ringRecordingCtx();
     renderChart(rec.ctx, sunburstModel(), RECT, 1);
@@ -6590,7 +6990,7 @@ describe('CH15 — chartEx treemap', () => {
     expect(rec.strokeRects).toHaveLength(0);
   });
 
-  it('wraps an over-wide inEnd leaf label without replacing it with an ellipsis', () => {
+  it('bounds an over-wide inEnd leaf label to the shared four-line limit', () => {
     const rec = recordingCtx();
     const model = baseModel({
       chartType: 'treemap',
@@ -6617,13 +7017,14 @@ describe('CH15 — chartEx treemap', () => {
     renderChart(rec.ctx, model, { x: 0, y: 0, w: 180, h: 180 }, 1);
 
     const narrow = [...rec.strokeRects].sort((a, b) => a.w - b.w)[0];
-    const narrowText = rec.texts
+    const narrowLabels = rec.texts
       .filter(text => text.baseline === 'bottom' && text.x >= narrow.x && text.x <= narrow.x + narrow.w)
-      .sort((a, b) => a.y - b.y)
+      .sort((a, b) => a.y - b.y);
+    const narrowText = narrowLabels
       .map(text => text.text)
       .join('');
-    expect(narrowText).toBe('A-medium');
-    expect(rec.texts.map(text => text.text)).not.toContain('…');
+    expect(narrowText).toBe('A-m…');
+    expect(narrowLabels).toHaveLength(4);
   });
 
   it('clips centered leaf labels and limits them to the tile height', () => {
@@ -6750,10 +7151,25 @@ describe('CH15 — chartEx treemap', () => {
       dataLabelOverrides: [{ idx: 4, text: 'Custom East\n20', fontColor: '222222' }],
     })];
     renderChart(rec.ctx, model, RECT, 1);
-    const custom = rec.texts.filter(text => text.text === 'Custom East' || text.text === '20');
+    const custom = rec.texts.filter(text =>
+      (text.text === 'Custom East' || text.text === '20') && text.fillStyle === '#222222'
+    );
     expect(custom.map(text => text.text)).toEqual(expect.arrayContaining(['Custom East', '20']));
-    expect(custom.every(text => text.fillStyle === '#222222')).toBe(true);
     expect(rec.texts.map(text => text.text)).not.toContain('East');
+  });
+
+  it('applies authored treemap manual layout in chart coordinates', () => {
+    const rec = recordingCtx();
+    const model = treemapModel();
+    model.series[0].dataLabelOverrides = [{
+      idx: 1,
+      text: 'manual tile',
+      fontColor: '123456',
+      manualLayout: { xMode: 'edge', yMode: 'edge', x: 0.5, y: 0.5, w: 0.2, h: 0.1 },
+    }];
+    renderChart(rec.ctx, model, RECT, 1);
+
+    expect(rec.texts.find(text => text.text === 'manual tile')).toMatchObject({ x: 384, y: 198 });
   });
 
   it('honors dataLabelHidden for treemap parent nodes', () => {
