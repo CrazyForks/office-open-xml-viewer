@@ -595,8 +595,12 @@ function drawAxisTick(
   // left). A secondary value axis sits on the RIGHT, where "outside" points
   // right — pass `opposite` to flip the out/in direction.
   opposite = false,
+  lineHidden = false,
 ): void {
-  if (mode === 'none' || !mode) return;
+  // Axis shape properties style both the rule and its tick marks. An authored
+  // `<a:ln><a:noFill/>` therefore suppresses the ticks too, while labels and
+  // gridlines remain independently visible.
+  if (lineHidden || mode === 'none' || !mode) return;
   // Tick length scales mildly with the axis line weight so a thick
   // ruler-style axis (e.g. Vertex42 Gantt 5 pt) produces ticks that
   // are visible without being huge.
@@ -1117,7 +1121,7 @@ function drawSecondaryValueAxis(
       const sval = secScale.min + si * secScale.step;
       const gy = toYSecondary(sval);
       // Same tick geometry as the left axis, mirrored to the right edge.
-      drawAxisTick(ctx, sec.majorTickMark, 'val', axX, gy, secLineColor, secLineW, true);
+      drawAxisTick(ctx, sec.majorTickMark, 'val', axX, gy, secLineColor, secLineW, true, sec.lineHidden);
       ctx.fillText(formatChartValWithCode(sval, sec.formatCode ?? null, date1904), axX + 14, gy);
     }
   }
@@ -1354,11 +1358,39 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     ? (chart.valAxisHidden ? h * 0.02 : catAxisLabelBandH(valAxLabelFontPx)) + catTitleH + legBottomH
     : catAxisLabelBandH(catAxFontPx) + catTitleH + legBottomH;
   const phEst = h - padT - padB;
+  let horizontalCategoryLabelBandW = 0;
+  if (isH && !chart.catAxisHidden && catLabelsVisible(chart)) {
+    // The paint path derives an unauthored tick font from the category slot,
+    // not the overall chart height. Use the same resolver here so tall charts
+    // do not reserve a gutter for a much larger font than they actually draw.
+    const measuredHorizontalCatTickFontPx = chart.catAxisFontSizeHpt != null
+      ? catAxFontPx
+      : Math.max(8, Math.min(11, (phEst / n) * 0.5));
+    ctx.save();
+    ctx.font = `${measuredHorizontalCatTickFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+    for (const category of cats) {
+      horizontalCategoryLabelBandW = Math.max(
+        horizontalCategoryLabelBandW,
+        ctx.measureText(formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904)).width,
+      );
+    }
+    ctx.restore();
+    horizontalCategoryLabelBandW += (chart.catAxisFontSizeHpt != null
+      ? valueTickLabelGapPx(measuredHorizontalCatTickFontPx)
+      : 4) + AXIS_OUTER_TEXT_MARGIN_PT * ptToPx;
+  }
+  // Auto layout keeps at least half of the frame available to the data plot;
+  // labels beyond that measured budget are elided at paint time. Authored outer
+  // layouts still use the full measured band in `manualOuterInsets` below.
+  const automaticHorizontalCategoryLabelBandW = Math.min(
+    horizontalCategoryLabelBandW,
+    Math.max(0, w / 2 - valTitleW - legLeftW),
+  );
   // Horizontal bars run the value axis along the (wide) bottom, so its length is
-  // the plot WIDTH. Estimate it from the fixed isH side pads (those don't depend
-  // on the value-label measurement).
+  // the plot WIDTH. Estimate it from the same measured category-label band that
+  // the final frame uses so automatic tick density agrees with painted geometry.
   const pwEst = isH
-    ? w - ((chart.catAxisHidden ? w * 0.03 : w * 0.22) + valTitleW + legLeftW) - (legRightW + w * 0.03)
+    ? w - ((chart.catAxisHidden ? w * 0.03 : automaticHorizontalCategoryLabelBandW) + valTitleW + legLeftW) - (legRightW + w * 0.03)
     : 0;
   // A deleted value axis has no ticks whose density needs adapting to the
   // available screen length. Office falls back to its default automatic scale
@@ -1468,24 +1500,6 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     valLabelTextW = wmax;
     valLabelBandW = valLabelTextW + 16; // ~12px tick+gap to the axis + ~4px to the title
   }
-  let horizontalCategoryLabelBandW = 0;
-  if (
-    isH
-    && !chart.catAxisHidden
-    && chart.plotAreaManualLayout != null
-    && chart.plotAreaManualLayout.layoutTarget !== 'inner'
-  ) {
-    ctx.font = `${catAxFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
-    for (const category of cats) {
-      horizontalCategoryLabelBandW = Math.max(
-        horizontalCategoryLabelBandW,
-        ctx.measureText(formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904)).width,
-      );
-    }
-    horizontalCategoryLabelBandW += chart.catAxisFontSizeHpt != null
-      ? valueTickLabelGapPx(catAxFontPx)
-      : 4;
-  }
   // Secondary value-axis label band (right edge). Measure with the SAME font
   // and number format the axis is drawn with (`secFontPx` / `sec.formatCode`),
   // otherwise a `%`/thousands format or an explicit font size makes the
@@ -1514,7 +1528,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     // Horizontal bars: keep the wider left band for the category labels
     // (`c:catAx/c:delete val="1"` → no category labels, so tighten).
     l: isH
-      ? (chart.catAxisHidden ? w * 0.03 : w * 0.22) + valTitleW + legLeftW
+      ? (chart.catAxisHidden ? w * 0.03 : automaticHorizontalCategoryLabelBandW) + valTitleW + legLeftW
       : legLeftW + valTitleW + valLabelBandW,
   };
 
@@ -1760,9 +1774,9 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       for (let si = 0; si <= steps; si++) {
         const val = axMin + si * step;
         if (!isH) {
-          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, valY(val), valLineColor, valLineW);
+          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, valY(val), valLineColor, valLineW, false, chart.valAxisLineHidden);
         } else {
-          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'cat', py0 + ph, valX(val), valLineColor, valLineW);
+          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'cat', py0 + ph, valX(val), valLineColor, valLineW, false, chart.valAxisLineHidden);
         }
       }
     }
@@ -1775,9 +1789,9 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       for (let ci = 0; ci <= last; ci++) {
         const frac = onBoundary ? ci / n : (n === 1 ? 0.5 : ci / (n - 1));
         if (!isH) {
-          drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, px0 + frac * pw, catLineColor, catLineW);
+          drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, px0 + frac * pw, catLineColor, catLineW, false, chart.catAxisLineHidden);
         } else {
-          drawAxisTick(ctx, chart.catAxisMajorTickMark, 'val', px0, py0 + frac * ph, catLineColor, catLineW);
+          drawAxisTick(ctx, chart.catAxisMajorTickMark, 'val', px0, py0 + frac * ph, catLineColor, catLineW, false, chart.catAxisLineHidden);
         }
       }
     }
@@ -2109,7 +2123,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         const sval = sMin + si * sStep;
         const gy = toYSecondary(sval);
         // Same tick geometry as the left axis, mirrored to the right edge.
-        drawAxisTick(ctx, sec.majorTickMark, 'val', axX, gy, secLineColor, secLineW, true);
+        drawAxisTick(ctx, sec.majorTickMark, 'val', axX, gy, secLineColor, secLineW, true, sec.lineHidden);
         ctx.fillText(formatChartValWithCode(sval, sec.formatCode ?? null, chart.date1904), axX + 14, gy);
       }
     }
@@ -2378,7 +2392,7 @@ function renderLineChart(
     for (const v of plan.majorLines) {
       const gy = toY(v);
       if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, v === 0, grid);
-      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, primaryValTickColor, primaryValTickWidth);
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, primaryValTickColor, primaryValTickWidth, false, chart.valAxisLineHidden);
       if (drawLabels) {
         ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
         ctx.textAlign = 'right';
@@ -2405,9 +2419,8 @@ function renderLineChart(
   }
 
   // Axis lines: bottom (category) + left (value). Both default to visible
-  // unless hidden explicitly. `<c:spPr><a:ln><a:noFill>` (line-only hide)
-  // suppresses the rule while keeping labels and tick marks — sample-1
-  // "Carbon & Growth" uses this on the value axis.
+  // unless hidden explicitly. Office treats `<c:spPr><a:ln><a:noFill>` as
+  // suppressing the rule and tick marks while retaining labels/gridlines.
   if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
     ctx.strokeStyle = primaryCatLine.color; ctx.lineWidth = primaryCatLine.width;
     ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
@@ -2544,7 +2557,7 @@ function renderLineChart(
     // indices to author intervals such as every second year.
     const tickInterval = Math.max(1, Math.floor(chart.catAxisTickMarkSkip ?? 1));
     for (let ci = 0; ci < n; ci += tickInterval) {
-      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, toX(ci), primaryCatTickColor, primaryCatTickWidth);
+      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, toX(ci), primaryCatTickColor, primaryCatTickWidth, false, chart.catAxisLineHidden);
     }
     const showLabels = catLabelsVisible(chart);
     const labelInterval = Math.max(1, Math.floor(chart.catAxisTickLabelSkip ?? 1));
@@ -2702,7 +2715,7 @@ function renderStockChart(
     for (const v of plan.majorLines) {
       const gy = toY(v);
       if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, v === 0, grid);
-      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy);
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, undefined, undefined, false, chart.valAxisLineHidden);
       if (drawLabels) {
         ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
         ctx.textAlign = 'right';
@@ -2800,7 +2813,7 @@ function renderStockChart(
     const rotRad = catLabelRotationRad(chart);
     for (let ci = 0; ci < n; ci += labelInterval) {
       const tx = toX(ci);
-      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, tx);
+      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, tx, undefined, undefined, false, chart.catAxisLineHidden);
       if (!showLabels) continue;
       ctx.fillStyle = catLabelColor;
       const label = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
@@ -3295,7 +3308,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     const steps = Math.round(axMax / step);
     for (let si = 0; si <= steps; si++) {
       const v = si * step; const gy = toY(v);
-      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, valLineColor, valLineW);
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, valLineColor, valLineW, false, chart.valAxisLineHidden);
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
       const gap = chart.valAxisFontSizeHpt != null
@@ -3304,10 +3317,10 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       ctx.fillText(formatPrimaryValueAxisTick(chart, v, pct), px0 - gap, gy);
     }
   }
-  // Category-axis baseline + value-axis rule. `<c:*Ax><c:spPr><a:ln><a:noFill>`
-  // suppresses just the rule (labels/ticks stay) → `*AxisLineHidden`. The value
-  // rule is drawn only when the file gives it a colour, matching the bar/line
-  // renderers (Office's default value axis is line-less, gridlines stand in).
+  // Category-axis baseline + value-axis rule. Office treats
+  // `<c:*Ax><c:spPr><a:ln><a:noFill>` as suppressing the rule and tick marks
+  // while labels/gridlines remain. The value rule is drawn only when the file
+  // gives it a colour, matching the bar/line renderers.
   if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
     ctx.strokeStyle = catLineColor; ctx.lineWidth = catLineW;
     ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
@@ -3322,11 +3335,11 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     const tickSkip = Math.max(1, Math.floor(chart.catAxisTickMarkSkip ?? 1));
     if (between) {
       for (let ci = 0; ci <= n; ci += tickSkip) {
-        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, px0 + (ci / n) * pw, catLineColor, catLineW);
+        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, px0 + (ci / n) * pw, catLineColor, catLineW, false, chart.catAxisLineHidden);
       }
     } else {
       for (let ci = 0; ci < n; ci += tickSkip) {
-        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, toX(ci), catLineColor, catLineW);
+        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, toX(ci), catLineColor, catLineW, false, chart.catAxisLineHidden);
       }
     }
   }
@@ -4697,7 +4710,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       // so only the width formula is shared. `axisLineWidthPx`'s 1 px fallback is
       // equivalent to undefined here (drawAxisTick treats both as a hairline).
       const yAxisLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : undefined;
-      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', yAxisX, gy, yAxisLineColor, axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx));
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', yAxisX, gy, yAxisLineColor, axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx), false, chart.valAxisLineHidden);
     }
   }
 
@@ -4719,10 +4732,10 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
 
   // X-axis line (the timeline ruler in Gantt-style scatter charts depends
   // on this line's stroke). Tick labels are skipped when the category axis
-  // is hidden via `<c:delete val="1"/>`; the rule itself is also gated on
-  // `<c:catAx><c:spPr><a:ln><a:noFill>` (line-only hide). Color and
-  // weight come from `<c:catAx><c:spPr><a:ln>` when present; default
-  // otherwise.
+  // is hidden via `<c:delete val="1"/>`. Office treats
+  // `<c:catAx><c:spPr><a:ln><a:noFill>` as suppressing the rule and tick
+  // marks. Color and weight come from
+  // `<c:catAx><c:spPr><a:ln>` when present; default otherwise.
   if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
     ctx.save();
     ctx.strokeStyle = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#888';
@@ -4768,7 +4781,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
         ctx.fillText(formatChartValWithCode(v, chart.catAxisFormatCode, chart.date1904), gx, labelY);
       }
       const xAxisLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : undefined;
-      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', xAxisY, gx, xAxisLineColor, axisLineWidthPx(chart.catAxisLineWidthEmu, ptToPx));
+      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', xAxisY, gx, xAxisLineColor, axisLineWidthPx(chart.catAxisLineWidthEmu, ptToPx), false, chart.catAxisLineHidden);
     }
   }
 
@@ -5638,13 +5651,15 @@ function renderWaterfallChart(
         gy,
         valAxisLine.color,
         valAxisLine.width,
+        false,
+        chart.valAxisLineHidden,
       );
     }
   }
 
   // L-frame: vertical (value-axis) rule + horizontal (category-axis) baseline.
-  // Each segment is independently gated on its axis's `<c:delete>` *and*
-  // `<c:spPr><a:ln><a:noFill>` (line-only hide).
+  // Each segment is independently gated on its axis's `<c:delete>` and on
+  // Office's rule/tick suppression for `<c:spPr><a:ln><a:noFill>`.
   const drawValLine = !chart.valAxisHidden && !chart.valAxisLineHidden;
   const drawCatLine = !chart.catAxisHidden && !chart.catAxisLineHidden;
   if (drawValLine) {
@@ -5998,6 +6013,8 @@ function renderBoxWhiskerChart(
         gy,
         valAxisLine.color,
         valAxisLine.width,
+        false,
+        chart.valAxisLineHidden,
       );
     }
     if (!chart.valAxisLineHidden) {

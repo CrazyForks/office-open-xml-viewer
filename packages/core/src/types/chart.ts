@@ -378,12 +378,13 @@ export interface ChartModel {
   catAxisHidden: boolean;
   /** `<c:valAx><c:delete val="1"/>`. */
   valAxisHidden: boolean;
-  /** `<c:catAx><c:spPr><a:ln><a:noFill>` — hide just the axis LINE; labels
-   *  and tick marks still render. Distinct from `catAxisHidden` (which
-   *  removes everything via `<c:delete val="1"/>`). */
+  /** `<c:catAx><c:spPr><a:ln><a:noFill>` — Office-compatible suppression of
+   *  the axis rule and tick marks. Labels and gridlines remain independent.
+   *  Distinct from `catAxisHidden` (which removes everything via
+   *  `<c:delete val="1"/>`). */
   catAxisLineHidden: boolean;
-  /** `<c:valAx><c:spPr><a:ln><a:noFill>` — hide just the axis LINE; labels
-   *  and tick marks still render. */
+  /** `<c:valAx><c:spPr><a:ln><a:noFill>` — Office-compatible suppression of
+   *  the axis rule and tick marks; labels and gridlines remain independent. */
   valAxisLineHidden: boolean;
   /** Hex without '#'. From `<c:plotArea><c:spPr><a:solidFill>`. */
   plotAreaBg: string | null;
@@ -913,7 +914,8 @@ export interface SecondaryValueAxis {
   lineColor?: string | null;
   /** `<c:spPr><a:ln w>` axis-line width in EMU. */
   lineWidthEmu?: number | null;
-  /** `<c:spPr><a:ln><a:noFill>` — hide just the axis rule. */
+  /** `<c:spPr><a:ln><a:noFill>` — Office-compatible suppression of the
+   *  secondary axis rule and tick marks; labels and gridlines remain. */
   lineHidden: boolean;
   /** `<c:majorTickMark>` — "cross" (default) | "out" | "in" | "none". */
   majorTickMark: string;

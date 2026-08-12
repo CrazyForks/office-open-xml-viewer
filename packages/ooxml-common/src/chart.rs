@@ -2249,8 +2249,9 @@ pub fn extract_axis_tick_label_color(
 ///
 ///  - `color`: resolved hex (no `#`) when the line carries a `<a:solidFill>`.
 ///  - `width_emu`: the `<a:ln w>` width in EMU when present.
-///  - `no_fill`: true when the line is explicitly `<a:noFill>` — the axis still
-///    shows its labels/ticks but the rule itself is suppressed.
+///  - `no_fill`: true when the line is explicitly `<a:noFill>`. The shared
+///    model records this separately from axis deletion; Office suppresses the
+///    axis rule and its tick marks while retaining labels and gridlines.
 ///
 /// When the axis has no `<c:spPr><a:ln>` at all the tuple is
 /// `(None, None, false)` and the caller falls back to its default rule.
@@ -7949,6 +7950,18 @@ mod tests {
         assert_eq!(no_fill_model.val_axis_major_gridlines, Some(false));
         assert_eq!(no_fill_model.val_axis_gridline_color, None);
         assert_eq!(no_fill_model.val_axis_gridline_width_emu, None);
+
+        let no_fill_axis_xml = xml.replace(
+            "<c:valAx><c:delete val=\"0\"/><c:majorGridlines/><c:majorTickMark val=\"out\"/></c:valAx>",
+            "<c:valAx><c:delete val=\"0\"/><c:majorGridlines/><c:majorTickMark val=\"out\"/><c:spPr><a:ln><a:noFill/></a:ln></c:spPr></c:valAx>",
+        );
+        let no_fill_axis_doc = chart_space_of(&no_fill_axis_xml);
+        let no_fill_axis_model =
+            parse_chart_part(no_fill_axis_doc.root_element(), &FixtureResolver)
+                .expect("no-fill axis chart parses");
+        assert!(no_fill_axis_model.val_axis_line_hidden);
+        assert_eq!(no_fill_axis_model.val_axis_major_tick_mark, "out");
+        assert!(!no_fill_axis_model.val_axis_hidden);
     }
 
     /// (b) Combo chart: a bar series on the primary value axis plus a line
