@@ -320,9 +320,15 @@ export interface ChartModel {
     catAxisTitleFontSizeHpt?: number | null;
     catAxisTitleFontBold?: boolean | null;
     catAxisTitleFontColor?: string | null;
+    catAxisTitleRotation?: number | null;
+    catAxisTitleVerticalMode?: 'horz' | 'vert' | 'vert270' | 'wordArtVert' | 'eaVert' | 'mongolianVert' | 'wordArtVertRtl' | null;
+    catAxisTitleManualLayout?: ChartManualLayout | null;
     valAxisTitleFontSizeHpt?: number | null;
     valAxisTitleFontBold?: boolean | null;
     valAxisTitleFontColor?: string | null;
+    valAxisTitleRotation?: number | null;
+    valAxisTitleVerticalMode?: 'horz' | 'vert' | 'vert270' | 'wordArtVert' | 'eaVert' | 'mongolianVert' | 'wordArtVertRtl' | null;
+    valAxisTitleManualLayout?: ChartManualLayout | null;
     catAxisFontFace?: string | null;
     valAxisFontFace?: string | null;
     catAxisTitleFontFace?: string | null;
@@ -1090,6 +1096,9 @@ export interface SecondaryValueAxis {
     titleFontBold?: boolean | null;
     titleFontColor?: string | null;
     titleFontFace?: string | null;
+    titleRotation?: number | null;
+    titleVerticalMode?: 'horz' | 'vert' | 'vert270' | 'wordArtVert' | 'eaVert' | 'mongolianVert' | 'wordArtVertRtl' | null;
+    titleManualLayout?: ChartManualLayout | null;
 }
 export interface ShapeAnchor {
     fromCol: number;

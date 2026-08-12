@@ -12,38 +12,38 @@ set textBaseline=top
 fillText "Area" 332,38.972 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
 set strokeStyle=#aaa
 beginPath
-moveTo 88.8,313.45
-lineTo 540,313.45
+moveTo 88.8,312.95
+lineTo 540,312.95
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
 beginPath
-moveTo 88.8,241.95
-lineTo 540,241.95
+moveTo 88.8,241.6167
+lineTo 540,241.6167
 stroke ss=#e0e0e0 lw=0.5 dash=
 beginPath
-moveTo 88.8,170.45
-lineTo 540,170.45
+moveTo 88.8,170.2833
+lineTo 540,170.2833
 stroke ss=#e0e0e0 lw=0.5 dash=
 beginPath
 moveTo 88.8,98.95
 lineTo 540,98.95
 stroke ss=#e0e0e0 lw=0.5 dash=
 beginPath
-moveTo 107.6,313.45
-lineTo 107.6,270.55
-lineTo 145.2,241.95
-lineTo 182.8,256.25
-lineTo 220.4,227.65
-lineTo 258,213.35
-lineTo 295.6,241.95
-lineTo 333.2,199.05
-lineTo 370.8,227.65
-lineTo 408.4,184.75
-lineTo 446,213.35
-lineTo 483.6,170.45
-lineTo 521.2,199.05
-lineTo 521.2,313.45
+moveTo 107.6,312.95
+lineTo 107.6,270.15
+lineTo 145.2,241.6167
+lineTo 182.8,255.8833
+lineTo 220.4,227.35
+lineTo 258,213.0833
+lineTo 295.6,241.6167
+lineTo 333.2,198.8167
+lineTo 370.8,227.35
+lineTo 408.4,184.55
+lineTo 446,213.0833
+lineTo 483.6,170.2833
+lineTo 521.2,198.8167
+lineTo 521.2,312.95
 closePath
 set fillStyle=#4472C4
 fill fs=#4472C4 ga=1
@@ -51,37 +51,37 @@ set strokeStyle=#4472C4
 set lineWidth=1.5
 setLineDash
 stroke ss=#4472C4 lw=1.5 dash=
-set font=10.725px sans-serif
+set font=10.7px sans-serif
 set textBaseline=middle
 set strokeStyle=#aaa
 set lineWidth=1
 beginPath
-moveTo 84.8,313.45
-lineTo 88.8,313.45
+moveTo 84.8,312.95
+lineTo 88.8,312.95
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#4472C4
 set lineWidth=1.5
 set fillStyle=#555
 set textAlign=right
-fillText "0" 82.8,313.45 fs=#555 font=10.725px sans-serif al=right bl=middle
+fillText "0" 82.8,312.95 fs=#555 font=10.7px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
 beginPath
-moveTo 84.8,241.95
-lineTo 88.8,241.95
+moveTo 84.8,241.6167
+lineTo 88.8,241.6167
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#4472C4
 set lineWidth=1.5
-fillText "5" 82.8,241.95 fs=#555 font=10.725px sans-serif al=right bl=middle
+fillText "5" 82.8,241.6167 fs=#555 font=10.7px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
 beginPath
-moveTo 84.8,170.45
-lineTo 88.8,170.45
+moveTo 84.8,170.2833
+lineTo 88.8,170.2833
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#4472C4
 set lineWidth=1.5
-fillText "10" 82.8,170.45 fs=#555 font=10.725px sans-serif al=right bl=middle
+fillText "10" 82.8,170.2833 fs=#555 font=10.7px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
 beginPath
@@ -90,92 +90,93 @@ lineTo 88.8,98.95
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#4472C4
 set lineWidth=1.5
-fillText "15" 82.8,98.95 fs=#555 font=10.725px sans-serif al=right bl=middle
+fillText "15" 82.8,98.95 fs=#555 font=10.7px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
 beginPath
-moveTo 88.8,313.45
-lineTo 540,313.45
+moveTo 88.8,312.95
+lineTo 540,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 88.8,317.45
-lineTo 88.8,313.45
+moveTo 88.8,316.95
+lineTo 88.8,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 126.4,317.45
-lineTo 126.4,313.45
+moveTo 126.4,316.95
+lineTo 126.4,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 164,317.45
-lineTo 164,313.45
+moveTo 164,316.95
+lineTo 164,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 201.6,317.45
-lineTo 201.6,313.45
+moveTo 201.6,316.95
+lineTo 201.6,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 239.2,317.45
-lineTo 239.2,313.45
+moveTo 239.2,316.95
+lineTo 239.2,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 276.8,317.45
-lineTo 276.8,313.45
+moveTo 276.8,316.95
+lineTo 276.8,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 314.4,317.45
-lineTo 314.4,313.45
+moveTo 314.4,316.95
+lineTo 314.4,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 352,317.45
-lineTo 352,313.45
+moveTo 352,316.95
+lineTo 352,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 389.6,317.45
-lineTo 389.6,313.45
+moveTo 389.6,316.95
+lineTo 389.6,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 427.2,317.45
-lineTo 427.2,313.45
+moveTo 427.2,316.95
+lineTo 427.2,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 464.8,317.45
-lineTo 464.8,313.45
+moveTo 464.8,316.95
+lineTo 464.8,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 502.4,317.45
-lineTo 502.4,313.45
+moveTo 502.4,316.95
+lineTo 502.4,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 540,317.45
-lineTo 540,313.45
+moveTo 540,316.95
+lineTo 540,312.95
 stroke ss=#aaa lw=1 dash=
 set textAlign=center
 set textBaseline=top
 set font=11px sans-serif
-fillText "Jan" 107.6,316.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Feb" 145.2,316.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Mar" 182.8,316.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Apr" 220.4,316.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "May" 258,316.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Jun" 295.6,316.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Jul" 333.2,316.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Aug" 370.8,316.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Sep" 408.4,316.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Oct" 446,316.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Nov" 483.6,316.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Dec" 521.2,316.45 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Jan" 107.6,315.95 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Feb" 145.2,315.95 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Mar" 182.8,315.95 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Apr" 220.4,315.95 fs=#555 font=11px sans-serif al=center bl=top
+fillText "May" 258,315.95 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Jun" 295.6,315.95 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Jul" 333.2,315.95 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Aug" 370.8,315.95 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Sep" 408.4,315.95 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Oct" 446,315.95 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Nov" 483.6,315.95 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Dec" 521.2,315.95 fs=#555 font=11px sans-serif al=center bl=top
 set font=10.5px sans-serif
 set textBaseline=middle
 set fillStyle=#4472C4
-fillRect 576,198.95,10,10.5 fs=#4472C4
+fillRect 576,198.7,10,10.5 fs=#4472C4
 set fillStyle=#333
 set textAlign=left
-fillText "A" 590,204.2 fs=#333 font=10.5px sans-serif al=left bl=middle
+fillText "A" 590,203.95 fs=#333 font=10.5px sans-serif al=left bl=middle
 save
-set font=bold 10px sans-serif
+set font=bold 10.5px sans-serif
 set fillStyle=#555
+translate 314.4,366.75
 set textAlign=center
-fillText "Month" 314.4,367 fs=#555 font=bold 10px sans-serif al=center bl=middle
+fillText "Month" 0,0 fs=#555 font=bold 10.5px sans-serif al=center bl=middle
 restore
 restore"
 `;
@@ -346,7 +347,7 @@ exports[`renderChart draw-call signature (characterization) > is stable for: clu
 save
 set font=10.5px sans-serif
 restore
-set font=10.725px sans-serif
+set font=10.7px sans-serif
 set font=10.5px sans-serif
 set font=bold 30.6px Calibri, Arial, sans-serif
 set fillStyle=#333
@@ -357,124 +358,125 @@ save
 set font=11px sans-serif
 restore
 set textBaseline=middle
-set font=10.725px sans-serif
+set font=10.7px sans-serif
 set fillStyle=#555
 set strokeStyle=#aaa
 beginPath
-moveTo 67.67,313.45
-lineTo 552.8,313.45
+moveTo 68.14,312.95
+lineTo 552.8,312.95
 stroke ss=#aaa lw=1 dash=
 set textAlign=right
-fillText "0" 55.67,313.45 fs=#555 font=10.725px sans-serif al=right bl=middle
+fillText "0" 56.14,312.95 fs=#555 font=10.7px sans-serif al=right bl=middle
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
 beginPath
-moveTo 67.67,241.95
-lineTo 552.8,241.95
+moveTo 68.14,241.6167
+lineTo 552.8,241.6167
 stroke ss=#e0e0e0 lw=0.5 dash=
-fillText "10" 55.67,241.95 fs=#555 font=10.725px sans-serif al=right bl=middle
+fillText "10" 56.14,241.6167 fs=#555 font=10.7px sans-serif al=right bl=middle
 beginPath
-moveTo 67.67,170.45
-lineTo 552.8,170.45
+moveTo 68.14,170.2833
+lineTo 552.8,170.2833
 stroke ss=#e0e0e0 lw=0.5 dash=
-fillText "20" 55.67,170.45 fs=#555 font=10.725px sans-serif al=right bl=middle
+fillText "20" 56.14,170.2833 fs=#555 font=10.7px sans-serif al=right bl=middle
 beginPath
-moveTo 67.67,98.95
+moveTo 68.14,98.95
 lineTo 552.8,98.95
 stroke ss=#e0e0e0 lw=0.5 dash=
-fillText "30" 55.67,98.95 fs=#555 font=10.725px sans-serif al=right bl=middle
+fillText "30" 56.14,98.95 fs=#555 font=10.7px sans-serif al=right bl=middle
 set fillStyle=#4472C4
-fillRect 102.3221,241.95,46.2029,71.5 fs=#4472C4
+fillRect 102.7586,241.6167,46.1581,71.3333 fs=#4472C4
 set font=bold 11px sans-serif
 set fillStyle=#333
 set textAlign=center
 set textBaseline=bottom
-fillText "10" 125.4236,240.95 fs=#333 font=bold 11px sans-serif al=center bl=bottom
+fillText "10" 125.8376,240.6167 fs=#333 font=bold 11px sans-serif al=center bl=bottom
 set fillStyle=#ED7D31
-fillRect 148.525,256.25,46.2029,57.2 fs=#ED7D31
+fillRect 148.9167,255.8833,46.1581,57.0667 fs=#ED7D31
 set fillStyle=#333
-fillText "8" 171.6264,255.25 fs=#333 font=bold 11px sans-serif al=center bl=bottom
+fillText "8" 171.9957,254.8833 fs=#333 font=bold 11px sans-serif al=center bl=bottom
 set fillStyle=#4472C4
-fillRect 264.0321,141.85,46.2029,171.6 fs=#4472C4
+fillRect 264.3119,141.75,46.1581,171.2 fs=#4472C4
 set fillStyle=#333
-fillText "24" 287.1336,140.85 fs=#333 font=bold 11px sans-serif al=center bl=bottom
+fillText "24" 287.391,140.75 fs=#333 font=bold 11px sans-serif al=center bl=bottom
 set fillStyle=#ED7D31
-fillRect 310.235,206.2,46.2029,107.25 fs=#ED7D31
+fillRect 310.47,205.95,46.1581,107 fs=#ED7D31
 set fillStyle=#333
-fillText "15" 333.3364,205.2 fs=#333 font=bold 11px sans-serif al=center bl=bottom
+fillText "15" 333.549,204.95 fs=#333 font=bold 11px sans-serif al=center bl=bottom
 set fillStyle=#4472C4
-fillRect 425.7421,191.9,46.2029,121.55 fs=#4472C4
+fillRect 425.8652,191.6833,46.1581,121.2667 fs=#4472C4
 set fillStyle=#333
-fillText "17" 448.8436,190.9 fs=#333 font=bold 11px sans-serif al=center bl=bottom
+fillText "17" 448.9443,190.6833 fs=#333 font=bold 11px sans-serif al=center bl=bottom
 set fillStyle=#ED7D31
-fillRect 471.945,156.15,46.2029,157.3 fs=#ED7D31
+fillRect 472.0233,156.0167,46.1581,156.9333 fs=#ED7D31
 set fillStyle=#333
-fillText "22" 495.0464,155.15 fs=#333 font=bold 11px sans-serif al=center bl=bottom
+fillText "22" 495.1024,155.0167 fs=#333 font=bold 11px sans-serif al=center bl=bottom
 set fillStyle=#555
 set font=11px sans-serif
 set textBaseline=top
-fillText "Q1" 148.525,316.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Q2" 310.235,316.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Q3" 471.945,316.45 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q1" 148.9167,315.95 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q2" 310.47,315.95 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q3" 472.0233,315.95 fs=#555 font=11px sans-serif al=center bl=top
 set strokeStyle=#aaa
 set lineWidth=1
 beginPath
-moveTo 67.67,313.45
-lineTo 552.8,313.45
+moveTo 68.14,312.95
+lineTo 552.8,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 63.67,313.45
-lineTo 67.67,313.45
+moveTo 64.14,312.95
+lineTo 68.14,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 63.67,241.95
-lineTo 67.67,241.95
+moveTo 64.14,241.6167
+lineTo 68.14,241.6167
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 63.67,170.45
-lineTo 67.67,170.45
+moveTo 64.14,170.2833
+lineTo 68.14,170.2833
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 63.67,98.95
-lineTo 67.67,98.95
+moveTo 64.14,98.95
+lineTo 68.14,98.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 67.67,317.45
-lineTo 67.67,313.45
+moveTo 68.14,316.95
+lineTo 68.14,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 229.38,317.45
-lineTo 229.38,313.45
+moveTo 229.6933,316.95
+lineTo 229.6933,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 391.09,317.45
-lineTo 391.09,313.45
+moveTo 391.2467,316.95
+lineTo 391.2467,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 552.8,317.45
-lineTo 552.8,313.45
+moveTo 552.8,316.95
+lineTo 552.8,312.95
 stroke ss=#aaa lw=1 dash=
 set font=10.5px sans-serif
 set textBaseline=middle
 set fillStyle=#4472C4
-fillRect 576,191.7,10,10.5 fs=#4472C4
+fillRect 576,191.45,10,10.5 fs=#4472C4
 set fillStyle=#333
 set textAlign=left
-fillText "Alpha" 590,196.95 fs=#333 font=10.5px sans-serif al=left bl=middle
+fillText "Alpha" 590,196.7 fs=#333 font=10.5px sans-serif al=left bl=middle
 set fillStyle=#ED7D31
-fillRect 576,206.2,10,10.5 fs=#ED7D31
+fillRect 576,205.95,10,10.5 fs=#ED7D31
 set fillStyle=#333
-fillText "Beta" 590,211.45 fs=#333 font=10.5px sans-serif al=left bl=middle
+fillText "Beta" 590,211.2 fs=#333 font=10.5px sans-serif al=left bl=middle
 save
-set font=bold 10px sans-serif
+set font=bold 10.5px sans-serif
 set fillStyle=#555
-translate 29.8,206.2
+translate 30.05,205.95
 rotate -1.5708
 set textAlign=center
-fillText "Units" 0,0 fs=#555 font=bold 10px sans-serif al=center bl=middle
+fillText "Units" 0,0 fs=#555 font=bold 10.5px sans-serif al=center bl=middle
 restore
 save
-fillText "Quarter" 310.235,367 fs=#555 font=bold 10px sans-serif al=center bl=middle
+translate 310.47,366.75
+fillText "Quarter" 0,0 fs=#555 font=bold 10.5px sans-serif al=center bl=middle
 restore
 restore"
 `;
@@ -668,7 +670,7 @@ set fillStyle=#555
 set strokeStyle=#aaa
 beginPath
 moveTo 47.8,335.45
-lineTo 495.6,335.45
+lineTo 503.1,335.45
 stroke ss=#aaa lw=1 dash=
 set textAlign=right
 fillText "0" 35.8,335.45 fs=#555 font=11px sans-serif al=right bl=middle
@@ -676,52 +678,52 @@ set strokeStyle=#e0e0e0
 set lineWidth=0.5
 beginPath
 moveTo 47.8,256.6167
-lineTo 495.6,256.6167
+lineTo 503.1,256.6167
 stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "50" 35.8,256.6167 fs=#555 font=11px sans-serif al=right bl=middle
 beginPath
 moveTo 47.8,177.7833
-lineTo 495.6,177.7833
+lineTo 503.1,177.7833
 stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "100" 35.8,177.7833 fs=#555 font=11px sans-serif al=right bl=middle
 beginPath
 moveTo 47.8,98.95
-lineTo 495.6,98.95
+lineTo 503.1,98.95
 stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "150" 35.8,98.95 fs=#555 font=11px sans-serif al=right bl=middle
 set fillStyle=#4472C4
-fillRect 92.58,177.7833,59.7067,157.6667 fs=#4472C4
-fillRect 241.8467,114.7167,59.7067,220.7333 fs=#4472C4
-fillRect 391.1133,146.25,59.7067,189.2 fs=#4472C4
+fillRect 93.33,177.7833,60.7067,157.6667 fs=#4472C4
+fillRect 245.0967,114.7167,60.7067,220.7333 fs=#4472C4
+fillRect 396.8633,146.25,60.7067,189.2 fs=#4472C4
 set fillStyle=#555
 set textAlign=center
 set textBaseline=top
-fillText "Q1" 122.4333,338.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Q2" 271.7,338.45 fs=#555 font=11px sans-serif al=center bl=top
-fillText "Q3" 420.9667,338.45 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q1" 123.6833,338.45 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q2" 275.45,338.45 fs=#555 font=11px sans-serif al=center bl=top
+fillText "Q3" 427.2167,338.45 fs=#555 font=11px sans-serif al=center bl=top
 set strokeStyle=#ED7D31
 set lineWidth=2
 setLineDash
 beginPath
-moveTo 122.4333,193.55
-lineTo 271.7,122.6
-lineTo 420.9667,158.075
+moveTo 123.6833,193.55
+lineTo 275.45,122.6
+lineTo 427.2167,158.075
 stroke ss=#ED7D31 lw=2 dash=
 set fillStyle=#ED7D31
 beginPath
-arc 122.4333,193.55,3,0,6.2832
+arc 123.6833,193.55,3,0,6.2832
 fill fs=#ED7D31 ga=1
 beginPath
-arc 271.7,122.6,3,0,6.2832
+arc 275.45,122.6,3,0,6.2832
 fill fs=#ED7D31 ga=1
 beginPath
-arc 420.9667,158.075,3,0,6.2832
+arc 427.2167,158.075,3,0,6.2832
 fill fs=#ED7D31 ga=1
 set strokeStyle=#aaa
 set lineWidth=1
 beginPath
 moveTo 47.8,335.45
-lineTo 495.6,335.45
+lineTo 503.1,335.45
 stroke ss=#aaa lw=1 dash=
 beginPath
 moveTo 43.8,335.45
@@ -744,55 +746,55 @@ moveTo 47.8,339.45
 lineTo 47.8,335.45
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 197.0667,339.45
-lineTo 197.0667,335.45
+moveTo 199.5667,339.45
+lineTo 199.5667,335.45
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 346.3333,339.45
-lineTo 346.3333,335.45
+moveTo 351.3333,339.45
+lineTo 351.3333,335.45
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 495.6,339.45
-lineTo 495.6,335.45
+moveTo 503.1,339.45
+lineTo 503.1,335.45
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 495.6,98.95
-lineTo 495.6,335.45
+moveTo 503.1,98.95
+lineTo 503.1,335.45
 stroke ss=#aaa lw=1 dash=
 set fillStyle=#555
 set textAlign=left
 set textBaseline=middle
 beginPath
-moveTo 499.6,335.45
-lineTo 495.6,335.45
+moveTo 507.1,335.45
+lineTo 503.1,335.45
 stroke ss=#aaa lw=1 dash=
-fillText "0" 509.6,335.45 fs=#555 font=11px sans-serif al=left bl=middle
+fillText "0" 517.1,335.45 fs=#555 font=11px sans-serif al=left bl=middle
 beginPath
-moveTo 499.6,276.325
-lineTo 495.6,276.325
+moveTo 507.1,276.325
+lineTo 503.1,276.325
 stroke ss=#aaa lw=1 dash=
-fillText "5" 509.6,276.325 fs=#555 font=11px sans-serif al=left bl=middle
+fillText "5" 517.1,276.325 fs=#555 font=11px sans-serif al=left bl=middle
 beginPath
-moveTo 499.6,217.2
-lineTo 495.6,217.2
+moveTo 507.1,217.2
+lineTo 503.1,217.2
 stroke ss=#aaa lw=1 dash=
-fillText "10" 509.6,217.2 fs=#555 font=11px sans-serif al=left bl=middle
+fillText "10" 517.1,217.2 fs=#555 font=11px sans-serif al=left bl=middle
 beginPath
-moveTo 499.6,158.075
-lineTo 495.6,158.075
+moveTo 507.1,158.075
+lineTo 503.1,158.075
 stroke ss=#aaa lw=1 dash=
-fillText "15" 509.6,158.075 fs=#555 font=11px sans-serif al=left bl=middle
+fillText "15" 517.1,158.075 fs=#555 font=11px sans-serif al=left bl=middle
 beginPath
-moveTo 499.6,98.95
-lineTo 495.6,98.95
+moveTo 507.1,98.95
+lineTo 503.1,98.95
 stroke ss=#aaa lw=1 dash=
-fillText "20" 509.6,98.95 fs=#555 font=11px sans-serif al=left bl=middle
+fillText "20" 517.1,98.95 fs=#555 font=11px sans-serif al=left bl=middle
 save
-set font=18px sans-serif
+set font=bold 10.5px sans-serif
+translate 540.6,217.2
+rotate 1.5708
 set textAlign=center
-translate 537.6,217.2
-rotate -1.5708
-fillText "Margin %" 0,0 fs=#555 font=18px sans-serif al=center bl=middle
+fillText "Margin %" 0,0 fs=#555 font=bold 10.5px sans-serif al=center bl=middle
 restore
 set font=10.5px sans-serif
 set fillStyle=#4472C4
@@ -885,295 +887,295 @@ set font=16.2px sans-serif
 set textBaseline=middle
 set strokeStyle=#aaa
 beginPath
-moveTo 84.44,313.45
-lineTo 540,313.45
+moveTo 84.94,312.95
+lineTo 540,312.95
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#888
 beginPath
-moveTo 80.44,313.45
-lineTo 84.44,313.45
+moveTo 80.94,312.95
+lineTo 84.94,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#aaa
 set fillStyle=#555
 set textAlign=right
-fillText "0" 78.44,313.45 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "0" 78.94,312.95 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
 beginPath
-moveTo 84.44,241.95
-lineTo 540,241.95
+moveTo 84.94,241.6167
+lineTo 540,241.6167
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 80.44,241.95
-lineTo 84.44,241.95
+moveTo 80.94,241.6167
+lineTo 84.94,241.6167
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
-fillText "5" 78.44,241.95 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "5" 78.94,241.6167 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
-moveTo 84.44,170.45
-lineTo 540,170.45
+moveTo 84.94,170.2833
+lineTo 540,170.2833
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 80.44,170.45
-lineTo 84.44,170.45
+moveTo 80.94,170.2833
+lineTo 84.94,170.2833
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
-fillText "10" 78.44,170.45 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "10" 78.94,170.2833 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
-moveTo 84.44,98.95
+moveTo 84.94,98.95
 lineTo 540,98.95
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 80.44,98.95
-lineTo 84.44,98.95
+moveTo 80.94,98.95
+lineTo 84.94,98.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
-fillText "15" 78.44,98.95 fs=#555 font=16.2px sans-serif al=right bl=middle
+fillText "15" 78.94,98.95 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
 beginPath
-moveTo 84.44,313.45
-lineTo 540,313.45
+moveTo 84.94,312.95
+lineTo 540,312.95
 stroke ss=#aaa lw=1 dash=
 beginPath
-moveTo 84.44,98.95
-lineTo 84.44,313.45
+moveTo 84.94,98.95
+lineTo 84.94,312.95
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#4472C4
 set lineWidth=2.3625
 setLineDash
 beginPath
-moveTo 103.4217,270.55
-lineTo 141.385,241.95
-lineTo 179.3483,256.25
-lineTo 217.3117,227.65
-lineTo 255.275,213.35
-lineTo 293.2383,241.95
-lineTo 331.2017,199.05
-lineTo 369.165,227.65
-lineTo 407.1283,184.75
-lineTo 445.0917,213.35
-lineTo 483.055,170.45
-lineTo 521.0183,199.05
+moveTo 103.9008,270.15
+lineTo 141.8225,241.6167
+lineTo 179.7442,255.8833
+lineTo 217.6658,227.35
+lineTo 255.5875,213.0833
+lineTo 293.5092,241.6167
+lineTo 331.4308,198.8167
+lineTo 369.3525,227.35
+lineTo 407.2742,184.55
+lineTo 445.1958,213.0833
+lineTo 483.1175,170.2833
+lineTo 521.0392,198.8167
 stroke ss=#4472C4 lw=2.3625 dash=
 set fillStyle=#4472C4
 beginPath
-arc 103.4217,270.55,2.625,0,6.2832
+arc 103.9008,270.15,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 save
 set fillStyle=#333
 set textAlign=left
-fillText "3" 116.7667,270.55 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "3" 117.2458,270.15 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
 beginPath
-arc 141.385,241.95,2.625,0,6.2832
+arc 141.8225,241.6167,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 save
 set fillStyle=#333
-fillText "5" 154.73,241.95 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "5" 155.1675,241.6167 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
 beginPath
-arc 179.3483,256.25,2.625,0,6.2832
+arc 179.7442,255.8833,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 save
 set fillStyle=#333
-fillText "4" 192.6933,256.25 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "4" 193.0892,255.8833 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
 beginPath
-arc 217.3117,227.65,2.625,0,6.2832
+arc 217.6658,227.35,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 save
 set fillStyle=#333
-fillText "6" 230.6567,227.65 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "6" 231.0108,227.35 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
 beginPath
-arc 255.275,213.35,2.625,0,6.2832
+arc 255.5875,213.0833,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 save
 set fillStyle=#333
-fillText "7" 268.62,213.35 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "7" 268.9325,213.0833 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
 beginPath
-arc 293.2383,241.95,2.625,0,6.2832
+arc 293.5092,241.6167,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 save
 set fillStyle=#333
-fillText "5" 306.5833,241.95 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "5" 306.8542,241.6167 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
 beginPath
-arc 331.2017,199.05,2.625,0,6.2832
+arc 331.4308,198.8167,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 save
 set fillStyle=#333
-fillText "8" 344.5467,199.05 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "8" 344.7758,198.8167 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
 beginPath
-arc 369.165,227.65,2.625,0,6.2832
+arc 369.3525,227.35,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 save
 set fillStyle=#333
-fillText "6" 382.51,227.65 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "6" 382.6975,227.35 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
 beginPath
-arc 407.1283,184.75,2.625,0,6.2832
+arc 407.2742,184.55,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 save
 set fillStyle=#333
-fillText "9" 420.4733,184.75 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "9" 420.6192,184.55 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
 beginPath
-arc 445.0917,213.35,2.625,0,6.2832
+arc 445.1958,213.0833,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 save
 set fillStyle=#333
-fillText "7" 458.4367,213.35 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "7" 458.5408,213.0833 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
 beginPath
-arc 483.055,170.45,2.625,0,6.2832
+arc 483.1175,170.2833,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 save
 set fillStyle=#333
-fillText "10" 496.4,170.45 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "10" 496.4625,170.2833 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
 beginPath
-arc 521.0183,199.05,2.625,0,6.2832
+arc 521.0392,198.8167,2.625,0,6.2832
 fill fs=#4472C4 ga=1
 save
 set fillStyle=#333
-fillText "8" 534.3633,199.05 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "8" 534.3842,198.8167 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
 set strokeStyle=#ED7D31
 setLineDash
 beginPath
-moveTo 103.4217,284.85
-lineTo 141.385,270.55
-lineTo 179.3483,241.95
-lineTo 217.3117,256.25
-lineTo 255.275,227.65
-lineTo 293.2383,199.05
-lineTo 331.2017,213.35
-lineTo 369.165,184.75
-lineTo 407.1283,227.65
-lineTo 445.0917,199.05
-lineTo 483.055,213.35
-lineTo 521.0183,184.75
+moveTo 103.9008,284.4167
+lineTo 141.8225,270.15
+lineTo 179.7442,241.6167
+lineTo 217.6658,255.8833
+lineTo 255.5875,227.35
+lineTo 293.5092,198.8167
+lineTo 331.4308,213.0833
+lineTo 369.3525,184.55
+lineTo 407.2742,227.35
+lineTo 445.1958,198.8167
+lineTo 483.1175,213.0833
+lineTo 521.0392,184.55
 stroke ss=#ED7D31 lw=2.3625 dash=
 set fillStyle=#ED7D31
 beginPath
-arc 103.4217,284.85,2.625,0,6.2832
+arc 103.9008,284.4167,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 save
 set fillStyle=#333
-fillText "2" 116.7667,284.85 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "2" 117.2458,284.4167 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
 beginPath
-arc 141.385,270.55,2.625,0,6.2832
+arc 141.8225,270.15,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 save
 set fillStyle=#333
-fillText "3" 154.73,270.55 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "3" 155.1675,270.15 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
 beginPath
-arc 179.3483,241.95,2.625,0,6.2832
+arc 179.7442,241.6167,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 save
 set fillStyle=#333
-fillText "5" 192.6933,241.95 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "5" 193.0892,241.6167 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
 beginPath
-arc 217.3117,256.25,2.625,0,6.2832
+arc 217.6658,255.8833,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 save
 set fillStyle=#333
-fillText "4" 230.6567,256.25 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "4" 231.0108,255.8833 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
 beginPath
-arc 255.275,227.65,2.625,0,6.2832
+arc 255.5875,227.35,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 save
 set fillStyle=#333
-fillText "6" 268.62,227.65 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "6" 268.9325,227.35 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
 beginPath
-arc 293.2383,199.05,2.625,0,6.2832
+arc 293.5092,198.8167,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 save
 set fillStyle=#333
-fillText "8" 306.5833,199.05 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "8" 306.8542,198.8167 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
 beginPath
-arc 331.2017,213.35,2.625,0,6.2832
+arc 331.4308,213.0833,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 save
 set fillStyle=#333
-fillText "7" 344.5467,213.35 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "7" 344.7758,213.0833 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
 beginPath
-arc 369.165,184.75,2.625,0,6.2832
+arc 369.3525,184.55,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 save
 set fillStyle=#333
-fillText "9" 382.51,184.75 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "9" 382.6975,184.55 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
 beginPath
-arc 407.1283,227.65,2.625,0,6.2832
+arc 407.2742,227.35,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 save
 set fillStyle=#333
-fillText "6" 420.4733,227.65 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "6" 420.6192,227.35 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
 beginPath
-arc 445.0917,199.05,2.625,0,6.2832
+arc 445.1958,198.8167,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 save
 set fillStyle=#333
-fillText "8" 458.4367,199.05 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "8" 458.5408,198.8167 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
 beginPath
-arc 483.055,213.35,2.625,0,6.2832
+arc 483.1175,213.0833,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 save
 set fillStyle=#333
-fillText "7" 496.4,213.35 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "7" 496.4625,213.0833 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
 beginPath
-arc 521.0183,184.75,2.625,0,6.2832
+arc 521.0392,184.55,2.625,0,6.2832
 fill fs=#ED7D31 ga=1
 save
 set fillStyle=#333
-fillText "9" 534.3633,184.75 fs=#333 font=16.2px sans-serif al=left bl=middle
+fillText "9" 534.3842,184.55 fs=#333 font=16.2px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
 set fillStyle=#555
@@ -1182,154 +1184,155 @@ set textBaseline=top
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 103.4217,317.45
-lineTo 103.4217,313.45
+moveTo 103.9008,316.95
+lineTo 103.9008,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 141.385,317.45
-lineTo 141.385,313.45
+moveTo 141.8225,316.95
+lineTo 141.8225,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 179.3483,317.45
-lineTo 179.3483,313.45
+moveTo 179.7442,316.95
+lineTo 179.7442,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 217.3117,317.45
-lineTo 217.3117,313.45
+moveTo 217.6658,316.95
+lineTo 217.6658,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 255.275,317.45
-lineTo 255.275,313.45
+moveTo 255.5875,316.95
+lineTo 255.5875,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 293.2383,317.45
-lineTo 293.2383,313.45
+moveTo 293.5092,316.95
+lineTo 293.5092,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 331.2017,317.45
-lineTo 331.2017,313.45
+moveTo 331.4308,316.95
+lineTo 331.4308,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 369.165,317.45
-lineTo 369.165,313.45
+moveTo 369.3525,316.95
+lineTo 369.3525,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 407.1283,317.45
-lineTo 407.1283,313.45
+moveTo 407.2742,316.95
+lineTo 407.2742,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 445.0917,317.45
-lineTo 445.0917,313.45
+moveTo 445.1958,316.95
+lineTo 445.1958,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 483.055,317.45
-lineTo 483.055,313.45
+moveTo 483.1175,316.95
+lineTo 483.1175,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 521.0183,317.45
-lineTo 521.0183,313.45
+moveTo 521.0392,316.95
+lineTo 521.0392,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
-fillText "Jan" 103.4217,318.45 fs=#555 font=16.2px sans-serif al=center bl=top
-fillText "Feb" 141.385,318.45 fs=#555 font=16.2px sans-serif al=center bl=top
-fillText "Mar" 179.3483,318.45 fs=#555 font=16.2px sans-serif al=center bl=top
-fillText "Apr" 217.3117,318.45 fs=#555 font=16.2px sans-serif al=center bl=top
-fillText "May" 255.275,318.45 fs=#555 font=16.2px sans-serif al=center bl=top
-fillText "Jun" 293.2383,318.45 fs=#555 font=16.2px sans-serif al=center bl=top
-fillText "Jul" 331.2017,318.45 fs=#555 font=16.2px sans-serif al=center bl=top
-fillText "Aug" 369.165,318.45 fs=#555 font=16.2px sans-serif al=center bl=top
-fillText "Sep" 407.1283,318.45 fs=#555 font=16.2px sans-serif al=center bl=top
-fillText "Oct" 445.0917,318.45 fs=#555 font=16.2px sans-serif al=center bl=top
-fillText "Nov" 483.055,318.45 fs=#555 font=16.2px sans-serif al=center bl=top
-fillText "Dec" 521.0183,318.45 fs=#555 font=16.2px sans-serif al=center bl=top
+fillText "Jan" 103.9008,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
+fillText "Feb" 141.8225,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
+fillText "Mar" 179.7442,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
+fillText "Apr" 217.6658,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
+fillText "May" 255.5875,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
+fillText "Jun" 293.5092,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
+fillText "Jul" 331.4308,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
+fillText "Aug" 369.3525,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
+fillText "Sep" 407.2742,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
+fillText "Oct" 445.1958,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
+fillText "Nov" 483.1175,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
+fillText "Dec" 521.0392,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
 set font=10.5px sans-serif
 set textBaseline=middle
 set fillStyle=#4472C4
 set strokeStyle=#4472C4
 set lineWidth=1.575
 beginPath
-moveTo 576,196.95
-lineTo 592.8,196.95
+moveTo 576,196.7
+lineTo 592.8,196.7
 stroke ss=#4472C4 lw=1.575 dash=
 set lineWidth=2.3625
 save
 beginPath
-arc 584.4,196.95,3.045,0,6.2832
+arc 584.4,196.7,3.045,0,6.2832
 fill fs=#4472C4 ga=1
 restore
 set fillStyle=#333
 set textAlign=left
-fillText "A" 596.8,196.95 fs=#333 font=10.5px sans-serif al=left bl=middle
+fillText "A" 596.8,196.7 fs=#333 font=10.5px sans-serif al=left bl=middle
 set fillStyle=#ED7D31
 set strokeStyle=#ED7D31
 set lineWidth=1.575
 beginPath
-moveTo 576,211.45
-lineTo 592.8,211.45
+moveTo 576,211.2
+lineTo 592.8,211.2
 stroke ss=#ED7D31 lw=1.575 dash=
 set lineWidth=2.3625
 save
 beginPath
-arc 584.4,211.45,3.045,0,6.2832
+arc 584.4,211.2,3.045,0,6.2832
 fill fs=#ED7D31 ga=1
 restore
 set fillStyle=#333
-fillText "B" 596.8,211.45 fs=#333 font=10.5px sans-serif al=left bl=middle
+fillText "B" 596.8,211.2 fs=#333 font=10.5px sans-serif al=left bl=middle
 save
-set font=bold 10px sans-serif
+set font=bold 10.5px sans-serif
 set fillStyle=#555
-translate 29.8,206.2
+translate 30.05,205.95
 rotate -1.5708
 set textAlign=center
-fillText "Value" 0,0 fs=#555 font=bold 10px sans-serif al=center bl=middle
+fillText "Value" 0,0 fs=#555 font=bold 10.5px sans-serif al=center bl=middle
 restore
 save
-fillText "Month" 312.22,367 fs=#555 font=bold 10px sans-serif al=center bl=middle
+translate 312.47,366.75
+fillText "Month" 0,0 fs=#555 font=bold 10.5px sans-serif al=center bl=middle
 restore
 restore"
 `;
@@ -1533,74 +1536,74 @@ set fillStyle=#333
 set textAlign=center
 set textBaseline=top
 fillText "XY" 332,38.972 fs=#333 font=bold 30.6px Calibri, Arial, sans-serif al=center bl=top
-set font=10.725px sans-serif
+set font=10.7px sans-serif
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
 beginPath
-moveTo 115.6,313.45
-lineTo 540,313.45
+moveTo 116.1,312.95
+lineTo 540,312.95
 stroke ss=#e0e0e0 lw=0.5 dash=
 set fillStyle=#555
 set textAlign=right
 set textBaseline=middle
-fillText "0" 111.6,313.45 fs=#555 font=10.725px sans-serif al=right bl=middle
+fillText "0" 112.1,312.95 fs=#555 font=10.7px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 111.6,313.45
-lineTo 115.6,313.45
+moveTo 112.1,312.95
+lineTo 116.1,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
 beginPath
-moveTo 115.6,259.825
-lineTo 540,259.825
+moveTo 116.1,259.45
+lineTo 540,259.45
 stroke ss=#e0e0e0 lw=0.5 dash=
-fillText "2" 111.6,259.825 fs=#555 font=10.725px sans-serif al=right bl=middle
+fillText "2" 112.1,259.45 fs=#555 font=10.7px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 111.6,259.825
-lineTo 115.6,259.825
+moveTo 112.1,259.45
+lineTo 116.1,259.45
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
 beginPath
-moveTo 115.6,206.2
-lineTo 540,206.2
+moveTo 116.1,205.95
+lineTo 540,205.95
 stroke ss=#e0e0e0 lw=0.5 dash=
-fillText "4" 111.6,206.2 fs=#555 font=10.725px sans-serif al=right bl=middle
+fillText "4" 112.1,205.95 fs=#555 font=10.7px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 111.6,206.2
-lineTo 115.6,206.2
+moveTo 112.1,205.95
+lineTo 116.1,205.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
 beginPath
-moveTo 115.6,152.575
-lineTo 540,152.575
+moveTo 116.1,152.45
+lineTo 540,152.45
 stroke ss=#e0e0e0 lw=0.5 dash=
-fillText "6" 111.6,152.575 fs=#555 font=10.725px sans-serif al=right bl=middle
+fillText "6" 112.1,152.45 fs=#555 font=10.7px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 111.6,152.575
-lineTo 115.6,152.575
+moveTo 112.1,152.45
+lineTo 116.1,152.45
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
 beginPath
-moveTo 115.6,98.95
+moveTo 116.1,98.95
 lineTo 540,98.95
 stroke ss=#e0e0e0 lw=0.5 dash=
-fillText "8" 111.6,98.95 fs=#555 font=10.725px sans-serif al=right bl=middle
+fillText "8" 112.1,98.95 fs=#555 font=10.7px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 111.6,98.95
-lineTo 115.6,98.95
+moveTo 112.1,98.95
+lineTo 116.1,98.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
@@ -1608,107 +1611,107 @@ save
 set strokeStyle=#888
 set lineWidth=1
 beginPath
-moveTo 115.6,313.45
-lineTo 540,313.45
+moveTo 116.1,312.95
+lineTo 540,312.95
 stroke ss=#888 lw=1 dash=
 restore
 save
 beginPath
-moveTo 115.6,98.95
-lineTo 115.6,313.45
+moveTo 116.1,98.95
+lineTo 116.1,312.95
 stroke ss=#888 lw=1 dash=
 restore
 set textAlign=center
 set textBaseline=top
-fillText "0" 115.6,317.45 fs=#555 font=10.725px sans-serif al=center bl=top
+fillText "0" 116.1,316.95 fs=#555 font=10.7px sans-serif al=center bl=top
 beginPath
-moveTo 115.6,317.45
-lineTo 115.6,313.45
+moveTo 116.1,316.95
+lineTo 116.1,312.95
 stroke ss=#888 lw=1 dash=
-fillText "1" 186.3333,317.45 fs=#555 font=10.725px sans-serif al=center bl=top
+fillText "1" 186.75,316.95 fs=#555 font=10.7px sans-serif al=center bl=top
 beginPath
-moveTo 186.3333,317.45
-lineTo 186.3333,313.45
+moveTo 186.75,316.95
+lineTo 186.75,312.95
 stroke ss=#888 lw=1 dash=
-fillText "2" 257.0667,317.45 fs=#555 font=10.725px sans-serif al=center bl=top
+fillText "2" 257.4,316.95 fs=#555 font=10.7px sans-serif al=center bl=top
 beginPath
-moveTo 257.0667,317.45
-lineTo 257.0667,313.45
+moveTo 257.4,316.95
+lineTo 257.4,312.95
 stroke ss=#888 lw=1 dash=
-fillText "3" 327.8,317.45 fs=#555 font=10.725px sans-serif al=center bl=top
+fillText "3" 328.05,316.95 fs=#555 font=10.7px sans-serif al=center bl=top
 beginPath
-moveTo 327.8,317.45
-lineTo 327.8,313.45
+moveTo 328.05,316.95
+lineTo 328.05,312.95
 stroke ss=#888 lw=1 dash=
-fillText "4" 398.5333,317.45 fs=#555 font=10.725px sans-serif al=center bl=top
+fillText "4" 398.7,316.95 fs=#555 font=10.7px sans-serif al=center bl=top
 beginPath
-moveTo 398.5333,317.45
-lineTo 398.5333,313.45
+moveTo 398.7,316.95
+lineTo 398.7,312.95
 stroke ss=#888 lw=1 dash=
-fillText "5" 469.2667,317.45 fs=#555 font=10.725px sans-serif al=center bl=top
+fillText "5" 469.35,316.95 fs=#555 font=10.7px sans-serif al=center bl=top
 beginPath
-moveTo 469.2667,317.45
-lineTo 469.2667,313.45
+moveTo 469.35,316.95
+lineTo 469.35,312.95
 stroke ss=#888 lw=1 dash=
-fillText "6" 540,317.45 fs=#555 font=10.725px sans-serif al=center bl=top
+fillText "6" 540,316.95 fs=#555 font=10.7px sans-serif al=center bl=top
 beginPath
-moveTo 540,317.45
-lineTo 540,313.45
+moveTo 540,316.95
+lineTo 540,312.95
 stroke ss=#888 lw=1 dash=
 save
 set strokeStyle=#4472C4
 set lineWidth=1.5
 beginPath
-moveTo 186.3333,259.825
-lineTo 257.0667,206.2
-lineTo 327.8,233.0125
-lineTo 398.5333,179.3875
-lineTo 469.2667,152.575
+moveTo 186.75,259.45
+lineTo 257.4,205.95
+lineTo 328.05,232.7
+lineTo 398.7,179.2
+lineTo 469.35,152.45
 stroke ss=#4472C4 lw=1.5 dash=
 restore
 save
 set fillStyle=#4472C4
 beginPath
-moveTo 186.3333,257.2
-lineTo 188.9583,259.825
-lineTo 186.3333,262.45
-lineTo 183.7083,259.825
+moveTo 186.75,256.825
+lineTo 189.375,259.45
+lineTo 186.75,262.075
+lineTo 184.125,259.45
 closePath
 fill fs=#4472C4 ga=1
 restore
 save
 beginPath
-moveTo 257.0667,203.575
-lineTo 259.6917,206.2
-lineTo 257.0667,208.825
-lineTo 254.4417,206.2
+moveTo 257.4,203.325
+lineTo 260.025,205.95
+lineTo 257.4,208.575
+lineTo 254.775,205.95
 closePath
 fill fs=#4472C4 ga=1
 restore
 save
 beginPath
-moveTo 327.8,230.3875
-lineTo 330.425,233.0125
-lineTo 327.8,235.6375
-lineTo 325.175,233.0125
+moveTo 328.05,230.075
+lineTo 330.675,232.7
+lineTo 328.05,235.325
+lineTo 325.425,232.7
 closePath
 fill fs=#4472C4 ga=1
 restore
 save
 beginPath
-moveTo 398.5333,176.7625
-lineTo 401.1583,179.3875
-lineTo 398.5333,182.0125
-lineTo 395.9083,179.3875
+moveTo 398.7,176.575
+lineTo 401.325,179.2
+lineTo 398.7,181.825
+lineTo 396.075,179.2
 closePath
 fill fs=#4472C4 ga=1
 restore
 save
 beginPath
-moveTo 469.2667,149.95
-lineTo 471.8917,152.575
-lineTo 469.2667,155.2
-lineTo 466.6417,152.575
+moveTo 469.35,149.825
+lineTo 471.975,152.45
+lineTo 469.35,155.075
+lineTo 466.725,152.45
 closePath
 fill fs=#4472C4 ga=1
 restore
@@ -1716,32 +1719,33 @@ set font=10.5px sans-serif
 set textBaseline=middle
 set lineWidth=1.575
 beginPath
-moveTo 576,204.2
-lineTo 592.8,204.2
+moveTo 576,203.95
+lineTo 592.8,203.95
 stroke ss=#4472C4 lw=1.575 dash=
 set lineWidth=1.5
 save
 beginPath
-moveTo 584.4,201.155
-lineTo 587.445,204.2
-lineTo 584.4,207.245
-lineTo 581.355,204.2
+moveTo 584.4,200.905
+lineTo 587.445,203.95
+lineTo 584.4,206.995
+lineTo 581.355,203.95
 closePath
 fill fs=#4472C4 ga=1
 restore
 set fillStyle=#333
 set textAlign=left
-fillText "S1" 596.8,204.2 fs=#333 font=10.5px sans-serif al=left bl=middle
+fillText "S1" 596.8,203.95 fs=#333 font=10.5px sans-serif al=left bl=middle
 save
-set font=bold 10px sans-serif
+set font=bold 10.5px sans-serif
 set fillStyle=#555
-translate 29.8,206.2
+translate 30.05,205.95
 rotate -1.5708
 set textAlign=center
-fillText "Y" 0,0 fs=#555 font=bold 10px sans-serif al=center bl=middle
+fillText "Y" 0,0 fs=#555 font=bold 10.5px sans-serif al=center bl=middle
 restore
 save
-fillText "X" 327.8,367 fs=#555 font=bold 10px sans-serif al=center bl=middle
+translate 328.05,366.75
+fillText "X" 0,0 fs=#555 font=bold 10.5px sans-serif al=center bl=middle
 restore
 restore"
 `;
