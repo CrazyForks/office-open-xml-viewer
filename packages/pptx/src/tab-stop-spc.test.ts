@@ -3,7 +3,8 @@ import { renderTextBody } from './renderer.js';
 import type { TextBody, Paragraph } from './types';
 import type { TextRunData, TabStop } from '@silurus/ooxml-core';
 
-// ECMA-376 §21.1.2.3.x (rPr @spc, letter-spacing) — 約物半角 bracket overlap on the
+// ECMA-376 §21.1.2.3.9 (rPr @spc; ST_TextPoint §20.1.10.74) — 約物半角
+// bracket overlap on the
 // TAB-STOP draw path, the pptx analog of PR #627 (drawWithFont) and docx #626
 // (docGrid §17.6.5).
 //
@@ -47,11 +48,10 @@ function ctxMeasure(s: string, fontPx: number): number {
   return w;
 }
 
-/** Recording 2D context. `measureText` models 約物半角 contextual collapse and is
- *  agnostic of letterSpacing (the renderer always measures BEFORE it sets
- *  letterSpacing). `fillText` records text + x + y AND the current letterSpacing
- *  at call time, so a test can assert the contiguous-draw fix set
- *  `ctx.letterSpacing = ls`. */
+/** Recording 2D context. `measureText` models 約物半角 contextual collapse plus
+ * native Canvas letterSpacing. `fillText` records text + x + y AND the current
+ * letterSpacing at call time, so a test can assert the contiguous-draw fix set
+ * `ctx.letterSpacing = ls`. */
 function mockCtx(): {
   ctx: CanvasRenderingContext2D;
   texts: { text: string; x: number; y: number; letterSpacing: string }[];
@@ -71,7 +71,7 @@ function mockCtx(): {
     measureText: (s: string) => {
       const p = px();
       return {
-        width: ctxMeasure(s, p),
+        width: ctxMeasure(s, p) + [...s].length * (parseFloat(letterSpacing) || 0),
         actualBoundingBoxAscent: p * 0.8,
         actualBoundingBoxDescent: p * 0.2,
         fontBoundingBoxAscent: p * 0.8,
@@ -152,7 +152,7 @@ const LS = 4; // px of @spc letter-spacing (points == px at SCALE 1/12700)
 // Tab stop at 400px from the text-area left (> the current pen of 0 at the `\t`).
 const TAB_POS_EMU = 400 * 12700;
 
-describe('pptx @spc tab-stop — 約物半角 brackets are drawn contiguously, never overlap (§21.1.2.3.x)', () => {
+describe('pptx @spc tab-stop — 約物半角 brackets are drawn contiguously, never overlap (§21.1.2.3.9)', () => {
   // (1) RED→GREEN core fix: a tab-stop @spc EA segment is painted by EXACTLY ONE
   //     contiguous fillText carrying the whole string, with letterSpacing=ls.
   //     Before the fix: 7 single-code-point fillText calls, letterSpacing '0px'.

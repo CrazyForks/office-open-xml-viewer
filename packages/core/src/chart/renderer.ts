@@ -1855,7 +1855,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         }
         const seriesLabels = s.seriesDataLabels;
         if ((chart.showDataLabels || seriesLabels?.showVal === true) && sv !== 0) {
-          // ECMA-376 §21.2.2.30 / §21.1.2.3.10 — data label font size comes from
+          // ECMA-376 §21.2.2.30 / §21.1.2.3.2 — data label font size comes from
           // `<c:dLbls><c:txPr>...<a:defRPr@sz>` (hundredths of a point). When
           // the file specifies one we honor it; otherwise the proportional
           // heuristic keeps small bars readable.

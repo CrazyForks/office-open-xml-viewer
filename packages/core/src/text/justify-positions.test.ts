@@ -77,10 +77,10 @@ describe('justifiedPiecePositions', () => {
   });
 
   it('adds letter-spacing × prefix-codepoint-count to each piece offset', () => {
-    // OOXML rPr @spc (§17.3.2.35 docx, §21.1.2.3.7 pptx) widens every code
-    // point's advance by `letterSpacingPx`, including the final one. A split
-    // piece's dx therefore needs `from · letterSpacingPx` on top of the prefix
-    // measure to land on the same x that `fillText(whole)` would draw it at.
+    // The renderer's Canvas spacing advance comes from OOXML w:spacing
+    // (§17.3.2.35) or DrawingML rPr@spc (§21.1.2.3.9; ST_TextPoint
+    // §20.1.10.74). A split piece's dx needs `from · letterSpacingPx` on top
+    // of the prefix measure to match where `fillText(whole)` would draw it.
     const cps = [...'a.bc'];
     const splitBefore = [1, 2, 3];
     const perGap = 2;
@@ -97,9 +97,9 @@ describe('justifiedPiecePositions', () => {
 
   it('lands the final glyph exactly on the box including letter-spacing', () => {
     // box = measure(whole) + cps.length·ls + nGaps·perGap, and the last piece's
-    // own advance also adds the trailing letter-spacing (rPr @spc is per glyph,
-    // including after the last). So the final piece's drawn end must equal
-    // measure(whole) + cps.length·ls + nGaps·perGap.
+    // own Canvas advance also includes the trailing letter-spacing. So the final
+    // piece's drawn end must equal measure(whole) + cps.length·ls +
+    // nGaps·perGap.
     const cps = [...'a.bc'];
     const splitBefore = [1, 2, 3];
     const perGap = 2;

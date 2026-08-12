@@ -52,8 +52,8 @@ export interface JustifiedPiece {
  * @param measure         Contextual width of a string — `ctx.measureText(s).width`
  *                        with the segment's font already selected on `ctx`. Must
  *                        NOT include letter-spacing (pass that via `letterSpacingPx`).
- * @param letterSpacingPx px added after each code point's glyph advance
- *                        (OOXML `rPr @spc` / `w:spacing` semantics). Default 0.
+ * @param letterSpacingPx Canvas spacing advance per code point, derived from
+ *                        OOXML `rPr@spc` / `w:spacing`. Default 0.
  * @returns One {@link JustifiedPiece} per slice, in draw order.
  */
 export function justifiedPiecePositions(
