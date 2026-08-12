@@ -2100,8 +2100,8 @@ function extendThroughTrailingIdeographicSpaces(
   return s;
 }
 
-/** The observed Word allowance is tied to the immediately preceding visible
- * East-Asian character, not merely to any East-Asian character elsewhere in a
+/** Project the registered line-end allowance from the immediately preceding
+ * visible East-Asian character, not from another character elsewhere in a
  * mixed-script segment. */
 function hasEastAsianVisiblePredecessor(text: string): boolean {
   const characters = [...text];
