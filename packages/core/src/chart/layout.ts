@@ -290,6 +290,63 @@ export function catAxisLabelBandH(catAxFontPx: number): number {
   return catAxFontPx * CAT_AXIS_LABEL_BAND_FONT_FRAC;
 }
 
+/** Office's default distance from an axis rule to one line of tick-label text,
+ * expressed relative to the resolved label font. These are paint metrics, not
+ * chart-size percentages, so the authored point size remains stable at zoom. */
+export function categoryTickLabelGapPx(fontPx: number): number {
+  return fontPx * (5 / 6);
+}
+
+export function valueTickLabelGapPx(fontPx: number): number {
+  return fontPx;
+}
+
+/** Excel/PowerPoint keep 1.5 pt of clear chart space outside the tick-label
+ * ink when resolving an authored outer plot rectangle. This is distinct from
+ * the rule-to-label gap. The value is consistent across the horizontal and
+ * vertical axes in the Office vector exports used to verify outer layouts. */
+export const AXIS_OUTER_TEXT_MARGIN_PT = 1.5;
+
+/** Measured conversion from a `layoutTarget="outer"` plot-area rectangle to
+ * its inner data rectangle (ECMA-376 §21.2.2.89). The outer rectangle includes
+ * tick marks, tick labels, axis titles, and Office's outer text clearance.
+ * Keeping this one-line label geometry shared prevents the
+ * bar, line, and area families from assigning different inner plot rectangles
+ * to the same authored layout. */
+export function chartManualOuterAxisInsets(metrics: Readonly<{
+  valAxisHidden: boolean;
+  catAxisHidden: boolean;
+  valLabelWidth: number;
+  valLabelFontPx: number;
+  catLabelFontPx: number;
+  valLabelGapPx?: number;
+  catLabelGapPx?: number;
+  outerTextMarginPx?: number;
+  valTitleBandW: number;
+  catTitleBandH: number;
+  secondaryBandW?: number;
+}>): ChartPad {
+  const outerMargin = metrics.outerTextMarginPx ?? 0;
+  return {
+    t: metrics.valAxisHidden ? 0 : metrics.valLabelFontPx / 2 + outerMargin,
+    r: (metrics.secondaryBandW ?? 0) > 0
+      ? (metrics.secondaryBandW ?? 0) + outerMargin
+      : 0,
+    b: metrics.catAxisHidden
+      ? 0
+      : metrics.catLabelFontPx
+        + (metrics.catLabelGapPx ?? categoryTickLabelGapPx(metrics.catLabelFontPx))
+        + metrics.catTitleBandH
+        + outerMargin,
+    l: metrics.valAxisHidden
+      ? 0
+      : metrics.valLabelWidth
+        + (metrics.valLabelGapPx ?? valueTickLabelGapPx(metrics.valLabelFontPx))
+        + metrics.valTitleBandW
+        + outerMargin,
+  };
+}
+
 // ─── Frame parameters + computeChartFrame ────────────────────────────────────
 
 /** A resolved `{t,r,b,l}` plot pad (canvas px). The caller builds this from the
