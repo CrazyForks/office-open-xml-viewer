@@ -72,7 +72,8 @@ function lineTexts(text: string, letterSpacing: number, maxWidth: number): strin
 
 describe('pptx rPr@spc wrap budgets (§21.1.2.3.9; ST_TextPoint §20.1.10.74)', () => {
   it('includes positive and negative spacing when fitting Latin tokens', () => {
-    expect(lineTexts('AA BB', 2, 58)).toEqual(['AA ', 'BB']);
+    // 5 glyphs have 4 internal boundaries: 50 + 4·2 = 58px.
+    expect(lineTexts('AA BB', 2, 57)).toEqual(['AA ', 'BB']);
     expect(lineTexts('AA BB', -2, 42)).toEqual(['AA BB']);
   });
 

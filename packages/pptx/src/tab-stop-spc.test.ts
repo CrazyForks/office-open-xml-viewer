@@ -11,7 +11,7 @@ import type { TextRunData, TabStop } from '@silurus/ooxml-core';
 // A right-/centre-aligned tab stop (pPr > tabLst, §21.1.2.1.x) places the text
 // after a `\t` at the stop (since #916, as ordinary inline segments after an
 // inline tab segment). Each segment is measured CONTEXTUALLY:
-// `segW = measureText(seg.text) + ls·codePointCount`. The browser's 約物半角
+// `segW = measureText(seg.text) + ls·(clusterCount-1)`. The browser's 約物半角
 // contextual shaping collapses an opening bracket "［" to half-width when it is
 // FOLLOWED by an East-Asian glyph WITHIN the measured string
 // (`measureText("［あ") < measureText("［") + measureText("あ")`).
@@ -173,7 +173,7 @@ describe('pptx @spc tab-stop — 約物半角 brackets are drawn contiguously, n
   });
 
   // (2) No-overlap / contextual abutment: the EA tab segment is one draw, its
-  //     reported box width is the CONTEXTUAL measure + len·ls (bracket collapsed),
+  //     reported box width is the contextual measure + (len-1)·ls (bracket collapsed),
   //     and the FOLLOWING tab segment abuts that edge (no overlap, no gap). The
   //     buggy per-glyph isolated sum would have overrun by FONT_PX/2 (full−half).
   it('keeps measure==draw so the next tab segment abuts the @spc EA box (no overlap)', () => {
@@ -189,9 +189,9 @@ describe('pptx @spc tab-stop — 約物半角 brackets are drawn contiguously, n
     const eaCalls = texts.filter((c) => c.text === EA_SPC);
     expect(eaCalls.length, 'EA tab segment is a single draw').toBe(1);
 
-    // Reported box width = contextual measure (bracket half) + len·ls = tabSegW.
+    // Reported box width = contextual measure + spacing at len-1 boundaries.
     const len = [...EA_SPC].length;
-    const boxW = ctxMeasure(EA_SPC, FONT_PX) + len * LS;
+    const boxW = ctxMeasure(EA_SPC, FONT_PX) + (len - 1) * LS;
     expect(segEA.w).toBeCloseTo(boxW, 6);
 
     // The next tab segment is drawn at the EA segment's box edge → abuts exactly.

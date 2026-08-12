@@ -35,10 +35,8 @@ pub fn text_point_to_pt(value: &str) -> Option<f64> {
         (number, 12.0)
     } else if let Some(number) = value.strip_suffix("mm") {
         (number, 72.0 / 25.4)
-    } else if let Some(number) = value.strip_suffix("cm") {
-        (number, 72.0 / 2.54)
     } else {
-        return None;
+        (value.strip_suffix("cm")?, 72.0 / 2.54)
     };
     if !is_universal_measure_number(number) {
         return None;

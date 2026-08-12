@@ -50,20 +50,30 @@ function mockCtx(mode: LetterSpacingMode = 'native') {
   return { ctx: ctx as unknown as CanvasRenderingContext2D, fills };
 }
 
-function run(text: string, letterSpacing: number, color: string): TextRunData {
+function run(
+  text: string,
+  letterSpacing: number,
+  color: string,
+  fontFamilyEa?: string,
+): TextRunData {
   return {
     type: 'text', text, bold: null, italic: null, underline: false,
     strikethrough: false, fontSize: 20, color, fontFamily: 'Arial', letterSpacing,
+    ...(fontFamilyEa ? { fontFamilyEa } : {}),
   };
 }
 
-function body(runs: TextRunData[], alignment: Paragraph['alignment'] = 'l'): TextBody {
+function body(
+  runs: TextRunData[],
+  alignment: Paragraph['alignment'] = 'l',
+  rtl: boolean = false,
+): TextBody {
   const paragraph = {
     alignment, marL: 0, marR: 0, indent: 0,
     spaceBefore: null, spaceAfter: null, spaceLine: null, lvl: 0,
     bullet: { type: 'none' }, defFontSize: null, defColor: null,
     defBold: null, defItalic: null, defFontFamily: null, tabStops: [],
-    eaLnBrk: true, runs,
+    eaLnBrk: true, rtl, runs,
   } as Paragraph;
   return {
     verticalAnchor: 't', paragraphs: [paragraph], defaultFontSize: 20,
@@ -73,6 +83,99 @@ function body(runs: TextRunData[], alignment: Paragraph['alignment'] = 'l'): Tex
 }
 
 describe('pptx rPr@spc uses Canvas shaping-cluster advances', () => {
+  it('applies positive and negative spacing only at internal cluster boundaries', () => {
+    for (const spacing of [4, -4]) {
+      const { ctx, fills } = mockCtx();
+      const seen: Array<{ text: string; x: number; w: number }> = [];
+      renderTextBody(
+        ctx,
+        body([run('AB', spacing, '000000'), run('X', 0, 'FF0000')]),
+        0, 0, 400, 100, SCALE,
+        null, 0, false, false, '#000000', undefined, RC,
+        (info) => seen.push({ text: info.text, x: info.inShapeX, w: info.w }),
+      );
+
+      const tracked = seen.find((info) => info.text === 'AB')!;
+      const following = seen.find((info) => info.text === 'X')!;
+      const trackedPaint = fills.find((call) => call.text === 'AB')!;
+      const followingPaint = fills.find((call) => call.text === 'X')!;
+      const expectedAdvance = 20 + spacing;
+
+      expect(tracked.w).toBeCloseTo(expectedAdvance, 6);
+      expect(following.x).toBeCloseTo(tracked.x + expectedAdvance, 6);
+      expect(followingPaint.x).toBeCloseTo(trackedPaint.x + expectedAdvance, 6);
+      expect(trackedPaint.letterSpacing).toBe(`${spacing}px`);
+    }
+  });
+
+  it('preserves the spacing seam when one authored run switches to an EA font', () => {
+    for (const spacing of [4, -4]) {
+      for (const alignment of ['l', 'ctr'] as const) {
+        const { ctx, fills } = mockCtx();
+        const seen: Array<{ text: string; x: number; w: number }> = [];
+        renderTextBody(
+          ctx,
+          body([run('Aあ', spacing, '000000', 'Meiryo')], alignment),
+          0, 0, 100, 100, SCALE,
+          null, 0, false, false, '#000000', undefined, RC,
+          (info) => seen.push({ text: info.text, x: info.inShapeX, w: info.w }),
+        );
+
+        const latin = fills.find((call) => call.text === 'A')!;
+        const cjk = fills.find((call) => call.text === 'あ')!;
+        expect(cjk.x).toBeCloseTo(latin.x + 10 + spacing, 6);
+        const first = seen.find((info) => info.text === 'A')!;
+        const second = seen.find((info) => info.text === 'あ')!;
+        expect(second.x + second.w - first.x).toBeCloseTo(20 + spacing, 6);
+      }
+    }
+  });
+
+  it('preserves an EA-font spacing seam after a tab stop', () => {
+    const { ctx, fills } = mockCtx();
+    const tabbed = body([run('\tAあ', 4, '000000', 'Meiryo')]);
+    tabbed.paragraphs[0].tabStops = [{ pos: 30 * 12700, algn: 'l' }];
+    renderTextBody(
+      ctx, tabbed,
+      0, 0, 100, 100, SCALE,
+      null, 0, false, false, '#000000', undefined, RC,
+    );
+    const latin = fills.find((call) => call.text === 'A')!;
+    const cjk = fills.find((call) => call.text === 'あ')!;
+    expect(latin.x).toBeCloseTo(30, 6);
+    expect(cjk.x).toBeCloseTo(latin.x + 14, 6);
+  });
+
+  it('does not insert spacing between distinct authored runs', () => {
+    const { ctx, fills } = mockCtx();
+    renderTextBody(
+      ctx,
+      body([run('A', 4, '000000'), run('あ', 4, 'FF0000', 'Meiryo')]),
+      0, 0, 100, 100, SCALE,
+      null, 0, false, false, '#000000', undefined, RC,
+    );
+    const latin = fills.find((call) => call.text === 'A')!;
+    const cjk = fills.find((call) => call.text === 'あ')!;
+    expect(cjk.x).toBeCloseTo(latin.x + 10, 6);
+  });
+
+  it('keeps an EA-font spacing seam between visually reordered RTL segments', () => {
+    for (const spacing of [4, -4]) {
+      const { ctx, fills } = mockCtx();
+      renderTextBody(
+        ctx,
+        body([run('אבあ', spacing, '000000', 'Meiryo')], 'r', true),
+        0, 0, 100, 100, SCALE,
+        null, 0, false, false, '#000000', undefined, RC,
+      );
+      const cjk = fills.find((call) => call.text === 'あ')!;
+      const hebrew = fills.find((call) => call.text === 'אב')!;
+      // Visual order is [あ, אב]. The spacing belongs at that visual seam,
+      // never before the first glyph at the line edge.
+      expect(hebrew.x).toBeCloseTo(cjk.x + 10 + spacing, 6);
+    }
+  });
+
   for (const [name, text] of [
     ['combining sequence', 'e\u0301'],
     ['emoji ZWJ sequence', '👨‍👩‍👧‍👦'],
@@ -94,7 +197,9 @@ describe('pptx rPr@spc uses Canvas shaping-cluster advances', () => {
         const following = seen.find((info) => info.text === 'X')!;
         const trackedPaint = fills.find((call) => call.text === text)!;
         const followingPaint = fills.find((call) => call.text === 'X')!;
-        const expectedAdvance = 10 + spacing;
+        // Each case is one browser shaping cluster, so DrawingML has no
+        // internal character boundary at which to apply spacing.
+        const expectedAdvance = 10;
 
         expect(tracked.w).toBeCloseTo(expectedAdvance, 6);
         expect(following.x).toBeCloseTo(tracked.x + expectedAdvance, 6);
@@ -123,10 +228,10 @@ describe('pptx rPr@spc uses Canvas shaping-cluster advances', () => {
       const x = fills.find((call) => call.text === 'X')!;
 
       expect(fills.some((call) => call.text === 'AB')).toBe(false);
-      expect(tracked.w).toBeCloseTo(28, 6);
+      expect(tracked.w).toBeCloseTo(24, 6);
       expect(b.x).toBeCloseTo(a.x + 14, 6);
-      expect(following.x).toBeCloseTo(tracked.x + 28, 6);
-      expect(x.x).toBeCloseTo(a.x + 28, 6);
+      expect(following.x).toBeCloseTo(tracked.x + 24, 6);
+      expect(x.x).toBeCloseTo(a.x + 24, 6);
     });
 
     it(`manually paints fully-distributed glyph positions when Canvas letterSpacing is ${mode}`, () => {

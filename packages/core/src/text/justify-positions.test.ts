@@ -96,9 +96,9 @@ describe('justifiedPiecePositions', () => {
   });
 
   it('lands the final glyph exactly on the box including letter-spacing', () => {
-    // box = measure(whole) + cps.length·ls + nGaps·perGap, and the last piece's
-    // own Canvas advance also includes the trailing letter-spacing. So the final
-    // piece's drawn end must equal measure(whole) + cps.length·ls +
+    // box = measure(whole) + (cps.length-1)·ls + nGaps·perGap. The last piece
+    // contributes spacing only at its internal boundaries, never after its final
+    // glyph. So the final piece's drawn end must equal measure(whole) + (n-1)·ls +
     // nGaps·perGap.
     const cps = [...'a.bc'];
     const splitBefore = [1, 2, 3];
@@ -106,10 +106,11 @@ describe('justifiedPiecePositions', () => {
     const ls = 4;
     const pieces = justifiedPiecePositions(cps, splitBefore, perGap, measure, ls);
     const last = pieces[pieces.length - 1];
-    const box = measure('a.bc') + cps.length * ls + splitBefore.length * perGap;
-    // Drawn end of the last piece: dx + measure(text) + text.length·ls.
-    const lastEnd = last.dx + measure(last.text) + [...last.text].length * ls;
-    expect(lastEnd).toBe(box); // 44 + 10 + 1·4 = 58, box = 36 + 16 + 6 = 58
+    const box = measure('a.bc') + (cps.length - 1) * ls + splitBefore.length * perGap;
+    // Drawn end: dx + measure(text) + max(0, text.length-1)·ls.
+    const lastEnd = last.dx + measure(last.text)
+      + Math.max(0, [...last.text].length - 1) * ls;
+    expect(lastEnd).toBe(box); // 44 + 10 = 54, box = 36 + 12 + 6 = 54
   });
 
   it('counts letter-spacing per CODE POINT, not UTF-16 code unit (surrogate pair)', () => {
@@ -130,10 +131,11 @@ describe('justifiedPiecePositions', () => {
     //   𠮟: measure('あ')=10        + 1·4 + 1·2 = 16
     //   い: measure('あ𠮟')=20      + 2·4 + 2·2 = 32
     expect(pieces.map((p) => p.dx)).toEqual([0, 16, 32]);
-    // Final glyph lands on the code-point box: measure(whole) + cpLen·ls + nGaps·perGap.
+    // Final glyph lands on the code-point box: measure(whole) + (cpLen-1)·ls + gaps.
     const last = pieces[pieces.length - 1];
-    const box = measure('あ𠮟い') + cps.length * ls + splitBefore.length * perGap;
-    const lastEnd = last.dx + measure(last.text) + [...last.text].length * ls;
-    expect(lastEnd).toBe(box); // 32 + 10 + 4 = 46; box = 30 + 12 + 4 = 46
+    const box = measure('あ𠮟い') + (cps.length - 1) * ls + splitBefore.length * perGap;
+    const lastEnd = last.dx + measure(last.text)
+      + Math.max(0, [...last.text].length - 1) * ls;
+    expect(lastEnd).toBe(box); // 32 + 10 = 42; box = 30 + 8 + 4 = 42
   });
 });

@@ -288,7 +288,7 @@ describe('pptx justify CJK — 約物連続 brackets are drawn contiguously, nev
     const LS = 4;
     // Include the authored tracking in the box budget so this remains a
     // paint-path control rather than accidentally becoming a wrap test.
-    const spcBoxW = BOX_W + [...EA_JUST].length * LS;
+    const spcBoxW = BOX_W + ([...EA_JUST].length - 1) * LS;
     const spc = render(bodyWith('l', [run(EA_JUST, LS)]), spcBoxW);
     const spcSeg = spc.texts.filter((c) => c.text === EA_JUST);
     expect(spcSeg.length, '@spc-only line is one contiguous draw').toBe(1);
