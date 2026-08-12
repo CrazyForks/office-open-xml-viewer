@@ -691,13 +691,12 @@ describe('CH1 — negative bar/column values extend from the zero line', () => {
     }), RECT, 1);
 
     // With no visible value-axis ticks, Office uses the default five-interval
-    // auto-scale target: data max 97 → major unit 20 → axis max 120. Applying
-    // the wide-axis tick-density rule would instead choose unit 10 / max 110,
-    // making the stacked bar too long relative to separately authored labels.
+    // auto-scale target: symmetric padding plus the ceiling 1/2/5 ladder gives
+    // data max 97 → major unit 50 → axis max 150.
     const bars = rec.rects;
     expect(bars).toHaveLength(2);
     const totalLength = bars[0].w + bars[1].w;
-    expect(totalLength).toBeCloseTo(RECT.w * 0.8 * (97 / 120), 4);
+    expect(totalLength).toBeCloseTo(RECT.w * 0.8 * (97 / 150), 4);
   });
 
   it('positive-only data keeps the axis anchored at 0 (pre-fix behavior)', () => {
@@ -4013,9 +4012,9 @@ describe('#738 — explicit majorUnit honored on every value axis (§21.2.2.103)
     const coarse = valTickNumbers({
       chartType: 'scatter',
       series: [series({ name: 'S', values: [10, 40, 70, 100] })],
-      valAxisMajorUnit: 50,
+      valAxisMajorUnit: 70,
     });
-    expect(coarse).toContain(50);
+    expect(coarse).toContain(70);
     expect(new Set(coarse).size).toBeLessThan(new Set(auto).size);
   });
 
@@ -4027,11 +4026,11 @@ describe('#738 — explicit majorUnit honored on every value axis (§21.2.2.103)
     const coarse = valTickNumbers({
       chartType: 'radar', categories: ['A', 'B', 'C', 'D'],
       series: [series({ name: 'S', values: [20, 60, 80, 100] })],
-      valAxisMajorUnit: 50,
+      valAxisMajorUnit: 70,
     });
     // Radar skips the center 0-label, so labels are the ring values.
     expect(new Set(coarse).size).toBeLessThan(new Set(auto).size);
-    expect(coarse).toContain(50);
+    expect(coarse).toContain(70);
   });
 
   it('secondary (combo) axis: majorUnit widens its independent step', () => {
@@ -4067,6 +4066,75 @@ describe('#738 — explicit majorUnit honored on every value axis (§21.2.2.103)
   });
 });
 
+describe('automatic linear-axis bounds reach the shared planner', () => {
+  const numericLabels = (values: number[]): number[] => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B'],
+      series: [series({ values })],
+      valAxisMajorGridlines: false,
+    }), RECT, 1);
+    return rec.texts.map(item => Number(item.text)).filter(Number.isFinite);
+  };
+
+  it('keeps an exact 1.2 positive line range offset and pins just above it to zero', () => {
+    expect(Math.min(...numericLabels([10, 12]))).toBeGreaterThan(0);
+    expect(numericLabels([10, 12.000_001])).toContain(0);
+  });
+
+  it('area geometry uses an authored non-zero minimum', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'area', categories: ['Low', 'High'],
+      series: [series({ values: [50, 100] })],
+      valMin: 50, valMax: 100, valAxisMajorUnit: 50,
+    }), RECT, 1);
+    const y50 = rec.texts.find(item => item.text === '50')?.y;
+    const y100 = rec.texts.find(item => item.text === '100')?.y;
+    expect(y50).toBeDefined();
+    expect(y100).toBeDefined();
+    expect(rec.segs.some(segment =>
+      Math.abs(segment.x1 - segment.x0) > 20
+      && Math.abs(segment.y0 - (y50 as number)) < 1e-6
+      && Math.abs(segment.y1 - (y100 as number)) < 1e-6
+    )).toBe(true);
+  });
+
+  it('area negative-only data uses a negative mirrored extent for ticks and geometry', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'area', categories: ['Low', 'High'],
+      series: [series({ values: [-10, -5] })],
+      valAxisMajorGridlines: false,
+    }), RECT, 1);
+    const numeric = rec.texts.map(item => Number(item.text)).filter(Number.isFinite);
+    expect(Math.min(...numeric)).toBeLessThanOrEqual(-10);
+    expect(Math.max(...numeric)).toBe(0);
+    expect(numeric).not.toContain(1);
+
+    const axisTickYs = rec.texts
+      .filter(item => Number.isFinite(Number(item.text)))
+      .map(item => item.y);
+    expect(rec.segs.some(segment =>
+      Math.abs(segment.x1 - segment.x0) > 20
+      && axisTickYs.some(y => Math.abs(y - segment.y0) < 1e-6)
+      && axisTickYs.some(y => Math.abs(y - segment.y1) < 1e-6)
+    )).toBe(true);
+  });
+
+  it('stacked area extent accumulates positive and negative values separately', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedArea', categories: ['A'],
+      series: [series({ values: [10] }), series({ values: [-8] })],
+      valAxisMajorGridlines: false,
+    }), RECT, 1);
+    const numeric = rec.texts.map(item => Number(item.text)).filter(Number.isFinite);
+    expect(Math.min(...numeric)).toBeLessThanOrEqual(-8);
+    expect(Math.max(...numeric)).toBeGreaterThanOrEqual(10);
+  });
+});
+
 describe('authored minor tick marks are painted between major ticks', () => {
   const shortHorizontal = (segment: Seg): boolean =>
     Math.abs(segment.y1 - segment.y0) < 0.01
@@ -4093,6 +4161,59 @@ describe('authored minor tick marks are painted between major ticks', () => {
 
     expect(rec.segs.filter(segment => shortHorizontal(segment) && segment.x0 < RECT.w / 2).length)
       .toBeGreaterThanOrEqual(15);
+  });
+
+  it('uses automatic major/5 positions for minor ticks without enabling minor gridlines', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B', 'C'],
+      series: [series({ values: [10, 50, 90] })],
+      valMin: 0, valMax: 100, valAxisMajorUnit: 20,
+      valAxisMajorGridlines: false, valAxisMinorGridlines: false,
+      valAxisMajorTickMark: 'none', valAxisMinorTickMark: 'cross',
+    }), RECT, 1);
+
+    expect(rec.segs.filter(segment => shortHorizontal(segment) && segment.x0 < RECT.w / 2))
+      .toHaveLength(20);
+    expect(rec.segs.filter(segment =>
+      segment.ss === '#e0e0e0' && Math.abs(segment.x1 - segment.x0) > 50
+    ))
+      .toHaveLength(0);
+  });
+
+  it('uses automatic major/5 positions for minor gridlines without enabling minor ticks', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B', 'C'],
+      series: [series({ values: [10, 50, 90] })],
+      valMin: 0, valMax: 100, valAxisMajorUnit: 20,
+      valAxisMajorGridlines: false,
+      valAxisMinorGridlines: true,
+      valAxisMinorGridlineColor: '123456',
+      valAxisMajorTickMark: 'none', valAxisMinorTickMark: 'none',
+    }), RECT, 1);
+
+    const minorGridYs = rec.segs
+      .filter(segment => segment.ss === '#123456' && Math.abs(segment.x1 - segment.x0) > 50)
+      .map(segment => segment.y0);
+    expect(minorGridYs).toHaveLength(20);
+    expect(rec.segs.filter(segment =>
+      shortHorizontal(segment)
+      && minorGridYs.some(y => Math.abs(y - segment.y0) < 1e-6)
+    )).toHaveLength(0);
+  });
+
+  it('uses automatic minor positions with horizontal value-axis geometry', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBarH', categories: ['A', 'B'],
+      series: [series({ values: [20, 80] })],
+      valMin: 0, valMax: 100, valAxisMajorUnit: 20,
+      valAxisMajorGridlines: false,
+      valAxisMajorTickMark: 'none', valAxisMinorTickMark: 'cross',
+    }), RECT, 1);
+
+    expect(rec.segs.filter(shortVertical).length).toBeGreaterThanOrEqual(20);
   });
 
   it('accepts a positive authored minor unit larger than the major unit', () => {
@@ -4226,6 +4347,54 @@ describe('authored minor tick marks are painted between major ticks', () => {
       .toBeGreaterThanOrEqual(15);
   });
 
+  it('uses automatic minor positions on the independent secondary value axis', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B', 'C'],
+      series: [
+        series({ values: [1, 2, 3] }),
+        series({ values: [10, 50, 90], useSecondaryAxis: true }),
+      ],
+      secondaryValAxis: {
+        min: 0, max: 100, title: null, hidden: false,
+        majorTickMark: 'none', minorTickMark: 'cross',
+        lineHidden: false, majorUnit: 20,
+      },
+    }), RECT, 1);
+
+    expect(rec.segs.filter(segment => shortHorizontal(segment) && segment.x0 > RECT.w / 2))
+      .toHaveLength(20);
+  });
+
+  it('keeps secondary minor gridlines and ticks independent', () => {
+    const model = (minorGridlines: boolean, minorTickMark: string): ChartModel => baseModel({
+      chartType: 'line', categories: ['A', 'B', 'C'],
+      series: [
+        series({ values: [1, 2, 3] }),
+        series({ values: [10, 50, 90], useSecondaryAxis: true }),
+      ],
+      secondaryValAxis: {
+        min: 0, max: 100, title: null, hidden: false,
+        majorTickMark: 'none', minorTickMark, lineHidden: false,
+        majorUnit: 20, minorGridlines,
+        minorGridlineColor: '123456',
+      },
+    });
+    const gridOnly = segRecordingCtx();
+    renderChart(gridOnly.ctx, model(true, 'none'), RECT, 1);
+    expect(gridOnly.segs.filter(segment =>
+      segment.ss === '#123456' && Math.abs(segment.x1 - segment.x0) > 50
+    )).toHaveLength(20);
+    expect(gridOnly.segs.filter(segment => shortHorizontal(segment) && segment.x0 > RECT.w / 2))
+      .toHaveLength(0);
+
+    const tickOnly = segRecordingCtx();
+    renderChart(tickOnly.ctx, model(false, 'cross'), RECT, 1);
+    expect(tickOnly.segs.filter(segment => segment.ss === '#123456')).toHaveLength(0);
+    expect(tickOnly.segs.filter(segment => shortHorizontal(segment) && segment.x0 > RECT.w / 2))
+      .toHaveLength(20);
+  });
+
   it('draws both numeric X- and Y-axis minor ticks for scatter', () => {
     const rec = segRecordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -4245,6 +4414,41 @@ describe('authored minor tick marks are painted between major ticks', () => {
 
     expect(rec.segs.filter(shortHorizontal).length).toBeGreaterThanOrEqual(15);
     expect(rec.segs.filter(shortVertical).length).toBeGreaterThanOrEqual(15);
+  });
+});
+
+describe('radar value-axis planning', () => {
+  it('honors an explicit minimum and paints minor gridlines without minor ticks', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'radar', radarStyle: 'standard',
+      categories: ['A', 'B', 'C', 'D'],
+      series: [series({ values: [50, 60, 70, 80] })],
+      valMin: 50, valMax: 100, valAxisMajorUnit: 25,
+      valAxisMinorGridlines: true, valAxisMinorGridlineColor: '123456',
+      valAxisMinorTickMark: 'none',
+    }), RECT, 1);
+    expect(rec.texts.some(item => item.text === '50')).toBe(false);
+    expect(rec.texts.some(item => item.text === '75')).toBe(true);
+    expect(rec.segs.filter(segment => segment.ss === '#123456').length).toBeGreaterThan(0);
+  });
+
+  it('paints radar minor ticks without enabling minor gridlines', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'radar', radarStyle: 'standard',
+      categories: ['A', 'B', 'C', 'D'],
+      series: [series({ values: [50, 60, 70, 80] })],
+      valMin: 50, valMax: 100, valAxisMajorUnit: 25,
+      valAxisMinorGridlines: false,
+      valAxisMinorTickMark: 'cross',
+    }), RECT, 1);
+    expect(rec.segs.filter(segment => segment.ss === '#e0e0e0')).toHaveLength(0);
+    expect(rec.segs.filter(segment =>
+      Math.abs(segment.y1 - segment.y0) < 1e-6
+      && Math.abs(segment.x1 - segment.x0) > 0
+      && Math.abs(segment.x1 - segment.x0) <= 12
+    ).length).toBeGreaterThan(0);
   });
 });
 
@@ -6714,9 +6918,9 @@ describe('CH — combo bar+line primary value axis spans BOTH the bars and the p
       ],
     }), RECT, 1);
     const axisMax = Math.max(...numericValLabels(rec));
-    // Bars alone: max category sum 150 → axis top 160 (unchanged by the fix).
-    expect(axisMax).toBe(160);
-    // The line contribution is what lifts the previous case from 160 to 200.
+    // Bars alone: max category sum 150 → symmetric padding and the ceiling
+    // 1/2/5 ladder produce an axis top of 200.
+    expect(axisMax).toBe(200);
   });
 
   it('a negative primary-axis line pulls the axis minimum below the bars', () => {

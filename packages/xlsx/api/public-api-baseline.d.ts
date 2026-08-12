@@ -1080,6 +1080,10 @@ export interface SecondaryValueAxis {
     lineHidden: boolean;
     majorTickMark: string;
     minorTickMark?: string | null;
+    minorGridlines?: boolean;
+    minorGridlineColor?: string | null;
+    minorGridlineWidthEmu?: number | null;
+    minorGridlineDash?: string | null;
     majorUnit?: number | null;
     minorUnit?: number | null;
     titleFontSizeHpt?: number | null;

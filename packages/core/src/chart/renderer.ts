@@ -21,7 +21,15 @@ import {
   valueTickLabelGapPx,
   type ChartLegendReserve,
 } from './layout.js';
-import { niceStep, valueAxisScale, axisFraction, logAxisScale, fitTrendline, linearTrendlineStats } from './axis-scale.js';
+import {
+  axisLengthNiceStep,
+  valueAxisScale,
+  planLinearValueAxis,
+  axisFraction,
+  logAxisScale,
+  fitTrendline,
+  linearTrendlineStats,
+} from './axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine, resolveGridline, isCrossBetween } from './axis-style.js';
 import { formatChartVal, formatChartValWithCode, formatCategoryLabel } from './chart-number-format.js';
 import { elideToWidth } from './text-elide.js';
@@ -743,53 +751,31 @@ function drawAxisTick(
   ctx.lineWidth = prevW;
 }
 
-/** Visit authored minor-unit positions between adjacent major ticks. OOXML does
- * not define the application's automatic minor unit, so an omitted
- * `<c:minorUnit>` deliberately produces no guessed positions. */
-const MAX_AXIS_TICKS = 10_000;
-
 function minorAxisValues(
   min: number,
   max: number,
   majorStep: number,
   minorUnit: number | null | undefined,
 ): number[] {
-  const step = minorUnit != null && isFinite(minorUnit) && minorUnit > 0
-    ? minorUnit
-    : 0;
-  if (!(step > 0) || !(majorStep > 0)) return [];
-  const epsilon = Math.max(Math.abs(majorStep), Math.abs(step)) * 1e-8;
-  const values: number[] = [];
-  // Axis units advance from the authored/derived scale minimum. Anchoring at
-  // numeric zero shifts every minor division when an explicit non-zero min is
-  // present and can also double-paint a major position.
-  let iterations = 0;
-  for (let value = min + step;
-    value < max - epsilon && iterations < MAX_AXIS_TICKS;
-    iterations += 1) {
-    // IEEE-754 addition can stop progressing for a positive but sub-ULP unit.
-    // Reject that authored scale instead of hanging the renderer. The count
-    // cap also bounds hostile documents whose unit requests millions of marks.
-    if (!(value > min) || !isFinite(value)) break;
-    // A position shared with a major tick is already painted by the major
-    // layer; do not double-stroke it when the two authored units coincide.
-    const majorMultiple = (value - min) / majorStep;
-    if (Math.abs(majorMultiple - Math.round(majorMultiple)) > 1e-8) values.push(value);
-    const next = value + step;
-    if (!(next > value)) break;
-    value = next;
-  }
-  return values;
+  return planLinearValueAxis({
+    dataMin: min,
+    dataMax: max,
+    explicitMin: min,
+    explicitMax: max,
+    majorUnit: majorStep,
+    minorUnit,
+    needMinor: true,
+  }).minorTicks;
 }
 
-function forEachMinorTick(
-  min: number,
-  max: number,
-  majorStep: number,
-  minorUnit: number | null | undefined,
-  visit: (value: number) => void,
-): void {
-  for (const value of minorAxisValues(min, max, majorStep, minorUnit)) visit(value);
+function majorAxisValues(min: number, max: number, majorStep: number): number[] {
+  return planLinearValueAxis({
+    dataMin: min,
+    dataMax: max,
+    explicitMin: min,
+    explicitMax: max,
+    majorUnit: majorStep,
+  }).majorTicks;
 }
 
 /** Stroke one horizontal value-axis gridline spanning the plot width at `gy`.
@@ -869,6 +855,25 @@ function valMinorGridStroke(
     width,
     explicit: chart.valAxisMinorGridlineColor != null,
     dash: dashPatternForPreset(chart.valAxisMinorGridlineDash ?? undefined),
+  };
+}
+
+function secondaryMinorGridStroke(
+  axis: SecondaryValueAxis,
+  ptToPx: number,
+): { color: string; width: number; explicit: boolean; dash: number[] } {
+  const { color, width } = resolveGridline(
+    axis.minorGridlineColor,
+    axis.minorGridlineWidthEmu,
+    ptToPx,
+  );
+  return {
+    color,
+    width,
+    explicit: axis.minorGridlineColor != null
+      || axis.minorGridlineWidthEmu != null
+      || axis.minorGridlineDash != null,
+    dash: dashPatternForPreset(axis.minorGridlineDash ?? undefined),
   };
 }
 
@@ -952,6 +957,7 @@ interface ValueAxisPlan {
   step: number;
   majorLines: number[];
   minorLines: number[];
+  minorTicks: number[];
   /** 0..1 position of `v` from the axis minimum toward the maximum (log-aware,
    *  orientation-aware). Renderers turn this into a pixel with
    *  `plotBottom - frac(v) * plotHeight` (vertical) — the reversal is already
@@ -1015,25 +1021,52 @@ function planValueAxis(
       step: lines.length > 1 ? lines[1] - lines[0] : max - min,
       majorLines: lines,
       minorLines: [],
+      minorTicks: [],
       frac: (v: number) => axisFraction(v, min, max, { logBase, reversed }),
     };
   }
-  const { min, max, step } = valueAxisScale(
-    dataMin, dataMax, explicitMin, explicitMax, axisLenPt, majorUnit,
-  );
-  const range = (max - min) || 1;
-  const majorLines: number[] = [];
-  const steps = Math.round((max - min) / step);
-  for (let si = 0; si <= steps; si++) majorLines.push(min + si * step);
-  // Minor gridlines (ECMA-376 §21.2.2.109/§21.2.2.112): only when the file both
-  // declares `<c:minorGridlines>` AND a positive `<c:minorUnit>`; the minor lines
-  // are the positive-unit positions measured from the scale minimum. The
-  // schema only requires a positive value; it does not require minor < major.
-  const minorLines: number[] = [];
+  if (percentStacked) {
+    const min = explicitMin ?? dataMin;
+    const max = explicitMax ?? dataMax;
+    const step = majorUnit != null && isFinite(majorUnit) && majorUnit > 0
+      ? majorUnit
+      : axisLengthNiceStep(dataMax - dataMin, axisLenPt);
+    const majorLines = majorAxisValues(min, max, step);
+    const needsMinorTicks = chart.valAxisMinorTickMark != null
+      && chart.valAxisMinorTickMark !== 'none';
+    const mu = valueAxisUnitInRendererSpace(chart.valAxisMinorUnit, true);
+    const minorTicks = chart.valAxisMinorGridlines === true || needsMinorTicks
+      ? minorAxisValues(min, max, step, mu)
+      : [];
+    const range = (max - min) || 1;
+    return {
+      min,
+      max,
+      step,
+      majorLines,
+      minorLines: chart.valAxisMinorGridlines ? minorTicks : [],
+      minorTicks,
+      frac: (v: number) => (reversed ? 1 - (v - min) / range : (v - min) / range),
+    };
+  }
+  const needsMinorTicks = chart.valAxisMinorTickMark != null
+    && chart.valAxisMinorTickMark !== 'none';
   const mu = valueAxisUnitInRendererSpace(chart.valAxisMinorUnit, percentStacked);
-  if (chart.valAxisMinorGridlines) minorLines.push(...minorAxisValues(min, max, step, mu));
+  const linear = planLinearValueAxis({
+    dataMin,
+    dataMax,
+    explicitMin,
+    explicitMax,
+    axisLenPt,
+    majorUnit,
+    minorUnit: mu,
+    needMinor: chart.valAxisMinorGridlines === true || needsMinorTicks,
+  });
+  const { min, max, majorUnit: step, majorTicks: majorLines } = linear;
+  const range = (max - min) || 1;
+  const minorLines = chart.valAxisMinorGridlines ? linear.minorTicks : [];
   return {
-    min, max, step, majorLines, minorLines,
+    min, max, step, majorLines, minorLines, minorTicks: linear.minorTicks,
     frac: (v: number) => (reversed ? 1 - (v - min) / range : (v - min) / range),
   };
 }
@@ -1348,15 +1381,16 @@ interface SecondaryAxisScale {
   min: number;
   max: number;
   step: number;
+  majorLines: number[];
+  minorTicks: number[];
   makeToY: (py0: number, ph: number) => (v: number) => number;
 }
 
 /** Compute the INDEPENDENT scale of a secondary value axis from the series that
  *  opt into it (`useSecondaryAxis === true`). Shared by every axis family that
  *  supports a secondary axis (bar-combo line series, and plain line / area
- *  series): the axis has its own "nice" major unit / gridline count, anchored so
- *  its min never sits above 0 (Excel keeps the zero line reachable), with an
- *  explicit `<c:scaling><c:min/max>` (`sec.min`/`sec.max`) overriding. Returns
+ *  series): the axis has its own bounded automatic plan, with an explicit
+ *  `<c:scaling><c:min/max>` (`sec.min`/`sec.max`) overriding. Returns
  *  null when no `SecondaryValueAxis` was parsed OR no series opts into it — the
  *  caller then keeps the single-axis path unchanged.
  *
@@ -1364,9 +1398,7 @@ interface SecondaryAxisScale {
  *  vertical right edge, so its length drives the auto major unit). `getValues`
  *  yields each opted-in series' raw values.
  *
- *  This is a pure refactor of the bar renderer's inline secondary-scale math —
- *  same `valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max, len)` call,
- *  same empty-data fallback (dMin→0, dMax→1). */
+ *  Empty secondary data keeps the neutral 0..1 fallback. */
 function computeSecondaryAxis(
   sec: SecondaryValueAxis | null,
   seriesForSecondary: ChartSeries[],
@@ -1382,12 +1414,25 @@ function computeSecondaryAxis(
   const dMax = secVals.length ? Math.max(...secVals) : 1;
   // An explicit `<c:valAx><c:majorUnit>` on the secondary axis (§21.2.2.103)
   // overrides the auto step, mirroring the primary axis. null ⇒ auto.
-  const { min, max, step } = valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max, plotHeightPt, sec.majorUnit);
+  const linear = planLinearValueAxis({
+    dataMin: dMin,
+    dataMax: dMax,
+    explicitMin: sec.min,
+    explicitMax: sec.max,
+    axisLenPt: plotHeightPt,
+    majorUnit: sec.majorUnit,
+    minorUnit: sec.minorUnit,
+    needMinor: sec.minorGridlines === true
+      || (sec.minorTickMark != null && sec.minorTickMark !== 'none'),
+  });
+  const { min, max, majorUnit: step } = linear;
   const range = (max - min) || 1;
   return {
     min,
     max,
     step,
+    majorLines: linear.majorTicks,
+    minorTicks: linear.minorTicks,
     makeToY: (py0: number, ph: number) => (v: number): number => py0 + ph - ((v - min) / range) * ph,
   };
 }
@@ -1425,23 +1470,26 @@ function drawSecondaryValueAxis(
     ctx.beginPath(); ctx.moveTo(axX, py0); ctx.lineTo(axX, py0 + ph); ctx.stroke();
   }
   if (!sec.hidden) {
+    if (sec.minorGridlines) {
+      const grid = secondaryMinorGridStroke(sec, ptToPx);
+      for (const value of secScale.minorTicks) {
+        strokeValueGridlineH(ctx, px0, pw, toYSecondary(value), false, grid);
+      }
+    }
     ctx.font = `${secFontPx}px ${chartFontFamily(chart, sec.fontFace, 'minor')}`;
     ctx.fillStyle = sec.fontColor ? `#${sec.fontColor}` : primaryLabelColor;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    const sRange = (secScale.max - secScale.min) || 1;
-    const secSteps = Math.max(1, Math.round(sRange / secScale.step));
-    for (let si = 0; si <= secSteps; si++) {
-      const sval = secScale.min + si * secScale.step;
+    for (const sval of secScale.majorLines) {
       const gy = toYSecondary(sval);
       // Same tick geometry as the left axis, mirrored to the right edge.
       drawAxisTick(ctx, sec.majorTickMark, 'val', axX, gy, secLineColor, secLineW, true, sec.lineHidden);
       ctx.fillText(formatChartValWithCode(sval, sec.formatCode ?? null, date1904), axX + 14, gy);
     }
     if (sec.minorTickMark && sec.minorTickMark !== 'none') {
-      forEachMinorTick(secScale.min, secScale.max, secScale.step, sec.minorUnit, value => {
+      for (const value of secScale.minorTicks) {
         drawAxisTick(ctx, sec.minorTickMark, 'val', axX, toYSecondary(value), secLineColor, secLineW, true, sec.lineHidden);
-      });
+      }
     }
   }
   if (sec.title) {
@@ -1846,7 +1894,7 @@ function renderBarChart(
   // `planValueAxis` folds in the CH6 major unit / logBase / orientation; with
   // none set it is byte-identical to `valueAxisScale` + a linear map.
   const plan = planValueAxis(chart, dataMin, dataMax, valAxisLenPt, pct);
-  const { min: axMin, max: axMax, step } = plan;
+  const { step } = plan;
 
   // Secondary value-axis scale (combo charts). INDEPENDENT of the primary: its
   // own "nice" major unit / gridline count. Its axis is the vertical right edge,
@@ -1872,9 +1920,7 @@ function renderBarChart(
     // reserved gutter width matches the painted labels when a real face is set.
     ctx.font = `${measuredValTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     let wmax = 0;
-    const vSteps = Math.round((axMax - axMin) / step);
-    for (let si = 0; si <= vSteps; si++) {
-      const val = axMin + si * step;
+    for (const val of plan.majorLines) {
       const label = formatPrimaryValueAxisTick(chart, val, pct);
       wmax = Math.max(wmax, ctx.measureText(label).width);
     }
@@ -1890,9 +1936,8 @@ function renderBarChart(
   if (sec && !sec.hidden) {
     ctx.font = `${secFontPx}px ${chartFontFamily(chart, sec.fontFace, 'minor')}`;
     let wmax = 0;
-    const sSteps = Math.round((sMax - sMin) / sStep);
-    for (let si = 0; si <= sSteps; si++) {
-      wmax = Math.max(wmax, ctx.measureText(formatChartValWithCode(sMin + si * sStep, sec.formatCode ?? null, chart.date1904)).width);
+    for (const value of secScale?.majorLines ?? majorAxisValues(sMin, sMax, sStep)) {
+      wmax = Math.max(wmax, ctx.measureText(formatChartValWithCode(value, sec.formatCode ?? null, chart.date1904)).width);
     }
     secLabelBandW = wmax + 18;
   }
@@ -2008,13 +2053,11 @@ function renderBarChart(
   // line-mapping helpers need the now-final plot rect, so they live here. Line
   // series bound to the secondary axis map through `toYSecondary`; everything
   // else uses the primary `axMax`.
-  const sRange = (sMax - sMin) || 1;
   // Primary value → pixel. `axRange`/`axMin` generalize the old `v / axMax`
   // mapping so the zero line sits wherever the axis crosses it (mid-plot when
   // the data straddles zero); positive-only data keeps `axMin === 0`, so the
   // mapping is unchanged. `valX`/`valY` give the on-axis pixel for a value on
   // the value axis (X for horizontal bars, Y for columns).
-  const axRange = (axMax - axMin) || 1;
   const valY = (v: number): number => py0 + ph - plan.frac(v) * ph;
   const valX = (v: number): number => px0 + plan.frac(v) * pw;
   const zeroY = valY(0); // column zero line
@@ -2030,7 +2073,6 @@ function renderBarChart(
   // the faint `#e0e0e0`/0.5 px default). The vertical (horizontal-bar) path
   // strokes gridlines inline, so it reads `grid.color`/`grid.width` directly.
   const grid = valGridStroke(chart, ptToPx);
-  const steps = Math.round(axRange / step);
   ctx.textBaseline = 'middle';
   const drawnValTickFontPx = chart.valAxisFontSizeHpt != null
     ? valAxLabelFontPx
@@ -2163,8 +2205,7 @@ function renderBarChart(
     // column chart the value axis is vertical (left) and the category axis
     // horizontal (bottom); a horizontal bar chart swaps the two.
     if (!chart.valAxisHidden && chart.valAxisMajorTickMark && chart.valAxisMajorTickMark !== 'none') {
-      for (let si = 0; si <= steps; si++) {
-        const val = axMin + si * step;
+      for (const val of plan.majorLines) {
         if (!isH) {
           drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, valY(val), valLineColor, valLineW, false, chart.valAxisLineHidden);
         } else {
@@ -2173,13 +2214,13 @@ function renderBarChart(
       }
     }
     if (!chart.valAxisHidden && chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
-      forEachMinorTick(axMin, axMax, step, chart.valAxisMinorUnit, value => {
+      for (const value of plan.minorTicks) {
         if (!isH) {
           drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', px0, valY(value), valLineColor, valLineW, false, chart.valAxisLineHidden);
         } else {
           drawAxisTick(ctx, chart.valAxisMinorTickMark, 'cat', py0 + ph, valX(value), valLineColor, valLineW, false, chart.valAxisLineHidden);
         }
-      });
+      }
     }
     // Category ticks sit at band BOUNDARIES with crossBetween="between" (the
     // bar/column default) — the dividers between Q1|Q2|Q3|Q4 (n+1 ticks) — and
@@ -2606,22 +2647,26 @@ function renderBarChart(
     const { color: secLineColor, width: secLineW } = resolveAxisLine(sec.lineColor, sec.lineWidthEmu, ptToPx);
     if (!sec.lineHidden) strokeAxis(axX, py0, axX, py0 + ph, secLineColor, secLineW);
     if (!sec.hidden) {
+      if (sec.minorGridlines) {
+        const grid = secondaryMinorGridStroke(sec, ptToPx);
+        for (const value of secScale?.minorTicks ?? []) {
+          strokeValueGridlineH(ctx, px0, pw, toYSecondary(value), false, grid);
+        }
+      }
       ctx.font = `${secFontPx}px ${chartFontFamily(chart, sec.fontFace, 'minor')}`;
       ctx.fillStyle = sec.fontColor ? `#${sec.fontColor}` : valLabelColor;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      const secSteps = Math.max(1, Math.round(sRange / sStep));
-      for (let si = 0; si <= secSteps; si++) {
-        const sval = sMin + si * sStep;
+      for (const sval of secScale?.majorLines ?? majorAxisValues(sMin, sMax, sStep)) {
         const gy = toYSecondary(sval);
         // Same tick geometry as the left axis, mirrored to the right edge.
         drawAxisTick(ctx, sec.majorTickMark, 'val', axX, gy, secLineColor, secLineW, true, sec.lineHidden);
         ctx.fillText(formatChartValWithCode(sval, sec.formatCode ?? null, chart.date1904), axX + 14, gy);
       }
       if (sec.minorTickMark && sec.minorTickMark !== 'none') {
-        forEachMinorTick(sMin, sMax, sStep, sec.minorUnit, value => {
+        for (const value of secScale?.minorTicks ?? minorAxisValues(sMin, sMax, sStep, sec.minorUnit)) {
           drawAxisTick(ctx, sec.minorTickMark, 'val', axX, toYSecondary(value), secLineColor, secLineW, true, sec.lineHidden);
-        });
+        }
       }
     }
     if (sec.title) {
@@ -2736,10 +2781,9 @@ function renderLineChart(
   if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
   const isLogAxis = chart.valAxisLogBase != null && chart.valAxisLogBase >= 2;
   if (chart.valMin != null) dataMin = pct ? chart.valMin * 100 : chart.valMin;
-  else if (dataMin > 0 && !isLogAxis) dataMin = 0;
+  else if (pct && dataMin > 0 && !isLogAxis) dataMin = 0;
   if (chart.valMax != null) dataMax = pct ? chart.valMax * 100 : chart.valMax;
-  else if (dataMax < 0) dataMax = 0;
-  if (dataMax === dataMin) dataMax = dataMin + 1;
+  else if (pct && dataMax < 0) dataMax = 0;
 
   // Shared frame bands. Title + category-label bands follow PowerPoint's chart
   // auto-layout (font-proportional, pinned to the demo slide-5 line-chart PDF);
@@ -2784,9 +2828,8 @@ function renderLineChart(
     const prevFont = ctx.font;
     ctx.font = `${secFontPx}px ${chartFontFamily(chart, sec.fontFace, 'minor')}`;
     let wmax = 0;
-    const sSteps = Math.round((secScale.max - secScale.min) / secScale.step);
-    for (let si = 0; si <= sSteps; si++) {
-      wmax = Math.max(wmax, ctx.measureText(formatChartValWithCode(secScale.min + si * secScale.step, sec.formatCode ?? null, chart.date1904)).width);
+    for (const value of secScale.majorLines) {
+      wmax = Math.max(wmax, ctx.measureText(formatChartValWithCode(value, sec.formatCode ?? null, chart.date1904)).width);
     }
     secLabelBandW = wmax + 18;
     ctx.font = prevFont;
@@ -2910,9 +2953,9 @@ function renderLineChart(
       }
     }
     if (chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
-      forEachMinorTick(plan.min, plan.max, plan.step, chart.valAxisMinorUnit, value => {
+      for (const value of plan.minorTicks) {
         drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', px0, toY(value), primaryValTickColor, primaryValTickWidth, false, chart.valAxisLineHidden);
-      });
+      }
     }
   }
 
@@ -3192,8 +3235,8 @@ function renderStockChart(
   }
 
   // ── Value-axis extent: across every series' plotted values (the hi-lo line
-  // needs both the low and high extremes). Anchored at 0 for positive data
-  // (matching Excel's stock chart) unless the file sets an explicit min. ──
+  // needs both the low and high extremes). Authored bounds are retained and
+  // omitted bounds flow through the shared automatic planner. ──
   let dataMin = Infinity;
   let dataMax = -Infinity;
   for (const s of series) {
@@ -3206,10 +3249,7 @@ function renderStockChart(
   }
   if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
   if (chart.valMin != null) dataMin = chart.valMin;
-  else if (dataMin > 0) dataMin = 0;
   if (chart.valMax != null) dataMax = chart.valMax;
-  else if (dataMax < 0) dataMax = 0;
-  if (dataMax === dataMin) dataMax = dataMin + 1;
 
   const plan = planValueAxis(chart, dataMin, dataMax, ph / ptToPx);
   if (plan.max - plan.min === 0) return;
@@ -3242,12 +3282,12 @@ function renderStockChart(
         ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
       }
     }
-    forEachMinorTick(plan.min, plan.max, plan.step, chart.valAxisMinorUnit, v => {
+    for (const v of plan.minorTicks) {
       drawAxisTick(
         ctx, chart.valAxisMinorTickMark, 'val', px0, toY(v),
         undefined, undefined, false, chart.valAxisLineHidden,
       );
-    });
+    }
   }
 
   // Axis rules (bottom = category, left = value).
@@ -3438,9 +3478,8 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     const prevFont = ctx.font;
     ctx.font = `${secFontPx}px ${chartFontFamily(chart, sec.fontFace, 'minor')}`;
     let wmax = 0;
-    const sSteps = Math.round((secScale.max - secScale.min) / secScale.step);
-    for (let si = 0; si <= sSteps; si++) {
-      wmax = Math.max(wmax, ctx.measureText(formatChartValWithCode(secScale.min + si * secScale.step, sec.formatCode ?? null, chart.date1904)).width);
+    for (const value of secScale.majorLines) {
+      wmax = Math.max(wmax, ctx.measureText(formatChartValWithCode(value, sec.formatCode ?? null, chart.date1904)).width);
     }
     secLabelBandW = wmax + 18;
     ctx.font = prevFont;
@@ -3454,40 +3493,48 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // the actual formatted tick-label width. The outer rectangle includes axis
   // labels and ticks (ECMA-376 §21.2.2.89); treating its left edge as `px0`
   // pushes the labels outside chart space.
-  const computeAreaDataMax = (): number => {
-    let max = 0;
+  const computeAreaDataExtent = (): { min: number; max: number } => {
+    let min = Infinity;
+    let max = -Infinity;
     for (let ci = 0; ci < n; ci++) {
       if (stacked) {
-        let sum = 0;
+        let positive = 0;
+        let negative = 0;
         for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) {
-          sum += stackedValue(areaIndex, ci);
+          const value = stackedValue(areaIndex, ci);
+          if (value >= 0) positive += value;
+          else negative += value;
         }
-        max = Math.max(max, sum);
+        min = Math.min(min, negative);
+        max = Math.max(max, positive);
       } else {
-        for (const s of chart.series) {
-          if (isSecondarySeries(s)) continue;
-          max = Math.max(max, s.values[ci] ?? 0);
+        for (const { series } of areaSeries) {
+          if (isSecondarySeries(series)) continue;
+          const value = series.values[ci];
+          if (value == null) continue;
+          min = Math.min(min, value);
+          max = Math.max(max, value);
         }
       }
       for (const { series } of lineSeries) {
         if (isSecondarySeries(series)) continue;
-        max = Math.max(max, series.values[ci] ?? 0);
+        const value = series.values[ci];
+        if (value == null) continue;
+        min = Math.min(min, value);
+        max = Math.max(max, value);
       }
     }
-    if (pct) max = max > 0 ? 100 : 0;
-    if (chart.valMax != null) max = pct ? chart.valMax * 100 : chart.valMax;
-    return max === 0 ? 1 : max;
+    if (!isFinite(min) || !isFinite(max)) return { min: 0, max: 1 };
+    if (pct) return { min: min < 0 ? -100 : 0, max: max > 0 ? 100 : 0 };
+    return { min, max };
   };
-  const dataMax = computeAreaDataMax();
-  const explicitMax = pct ? dataMax : chart.valMax;
-  const majorUnit = valueAxisUnitInRendererSpace(chart.valAxisMajorUnit, pct);
-  const provisionalScale = valueAxisScale(
-    0,
-    dataMax,
-    undefined,
-    explicitMax,
+  const areaExtent = computeAreaDataExtent();
+  const provisionalScale = planValueAxis(
+    chart,
+    areaExtent.min,
+    areaExtent.max,
     phEst / ptToPx,
-    majorUnit,
+    pct,
   );
   const manualValTickFontPx = chart.valAxisFontSizeHpt != null
     ? valAxFontPx
@@ -3500,11 +3547,10 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   ) {
     const prevFont = ctx.font;
     ctx.font = `${manualValTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
-    const steps = Math.round(provisionalScale.max / provisionalScale.step);
-    for (let si = 0; si <= steps; si++) {
+    for (const value of provisionalScale.majorLines) {
       primaryLabelWidth = Math.max(
         primaryLabelWidth,
-        ctx.measureText(formatPrimaryValueAxisTick(chart, si * provisionalScale.step, pct)).width,
+        ctx.measureText(formatPrimaryValueAxisTick(chart, value, pct)).width,
       );
     }
     ctx.font = prevFont;
@@ -3554,17 +3600,9 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // Primary extent from the PRIMARY series only (secondary series live on their
   // own axis). When `sec` is null every series is primary, byte-identical to
   // the pre-CH7 path.
-  // Area anchors the value axis at 0; ignore the returned min. Value axis is
-  // vertical → length = plot height (axis-length-aware auto major unit). An
+  // Value axis is vertical → length = plot height (axis-length-aware auto major unit). An
   // explicit `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto step.
-  const { max: axMax, step } = valueAxisScale(
-    0,
-    dataMax,
-    undefined,
-    explicitMax,
-    ph / ptToPx,
-    majorUnit,
-  );
+  const areaPlan = planValueAxis(chart, areaExtent.min, areaExtent.max, ph / ptToPx, pct);
 
   // crossBetween="between" (Office's default; ECMA-376 §21.2.2.32 leaves the
   // default application-defined) gives each category a band of width pw/n and
@@ -3575,7 +3613,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const toX = between
     ? (i: number) => px0 + ((i + 0.5) / n) * pw
     : (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
-  const toY = (v: number) => py0 + ph - (v / axMax) * ph;
+  const toY = (v: number) => py0 + ph - areaPlan.frac(v) * ph;
   // Secondary series map through their own scale; `secScale` is null on the
   // common single-axis path so `yMapFor` always returns the primary `toY`.
   const toYSecondary = secScale ? secScale.makeToY(py0, ph) : toY;
@@ -3601,20 +3639,16 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     const grid = valGridStroke(chart, ptToPx);
     const minorGrid = valMinorGridStroke(chart, ptToPx);
     // Minor gridlines (`<c:valAx><c:minorGridlines>`, §21.2.2.129) drawn first,
-    // UNDER the majors and the series, only when the file declares them AND a
-    // positive `<c:minorUnit>`. Positions are generated by the same scale-min
-    // based helper used by the other value-axis renderers.
-    const mu = valueAxisUnitInRendererSpace(chart.valAxisMinorUnit, pct);
+    // UNDER the majors and the series when the file declares them. An omitted
+    // minor unit uses the shared automatic major/5 fallback.
     if (chart.valAxisMinorGridlines) {
-      forEachMinorTick(0, axMax, step, mu, v => {
+      for (const v of areaPlan.minorLines) {
         strokeValueGridlineH(ctx, px0, pw, toY(v), false, minorGrid);
-      });
+      }
     }
     if (drawValMajorGridlines(chart)) {
-      const steps = Math.round(axMax / step);
-      for (let si = 0; si <= steps; si++) {
-        const v = si * step;
-        strokeValueGridlineH(ctx, px0, pw, toY(v), si === 0, grid);
+      for (const v of areaPlan.majorLines) {
+        strokeValueGridlineH(ctx, px0, pw, toY(v), v === 0, grid);
       }
     }
   }
@@ -3835,9 +3869,8 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       : Math.max(8, Math.min(11, ph / 20));
     ctx.font = `${drawnValTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     ctx.textBaseline = 'middle';
-    const steps = Math.round(axMax / step);
-    for (let si = 0; si <= steps; si++) {
-      const v = si * step; const gy = toY(v);
+    for (const v of areaPlan.majorLines) {
+      const gy = toY(v);
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, valLineColor, valLineW, false, chart.valAxisLineHidden);
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
@@ -3847,10 +3880,9 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       ctx.fillText(formatPrimaryValueAxisTick(chart, v, pct), px0 - gap, gy);
     }
     if (chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
-      const minorUnit = valueAxisUnitInRendererSpace(chart.valAxisMinorUnit, pct);
-      forEachMinorTick(0, axMax, step, minorUnit, value => {
+      for (const value of areaPlan.minorTicks) {
         drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', px0, toY(value), valLineColor, valLineW, false, chart.valAxisLineHidden);
-      });
+      }
     }
   }
   // Category-axis baseline + value-axis rule. Office treats
@@ -4702,17 +4734,37 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   const cy2 = frame.center.cy;
   const rd  = Math.min(pw, ph) * 0.38;
 
-  let dataMax = 0;
-  for (const s of chart.series) for (const v of s.values) dataMax = Math.max(dataMax, v ?? 0);
-  if (chart.valMax != null) dataMax = chart.valMax;
+  let dataMin = Infinity;
+  let dataMax = -Infinity;
+  for (const s of chart.series) for (const v of s.values) {
+    if (v == null) continue;
+    dataMin = Math.min(dataMin, v);
+    dataMax = Math.max(dataMax, v);
+  }
+  if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
   if (dataMax === 0) dataMax = 1;
-  // Radar anchors the value axis at 0; ignore the returned min. An explicit
-  // `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto ring step. The
+  const needsMinorTicks = chart.valAxisMinorTickMark != null
+    && chart.valAxisMinorTickMark !== 'none';
+  // An explicit `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto ring step. The
   // axis-length-aware auto density (GRIDLINE_SPACING_PT) is calibrated against
   // Cartesian bar/line/area axes, not the radial spoke, so radar keeps the
   // legacy fixed auto target (axisLenPt undefined) — only the explicit majorUnit
   // path is new (byte-stable auto rings).
-  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax, undefined, chart.valAxisMajorUnit);
+  const radarAxisPlan = planLinearValueAxis({
+    dataMin,
+    dataMax,
+    explicitMin: chart.valMin,
+    explicitMax: chart.valMax,
+    majorUnit: chart.valAxisMajorUnit,
+    minorUnit: chart.valAxisMinorUnit,
+    needMinor: chart.valAxisMinorGridlines === true || needsMinorTicks,
+  });
+  const { min: axMin, max: axMax } = radarAxisPlan;
+  const radarFrac = (value: number): number => clamp(
+    axisFraction(value, axMin, axMax, { reversed: valAxisReversed(chart) }),
+    0,
+    1,
+  );
 
   const angle0 = -Math.PI / 2;
   const spoke  = (i: number) => angle0 + (i / n) * Math.PI * 2;
@@ -4722,11 +4774,9 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   // the value (not `ri / rings`) keeps the rings on the major-unit multiples
   // even when `axMax` is not an exact multiple of `step` (e.g. an explicit
   // `<c:majorUnit>` §21.2.2.103 that doesn't divide the auto-rounded max).
-  const rings = Math.round(axMax / step);
-  const ringValue = (ri: number): number => Math.min(ri * step, axMax);
-  ctx.strokeStyle = '#ddd'; ctx.lineWidth = 0.5;
-  for (let ri = 1; ri <= rings; ri++) {
-    const rr = (ringValue(ri) / axMax) * rd;
+  const ringValues = radarAxisPlan.majorTicks.filter(value => radarFrac(value) > 0);
+  const strokeRing = (value: number): void => {
+    const rr = radarFrac(value) * rd;
     ctx.beginPath();
     for (let i = 0; i < n; i++) {
       const a = spoke(i);
@@ -4734,7 +4784,18 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
       if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
     }
     ctx.closePath(); ctx.stroke();
+  };
+  if (chart.valAxisMinorGridlines) {
+    const minorGrid = valMinorGridStroke(chart, ptToPx);
+    ctx.strokeStyle = minorGrid.color;
+    ctx.lineWidth = minorGrid.width;
+    const previousDash = minorGrid.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
+    if (minorGrid.dash.length > 0) ctx.setLineDash(minorGrid.dash);
+    for (const value of radarAxisPlan.minorTicks) strokeRing(value);
+    if (minorGrid.dash.length > 0) ctx.setLineDash(previousDash);
   }
+  ctx.strokeStyle = '#ddd'; ctx.lineWidth = 0.5;
+  for (const ringValue of ringValues) strokeRing(ringValue);
 
   ctx.strokeStyle = '#bbb'; ctx.lineWidth = 0.5;
   for (let i = 0; i < n; i++) {
@@ -4753,10 +4814,25 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
     ctx.fillStyle = '#555';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    for (let ri = 1; ri <= rings; ri++) {
-      const v = ringValue(ri);
-      const rr = (v / axMax) * rd;
+    for (const v of ringValues) {
+      const rr = radarFrac(v) * rd;
       ctx.fillText(formatChartVal(v), cx2 - 3, cy2 - rr);
+    }
+    if (needsMinorTicks) {
+      const valAxisLine = resolveAxisLine(chart.valAxisLineColor, chart.valAxisLineWidthEmu, ptToPx);
+      for (const value of radarAxisPlan.minorTicks) {
+        drawAxisTick(
+          ctx,
+          chart.valAxisMinorTickMark,
+          'val',
+          cx2,
+          cy2 - radarFrac(value) * rd,
+          valAxisLine.color,
+          valAxisLine.width,
+          false,
+          chart.valAxisLineHidden,
+        );
+      }
     }
   }
 
@@ -4805,7 +4881,7 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
     for (let i = 0; i < n; i++) {
       const v = s.values[i];
       if (v == null) { pts.push(null); continue; }
-      const frac = v / axMax;
+      const frac = radarFrac(v);
       const a = spoke(i);
       pts.push([cx2 + Math.cos(a) * rd * frac, cy2 + Math.sin(a) * rd * frac]);
     }
@@ -5155,50 +5231,47 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
 
   let xMin = Math.min(...allX); let xMax = Math.max(...allX);
   let yMin = Math.min(...allY); let yMax = Math.max(...allY);
-  if (xMin === xMax) { xMin -= 1; xMax += 1; }
-  if (yMin === yMax) { yMin -= 1; yMax += 1; }
-  // Apply explicit `<c:valAx><c:scaling><c:min/max>` and `<c:catAx>` scaling
-  // when present; otherwise pad up to zero on the value axis (matches Excel
-  // for charts whose data is all positive).
+  // Apply explicit `<c:valAx><c:scaling><c:min/max>` and `<c:catAx>` scaling.
+  // Omitted Y bounds, including point ranges, flow through the shared planner.
   if (chart.valMin != null) yMin = chart.valMin;
-  else if (yMin > 0) yMin = 0;
   if (chart.valMax != null) yMax = chart.valMax;
-  // Auto value (Y) axis: ONE major unit (the "nice" step) drives both the
-  // rounded bounds and the gridlines — identical to bar/line/area. niceAxisMax
-  // adds ~5% headroom above the data max and rounds up to that step, so the top
-  // point sits below the top gridline (data 3.5 → step 0.5, max 4 → 0,.5,…,4;
-  // 0.1129 → step 0.02, max 0.12). The step is taken from the DATA range and
-  // reused for the gridline loop below. The post-anchor yMin (which already had
-  // chart.valMin and the >0→0 anchor applied above) is the data extent; passing
-  // chart.valMin/valMax as the explicit args reproduces the prior `?? niceAxis…`
-  // behavior exactly. Explicit <c:valAx><c:scaling> wins. NB: the auto major
-  // unit is not specified by ECMA-376 (Excel-proprietary); niceStep approximates
-  // it and may differ from Excel by one step on some ranges. An explicit
-  // `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto step. The
-  // axis-length-aware auto density (GRIDLINE_SPACING_PT) is calibrated against
-  // the bar/line/area value axes; scatter/bubble keep the legacy fixed auto
-  // target (axisLenPt undefined) so their auto gridlines stay byte-stable —
-  // only the explicit majorUnit path is new here.
-  const { min: niceYMin, max: niceYMax, step: yAxisStep } =
-    valueAxisScale(yMin, yMax, chart.valMin, chart.valMax, undefined, chart.valAxisMajorUnit);
-  yMin = niceYMin; yMax = niceYMax;
-  if (chart.catAxisMin != null) xMin = chart.catAxisMin;
-  if (chart.catAxisMax != null) xMax = chart.catAxisMax;
-  // Excel snaps auto-derived axis bounds outward to a multiple of the
-  // step so both ends land on round numbers (e.g. dates jump to a date
-  // before the first task and after the last). When the spec set min /
-  // max explicitly we leave them alone.
-  if (chart.catAxisMin == null || chart.catAxisMax == null) {
-    const step = niceStep(xMax - xMin);
-    if (step > 0) {
-      if (chart.catAxisMin == null) xMin = Math.floor(xMin / step) * step;
-      if (chart.catAxisMax == null) xMax = Math.ceil(xMax / step) * step;
-    }
-  }
+  // Scatter/bubble retain their fixed-density target (axis length omitted),
+  // while using the same bounds, authored-unit precedence, and safety policy.
+  const yNeedsMinor = chart.valAxisMinorGridlines === true
+    || (chart.valAxisMinorTickMark != null && chart.valAxisMinorTickMark !== 'none');
+  const yAxisPlan = planLinearValueAxis({
+    dataMin: yMin,
+    dataMax: yMax,
+    explicitMin: chart.valMin,
+    explicitMax: chart.valMax,
+    majorUnit: chart.valAxisMajorUnit,
+    minorUnit: chart.valAxisMinorUnit,
+    needMinor: yNeedsMinor,
+  });
+  yMin = yAxisPlan.min;
+  yMax = yAxisPlan.max;
+  const xNeedsMinor = chart.catAxisMinorGridlines === true
+    || (chart.catAxisMinorTickMark != null && chart.catAxisMinorTickMark !== 'none');
+  const xAxisPlan = planLinearValueAxis({
+    dataMin: xMin,
+    dataMax: xMax,
+    explicitMin: chart.catAxisMin,
+    explicitMax: chart.catAxisMax,
+    axisLenPt: pw / ptToPx,
+    majorUnit: chart.catAxisMajorUnit,
+    minorUnit: chart.catAxisMinorUnit,
+    needMinor: xNeedsMinor,
+  });
+  xMin = xAxisPlan.min;
+  xMax = xAxisPlan.max;
 
   const toX = (v: number) => px0 + ((v - xMin) / (xMax - xMin)) * pw;
   const toY = (v: number) => py0 + ph - ((v - yMin) / (yMax - yMin)) * ph;
-  const xStep = chart.catAxisMajorUnit ?? niceStep(xMax - xMin);
+  const xStep = xAxisPlan.majorUnit;
+  const yMajorTicks = yAxisPlan.majorTicks;
+  const yMinorTicks = yAxisPlan.minorTicks;
+  const xMajorTicks = xAxisPlan.majorTicks;
+  const xMinorTicks = xAxisPlan.minorTicks;
 
   // Each scatter axis is a numeric value axis. Its crossing coordinate comes
   // from the opposite axis's scale (§21.2.2.31 / §21.2.2.32): autoZero uses
@@ -5234,13 +5307,11 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${yTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     if (chart.valAxisMinorGridlines) {
       const minorGrid = valMinorGridStroke(chart, ptToPx);
-      forEachMinorTick(yMin, yMax, yAxisStep, chart.valAxisMinorUnit, value => {
+      for (const value of yMinorTicks) {
         strokeValueGridlineH(ctx, px0, pw, toY(value), false, minorGrid);
-      });
+      }
     }
-    const ySteps = Math.round((yMax - yMin) / yAxisStep) + 1;
-    for (let si = 0; si < ySteps; si++) {
-      const v = yMin + si * yAxisStep; if (v > yMax + yAxisStep * 0.01) break;
+    for (const v of yMajorTicks) {
       const gy = toY(v);
       ctx.strokeStyle = grid.color; ctx.lineWidth = grid.width;
       if (drawValMajorGridlines(chart)) {
@@ -5271,9 +5342,9 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     }
     if (chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
       const yAxisLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : undefined;
-      forEachMinorTick(yMin, yMax, yAxisStep, chart.valAxisMinorUnit, value => {
+      for (const value of yMinorTicks) {
         drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', yAxisX, toY(value), yAxisLineColor, axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx), false, chart.valAxisLineHidden);
-      });
+      }
     }
   }
 
@@ -5282,14 +5353,11 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   // Its major gridlines therefore run vertically through each numeric X tick.
   if (!chart.catAxisHidden && drawCatMajorGridlines(chart) && xStep > 0) {
     const xGrid = catGridStroke(chart, ptToPx);
-    const xSteps = Math.round((xMax - xMin) / xStep) + 1;
     ctx.strokeStyle = xGrid.color;
     ctx.lineWidth = xGrid.width;
     const previousDash = xGrid.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
     if (xGrid.dash.length > 0) ctx.setLineDash(xGrid.dash);
-    for (let si = 0; si < xSteps; si++) {
-      const v = xMin + si * xStep;
-      if (v > xMax + xStep * 0.01) break;
+    for (const v of xMajorTicks) {
       const gx = toX(v);
       ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
     }
@@ -5301,10 +5369,10 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     ctx.strokeStyle = xGrid.color;
     ctx.lineWidth = xGrid.width;
     if (xGrid.dash.length > 0) ctx.setLineDash(xGrid.dash);
-    forEachMinorTick(xMin, xMax, xStep, chart.catAxisMinorUnit, value => {
+    for (const value of xMinorTicks) {
       const gx = toX(value);
       ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
-    });
+    }
     if (xGrid.dash.length > 0) ctx.setLineDash(previousDash);
   }
 
@@ -5344,7 +5412,6 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       ? categoryTickLabelGapPx(tickFontPx)
       : 4;
     ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${tickFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
-    const xSteps = Math.round((xMax - xMin) / xStep) + 1;
     ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
     ctx.textAlign = 'center';
     const labelPos = chart.catAxisTickLabelPos ?? 'nextTo';
@@ -5352,8 +5419,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       ? py0 + ph + tickGap
       : labelPos === 'high' ? py0 - tickGap : xAxisY + tickGap;
     ctx.textBaseline = labelPos === 'high' ? 'bottom' : 'top';
-    for (let si = 0; si < xSteps; si++) {
-      const v = xMin + si * xStep; if (v > xMax + xStep * 0.01) break;
+    for (const v of xMajorTicks) {
       const gx = toX(v);
       if (labelPos !== 'none') {
         ctx.fillText(formatChartValWithCode(v, chart.catAxisFormatCode, chart.date1904), gx, labelY);
@@ -5363,9 +5429,9 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     }
     if (chart.catAxisMinorTickMark && chart.catAxisMinorTickMark !== 'none') {
       const xAxisLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : undefined;
-      forEachMinorTick(xMin, xMax, xStep, chart.catAxisMinorUnit, value => {
+      for (const value of xMinorTicks) {
         drawAxisTick(ctx, chart.catAxisMinorTickMark, 'cat', xAxisY, toX(value), xAxisLineColor, axisLineWidthPx(chart.catAxisLineWidthEmu, ptToPx), false, chart.catAxisLineHidden);
-      });
+      }
     }
   }
 
@@ -6523,12 +6589,12 @@ function renderWaterfallChart(
         chart.valAxisLineHidden,
       );
     }
-    forEachMinorTick(plan.min, plan.max, plan.step, chart.valAxisMinorUnit, value => {
+    for (const value of plan.minorTicks) {
       drawAxisTick(
         ctx, chart.valAxisMinorTickMark, 'val', px0, yOf(value),
         valAxisLine.color, valAxisLine.width, false, chart.valAxisLineHidden,
       );
-    });
+    }
   }
 
   // L-frame: vertical (value-axis) rule + horizontal (category-axis) baseline.
@@ -6966,15 +7032,19 @@ function renderBoxWhiskerChart(
 
   const font = chartFontFamily(chart, chart.valAxisFontFace, 'minor');
   const valFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
-  const provisionalScale = valueAxisScale(
+  const provisionalScale = planLinearValueAxis({
     dataMin,
     dataMax,
-    chart.valMin,
-    chart.valMax,
-    h / ptToPx,
-    chart.valAxisMajorUnit,
-  );
-  if (!usableScale(provisionalScale)) {
+    explicitMin: chart.valMin,
+    explicitMax: chart.valMax,
+    axisLenPt: h / ptToPx,
+    majorUnit: chart.valAxisMajorUnit,
+  });
+  if (!usableScale({
+    min: provisionalScale.min,
+    max: provisionalScale.max,
+    step: provisionalScale.majorUnit,
+  })) {
     rejectOutOfRange();
     return;
   }
@@ -6983,12 +7053,7 @@ function renderBoxWhiskerChart(
     const previousFont = ctx.font;
     ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${valFontPx}px ${font}`;
     let maxLabelW = 0;
-    const tickCount = Math.min(
-      1000,
-      Math.max(0, Math.round((provisionalScale.max - provisionalScale.min) / provisionalScale.step)),
-    );
-    for (let tickIndex = 0; tickIndex <= tickCount; tickIndex++) {
-      const value = provisionalScale.min + tickIndex * provisionalScale.step;
+    for (const value of provisionalScale.majorTicks) {
       const label = formatChartValWithCode(
         value,
         chart.valAxisFormatCode,
@@ -7042,15 +7107,13 @@ function renderBoxWhiskerChart(
   const nCat = cats.length;
 
   // Excel's automatic value axis uses nice-rounded bounds and steps.
-  const axisScale = valueAxisScale(
-    dataMin, dataMax, chart.valMin, chart.valMax, ph / ptToPx, chart.valAxisMajorUnit,
-  );
-  if (!usableScale(axisScale)) {
+  const boxAxisPlan = planValueAxis(chart, dataMin, dataMax, ph / ptToPx);
+  if (!usableScale(boxAxisPlan)) {
     rejectOutOfRange();
     return;
   }
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, frame.title.fontPx);
-  const { min: axisMin, max: axisMax, step } = axisScale;
+  const { min: axisMin, max: axisMax } = boxAxisPlan;
   const span = axisMax - axisMin;
   const yOf = (v: number): number => py0 + ph * (1 - (v - axisMin) / span);
 
@@ -7065,11 +7128,11 @@ function renderBoxWhiskerChart(
     ctx.textBaseline = 'middle';
     if (chart.valAxisMinorGridlines) {
       const minorGridline = valMinorGridStroke(chart, ptToPx);
-      forEachMinorTick(axisMin, axisMax, step, chart.valAxisMinorUnit, value => {
+      for (const value of boxAxisPlan.minorLines) {
         strokeValueGridlineH(ctx, px0, pw, yOf(value), false, minorGridline);
-      });
+      }
     }
-    for (let v = axisMin; v <= axisMax + 1e-6; v += step) {
+    for (const v of boxAxisPlan.majorLines) {
       const gy = yOf(v);
       if (chart.valAxisMajorGridlines !== false) {
         ctx.strokeStyle = valGridline.color;
@@ -7093,12 +7156,12 @@ function renderBoxWhiskerChart(
         chart.valAxisLineHidden,
       );
     }
-    forEachMinorTick(axisMin, axisMax, step, chart.valAxisMinorUnit, value => {
+    for (const value of boxAxisPlan.minorTicks) {
       drawAxisTick(
         ctx, chart.valAxisMinorTickMark, 'val', px0, yOf(value),
         valAxisLine.color, valAxisLine.width, false, chart.valAxisLineHidden,
       );
-    });
+    }
     if (!chart.valAxisLineHidden) {
       ctx.strokeStyle = valAxisLine.color;
       ctx.lineWidth = valAxisLine.width;
