@@ -396,6 +396,60 @@ describe('bar chart authored layout and fills', () => {
     expect(right).toBeDefined();
     expect(left?.x).toBeLessThan(right?.x ?? 0);
   });
+
+  it('measures the automatic horizontal category-label gutter instead of eliding long labels', () => {
+    const rec = recordingCtx();
+    const category = 'San Francisco County, California';
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBarH',
+      categories: [category],
+      catAxisFontSizeHpt: 1200,
+      catAxisFontFace: 'Lato',
+      series: [series({ values: [1] })],
+    }), RECT, 1);
+
+    expect(rec.texts.some((text) => text.text === category)).toBe(true);
+    expect(rec.texts.some((text) => text.text.endsWith('…'))).toBe(false);
+  });
+
+  it('does not reserve a horizontal category-label gutter when tick labels are hidden', () => {
+    const render = (tickLabelPos: ChartModel['catAxisTickLabelPos']) => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'clusteredBarH',
+        categories: ['A category label long enough to affect the gutter'],
+        catAxisTickLabelPos: tickLabelPos,
+        plotAreaBg: 'ABCDEF',
+        series: [series({ values: [1] })],
+      }), RECT, 1);
+      return rec.rects.find(rect => rect.fs === '#ABCDEF');
+    };
+
+    const visible = render('nextTo');
+    const hidden = render('none');
+    expect(hidden?.x).toBeLessThan(visible?.x ?? 0);
+    expect(hidden?.w).toBeGreaterThan(visible?.w ?? Number.POSITIVE_INFINITY);
+  });
+
+  it('measures an unauthored horizontal category font at the painted slot size', () => {
+    const rect: ChartRect = { x: 0, y: 0, w: 640, h: 720 };
+    const render = (fontSizeHpt: number | null) => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'clusteredBarH',
+        categories: ['A category label whose width is sensitive to the font size'],
+        catAxisFontSizeHpt: fontSizeHpt,
+        plotAreaBg: 'ABCDEF',
+        series: [series({ values: [1] })],
+      }), rect, 1);
+      return rec.rects.find(item => item.fs === '#ABCDEF');
+    };
+
+    const automatic = render(null);
+    const authoredElevenPx = render(1100);
+    expect(automatic?.x).toBeCloseTo(authoredElevenPx?.x ?? 0, 6);
+    expect(automatic?.w).toBeCloseTo(authoredElevenPx?.w ?? 0, 6);
+  });
 });
 
 describe('CH1 — negative bar/column values extend from the zero line', () => {
@@ -1587,6 +1641,35 @@ const SECONDARY_AXIS = {
   majorTickMark: 'out',
   lineHidden: false,
 };
+
+describe('axis noFill tick visibility', () => {
+  it('suppresses value-axis tick lines with a hidden axis rule while retaining labels', () => {
+    const render = (lineHidden: boolean) => {
+      const rec = pathRecordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'line',
+        categories: ['2008', '2009', '2010'],
+        series: [series({ values: [0.18, 0.19, 0.17] })],
+        valAxisLineHidden: lineHidden,
+        valAxisMajorTickMark: 'out',
+        catAxisMajorTickMark: 'none',
+        valAxisFormatCode: '0%',
+      }), RECT, 1);
+      return rec;
+    };
+    const visible = render(false);
+    const hidden = render(true);
+    const valueTicks = (segments: Array<Array<{ x: number; y: number }>>) => segments.filter((segment) =>
+      segment.length === 2
+      && segment[0].y === segment[1].y
+      && Math.abs(segment[1].x - segment[0].x) <= 8,
+    );
+
+    expect(valueTicks(visible.segments).length).toBeGreaterThan(0);
+    expect(valueTicks(hidden.segments)).toHaveLength(0);
+    expect(hidden.texts.some((text) => text.text.endsWith('%'))).toBe(true);
+  });
+});
 
 describe('CH7 — line/area series honor a secondary value axis (§21.2.2.*)', () => {
   // The primary series ASCENDS [10,20,30]; the secondary series DESCENDS
