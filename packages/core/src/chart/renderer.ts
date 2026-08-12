@@ -3,7 +3,7 @@
 // scatter, waterfall). Ported from the xlsx implementation with pptx
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
-import type { ChartDataLabelOverride, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, ChartTextBox, SecondaryValueAxis } from '../types/chart';
+import type { ChartDataLabelOverride, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, ChartTextBox, ChartTrendline, SecondaryValueAxis } from '../types/chart';
 import type { Fill } from '../types/common';
 import {
   AXIS_OUTER_TEXT_MARGIN_PT,
@@ -21,7 +21,7 @@ import {
   valueTickLabelGapPx,
   type ChartLegendReserve,
 } from './layout.js';
-import { niceStep, valueAxisScale, axisFraction, logAxisScale, fitTrendline } from './axis-scale.js';
+import { niceStep, valueAxisScale, axisFraction, logAxisScale, fitTrendline, linearTrendlineStats } from './axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine, resolveGridline, isCrossBetween } from './axis-style.js';
 import { formatChartVal, formatChartValWithCode, formatCategoryLabel } from './chart-number-format.js';
 import { elideToWidth } from './text-elide.js';
@@ -36,6 +36,7 @@ import {
   computeBoxWhiskerStats,
 } from './box-whisker.js';
 import { planParetoLayout } from './pareto-layout.js';
+import { placeTrendlineLabel } from './trendline-label.js';
 import { hexToRgba, resolveFill } from '../shape/paint.js';
 import {
   DEFAULT_TEXT_INSET_LR_EMU,
@@ -1037,6 +1038,90 @@ function planValueAxis(
   };
 }
 
+interface TrendlineLabelContext {
+  chart: ChartModel;
+  chartRect: ChartRect;
+  plotRect: ChartRect;
+  clipLineToPlot?: boolean;
+}
+
+function compactTrendlineNumber(value: number): string {
+  return formatChartVal(Number(value.toPrecision(6)));
+}
+
+function generatedTrendlineLabel(
+  tl: ChartTrendline,
+  stats: ReturnType<typeof linearTrendlineStats>,
+): string[] {
+  if (tl.labelText) return tl.labelText.split(/\r?\n/);
+  if (!stats) return [];
+  const lines: string[] = [];
+  if (tl.dispEq) {
+    const sign = stats.intercept < 0 ? '−' : '+';
+    lines.push(
+      `y = ${compactTrendlineNumber(stats.slope)}x ${sign} ${compactTrendlineNumber(Math.abs(stats.intercept))}`,
+    );
+  }
+  if (tl.dispRSqr) lines.push(`R² = ${compactTrendlineNumber(stats.rSquared)}`);
+  return lines;
+}
+
+function drawTrendlineLabel(
+  ctx: CanvasRenderingContext2D,
+  tl: ChartTrendline,
+  stats: ReturnType<typeof linearTrendlineStats>,
+  ptToPx: number,
+  labelContext?: TrendlineLabelContext,
+): void {
+  if (!labelContext) return;
+  const lines = generatedTrendlineLabel(tl, stats);
+  if (lines.length === 0) return;
+  const { chart, chartRect, plotRect } = labelContext;
+  const fontPx = tl.labelFontSizeHpt != null
+    ? (tl.labelFontSizeHpt / 100) * ptToPx
+    : chart.dataLabelFontSizeHpt != null
+      ? (chart.dataLabelFontSizeHpt / 100) * ptToPx
+      : 10 * ptToPx;
+  const face = chartFontFamily(chart, tl.labelFontFace ?? chart.dataLabelFontFace, 'minor');
+  const bold = tl.labelFontBold ?? chart.dataLabelFontBold ?? false;
+  ctx.font = `${bold ? 'bold ' : ''}${fontPx}px ${face}`;
+  const lineHeight = fontPx * 1.2;
+  const naturalWidth = Math.max(...lines.map(line => ctx.measureText(line).width));
+  const placement = placeTrendlineLabel(
+    chartRect,
+    plotRect,
+    naturalWidth,
+    lines.length * lineHeight,
+    fontPx,
+    tl.labelManualLayout,
+  );
+  if (!placement) return;
+
+  ctx.save();
+  if (placement.automatic) {
+    ctx.beginPath();
+    ctx.rect(plotRect.x, plotRect.y, plotRect.w, plotRect.h);
+    ctx.clip();
+  }
+  const alignment = tl.labelTextAlign;
+  ctx.textAlign = alignment === 'r' ? 'right' : alignment === 'ctr' ? 'center' : 'left';
+  ctx.textBaseline = 'top';
+  const color = tl.labelFontColor ?? chart.dataLabelFontColor;
+  ctx.fillStyle = color ? `#${color}` : '#595959';
+  const textX = ctx.textAlign === 'right'
+    ? placement.x + placement.w
+    : ctx.textAlign === 'center'
+      ? placement.x + placement.w / 2
+      : placement.x;
+  const completeLines = placement.automatic
+    ? lines.length
+    : Math.min(lines.length, Math.floor(placement.h / lineHeight));
+  for (let index = 0; index < completeLines; index++) {
+    ctx.fillText(elideToWidth(ctx, lines[index], placement.w), textX, placement.y + index * lineHeight);
+  }
+  ctx.restore();
+}
+
 /** Draw a series' `<c:trendline>` regression lines (ECMA-376 §21.2.2.211).
  *  Each trendline is fitted over the series' non-null `(categoryIndex, value)`
  *  points via {@link fitTrendline} and stroked through the chart's
@@ -1053,6 +1138,7 @@ function drawSeriesTrendlines(
   toY: (v: number) => number,
   ptToPx: number,
   xValues?: readonly (number | null)[],
+  labelContext?: TrendlineLabelContext,
 ): void {
   const tls = s.trendLines;
   if (!tls || tls.length === 0) return;
@@ -1061,16 +1147,29 @@ function drawSeriesTrendlines(
   for (let i = 0; i < s.values.length; i++) {
     const v = s.values[i];
     const x = xValues ? xValues[i] : i;
-    if (v != null && x != null) { xs.push(x); ys.push(v); }
+    if (v != null && x != null && Number.isFinite(v) && Number.isFinite(x)) {
+      xs.push(x);
+      ys.push(v);
+    }
   }
   if (xs.length < 2) return;
   const prevDash = ctx.getLineDash ? ctx.getLineDash() : [];
   for (const tl of tls) {
-    if (tl.lineHidden) continue;
     const fit = fitTrendline(xs, ys, tl.trendlineType, {
       period: tl.period, intercept: tl.intercept,
     });
     if (fit.xs.length < 2) continue;
+    if (![...fit.xs, ...fit.ys].every(Number.isFinite)) continue;
+    const candidateStats = tl.trendlineType === 'linear'
+      ? linearTrendlineStats(xs, ys, tl.intercept)
+      : null;
+    const stats = candidateStats && [
+      candidateStats.slope,
+      candidateStats.intercept,
+      candidateStats.rSquared,
+    ].every(Number.isFinite)
+      ? candidateStats
+      : null;
     // For a linear fit, forward/backward extend the two endpoints along the
     // fitted slope (in category-index units).
     let fxs = fit.xs; let fys = fit.ys;
@@ -1081,20 +1180,37 @@ function drawSeriesTrendlines(
       fxs = [x0, x1];
       fys = [fit.ys[0] - m * bwd, fit.ys[1] + m * fwd];
     }
-    ctx.strokeStyle = tl.lineColor ? `#${tl.lineColor}` : seriesColor;
-    ctx.lineWidth = tl.lineWidthEmu ? axisLineWidthPx(tl.lineWidthEmu, ptToPx) : 1.5;
-    // DrawingML line presets are authored paint; omission means solid.
-    ctx.setLineDash(dashPatternForPreset(tl.lineDash ?? undefined));
-    ctx.beginPath();
-    for (let i = 0; i < fxs.length; i++) {
-      const px = toX(fxs[i]); const py = toY(fys[i]);
-      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    if (![...fxs, ...fys].every(Number.isFinite)) continue;
+    if (!tl.lineHidden) {
+      if (labelContext?.clipLineToPlot) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(
+          labelContext.plotRect.x,
+          labelContext.plotRect.y,
+          labelContext.plotRect.w,
+          labelContext.plotRect.h,
+        );
+        ctx.clip();
+      }
+      ctx.strokeStyle = tl.lineColor ? `#${tl.lineColor}` : seriesColor;
+      ctx.lineWidth = tl.lineWidthEmu ? axisLineWidthPx(tl.lineWidthEmu, ptToPx) : 1.5;
+      // DrawingML line presets are authored paint; omission means solid.
+      ctx.setLineDash(dashPatternForPreset(tl.lineDash ?? undefined));
+      ctx.beginPath();
+      const mapped = fxs.map((x, index) => ({ x: toX(x), y: toY(fys[index]) }));
+      if (!mapped.every(point => Number.isFinite(point.x) && Number.isFinite(point.y))) {
+        if (labelContext?.clipLineToPlot) ctx.restore();
+        continue;
+      }
+      for (let i = 0; i < mapped.length; i++) {
+        const { x: px, y: py } = mapped[i];
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+      if (labelContext?.clipLineToPlot) ctx.restore();
     }
-    ctx.stroke();
-
-    // `<c:dispEq>` / `<c:dispRSqr>` control a trendline-label object whose
-    // omitted layout is application-defined. Do not invent an anchor here;
-    // authored label layout is tracked separately from rendering the line.
+    drawTrendlineLabel(ctx, tl, stats, ptToPx, labelContext);
   }
   ctx.setLineDash(prevDash);
 }
@@ -2416,7 +2532,12 @@ function renderBarChart(
         }
       }
       // Trendlines (`<c:trendline>`, §21.2.2.211) for the combo line series.
-      drawSeriesTrendlines(ctx, s, color, (i) => px0 + categorySlotIndex(i) * catGap + catGap / 2, yOf, ptToPx);
+      drawSeriesTrendlines(
+        ctx, s, color,
+        (i) => px0 + categorySlotIndex(i) * catGap + catGap / 2,
+        yOf, ptToPx, undefined,
+        { chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph } },
+      );
     }
   }
 
@@ -2460,6 +2581,9 @@ function renderBarChart(
         false,
         scatterToX,
         scatterToY,
+        r,
+        px0,
+        py0,
         pw,
         ph,
         ptToPx,
@@ -2935,7 +3059,10 @@ function renderLineChart(
     // Trendlines (`<c:trendline>`, §21.2.2.211) over this series' points —
     // drawn on top of the line/markers, dashed, in the series color unless the
     // trendline declares its own `<a:ln>`.
-    drawSeriesTrendlines(ctx, s, color, toX, yOf, ptToPx);
+    drawSeriesTrendlines(
+      ctx, s, color, toX, yOf, ptToPx, undefined,
+      { chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph } },
+    );
   }
 
   if (!chart.catAxisHidden) {
@@ -3693,7 +3820,10 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       ctx, s, cats, n, toX, yOf, plottedOf, ph, ptToPx, chart.date1904 ?? false, false,
       chartFontFamily(chart, chart.dataLabelFontFace, 'minor'), chart.dataLabelPosition ?? 'r',
     );
-    drawSeriesTrendlines(ctx, s, stroke, toX, yOf, ptToPx);
+    drawSeriesTrendlines(
+      ctx, s, stroke, toX, yOf, ptToPx, undefined,
+      { chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph } },
+    );
   }
 
   // Value-axis tick marks + labels. The gridlines themselves were already laid
@@ -4817,6 +4947,9 @@ function drawScatterSeriesLayer(
   useIndexX: boolean,
   toX: (value: number) => number,
   toY: (value: number) => number,
+  chartRect: ChartRect,
+  px0: number,
+  py0: number,
   pw: number,
   ph: number,
   ptToPx: number,
@@ -4933,7 +5066,10 @@ function drawScatterSeriesLayer(
 
   for (const { series: s, fallbackColor, cats } of layers) {
     const trendlineX = s.values.map((_, index) => scatterXValue(cats, index, useIndexX));
-    drawSeriesTrendlines(ctx, s, fallbackColor, toX, toY, ptToPx, trendlineX);
+    drawSeriesTrendlines(
+      ctx, s, fallbackColor, toX, toY, ptToPx, trendlineX,
+      { chart, chartRect, plotRect: { x: px0, y: py0, w: pw, h: ph } },
+    );
   }
 }
 
@@ -5347,12 +5483,15 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
 
     if (s.trendLines && s.trendLines.length > 0) {
       const trendlineX = s.values.map((_, index) => scatterXValue(cats, index, useIndexX));
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(px0, py0, pw, ph);
-      ctx.clip();
-      drawSeriesTrendlines(ctx, s, fallbackColor, toX, toY, ptToPx, trendlineX);
-      ctx.restore();
+      drawSeriesTrendlines(
+        ctx, s, fallbackColor, toX, toY, ptToPx, trendlineX,
+        {
+          chart,
+          chartRect: r,
+          plotRect: { x: px0, y: py0, w: pw, h: ph },
+          clipLineToPlot: true,
+        },
+      );
     }
   }
 

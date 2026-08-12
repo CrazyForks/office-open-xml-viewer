@@ -4446,6 +4446,148 @@ describe('CH6-follow — series trendlines (commit 3)', () => {
     expect(hidden.segs).toEqual(without.segs);
   });
 
+  it('places equation and R² at the same bounded automatic anchor for either slope sign', () => {
+    const renderLabels = (values: number[]) => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, lineWithTrend({
+        values,
+        trendLines: [{ trendlineType: 'linear', dispEq: true, dispRSqr: true }],
+      }), RECT, 1);
+      return rec.texts.filter(text => text.text.startsWith('y = ') || text.text.startsWith('R² = '));
+    };
+    const positive = renderLabels([1, 3, 5, 7]);
+    const negative = renderLabels([7, 5, 3, 1]);
+    expect(positive[0].x + (positive[0].width ?? 0)).toBe(
+      negative[0].x + (negative[0].width ?? 0),
+    );
+    expect(positive.map(text => text.y)).toEqual(negative.map(text => text.y));
+    expect(positive.map(text => text.text)).toEqual(['y = 2x + 1', 'R² = 1']);
+    expect(positive).toHaveLength(2);
+    for (const text of positive) {
+      expect(text.x).toBeGreaterThanOrEqual(RECT.x);
+      expect(text.x + (text.width ?? 0)).toBeLessThanOrEqual(RECT.x + RECT.w);
+      expect(text.y).toBeGreaterThanOrEqual(RECT.y);
+      expect(text.y).toBeLessThanOrEqual(RECT.y + RECT.h);
+    }
+  });
+
+  it('honors trendline-label manual layout and text properties independently of line paint', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, lineWithTrend({
+      trendLines: [{
+        trendlineType: 'linear',
+        lineHidden: true,
+        dispEq: true,
+        labelText: 'Authored fit',
+        labelFontSizeHpt: 1800,
+        labelFontBold: true,
+        labelFontColor: '123456',
+        labelFontFace: 'Georgia',
+        labelTextAlign: 'ctr',
+        labelManualLayout: {
+          xMode: 'edge', yMode: 'edge', wMode: 'factor', hMode: 'factor',
+          x: 0.1, y: 0.2, w: 0.25, h: 0.1,
+        },
+      }],
+    }), RECT, 1);
+    const label = rec.texts.find(text => text.text === 'Authored fit');
+    expect(label).toMatchObject({
+      x: RECT.x + RECT.w * 0.225,
+      y: RECT.y + RECT.h * 0.2,
+      align: 'center',
+      baseline: 'top',
+      fillStyle: '#123456',
+    });
+    expect(label?.font).toContain('bold 18px');
+    expect(label?.font).toContain('Georgia');
+  });
+
+  it('uses shared data-label bold and color when trendline text properties are omitted', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, {
+      ...lineWithTrend({
+        trendLines: [{ trendlineType: 'linear', labelText: 'First\nSecond' }],
+      }),
+      dataLabelFontBold: true,
+      dataLabelFontColor: 'FF0000',
+    }, RECT, 1);
+    const labels = rec.texts.filter(text => text.text === 'First' || text.text === 'Second');
+    expect(labels.map(label => label.text)).toEqual(['First', 'Second']);
+    expect(labels.every(label => label.font?.includes('bold'))).toBe(true);
+    expect(labels.every(label => label.fillStyle === '#FF0000')).toBe(true);
+  });
+
+  it.each([
+    { flags: { dispEq: true }, expected: ['y = 2x + 1'] },
+    { flags: { dispRSqr: true }, expected: ['R² = 1'] },
+  ])('renders $expected without coupling text calculation to placement', ({ flags, expected }) => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, lineWithTrend({
+      trendLines: [{ trendlineType: 'linear', ...flags }],
+    }), RECT, 1);
+    expect(rec.texts.map(text => text.text).filter(text => text.startsWith('y =') || text.startsWith('R²')))
+      .toEqual(expected);
+  });
+
+  it('uses the same top-right edge for near-flat and steep linear fits', () => {
+    const rightEdge = (values: number[]): number => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, lineWithTrend({
+        values,
+        trendLines: [{ trendlineType: 'linear', dispEq: true }],
+      }), RECT, 1);
+      const label = rec.texts.find(text => text.text.startsWith('y = '));
+      return (label?.x ?? 0) + (label?.width ?? 0);
+    };
+    expect(rightEdge([1, 1.01, 1.02, 1.03])).toBe(rightEdge([1, 51, 101, 151]));
+  });
+
+  it('does not send overflowed regression coordinates or labels to Canvas', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, {
+      ...lineWithTrend({
+        values: [Number.MAX_VALUE, Number.MAX_VALUE, Number.MAX_VALUE, Number.MAX_VALUE],
+        trendLines: [{ trendlineType: 'linear', dispEq: true, dispRSqr: true }],
+      }),
+      valMin: 0,
+      valMax: 10,
+    }, RECT, 1);
+    expect(rec.texts.map(text => text.text).join(' ')).not.toMatch(/NaN|Infinity/);
+    expect(rec.texts.some(text => text.text.startsWith('y = ') || text.text.startsWith('R² = ')))
+      .toBe(false);
+  });
+
+  it('rejects non-finite trendline geometry after finite forward extension', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, lineWithTrend({
+      trendLines: [{
+        trendlineType: 'linear',
+        forward: Number.MAX_VALUE,
+        dispEq: true,
+      }],
+    }), RECT, 1);
+    expect(rec.texts.map(text => text.text).join(' ')).not.toMatch(/NaN|Infinity/);
+    expect(rec.texts.some(text => text.text.startsWith('y = '))).toBe(false);
+  });
+
+  it('renders a scatter trendline label through the shared plot-aware path', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'scatter',
+      categories: [],
+      series: [series({
+        categories: ['0', '1', '2', '3'],
+        values: [1, 3, 5, 7],
+        trendLines: [{ trendlineType: 'linear', dispEq: true }],
+      })],
+      catAxisMin: 0,
+      catAxisMax: 3,
+      valMin: 0,
+      valMax: 8,
+    }), RECT, 1);
+    expect(rec.texts.some(text => text.text === 'y = 2x + 1')).toBe(true);
+  });
+
   it('applies the authored major-gridline dash without leaking it to other strokes', () => {
     const rec = dashSegRecordingCtx();
     renderChart(rec.ctx, baseModel({

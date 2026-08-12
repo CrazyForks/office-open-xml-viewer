@@ -689,6 +689,20 @@ pub struct ChartTrendline {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disp_eq: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_manual_layout: Option<ChartManualLayout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_font_size_hpt: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_font_bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_font_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_font_face: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_text_align: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_width_emu: Option<u32>,
@@ -2170,14 +2184,23 @@ fn bool_child(parent: Node, name: &str) -> Option<bool> {
 /// `<c:ser><c:trendline>` (ECMA-376 §21.2.2.211, `CT_Trendline`) — every
 /// trendline declared on `ser_node` (0..N). Each carries a required
 /// `<c:trendlineType>` plus optional order/period/forward/backward/intercept,
-/// the `<c:dispRSqr>` / `<c:dispEq>` label flags, and an `<c:spPr><a:ln>` line
-/// style (color resolved via `resolver`, width in EMU). Returns `None` when the
-/// series declares no trendline (byte-stable); otherwise the parsed vec. Shared
-/// so pptx and xlsx honor trendlines identically.
+/// the `<c:dispRSqr>` / `<c:dispEq>` label flags, optional
+/// `<c:trendlineLbl>` layout/text properties, and an `<c:spPr><a:ln>` line style
+/// (color resolved via `resolver`, width in EMU). Returns `None` when the series
+/// declares no trendline (byte-stable); otherwise the parsed vec. Shared so pptx
+/// and xlsx honor trendlines identically.
 pub fn extract_series_trendlines(
     ser_node: Node,
     resolver: &dyn ColorResolver,
 ) -> Option<Vec<ChartTrendline>> {
+    fn first_named_descendant<'a, 'input>(
+        container: Node<'a, 'input>,
+        name: &str,
+    ) -> Option<Node<'a, 'input>> {
+        container
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == name)
+    }
     let mut out = Vec::new();
     for tl in ser_node
         .children()
@@ -2212,6 +2235,67 @@ pub fn extract_series_trendlines(
                 (color, width, dash, hidden)
             }
         };
+        let label = child(tl, "trendlineLbl");
+        let label_txpr = label.and_then(|node| child(node, "txPr"));
+        let label_tx = label.and_then(|node| child(node, "tx"));
+        let label_rich = label_tx.and_then(|tx| child(tx, "rich"));
+        let rich_run_prop = label_rich.and_then(|rich| first_named_descendant(rich, "rPr"));
+        let rich_default_prop = label_rich.and_then(|rich| first_named_descendant(rich, "defRPr"));
+        let txpr_run_prop = label_txpr.and_then(|txpr| first_named_descendant(txpr, "rPr"));
+        let txpr_default_prop = label_txpr.and_then(|txpr| first_named_descendant(txpr, "defRPr"));
+        let run_props = [
+            rich_run_prop,
+            rich_default_prop,
+            txpr_run_prop,
+            txpr_default_prop,
+        ];
+        let label_text = label_tx
+            .and_then(|tx| {
+                child(tx, "rich")
+                    .map(|rich| flatten_rich_text(rich, None))
+                    .or_else(|| {
+                        child(tx, "strRef")
+                            .and_then(|reference| child(reference, "strCache"))
+                            .map(|cache| {
+                                cache
+                                    .children()
+                                    .filter(|node| {
+                                        node.is_element() && node.tag_name().name() == "pt"
+                                    })
+                                    .filter_map(|point| child(point, "v"))
+                                    .filter_map(|value| value.text())
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            })
+                    })
+            })
+            .filter(|text| !text.is_empty());
+        let label_manual_layout = label
+            .and_then(|node| child(node, "layout"))
+            .and_then(extract_manual_layout);
+        let label_font_size_hpt = run_props
+            .iter()
+            .flatten()
+            .find_map(|node| attr(node, "sz").and_then(|value| value.parse::<i32>().ok()));
+        let label_font_bold = run_props
+            .iter()
+            .flatten()
+            .find_map(|node| chart_text_bool_attr(*node, "b"));
+        let label_font_color = run_props.iter().flatten().find_map(|node| {
+            child(*node, "solidFill").and_then(|fill| resolver.resolve_solid_fill(fill))
+        });
+        let label_font_face = run_props
+            .iter()
+            .flatten()
+            .find_map(|node| first_latin_typeface(*node));
+        let label_text_align = label_rich
+            .and_then(|rich| first_named_descendant(rich, "pPr"))
+            .and_then(|node| attr(&node, "algn"))
+            .or_else(|| {
+                label_txpr
+                    .and_then(|txpr| first_named_descendant(txpr, "pPr"))
+                    .and_then(|node| attr(&node, "algn"))
+            });
         out.push(ChartTrendline {
             trendline_type: trendline_type.to_string(),
             order: u32_val("order"),
@@ -2221,6 +2305,13 @@ pub fn extract_series_trendlines(
             intercept: f64_val("intercept"),
             disp_r_sqr: bool_child(tl, "dispRSqr"),
             disp_eq: bool_child(tl, "dispEq"),
+            label_manual_layout,
+            label_text,
+            label_font_size_hpt,
+            label_font_bold,
+            label_font_color,
+            label_font_face,
+            label_text_align,
             line_color,
             line_width_emu,
             line_dash,
@@ -8151,27 +8242,51 @@ mod tests {
                    <c:trendlineType val="linear"/>
                    <c:dispEq val="1"/>
                    <c:dispRSqr val="1"/>
+                   <c:trendlineLbl>
+                     <c:layout><c:manualLayout><c:xMode val="edge"/><c:yMode val="edge"/><c:x val="0.1"/><c:y val="0.2"/></c:manualLayout></c:layout>
+                     <c:tx><c:rich><a:bodyPr/><a:p><a:pPr algn="r"><a:defRPr sz="1800" b="1"><a:solidFill><a:srgbClr val="123456"/></a:solidFill><a:latin typeface="Georgia"/></a:defRPr></a:pPr><a:r><a:rPr sz="2000" b="0"><a:solidFill><a:srgbClr val="654321"/></a:solidFill></a:rPr><a:t>Authored</a:t></a:r></a:p><a:p><a:r><a:t>fit</a:t></a:r></a:p></c:rich></c:tx>
+                     <c:txPr><a:bodyPr/><a:p><a:pPr algn="ctr"><a:defRPr sz="1800" b="1"><a:solidFill><a:srgbClr val="123456"/></a:solidFill><a:latin typeface="Georgia"/></a:defRPr></a:pPr></a:p></c:txPr>
+                   </c:trendlineLbl>
                  </c:trendline>
                  <c:trendline>
                    <c:spPr><a:ln><a:noFill/></a:ln></c:spPr>
                    <c:trendlineType val="movingAvg"/>
                    <c:period val="3"/>
                  </c:trendline>
+                 <c:trendline>
+                   <c:trendlineType val="linear"/>
+                   <c:trendlineLbl><c:tx><c:strRef><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Cached fit</c:v></c:pt></c:strCache></c:strRef></c:tx></c:trendlineLbl>
+                 </c:trendline>
                </c:ser>"#
         );
         let got = extract_series_trendlines(root_of(&xml).root_element(), &StubResolver).unwrap();
-        assert_eq!(got.len(), 2);
+        assert_eq!(got.len(), 3);
         assert_eq!(got[0].trendline_type, "linear");
         assert_eq!(got[0].line_color.as_deref(), Some("FF0000"));
         assert_eq!(got[0].line_width_emu, Some(19050));
         assert_eq!(got[0].line_dash.as_deref(), Some("dash"));
         assert_eq!(got[0].disp_eq, Some(true));
         assert_eq!(got[0].disp_r_sqr, Some(true));
+        assert_eq!(got[0].label_text.as_deref(), Some("Authored\nfit"));
+        assert_eq!(got[0].label_font_size_hpt, Some(2000));
+        assert_eq!(got[0].label_font_bold, Some(false));
+        assert_eq!(got[0].label_font_color.as_deref(), Some("654321"));
+        assert_eq!(got[0].label_font_face.as_deref(), Some("Georgia"));
+        assert_eq!(got[0].label_text_align.as_deref(), Some("r"));
+        let manual = got[0]
+            .label_manual_layout
+            .as_ref()
+            .expect("trendline label manual layout");
+        assert_eq!(manual.x_mode, "edge");
+        assert_eq!(manual.y_mode, "edge");
+        assert_eq!(manual.x, 0.1);
+        assert_eq!(manual.y, 0.2);
         assert_eq!(got[1].trendline_type, "movingAvg");
         assert_eq!(got[1].period, Some(3));
         assert_eq!(got[1].line_color, None);
         assert_eq!(got[0].line_hidden, None);
         assert_eq!(got[1].line_hidden, Some(true));
+        assert_eq!(got[2].label_text.as_deref(), Some("Cached fit"));
     }
 
     // ========================================================================
