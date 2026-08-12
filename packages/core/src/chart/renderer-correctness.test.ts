@@ -1787,6 +1787,149 @@ describe('ChartEx flat layouts dispatch to semantic renderers', () => {
     )).toBe(true);
   });
 
+  it('renders owner-backed Pareto bars in sorted source identity order with a 0-100% line axis', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pareto',
+      categories: ['Five', 'Twenty', 'Ten'],
+      series: [
+        series({
+          name: 'Frequency',
+          values: [5, 20, 10],
+          dataPointOverrides: [
+            { idx: 0, color: 'AA0000' },
+            { idx: 1, color: '00AA00' },
+            { idx: 2, color: '0000AA' },
+          ],
+        }),
+        series({ name: 'Cumulative %', values: [], color: '333333' }),
+      ],
+    }), RECT, 1);
+
+    expect(rec.rects.map(rect => rect.fs.toUpperCase())).toEqual([
+      '#00AA00', '#0000AA', '#AA0000',
+    ]);
+    const texts = rec.texts.map(text => text.text);
+    expect(texts).toEqual(expect.arrayContaining(['Twenty', 'Ten', 'Five', '0%', '100%']));
+  });
+
+  it.each(['pareto', 'paretoLine'])('%s rejects oversized input before sorting or paint', chartType => {
+    const rec = recordingCtx();
+    const values = Array.from({ length: 10_001 }, (_, index) => index);
+    renderChart(rec.ctx, baseModel({
+      chartType,
+      categories: [],
+      series: [series({ values })],
+    }), RECT, 1);
+    expect(rec.texts.map(text => text.text)).toContain('(too many data points)');
+    expect(rec.rects).toHaveLength(0);
+  });
+
+  it('honors direct Pareto cumulative-line width/color and noFill', () => {
+    const model = (chartexStyle: ChartSeries['chartexStyle']) => baseModel({
+      chartType: 'pareto',
+      categories: ['A', 'B', 'C'],
+      series: [
+        series({ values: [3, 2, 1] }),
+        series({
+          values: [],
+          seriesType: 'line',
+          useSecondaryAxis: true,
+          showMarker: false,
+          chartexStyle,
+        }),
+      ],
+    });
+
+    const styled = strokedPolylineCtx();
+    renderChart(styled.ctx, model({ lineColors: ['123456'], lineWidthEmu: 25400 }), RECT, 1);
+    expect(styled.strokes.some(stroke =>
+      stroke.ss.toLowerCase() === '#123456'
+      && stroke.lw === 2
+      && stroke.points.some((point, index) =>
+        index > 0
+        && point.x !== stroke.points[index - 1].x
+        && point.y !== stroke.points[index - 1].y
+      )
+    )).toBe(true);
+
+    const hidden = strokedPolylineCtx();
+    renderChart(hidden.ctx, model({ lineHidden: true }), RECT, 1);
+    expect(hidden.strokes.some(stroke =>
+      stroke.points.some((point, index) =>
+        index > 0
+        && point.x !== stroke.points[index - 1].x
+        && point.y !== stroke.points[index - 1].y
+      )
+    )).toBe(false);
+  });
+
+  it('distinguishes linked NoStyle from linked and direct Pareto line noFill', () => {
+    const model = (
+      linked: ChartModel['chartexDataPointLineStyle'],
+      direct?: ChartSeries['chartexStyle'],
+    ) => baseModel({
+      chartType: 'pareto',
+      categories: ['A', 'B', 'C'],
+      chartexDataPointLineStyle: linked,
+      series: [
+        series({ values: [3, 2, 1] }),
+        series({
+          values: [],
+          seriesType: 'line',
+          useSecondaryAxis: true,
+          showMarker: false,
+          chartexStyle: direct,
+        }),
+      ],
+    });
+    const hasCumulativeLine = (rec: ReturnType<typeof strokedPolylineCtx>): boolean =>
+      rec.strokes.some(stroke => stroke.points.some((point, index) =>
+        index > 0
+        && point.x !== stroke.points[index - 1].x
+        && point.y !== stroke.points[index - 1].y
+      ));
+
+    const noStyle = strokedPolylineCtx();
+    renderChart(noStyle.ctx, model({ lineHidden: true, lineNoStyle: true }), RECT, 1);
+    expect(hasCumulativeLine(noStyle)).toBe(true);
+
+    const linkedNoFill = strokedPolylineCtx();
+    renderChart(linkedNoFill.ctx, model({ lineHidden: true }), RECT, 1);
+    expect(hasCumulativeLine(linkedNoFill)).toBe(false);
+
+    const directNoFill = strokedPolylineCtx();
+    renderChart(
+      directNoFill.ctx,
+      model({ lineHidden: true, lineNoStyle: true }, { lineHidden: true }),
+      RECT,
+      1,
+    );
+    expect(hasCumulativeLine(directNoFill)).toBe(false);
+  });
+
+  it('uses the original combo-series index for linked line style fallback', () => {
+    const rec = strokedPolylineCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B', 'C'],
+      chartexDataPointLineStyle: { lineColors: ['111111', '222222'] },
+      series: [
+        series({ values: [3, 2, 1] }),
+        series({ values: [1, 2, 3], seriesType: 'line', showMarker: false }),
+      ],
+    }), RECT, 1);
+
+    expect(rec.strokes.some(stroke =>
+      stroke.ss.toLowerCase() === '#222222'
+      && stroke.points.some((point, index) =>
+        index > 0
+        && point.x !== stroke.points[index - 1].x
+        && point.y !== stroke.points[index - 1].y
+      )
+    )).toBe(true);
+  });
+
   it('waterfall uses locale-neutral English semantic legend labels', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -1801,6 +1944,64 @@ describe('ChartEx flat layouts dispatch to semantic renderers', () => {
     expect(rec.texts.map(text => text.text)).toEqual(
       expect.arrayContaining(['Increase', 'Decrease', 'Total']),
     );
+  });
+
+  it('waterfall preserves missing slots without painting or labeling non-finite values', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'waterfall',
+      categories: ['Start', 'Invalid', 'Missing', 'Drop', 'End'],
+      series: [series({ values: [2, Number.NaN, null, -1, 1] })],
+      subtotalIndices: [4],
+      showDataLabels: true,
+      catAxisHidden: true,
+      valAxisHidden: true,
+    }), RECT, 1);
+
+    // Three finite bars plus the historical zero-height placeholder for the
+    // missing numeric slot. The present NaN point is the only suppressed bar.
+    expect(rec.rects).toHaveLength(4);
+    expect(rec.texts.map(text => text.text)).toEqual(['2', '-1', '1']);
+  });
+
+  it('waterfall keeps finite geometry when cumulative finite values overflow', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'waterfall',
+      categories: ['A', 'B', 'C'],
+      series: [series({ values: [Number.MAX_VALUE, Number.MAX_VALUE, -1] })],
+      catAxisHidden: true,
+      valAxisHidden: true,
+    }), RECT, 1);
+    expect(rec.rects).toHaveLength(0);
+    expect(rec.texts.map(text => text.text)).toContain('(chart values out of range)');
+  });
+
+  it('waterfall preserves an authored category-only label on a missing numeric slot', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'waterfall',
+      categories: ['Start', 'Missing', 'End'],
+      series: [series({
+        values: [2, null, 2],
+        seriesDataLabels: {
+          showVal: true,
+          showCatName: false,
+          showSerName: false,
+          showPercent: false,
+        },
+        dataLabelOverrides: [{
+          idx: 1,
+          text: '',
+          showVal: false,
+          showCatName: true,
+        }],
+      })],
+      catAxisHidden: true,
+      valAxisHidden: true,
+    }), RECT, 1);
+    expect(rec.texts.map(text => text.text)).toContain('Missing');
+    expect(rec.texts.map(text => text.text)).not.toContain('0');
   });
 });
 
@@ -3230,6 +3431,46 @@ describe('CH10 — chart text font faces', () => {
 
 interface Seg { x0: number; y0: number; x1: number; y1: number; ss: string; lw: number }
 interface SegRecorded { ctx: CanvasRenderingContext2D; segs: Seg[]; texts: TextCall[] }
+
+function strokedPolylineCtx(): {
+  ctx: CanvasRenderingContext2D;
+  strokes: Array<{ points: Array<{ x: number; y: number }>; ss: string; lw: number }>;
+} {
+  const strokes: Array<{ points: Array<{ x: number; y: number }>; ss: string; lw: number }> = [];
+  let path: Array<{ x: number; y: number }> = [];
+  const state: Record<string, unknown> = {
+    font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
+  };
+  const handler: ProxyHandler<Record<string, unknown>> = {
+    get(_target, prop: string) {
+      if (prop in state && typeof state[prop] !== 'function') return state[prop];
+      switch (prop) {
+        case 'measureText': return (text: string) => ({ width: String(text).length * 6 });
+        case 'beginPath': return () => { path = []; };
+        case 'moveTo': return (x: number, y: number) => { path.push({ x, y }); };
+        case 'lineTo': return (x: number, y: number) => { path.push({ x, y }); };
+        case 'stroke': return () => {
+          if (path.length >= 2) {
+            strokes.push({
+              points: path.map(point => ({ ...point })),
+              ss: String(state.strokeStyle),
+              lw: Number(state.lineWidth),
+            });
+          }
+        };
+        case 'createLinearGradient': case 'createRadialGradient':
+          return () => ({ addColorStop() {} });
+        default: return () => undefined;
+      }
+    },
+    set(_target, prop: string, value) { state[prop] = value; return true; },
+  };
+  return {
+    ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D,
+    strokes,
+  };
+}
 
 /** Recording context that captures stroked line SEGMENTS (moveTo→lineTo→stroke)
  *  plus fillText, so gridline presence/orientation can be asserted. */
