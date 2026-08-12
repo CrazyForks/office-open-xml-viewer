@@ -821,6 +821,8 @@ export interface ChartModel {
    * for treemap charts; null/absent otherwise.
    */
   chartexTreemap?: ChartexTreemap | null;
+  /** ChartEx histogram controls; raw observations remain in `series[0]`. */
+  chartexHistogramBinning?: ChartexHistogramBinning | null;
   /**
    * Theme accent palette (`accent1..6`, hex without '#') for chartEx charts
    * that color by branch/series index (boxWhisker series and
@@ -946,6 +948,15 @@ export interface ChartexTreemap {
   rows: ChartexSunburstRow[];
   /** `<cx:parentLabelLayout val>`: `banner`, `overlapping`, or `none`. */
   parentLabelLayout?: string | null;
+}
+
+/** ChartEx `CT_Binning` controls retained for histogram aggregation. */
+export interface ChartexHistogramBinning {
+  binSize?: number | null;
+  binCount?: number | null;
+  intervalClosed?: 'l' | 'r' | null;
+  underflow?: number | null;
+  overflow?: number | null;
 }
 
 /**

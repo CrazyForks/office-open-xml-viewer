@@ -248,6 +248,13 @@ export interface ChartexTreemap {
     rows: ChartexSunburstRow[];
     parentLabelLayout?: string | null;
 }
+export interface ChartexHistogramBinning {
+    binSize?: number | null;
+    binCount?: number | null;
+    intervalClosed?: 'l' | 'r' | null;
+    underflow?: number | null;
+    overflow?: number | null;
+}
 export interface ChartLabelBox {
     fill?: string;
     borderColor?: string;
@@ -387,6 +394,7 @@ export interface ChartModel {
     chartexBox?: ChartexBoxWhisker | null;
     chartexSunburst?: ChartexSunburst | null;
     chartexTreemap?: ChartexTreemap | null;
+    chartexHistogramBinning?: ChartexHistogramBinning | null;
     chartexAccents?: string[] | null;
     chartexColorPalette?: Array<string | null> | null;
     chartexColorStyleMethod?: string | null;

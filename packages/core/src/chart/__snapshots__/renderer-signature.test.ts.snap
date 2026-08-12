@@ -2813,17 +2813,17 @@ moveTo 49.16,357.8
 lineTo 639.2,357.8
 stroke ss=#aaa lw=1 dash=
 set fillStyle=#5B9BD5
-fillRect 93.413,123.7286,59.004,234.0714 fs=#5B9BD5
+fillRect 67.4601,123.7286,110.9098,234.0714 fs=#5B9BD5
 set strokeStyle=#5B9BD5
 setLineDash
-strokeRect 93.413,123.7286,59.004,234.0714 ss=#5B9BD5 lw=1
+strokeRect 67.4601,123.7286,110.9098,234.0714 ss=#5B9BD5 lw=1
 save
 set strokeStyle=#ccc
 setLineDash
 set lineWidth=0.8
 beginPath
-moveTo 152.417,123.7286
-lineTo 240.923,123.7286
+moveTo 178.3699,123.7286
+lineTo 214.9701,123.7286
 stroke ss=#ccc lw=0.8 dash=
 restore
 set fillStyle=#595959
@@ -2831,46 +2831,46 @@ set textAlign=center
 set textBaseline=bottom
 fillText "100" 122.915,120.7286 fs=#595959 font=16.2px sans-serif al=center bl=bottom
 set fillStyle=#5B9BD5
-fillRect 240.923,53.5071,59.004,70.2214 fs=#5B9BD5
+fillRect 214.9701,53.5071,110.9098,70.2214 fs=#5B9BD5
 set strokeStyle=#5B9BD5
 set lineWidth=1
 setLineDash
-strokeRect 240.923,53.5071,59.004,70.2214 ss=#5B9BD5 lw=1
+strokeRect 214.9701,53.5071,110.9098,70.2214 ss=#5B9BD5 lw=1
 save
 set strokeStyle=#ccc
 setLineDash
 set lineWidth=0.8
 beginPath
-moveTo 299.927,53.5071
-lineTo 388.433,53.5071
+moveTo 325.8799,53.5071
+lineTo 362.4801,53.5071
 stroke ss=#ccc lw=0.8 dash=
 restore
 set fillStyle=#595959
 fillText "30" 270.425,50.5071 fs=#595959 font=16.2px sans-serif al=center bl=bottom
 set fillStyle=#ED7D31
-fillRect 388.433,53.5071,59.004,46.8143 fs=#ED7D31
+fillRect 362.4801,53.5071,110.9098,46.8143 fs=#ED7D31
 set strokeStyle=#ED7D31
 set lineWidth=1
 setLineDash
-strokeRect 388.433,53.5071,59.004,46.8143 ss=#ED7D31 lw=1
+strokeRect 362.4801,53.5071,110.9098,46.8143 ss=#ED7D31 lw=1
 save
 set strokeStyle=#ccc
 setLineDash
 set lineWidth=0.8
 beginPath
-moveTo 447.437,100.3214
-lineTo 535.943,100.3214
+moveTo 473.3899,100.3214
+lineTo 509.9901,100.3214
 stroke ss=#ccc lw=0.8 dash=
 restore
 set fillStyle=#595959
 set textBaseline=top
 fillText "-20" 417.935,103.3214 fs=#595959 font=16.2px sans-serif al=center bl=top
 set fillStyle=#A5A5A5
-fillRect 535.943,100.3214,59.004,257.4786 fs=#A5A5A5
+fillRect 509.9901,100.3214,110.9098,257.4786 fs=#A5A5A5
 set strokeStyle=#A5A5A5
 set lineWidth=1
 setLineDash
-strokeRect 535.943,100.3214,59.004,257.4786 ss=#A5A5A5 lw=1
+strokeRect 509.9901,100.3214,110.9098,257.4786 ss=#A5A5A5 lw=1
 set fillStyle=#595959
 set textBaseline=bottom
 fillText "110" 565.445,97.3214 fs=#595959 font=16.2px sans-serif al=center bl=bottom
@@ -2893,17 +2893,17 @@ moveTo 24.8,357.8
 lineTo 639.2,357.8
 stroke ss=#aaa lw=1 dash=
 set fillStyle=#5B9BD5
-fillRect 70.88,123.7286,61.44,234.0714 fs=#5B9BD5
+fillRect 43.8556,123.7286,115.4887,234.0714 fs=#5B9BD5
 set strokeStyle=#5B9BD5
 setLineDash
-strokeRect 70.88,123.7286,61.44,234.0714 ss=#5B9BD5 lw=1
+strokeRect 43.8556,123.7286,115.4887,234.0714 ss=#5B9BD5 lw=1
 save
 set strokeStyle=#ccc
 setLineDash
 set lineWidth=0.8
 beginPath
-moveTo 132.32,123.7286
-lineTo 224.48,123.7286
+moveTo 159.3444,123.7286
+lineTo 197.4556,123.7286
 stroke ss=#ccc lw=0.8 dash=
 restore
 set fillStyle=#595959
@@ -2911,46 +2911,46 @@ set textAlign=center
 set textBaseline=bottom
 fillText "100" 101.6,120.7286 fs=#595959 font=16.2px sans-serif al=center bl=bottom
 set fillStyle=#5B9BD5
-fillRect 224.48,53.5071,61.44,70.2214 fs=#5B9BD5
+fillRect 197.4556,53.5071,115.4887,70.2214 fs=#5B9BD5
 set strokeStyle=#5B9BD5
 set lineWidth=1
 setLineDash
-strokeRect 224.48,53.5071,61.44,70.2214 ss=#5B9BD5 lw=1
+strokeRect 197.4556,53.5071,115.4887,70.2214 ss=#5B9BD5 lw=1
 save
 set strokeStyle=#ccc
 setLineDash
 set lineWidth=0.8
 beginPath
-moveTo 285.92,53.5071
-lineTo 378.08,53.5071
+moveTo 312.9444,53.5071
+lineTo 351.0556,53.5071
 stroke ss=#ccc lw=0.8 dash=
 restore
 set fillStyle=#595959
 fillText "30" 255.2,50.5071 fs=#595959 font=16.2px sans-serif al=center bl=bottom
 set fillStyle=#ED7D31
-fillRect 378.08,53.5071,61.44,46.8143 fs=#ED7D31
+fillRect 351.0556,53.5071,115.4887,46.8143 fs=#ED7D31
 set strokeStyle=#ED7D31
 set lineWidth=1
 setLineDash
-strokeRect 378.08,53.5071,61.44,46.8143 ss=#ED7D31 lw=1
+strokeRect 351.0556,53.5071,115.4887,46.8143 ss=#ED7D31 lw=1
 save
 set strokeStyle=#ccc
 setLineDash
 set lineWidth=0.8
 beginPath
-moveTo 439.52,100.3214
-lineTo 531.68,100.3214
+moveTo 466.5444,100.3214
+lineTo 504.6556,100.3214
 stroke ss=#ccc lw=0.8 dash=
 restore
 set fillStyle=#595959
 set textBaseline=top
 fillText "-20" 408.8,103.3214 fs=#595959 font=16.2px sans-serif al=center bl=top
 set fillStyle=#A5A5A5
-fillRect 531.68,100.3214,61.44,257.4786 fs=#A5A5A5
+fillRect 504.6556,100.3214,115.4887,257.4786 fs=#A5A5A5
 set strokeStyle=#A5A5A5
 set lineWidth=1
 setLineDash
-strokeRect 531.68,100.3214,61.44,257.4786 ss=#A5A5A5 lw=1
+strokeRect 504.6556,100.3214,115.4887,257.4786 ss=#A5A5A5 lw=1
 set fillStyle=#595959
 set textBaseline=bottom
 fillText "110" 562.4,97.3214 fs=#595959 font=16.2px sans-serif al=center bl=bottom
