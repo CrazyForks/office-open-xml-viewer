@@ -188,10 +188,21 @@ export interface ChartTrendline {
   backward?: number | null;
   /** `<c:intercept val>` — forced y-intercept (linear/exp). null = free fit. */
   intercept?: number | null;
-  /** `<c:dispRSqr val="1">` — show the R² value (label; not yet rendered). */
+  /** `<c:dispRSqr val="1">` — show the R² value. */
   dispRSqr?: boolean | null;
-  /** `<c:dispEq val="1">` — show the fit equation (label; not yet rendered). */
+  /** `<c:dispEq val="1">` — show the fit equation. */
   dispEq?: boolean | null;
+  /** `<c:trendlineLbl><c:layout><c:manualLayout>` authored label placement. */
+  labelManualLayout?: ChartManualLayout | null;
+  /** Explicit `<c:trendlineLbl><c:tx>` text, when present. */
+  labelText?: string | null;
+  /** Trendline-label `<c:txPr>` run properties. */
+  labelFontSizeHpt?: number | null;
+  labelFontBold?: boolean | null;
+  labelFontColor?: string | null;
+  labelFontFace?: string | null;
+  /** First authored paragraph alignment from `<c:trendlineLbl><c:txPr>`. */
+  labelTextAlign?: string | null;
   /** `<c:spPr><a:ln><a:solidFill>` trendline color (hex without '#'). null =
    *  inherit the series color. */
   lineColor?: string | null;

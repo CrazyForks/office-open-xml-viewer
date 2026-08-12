@@ -404,6 +404,13 @@ export interface ChartTrendline {
     intercept?: number | null;
     dispRSqr?: boolean | null;
     dispEq?: boolean | null;
+    labelManualLayout?: ChartManualLayout | null;
+    labelText?: string | null;
+    labelFontSizeHpt?: number | null;
+    labelFontBold?: boolean | null;
+    labelFontColor?: string | null;
+    labelFontFace?: string | null;
+    labelTextAlign?: string | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
     lineDash?: string | null;
