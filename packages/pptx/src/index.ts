@@ -41,6 +41,7 @@ export type {
   ChartTextRun,
   ChartTrendline,
   ChartType,
+  ChartExElementStyle,
   ChartexBoxSeries,
   ChartexBoxWhisker,
   ChartexSunburst,

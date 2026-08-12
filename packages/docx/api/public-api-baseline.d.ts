@@ -104,7 +104,7 @@ export interface ChartexBoxWhisker {
     categories: string[];
     series: ChartexBoxSeries[];
 }
-interface ChartExElementStyle {
+export interface ChartExElementStyle {
     fillPaints?: Array<SolidFill | GradientFill | PatternFill | null> | null;
     fillColors?: Array<string | null> | null;
     fillHidden?: boolean | null;
@@ -116,26 +116,6 @@ interface ChartExElementStyle {
     lineJoin?: string | null;
     fillColorIndex?: number | null;
     lineColorIndex?: number | null;
-}
-interface GradientFill {
-    fillType: 'gradient';
-    stops: GradientStop__emitterCollision1[];
-    angle: number;
-    gradType: string;
-    scaled?: boolean;
-    path?: 'shape' | 'circle' | 'rect' | string;
-    fillToRect?: FillRect;
-    tileRect?: FillRect;
-    flip?: 'none' | 'x' | 'y' | 'xy' | string;
-    rotWithShape?: boolean;
-}
-interface GradientStop__emitterCollision1 {
-    position: number;
-    color: string;
-}
-interface SolidFill {
-    fillType: 'solid';
-    color: string;
 }
 export interface ChartexSunburst {
     rows: ChartexSunburstRow[];
@@ -855,7 +835,23 @@ export interface FramePr {
     xAlign?: 'left' | 'center' | 'right' | 'inside' | 'outside' | string;
     yAlign?: 'inline' | 'top' | 'center' | 'bottom' | 'inside' | 'outside' | string;
 }
+export interface GradientFill {
+    fillType: 'gradient';
+    stops: GradientStop__emitterCollision1[];
+    angle: number;
+    gradType: string;
+    scaled?: boolean;
+    path?: 'shape' | 'circle' | 'rect' | string;
+    fillToRect?: FillRect;
+    tileRect?: FillRect;
+    flip?: 'none' | 'x' | 'y' | 'xy' | string;
+    rotWithShape?: boolean;
+}
 export interface GradientStop {
+    position: number;
+    color: string;
+}
+interface GradientStop__emitterCollision1 {
     position: number;
     color: string;
 }
@@ -1470,6 +1466,10 @@ export interface ShapeTextRun {
     bold?: boolean;
     italic?: boolean;
     ruby?: RubyAnnotation | null;
+}
+export interface SolidFill {
+    fillType: 'solid';
+    color: string;
 }
 export interface TableBorders {
     top: BorderSpec | null;

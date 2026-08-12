@@ -113,7 +113,7 @@ export interface ChartexBoxWhisker {
     categories: string[];
     series: ChartexBoxSeries[];
 }
-interface ChartExElementStyle {
+export interface ChartExElementStyle {
     fillPaints?: Array<SolidFill | GradientFill | PatternFill | null> | null;
     fillColors?: Array<string | null> | null;
     fillHidden?: boolean | null;
