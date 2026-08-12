@@ -4408,6 +4408,9 @@ fn chartex_data_cat_val_points(
         .enumerate()
         .filter_map(|(index, value)| {
             let value = value?;
+            if !value.is_finite() {
+                return None;
+            }
             let category = categories
                 .as_ref()
                 .and_then(|items| items.get(index))
@@ -10664,6 +10667,35 @@ mod tests {
         assert_eq!(s1.values_by_category, vec![vec![5.0], vec![7.0, 9.0]]);
         assert!(!s1.mean_marker && s1.mean_line && !s1.show_outliers && s1.show_nonoutliers);
         assert_eq!(s1.quartile_method, "inclusive");
+    }
+
+    #[test]
+    fn parse_chartex_part_boxwhisker_discards_non_finite_values_and_keeps_repeats() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chartData><cx:data id="0">
+                <cx:strDim type="cat"><cx:lvl ptCount="5">
+                  <cx:pt idx="0">Drop</cx:pt><cx:pt idx="1">Keep</cx:pt>
+                  <cx:pt idx="2">Keep</cx:pt><cx:pt idx="3">Drop</cx:pt>
+                  <cx:pt idx="4">Drop</cx:pt>
+                </cx:lvl></cx:strDim>
+                <cx:numDim type="val"><cx:lvl ptCount="5">
+                  <cx:pt idx="0">NaN</cx:pt><cx:pt idx="1">5</cx:pt>
+                  <cx:pt idx="2">5</cx:pt><cx:pt idx="3">inf</cx:pt>
+                  <cx:pt idx="4">-inf</cx:pt>
+                </cx:lvl></cx:numDim>
+              </cx:data></cx:chartData>
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                <cx:series layoutId="boxWhisker"><cx:dataId val="0"/></cx:series>
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let document = chart_space_of(&xml);
+        let model = parse_chartex_part(document.root_element(), &FixtureResolver, None)
+            .expect("finite repeated samples remain plottable");
+        let box_data = model.chartex_box.expect("box data");
+        assert_eq!(box_data.categories, vec!["Keep"]);
+        assert_eq!(box_data.series[0].values_by_category, vec![vec![5.0, 5.0]]);
     }
 
     struct FormulaOnlyBoxResolver;

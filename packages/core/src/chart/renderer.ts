@@ -29,6 +29,11 @@ import {
   type CategoryGapPolicy,
 } from './category-spacing.js';
 import { planHistogramBins } from './histogram-binning.js';
+import {
+  boxWhiskerGeometry,
+  boxWhiskerPointCount,
+  computeBoxWhiskerStats,
+} from './box-whisker.js';
 import { hexToRgba, resolveFill } from '../shape/paint.js';
 import {
   DEFAULT_TEXT_INSET_LR_EMU,
@@ -6488,62 +6493,6 @@ function renderParetoLineChart(
 
 // ─── chartEx: box-and-whisker (CH15, MS 2014 chartex ext) ────────────────────
 
-/** Statistics of one box in a box-and-whisker plot. */
-interface BoxStats {
-  q1: number;
-  median: number;
-  q3: number;
-  /** Whisker ends = min/max of the NON-outlier points. */
-  whiskerLo: number;
-  whiskerHi: number;
-  mean: number;
-  outliers: number[];
-  /** Interior (non-outlier) points used by the optional point overlay. */
-  inner: number[];
-}
-
-function boxMedian(sorted: number[]): number {
-  if (sorted.length === 0) return 0;
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0
-    ? (sorted[middle - 1] + sorted[middle]) / 2
-    : sorted[middle];
-}
-
-/**
- * Compute the five-number summary + mean + outliers for one box, using the
- * 1.5·IQR outlier fence (the Tukey rule Office applies; points beyond
- * `Q1 − 1.5·IQR` / `Q3 + 1.5·IQR` are outliers and the whiskers stop at the
- * most extreme non-outlier).
- */
-function computeBoxStats(values: number[], method: string): BoxStats | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  const median = boxMedian(sorted);
-  // Excel's box-chart "inclusive median" option includes an odd-sized
-  // sample's median in each half; "exclusive median" omits it. For even-sized
-  // samples the two methods share the same lower and upper halves.
-  const includeMedian = method === 'inclusive' && sorted.length % 2 === 1;
-  const lower = sorted.slice(0, middle + (includeMedian ? 1 : 0));
-  const upper = sorted.slice(middle + (sorted.length % 2 === 1 && !includeMedian ? 1 : 0));
-  const q1 = boxMedian(lower.length ? lower : sorted);
-  const q3 = boxMedian(upper.length ? upper : sorted);
-  const iqr = q3 - q1;
-  const loFence = q1 - 1.5 * iqr;
-  const hiFence = q3 + 1.5 * iqr;
-  const inner: number[] = [];
-  const outliers: number[] = [];
-  for (const v of sorted) {
-    if (v < loFence || v > hiFence) outliers.push(v);
-    else inner.push(v);
-  }
-  const whiskerLo = inner.length ? inner[0] : sorted[0];
-  const whiskerHi = inner.length ? inner[inner.length - 1] : sorted[sorted.length - 1];
-  const mean = values.reduce((a, b) => a + b, 0) / values.length;
-  return { q1, median, q3, whiskerLo, whiskerHi, mean, outliers, inner };
-}
-
 /**
  * Render a chartEx box-and-whisker chart (MS 2014 chartex extension — there is
  * no ECMA-376 section; the structure is Microsoft's `<cx:chartSpace>` with a
@@ -6567,6 +6516,36 @@ function renderBoxWhiskerChart(
   const box = chart.chartexBox;
   if (!box || box.categories.length === 0 || box.series.length === 0) return;
   const { x, y, w, h } = r;
+  const pointCount = boxWhiskerPointCount(
+    box.series.map(series => series.valuesByCategory),
+    MAX_CANVAS_CHART_POINTS,
+  );
+  if (rejectOversizedCanvasChart(ctx, r, pointCount)) return;
+
+  const rejectOutOfRange = (): void => {
+    ctx.fillStyle = '#888';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('(chart values out of range)', x + w / 2, y + h / 2);
+  };
+  const usableScale = (scale: { min: number; max: number; step: number }): boolean => {
+    const span = scale.max - scale.min;
+    const intervalCount = span / scale.step;
+    return Number.isFinite(scale.min)
+      && Number.isFinite(scale.max)
+      && Number.isFinite(scale.step)
+      && Number.isFinite(span)
+      && Number.isFinite(intervalCount)
+      && scale.max > scale.min
+      && scale.step > 0
+      // Axis paint is synchronous. Refuse an authored tiny major unit before
+      // entering a loop whose finite bounds could still imply vast work.
+      && intervalCount <= 1000
+      // A finite positive step may still be too small to advance a large
+      // floating-point bound, which would wedge the major-gridline loop.
+      && scale.min + scale.step > scale.min;
+  };
 
   // Resolve the value range before laying out the plot. The tick labels are a
   // real layout input: reserve their measured width instead of a percentage of
@@ -6576,12 +6555,17 @@ function renderBoxWhiskerChart(
   for (const s of box.series) {
     for (const group of s.valuesByCategory) {
       for (const v of group) {
+        if (!Number.isFinite(v)) continue;
         if (v < dataMin) dataMin = v;
         if (v > dataMax) dataMax = v;
       }
     }
   }
   if (!isFinite(dataMin) || !isFinite(dataMax)) return;
+  if (!Number.isFinite(dataMax - dataMin)) {
+    rejectOutOfRange();
+    return;
+  }
 
   const font = chartFontFamily(chart, chart.valAxisFontFace, 'minor');
   const valFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
@@ -6593,6 +6577,10 @@ function renderBoxWhiskerChart(
     h / ptToPx,
     chart.valAxisMajorUnit,
   );
+  if (!usableScale(provisionalScale)) {
+    rejectOutOfRange();
+    return;
+  }
   let valLabelBandW = 0;
   if (!chart.valAxisHidden) {
     const previousFont = ctx.font;
@@ -6636,7 +6624,6 @@ function renderBoxWhiskerChart(
     legendSideReserveFrac: 0.22,
     pad,
   });
-  drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, frame.title.fontPx);
   const { px0, py0, pw, ph } = frame.plotRect;
 
   const cats = box.categories;
@@ -6647,10 +6634,16 @@ function renderBoxWhiskerChart(
   );
 
   // Excel's automatic value axis uses nice-rounded bounds and steps.
-  const { min: axisMin, max: axisMax, step } = valueAxisScale(
+  const axisScale = valueAxisScale(
     dataMin, dataMax, chart.valMin, chart.valMax, ph / ptToPx, chart.valAxisMajorUnit,
   );
-  const span = axisMax - axisMin || 1;
+  if (!usableScale(axisScale)) {
+    rejectOutOfRange();
+    return;
+  }
+  drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, frame.title.fontPx);
+  const { min: axisMin, max: axisMax, step } = axisScale;
+  const span = axisMax - axisMin;
   const yOf = (v: number): number => py0 + ph * (1 - (v - axisMin) / span);
 
   const valAxisLine = resolveAxisLine(chart.valAxisLineColor, chart.valAxisLineWidthEmu, ptToPx);
@@ -6713,12 +6706,11 @@ function renderBoxWhiskerChart(
 
   // ChartEx places categorical box/whisker data points at interior category
   // positions, leaving one category interval between each plot edge and the
-  // first/last point. Multiple populated series split the category group so
-  // their boxes remain individually visible. `gapWidth` controls the
-  // group-vs-gap width inside that interval.
+  // first/last point. Every series owns one stable equal slot in each category
+  // group, including categories where a peer has no retained observations.
+  // `gapWidth` controls the group-vs-gap width inside that interval.
   const slotW = pw / (nCat + 1);
   const gapWidthPct = resolveCategoryGapWidthPercent(chart.barGapWidth, 'chartex');
-  const groupW = slotW / (1 + gapWidthPct / 100);
   const paletteOf = (si: number): string => {
     const fill = box.series[si].color
       ?? chartExDataPointFill(
@@ -6734,25 +6726,12 @@ function renderBoxWhiskerChart(
     box.series[si].color,
   );
   const statsBySeries = box.series.map(series => series.valuesByCategory.map(values => (
-    computeBoxStats(values, series.quartileMethod)
+    computeBoxWhiskerStats(values, series.quartileMethod)
   )));
-  const populatedSeriesByCategory = cats.map((_category, categoryIndex) =>
-    box.series
-      .map((series, seriesIndex) => ({
-        seriesIndex,
-        populated: (series.valuesByCategory[categoryIndex]?.length ?? 0) > 0,
-      }))
-      .filter(entry => entry.populated)
-      .map(entry => entry.seriesIndex)
-  );
   const boxGeometry = (ci: number, si: number): { bx: number; boxW: number; cx: number } => {
-    const categoryCenterX = px0 + slotW * (ci + 1);
-    const slotLeft = categoryCenterX - groupW / 2;
-    const populated = populatedSeriesByCategory[ci];
-    const activeIndex = Math.max(0, populated.indexOf(si));
-    const boxW = groupW / Math.max(1, populated.length);
-    const bx = slotLeft + activeIndex * boxW;
-    return { bx, boxW, cx: bx + boxW / 2 };
+    const geometry = boxWhiskerGeometry(px0, pw, nCat, nSer, ci, si, gapWidthPct);
+    if (!geometry) return { bx: px0, boxW: 0, cx: px0 };
+    return { bx: geometry.boxX, boxW: geometry.boxWidth, cx: geometry.centerX };
   };
 
   // `<cx:visibility meanLine>` connects the category means for one series.

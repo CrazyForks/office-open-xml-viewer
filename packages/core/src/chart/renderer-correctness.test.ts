@@ -4808,11 +4808,11 @@ describe('CH15 — chartEx box-and-whisker', () => {
       valAxisMajorGridlines: true,
       chartexBox: {
         categories: ['A', 'B', 'C'],
-        series: [
-          { name: 'A', color: '5B9BD5', valuesByCategory: [[1, 2, 3], [], []], meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false, quartileMethod: 'inclusive' },
-          { name: 'B', color: 'ED7D31', valuesByCategory: [[], [4, 5, 6], []], meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false, quartileMethod: 'inclusive' },
-          { name: 'C', color: 'A5A5A5', valuesByCategory: [[], [], [7, 8, 9]], meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false, quartileMethod: 'inclusive' },
-        ],
+        series: [{
+          name: 'S', color: '5B9BD5', valuesByCategory: [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+          meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false,
+          quartileMethod: 'inclusive',
+        }],
       },
     }), RECT, 1);
 
@@ -4901,7 +4901,7 @@ describe('CH15 — chartEx box-and-whisker', () => {
     expect(lineRole.every(segment => segment.lw === 2)).toBe(true);
   });
 
-  it('partitions one category among its populated box-and-whisker series', () => {
+  it('partitions one category into equal series slots with a fixed gutter', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, boxModel({
       chartexBox: {
@@ -4922,13 +4922,15 @@ describe('CH15 — chartEx box-and-whisker', () => {
     }), RECT, 1);
 
     expect(rec.rects).toHaveLength(2);
-    expect(rec.rects[0].x + rec.rects[0].w).toBeCloseTo(rec.rects[1].x, 5);
     expect(rec.rects[0].w).toBeCloseTo(rec.rects[1].w, 5);
+    const gutter = rec.rects[1].x - (rec.rects[0].x + rec.rects[0].w);
+    const slotWidth = rec.rects[1].x - rec.rects[0].x;
+    expect(gutter / slotWidth).toBeCloseTo(0.06, 5);
   });
 
-  it('uses the full category width when only one series has data in that category', () => {
-    const rec = recordingCtx();
-    renderChart(rec.ctx, boxModel({
+  it('keeps each series in its stable slot when peer categories are empty', () => {
+    const sparse = recordingCtx();
+    const model = boxModel({
       chartexBox: {
         categories: ['A', 'B'],
         series: [
@@ -4944,11 +4946,115 @@ describe('CH15 — chartEx box-and-whisker', () => {
           },
         ],
       },
-    }), RECT, 1);
+    });
+    renderChart(sparse.ctx, model, RECT, 1);
 
-    expect(rec.rects).toHaveLength(2);
-    expect(rec.rects[0].w).toBeCloseTo(rec.rects[1].w, 5);
-    expect(rec.rects[0].w).toBeGreaterThan(50);
+    const full = recordingCtx();
+    const fullModel = structuredClone(model);
+    if (!fullModel.chartexBox) throw new Error('box fixture missing');
+    fullModel.chartexBox.series[0].valuesByCategory[1] = [1, 2, 3, 4];
+    fullModel.chartexBox.series[1].valuesByCategory[0] = [2, 3, 4, 5];
+    renderChart(full.ctx, fullModel, RECT, 1);
+
+    expect(sparse.rects).toHaveLength(2);
+    expect(full.rects).toHaveLength(4);
+    expect(sparse.rects[0].x).toBeCloseTo(full.rects[0].x, 5);
+    expect(sparse.rects[1].x).toBeCloseTo(full.rects[3].x, 5);
+    expect(sparse.rects[0].w).toBeCloseTo(sparse.rects[1].w, 5);
+  });
+
+  it('drops non-finite observations before deriving or painting geometry', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexBox: {
+        categories: ['A'],
+        series: [{
+          name: 'S', color: '5B9BD5', valuesByCategory: [[NaN, -Infinity, 5, 5, Infinity, 5]],
+          meanMarker: true, meanLine: false, showOutliers: true, showNonoutliers: true,
+          quartileMethod: 'inclusive',
+        }],
+      },
+    }), RECT, 1);
+    expect(rec.rects).toHaveLength(1);
+    expect(rec.rects.every(rect => [rect.x, rect.y, rect.w, rect.h].every(Number.isFinite))).toBe(true);
+  });
+
+  it('does not emit non-finite Canvas geometry for extreme finite observations', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexBox: {
+        categories: ['A'],
+        series: [{
+          name: 'S', color: '5B9BD5',
+          valuesByCategory: [[-Number.MAX_VALUE, -Number.MAX_VALUE, Number.MAX_VALUE, Number.MAX_VALUE]],
+          meanMarker: true, meanLine: false, showOutliers: true, showNonoutliers: true,
+          quartileMethod: 'exclusive',
+        }],
+      },
+    }), RECT, 1);
+    const coordinates = [
+      ...rec.fillRects.flatMap(rect => [rect.x, rect.y, rect.w, rect.h]),
+      ...rec.arcs.flatMap(arc => [arc.x, arc.y, arc.r]),
+      ...rec.segments.flatMap(segment => segment.flatMap(point => [point.x, point.y])),
+      ...rec.texts.flatMap(text => [text.x, text.y]),
+    ];
+    expect(coordinates.length).toBeGreaterThan(0);
+    expect(coordinates.every(Number.isFinite)).toBe(true);
+  });
+
+  it('atomically rejects finite input whose automatic nice-axis headroom overflows', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexBox: {
+        categories: ['A'],
+        series: [{
+          name: 'S', color: '5B9BD5', valuesByCategory: [[-8e307, 0, 8e307]],
+          meanMarker: true, meanLine: true, showOutliers: true, showNonoutliers: true,
+          quartileMethod: 'inclusive',
+        }],
+      },
+    }), RECT, 1);
+    expect(rec.fillRects).toHaveLength(0);
+    expect(rec.arcs).toHaveLength(0);
+    expect(rec.segments).toHaveLength(0);
+    expect(rec.texts.map(text => text.text)).toEqual(['(chart values out of range)']);
+  });
+
+  it('atomically rejects a huge finite authored range with a tiny major unit', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      valMin: 0,
+      valMax: 1e308,
+      valAxisMajorUnit: 1,
+      chartexBox: {
+        categories: ['A'],
+        series: [{
+          name: 'S', color: '5B9BD5', valuesByCategory: [[0, 1, 2]],
+          meanMarker: true, meanLine: true, showOutliers: true, showNonoutliers: true,
+          quartileMethod: 'inclusive',
+        }],
+      },
+    }), RECT, 1);
+    expect(rec.fillRects).toHaveLength(0);
+    expect(rec.arcs).toHaveLength(0);
+    expect(rec.segments).toHaveLength(0);
+    expect(rec.texts.map(text => text.text)).toEqual(['(chart values out of range)']);
+  });
+
+  it('refuses an oversized box-and-whisker chart before sorting or painting', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexBox: {
+        categories: ['A'],
+        series: [{
+          name: 'S', color: '5B9BD5', valuesByCategory: [new Array(10_001).fill(1)],
+          meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false,
+          quartileMethod: 'inclusive',
+        }],
+      },
+    }), RECT, 1);
+    expect(rec.rects).toHaveLength(0);
+    expect(rec.texts.map(text => text.text)).toContain('(too many data points)');
   });
 
   it('uses the box/whisker semantic outline for Chart Style NoStyle only', () => {
