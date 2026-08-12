@@ -1690,6 +1690,32 @@ describe('ChartEx flat layouts dispatch to semantic renderers', () => {
     },
   );
 
+  it('bins raw histogram observations before routing them to bar geometry', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'histogram',
+      categories: [],
+      catAxisHidden: true,
+      valAxisHidden: true,
+      series: [series({ values: [0, 1, 2, 3, 4] })],
+      chartexHistogramBinning: { binCount: 2, intervalClosed: 'l' },
+    }), RECT, 1);
+
+    expect(rec.rects).toHaveLength(2);
+  });
+
+  it('rejects histogram input beyond the ChartEx cache ceiling', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'histogram',
+      categories: [],
+      series: [series({ values: new Array<number | null>(1_048_577) })],
+    }), RECT, 1);
+
+    expect(rec.rects).toHaveLength(0);
+    expect(rec.texts.map(text => text.text)).toContain('(too many data points)');
+  });
+
   it.each(['waterfall', 'funnel'])(
     '%s renders every numeric data point when the optional category dimension is unavailable',
     chartType => {

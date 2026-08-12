@@ -481,6 +481,10 @@ pub struct ChartModel {
     /// parent-label layout. `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chartex_treemap: Option<ChartexTreemap>,
+    /// ChartEx histogram `CT_Binning` controls. Raw observations remain in
+    /// `series[0].values` so the renderer can derive a bounded frequency plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chartex_histogram_binning: Option<ChartexHistogramBinning>,
     /// Theme accent palette (`accent1..6` resolved to hex, no `#`) for chartEx
     /// charts that color by branch/series index (boxWhisker series and
     /// sunburst/treemap branches). `None` when the resolver supplies no default palette (pptx);
@@ -1008,6 +1012,24 @@ pub struct ChartexTreemap {
     /// `none`). Absent stays `None`; the renderer uses its neutral default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_label_layout: Option<String>,
+}
+
+/// ChartEx `CT_Binning` controls ([MS-ODRAWXML] 2.24.3.7). Numeric
+/// underflow/overflow bounds are retained; the schema's `auto` token remains
+/// `None`, as does omission.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartexHistogramBinning {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin_size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_closed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underflow: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow: Option<f64>,
 }
 
 /// Mirror of TS `ChartManualLayout`.
@@ -3104,10 +3126,12 @@ fn chartex_text(container: Node) -> Option<String> {
 /// Colour and theme-font resolution route through the shared [`ColorResolver`]
 /// so XLSX, PPTX, and DOCX retain the same chart model contract.
 ///
-/// The chart type is the series `layoutId` string as-is (`"waterfall"`,
-/// `"treemap"`, `"sunburst"`, `"boxWhisker"`, `"funnel"`, `"histogram"`, …);
-/// this function does not gate on which layouts the renderer supports, so
-/// adding a new chartEx layout is a renderer concern, not a parse concern.
+/// The chart type normally preserves the series `layoutId` (`"waterfall"`,
+/// `"treemap"`, `"sunburst"`, `"boxWhisker"`, `"funnel"`, …). The one
+/// semantic normalization is [MS-ODRAWXML] histogram: `clusteredColumn` with
+/// CT_Binning becomes `"histogram"` so raw observations cannot be mistaken for
+/// already aggregated column heights. Other unsupported layouts pass through
+/// for renderer dispatch.
 ///
 /// Returns `None` when the part has no `<cx:series>` (not a chartEx chart).
 pub fn parse_chartex_part(
@@ -3231,6 +3255,32 @@ fn parse_chartex_data_point_overrides(
             })
         })
         .collect()
+}
+
+fn parse_chartex_histogram_binning(series: Node) -> Option<ChartexHistogramBinning> {
+    let binning = child(child(series, "layoutPr")?, "binning")?;
+    let finite_text = |name: &str| {
+        child(binning, name)
+            .and_then(|node| node.text())
+            .and_then(|text| text.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+    };
+    let finite_attr = |name: &str| {
+        attr(&binning, name)
+            .and_then(|text| text.parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+    };
+    Some(ChartexHistogramBinning {
+        bin_size: finite_text("binSize").filter(|value| *value > 0.0),
+        bin_count: child(binning, "binCount")
+            .and_then(|node| node.text())
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .filter(|value| *value > 0),
+        interval_closed: attr(&binning, "intervalClosed")
+            .filter(|value| value == "l" || value == "r"),
+        underflow: finite_attr("underflow"),
+        overflow: finite_attr("overflow"),
+    })
 }
 
 type DataPointShape = (
@@ -3436,7 +3486,18 @@ pub fn parse_chartex_part_with_references_and_style_parts(
     };
     let series_node = *series_nodes.first()?;
     let layout_id = attr(&series_node, "layoutId").unwrap_or_default();
-    let chart_type = layout_id; // "waterfall", "treemap", etc.
+    // [MS-ODRAWXML] represents a histogram as a clusteredColumn series with a
+    // CT_Binning child; `histogram` is not an ST_SeriesLayout enumeration.
+    // Normalize the semantic family here so raw observations cannot reach the
+    // ordinary clustered-column renderer.
+    let chartex_histogram_binning = (layout_id == "clusteredColumn")
+        .then(|| parse_chartex_histogram_binning(series_node))
+        .flatten();
+    let chart_type = if chartex_histogram_binning.is_some() {
+        "histogram".to_string()
+    } else {
+        layout_id
+    };
     let data_by_id: std::collections::HashMap<String, Node> = root
         .descendants()
         .filter(|node| node.is_element() && node.tag_name().name() == "data")
@@ -3987,8 +4048,8 @@ pub fn parse_chartex_part_with_references_and_style_parts(
     // `<c:gapWidth>` but stored as a *fraction* (e.g. 0.8 ≡ 80%) instead of
     // an integer percentage. Convert to the legacy percentage form so the
     // shared renderer's `barW = catGap / (1 + gapWidth/100)` formula works
-    // uniformly across chart types. Default 1.5 (= legacy 150%) per PowerPoint
-    // when the attribute is omitted.
+    // uniformly across chart types. Omission stays `None`: ChartEx has no
+    // schema default, so the renderer owns the shared ordinal-layout policy.
     let bar_gap_width = root
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "catScaling")
@@ -4146,6 +4207,7 @@ pub fn parse_chartex_part_with_references_and_style_parts(
         chartex_box,
         chartex_sunburst,
         chartex_treemap,
+        chartex_histogram_binning,
         chartex_accents,
         chartex_color_palette,
         chartex_color_style_method,
@@ -6813,6 +6875,7 @@ pub fn parse_chart_part_with_references(
         chartex_box: None,
         chartex_sunburst: None,
         chartex_treemap: None,
+        chartex_histogram_binning: None,
         chartex_accents: None,
         chartex_color_palette: None,
         chartex_color_style_method: None,
@@ -7050,6 +7113,7 @@ mod tests {
             chartex_box: None,
             chartex_sunburst: None,
             chartex_treemap: None,
+            chartex_histogram_binning: None,
             chartex_accents: None,
             chartex_color_palette: None,
             chartex_color_style_method: None,
@@ -10422,6 +10486,66 @@ mod tests {
         assert_eq!(hidden_point.idx, 1);
         assert_eq!(hidden_point.fill_hidden, Some(true));
         assert_eq!(hidden_point.line_hidden, Some(true));
+    }
+
+    #[test]
+    fn parse_chartex_histogram_retains_binning_contract() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}">
+              <cx:chartData><cx:data id="0"><cx:numDim type="val"><cx:lvl ptCount="5">
+                <cx:pt idx="0">0</cx:pt><cx:pt idx="1">1</cx:pt><cx:pt idx="2">2</cx:pt>
+                <cx:pt idx="3">3</cx:pt><cx:pt idx="4">4</cx:pt>
+              </cx:lvl></cx:numDim></cx:data></cx:chartData>
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                <cx:series layoutId="clusteredColumn"><cx:dataId val="0"/><cx:layoutPr>
+                  <cx:binning intervalClosed="r" underflow="0" overflow="4"><cx:binCount>2</cx:binCount></cx:binning>
+                </cx:layoutPr></cx:series>
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let document = chart_space_of(&xml);
+        let model = parse_chartex_part(document.root_element(), &FixtureResolver, None)
+            .expect("histogram parses");
+        let binning = model
+            .chartex_histogram_binning
+            .expect("histogram binning contract");
+        assert_eq!(model.chart_type, "histogram");
+        assert_eq!(binning.bin_count, Some(2));
+        assert_eq!(binning.bin_size, None);
+        assert_eq!(binning.interval_closed.as_deref(), Some("r"));
+        assert_eq!(binning.underflow, Some(0.0));
+        assert_eq!(binning.overflow, Some(4.0));
+        assert_eq!(
+            model.series[0].values,
+            vec![Some(0.0), Some(1.0), Some(2.0), Some(3.0), Some(4.0)]
+        );
+    }
+
+    #[test]
+    fn parse_chartex_histogram_binning_accepts_size_and_keeps_auto_unset() {
+        let size_xml = r#"<cx:series xmlns:cx="urn:cx"><cx:layoutPr><cx:binning intervalClosed="l" underflow="auto"><cx:binSize>0.5</cx:binSize></cx:binning></cx:layoutPr></cx:series>"#;
+        let size_document = root_of(size_xml);
+        let size =
+            parse_chartex_histogram_binning(size_document.root_element()).expect("bin size parses");
+        assert_eq!(size.bin_size, Some(0.5));
+        assert_eq!(size.bin_count, None);
+        assert_eq!(size.interval_closed.as_deref(), Some("l"));
+        assert_eq!(size.underflow, None);
+
+        let invalid_xml = r#"<cx:series xmlns:cx="urn:cx"><cx:layoutPr><cx:binning intervalClosed="x" overflow="NaN"><cx:binSize>-1</cx:binSize></cx:binning></cx:layoutPr></cx:series>"#;
+        let invalid_document = root_of(invalid_xml);
+        let invalid = parse_chartex_histogram_binning(invalid_document.root_element())
+            .expect("empty automatic contract remains present");
+        assert_eq!(
+            invalid,
+            ChartexHistogramBinning {
+                bin_size: None,
+                bin_count: None,
+                interval_closed: None,
+                underflow: None,
+                overflow: None,
+            }
+        );
     }
 
     /// (c) A `<cx:chartSpace>` with no `<cx:series>` is not a chartEx chart —

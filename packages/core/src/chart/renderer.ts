@@ -24,6 +24,11 @@ import { niceStep, valueAxisScale, axisFraction, logAxisScale, fitTrendline } fr
 import { axisLineWidthPx, resolveAxisLine, resolveGridline, isCrossBetween } from './axis-style.js';
 import { formatChartVal, formatChartValWithCode, formatCategoryLabel } from './chart-number-format.js';
 import { elideToWidth } from './text-elide.js';
+import {
+  resolveCategoryGapWidthPercent,
+  type CategoryGapPolicy,
+} from './category-spacing.js';
+import { planHistogramBins } from './histogram-binning.js';
 import { hexToRgba, resolveFill } from '../shape/paint.js';
 import {
   DEFAULT_TEXT_INSET_LR_EMU,
@@ -1388,7 +1393,13 @@ function drawBarDataLabel(
 // percentStacked. Also handles mixed bar+line series (seriesType per series).
 // ═══════════════════════════════════════════════════════════════════════════
 
-function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
+function renderBarChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+  gapPolicy: CategoryGapPolicy = 'legacy',
+): void {
   const { x, y, w, h } = r;
   const isH = chart.chartType === 'clusteredBarH' || chart.chartType === 'stackedBarH' || chart.chartType === 'stackedBarHPct';
   const stacked = chart.chartType.startsWith('stacked');
@@ -1949,7 +1960,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     : (catRev ? n - 1 - ci : ci);
   const nSeriesEffective = stacked ? 1 : Math.max(1, barSeries.length);
   const overlapPct  = stacked ? 0 : (chart.barOverlap ?? 0);
-  const gapWidthPct = chart.barGapWidth ?? 150;
+  const gapWidthPct = resolveCategoryGapWidthPercent(chart.barGapWidth, gapPolicy);
   const denom = 1 + (nSeriesEffective - 1) * (1 - overlapPct / 100) + gapWidthPct / 100;
   const barW  = catGap / denom;
   // Pitch between bars within a cluster (not the gap — the left-edge to
@@ -5995,6 +6006,27 @@ function rejectOversizedCanvasChart(
   return true;
 }
 
+function renderHistogramChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  rect: ChartRect,
+  ptToPx: number,
+): void {
+  const source = chart.series[0];
+  if (!source) return;
+  const plan = planHistogramBins(source.values, chart.chartexHistogramBinning ?? {});
+  if (plan.kind === 'tooManyInputPoints') {
+    rejectOversizedCanvasChart(ctx, rect, MAX_CANVAS_CHART_POINTS + 1);
+    return;
+  }
+  renderBarChart(ctx, {
+    ...chart,
+    chartType: 'clusteredBar',
+    categories: plan.categories,
+    series: [{ ...source, categories: undefined, values: plan.counts }],
+  }, rect, ptToPx, 'chartex');
+}
+
 function renderWaterfallChart(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -6195,12 +6227,11 @@ function renderWaterfallChart(
   // adjacent categories expressed as a percentage of the bar width
   // (legacy `<c:gapWidth val>`) or as a fraction (chartEx
   // `<cx:catScaling gapWidth>`, normalised to the same percent form by the
-  // parser). The bar then occupies `catGap / (1 + gapWidth/100)`. The existing
-  // 150% fallback is retained for byte compatibility when ChartEx requests
-  // automatic spacing; reproducing Office's automatic choice is tracked
-  // separately and is not tuned in this change.
+  // parser). The bar then occupies `catGap / (1 + gapWidth/100)`. Omitted
+  // ChartEx spacing uses the shared ordinal-layout policy; an authored
+  // value remains authoritative after parser normalization.
   const gapW = pw / n;
-  const gapWidthPct = chart.barGapWidth ?? 150;
+  const gapWidthPct = resolveCategoryGapWidthPercent(chart.barGapWidth, 'chartex');
   const barW = gapW / (1 + gapWidthPct / 100);
 
   bars.forEach((bar, i) => {
@@ -6376,11 +6407,8 @@ function renderFunnelChart(
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, frame.title.fontPx);
   const { px0, py0, pw, ph } = frame.plotRect;
   const rowH = ph / n;
-  // Apply only an authored ChartEx gap. CT_CategoryAxisScaling does not define
-  // an omitted-value default; matching application auto-spacing is #1227.
-  const barH = chart.barGapWidth == null
-    ? rowH
-    : rowH / (1 + chart.barGapWidth / 100);
+  const gapWidthPct = resolveCategoryGapWidthPercent(chart.barGapWidth, 'chartex');
+  const barH = rowH / (1 + gapWidthPct / 100);
   const series = chart.series[0];
   const color = `#${series?.color ?? chartExDataPointFill(chart, 0, 1, series?.chartexStyle)}`;
   const paint = chartExDataPointPaint(chart, 0, 1, series?.chartexStyle, series?.color);
@@ -6689,7 +6717,7 @@ function renderBoxWhiskerChart(
   // their boxes remain individually visible. `gapWidth` controls the
   // group-vs-gap width inside that interval.
   const slotW = pw / (nCat + 1);
-  const gapWidthPct = chart.barGapWidth ?? 150;
+  const gapWidthPct = resolveCategoryGapWidthPercent(chart.barGapWidth, 'chartex');
   const groupW = slotW / (1 + gapWidthPct / 100);
   const paletteOf = (si: number): string => {
     const fill = box.series[si].color
@@ -7947,7 +7975,15 @@ export function renderChart(
       case 'waterfall':
         renderWaterfallChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'clusteredColumn':
-        renderBarChart(ctx, { ...chart, chartType: 'clusteredBar' }, rect, ptToPx); break;
+        renderBarChart(
+          ctx,
+          { ...chart, chartType: 'clusteredBar' },
+          rect,
+          ptToPx,
+          'chartex',
+        ); break;
+      case 'histogram':
+        renderHistogramChart(ctx, chart, rect, ptToPx); break;
       case 'funnel':
         renderFunnelChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'paretoLine':
