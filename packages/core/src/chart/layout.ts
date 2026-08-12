@@ -131,12 +131,16 @@ export interface ChartFrame {
 
 // ─── Title band ──────────────────────────────────────────────────────────────
 
-/** Chart title font size (px). Verbatim from renderer.ts `chartTitleFontPx`:
- *  honor the XML `<c:title>…@sz` (hundredths of a point, scaled by ptToPx),
- *  else the proportional `max(10, h*0.085)` fallback. */
-export function chartTitleFontPx(chart: ChartModel, h: number, ptToPx: number): number {
+/** Product fallback for a chart title whose authored rich text and linked
+ *  Chart Style both omit a size. OOXML does not define an automatic size. */
+const DEFAULT_CHART_TITLE_SIZE_PT = 14;
+
+/** Chart title font size (px). Honor the parser-resolved size first (authored
+ *  rich text, then linked Chart Style); otherwise use one deterministic 14pt
+ *  fallback across classic and ChartEx chart families. */
+export function chartTitleFontPx(chart: ChartModel, _h: number, ptToPx: number): number {
   if (chart.titleFontSizeHpt) return (chart.titleFontSizeHpt / 100) * ptToPx;
-  return Math.max(10, h * 0.085);
+  return DEFAULT_CHART_TITLE_SIZE_PT * ptToPx;
 }
 
 /** Fraction of the title font size used as the band's TOP pad — the gap from
@@ -152,15 +156,17 @@ export function chartTitleFontPx(chart: ChartModel, h: number, ptToPx: number): 
  *  places the cap-top at ~0.81×font from the band top, matching PowerPoint's
  *  rendered chart titles (measured against the demo sample-1 line chart PDF).
  *
- *  The band's TOTAL height (`bandH`) is unchanged — see {@link chartTitleBand};
- *  only the split between top and bottom pad moves, so the plot rectangle below
- *  the title does not shift by a single pixel. */
+ *  For an already-resolved `fontPx`, the band's TOTAL height (`bandH`) is
+ *  unchanged by this top/bottom-pad redistribution — see
+ *  {@link chartTitleBand}. A different resolved title size may still change the
+ *  band and therefore the plot rectangle below it. */
 export const TITLE_TOP_PAD_FONT_FRAC = 0.62;
 
 /** Resolve the title band from the family's top/bottom pad FRACTIONS (of `h`).
  *  These fractions still set the band's TOTAL height (`bandH = fontPx +
- *  h*topPadFrac + h*bottomPadFrac`), which every family's plot layout depends on
- *  — that value is byte-identical to before, so the plot area never moves.
+ *  h*topPadFrac + h*bottomPadFrac`), which every family's plot layout depends on.
+ *  Given the same resolved `fontPx`, changing only the top/bottom-pad split keeps
+ *  that total byte-identical; resolving a different font size changes `bandH`.
  *
  *  What changed: the title's vertical placement WITHIN the band. `topPad` (the
  *  draw offset) is now a FONT-proportional inset ({@link TITLE_TOP_PAD_FONT_FRAC}
@@ -180,8 +186,8 @@ export function chartTitleBand(
 ): ChartTitleBand {
   if (!chart.title && !chart.titlePresent) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
   const fontPx = chartTitleFontPx(chart, h, ptToPx);
-  // Total band height is preserved verbatim from the family fractions so the
-  // plot rectangle below stays put.
+  // For a given resolved font size, the family fractions preserve the total
+  // band height while only the top/bottom-pad split changes.
   const bandH = fontPx + h * topPadFrac + h * bottomPadFrac;
   // Font-proportional top inset, clamped so the title never overflows the band.
   const topPad = Math.min(Math.max(0, bandH - fontPx), fontPx * TITLE_TOP_PAD_FONT_FRAC);

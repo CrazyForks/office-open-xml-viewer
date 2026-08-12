@@ -1849,9 +1849,9 @@ function renderBarChart(
     }
     : chart;
 
-  // Honor the XML-specified title font size when present; otherwise fall back
-  // to the proportional heuristic. Reserve the title band based on the actual
-  // drawn height so the plot shrinks to avoid overlap.
+  // Honor the parser-resolved title font size when present; otherwise use the
+  // shared fixed fallback. Reserve the title band from the actual drawn size
+  // so the plot shrinks to avoid overlap.
   // Shared frame bands. Title + category-label bands follow PowerPoint's chart
   // auto-layout (font-proportional, pinned to the demo slide-5 line-chart PDF);
   // see cartesianTitleBand / catAxisLabelBandH in layout.ts. The default 0.22

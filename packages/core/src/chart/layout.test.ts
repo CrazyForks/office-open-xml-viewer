@@ -104,9 +104,13 @@ describe('chartTitleFontPx', () => {
   it('honors XML size in hundredths of a point', () => {
     expect(chartTitleFontPx(model({ titleFontSizeHpt: 1600 }), H, PTPX)).toBe((1600 / 100) * PTPX);
   });
-  it('falls back to max(10, h*0.085)', () => {
-    expect(chartTitleFontPx(model({}), H, PTPX)).toBe(Math.max(10, H * 0.085));
-    expect(chartTitleFontPx(model({}), 80, PTPX)).toBe(Math.max(10, 80 * 0.085));
+  it('uses the same 14pt fallback on compact and large frames', () => {
+    expect(chartTitleFontPx(model({}), 80, PTPX)).toBe(14 * PTPX);
+    expect(chartTitleFontPx(model({}), 720, PTPX)).toBe(14 * PTPX);
+  });
+  it('shares the fallback across classic and ChartEx chart families', () => {
+    expect(chartTitleFontPx(model({ chartType: 'line' }), H, PTPX)).toBe(14 * PTPX);
+    expect(chartTitleFontPx(model({ chartType: 'boxWhisker' }), H, PTPX)).toBe(14 * PTPX);
   });
 });
 
