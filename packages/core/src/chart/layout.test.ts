@@ -156,6 +156,55 @@ describe('chartLegendReserve + bands', () => {
     expect(leg).toEqual({ side: 'b', reserveW: 0, reserveH: Math.max(18, H * 0.08) });
     expect(chartLegendBands(leg).legBottomH).toBe(Math.max(18, H * 0.08));
   });
+  it('derives a bounded top band from measured greedy row packing', () => {
+    const leg = chartLegendReserve(
+      model({ showLegend: true, legendPos: 't' }),
+      W,
+      H,
+      0.22,
+      {
+        itemWidths: Array(12).fill(120),
+        rowHeight: 16,
+        itemGap: 12,
+        horizontalPadding: 8,
+        verticalPadding: 4,
+      },
+    );
+    expect(leg).toEqual({ side: 't', reserveW: 0, reserveH: 52 });
+  });
+  it('packs top entries against the exact content width after horizontal padding', () => {
+    const leg = chartLegendReserve(
+      model({ showLegend: true, legendPos: 't' }),
+      W,
+      H,
+      0.22,
+      {
+        itemWidths: [300, 322],
+        rowHeight: 16,
+        itemGap: 12,
+        horizontalPadding: 8,
+        verticalPadding: 4,
+      },
+    );
+    // 300 + 12 + 322 = 634: it fits W - 4 but not the painted W - 8.
+    expect(leg).toEqual({ side: 't', reserveW: 0, reserveH: 36 });
+  });
+  it('bounds a measured side reserve while leaving room for the plot', () => {
+    const leg = chartLegendReserve(
+      model({ showLegend: true, legendPos: 'r' }),
+      W,
+      H,
+      0.22,
+      {
+        itemWidths: [240],
+        rowHeight: 16,
+        itemGap: 12,
+        horizontalPadding: 8,
+        verticalPadding: 4,
+      },
+    );
+    expect(leg).toEqual({ side: 'r', reserveW: W * 0.22, reserveH: 0 });
+  });
 });
 
 describe('chartAxisTitleBands', () => {

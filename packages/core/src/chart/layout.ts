@@ -37,6 +37,46 @@ export interface ChartLegendReserve {
   reserveH: number;
 }
 
+/** Canvas-measured legend entry widths used by automatic packing. The renderer
+ * resolves the authored/theme font and swatch geometry, while this module owns
+ * the pure reserve calculation shared by every chart family. */
+export interface ChartLegendMetrics {
+  itemWidths: readonly number[];
+  rowHeight: number;
+  itemGap: number;
+  horizontalPadding: number;
+  verticalPadding: number;
+}
+
+/** Greedily pack source-order legend items into rows that fit `maxWidth`.
+ * A single over-wide item owns its row and is width-capped by the painter. */
+export function packLegendRows(
+  itemWidths: readonly number[],
+  maxWidth: number,
+  itemGap: number,
+): number[][] {
+  const availableWidth = Math.max(1, maxWidth);
+  const rows: number[][] = [];
+  let row: number[] = [];
+  let rowWidth = 0;
+  for (let index = 0; index < itemWidths.length; index++) {
+    const itemWidth = Math.min(availableWidth, Math.max(0, itemWidths[index]));
+    const nextWidth = row.length === 0
+      ? itemWidth
+      : rowWidth + itemGap + itemWidth;
+    if (row.length > 0 && nextWidth > availableWidth) {
+      rows.push(row);
+      row = [index];
+      rowWidth = itemWidth;
+    } else {
+      row.push(index);
+      rowWidth = nextWidth;
+    }
+  }
+  if (row.length > 0) rows.push(row);
+  return rows;
+}
+
 /** Per-side reserved legend widths/heights, split out of a
  *  {@link ChartLegendReserve} for convenient consumption. Exactly one of the
  *  four is non-zero (or all zero when there is no legend). */
@@ -154,19 +194,45 @@ export function chartTitleBand(
 /** Resolve legend placement from `<c:legendPos>`. Returns null when hidden.
  *  Verbatim from renderer.ts `legendLayout`, except the side reserve FRACTION
  *  is a parameter (`sideReserveFrac`) so pie can request its wider 0.28 band
- *  while every other family keeps 0.22. Top/bottom always reserve `max(18,
- *  h*0.08)`. */
+ *  while every other family keeps 0.22. When measured metrics are supplied,
+ *  top/bottom reserve complete packed rows (bounded to 30% of chart height)
+ *  and sides reserve the measured entry width within the same 30% bound. */
 export function chartLegendReserve(
   chart: ChartModel,
   w: number,
   h: number,
   sideReserveFrac: number,
+  metrics?: ChartLegendMetrics,
 ): ChartLegendReserve | null {
   if (!chart.showLegend) return null;
   const pos = chart.legendPos ?? 'r';
   const side: ChartLegendSide = pos === 'l' ? 'l' : pos === 't' ? 't' : pos === 'b' ? 'b' : 'r';
   if (side === 'r' || side === 'l') {
+    if (metrics) {
+      const minWidth = Math.min(80, w * 0.3);
+      const maxWidth = Math.max(minWidth, Math.min(w * 0.3, Math.max(80, w * sideReserveFrac)));
+      const measuredWidth = Math.max(0, ...metrics.itemWidths) + metrics.horizontalPadding;
+      return {
+        side,
+        reserveW: Math.min(maxWidth, Math.max(minWidth, measuredWidth)),
+        reserveH: 0,
+      };
+    }
     return { side, reserveW: Math.max(80, w * sideReserveFrac), reserveH: 0 };
+  }
+  if (metrics) {
+    const availableWidth = Math.max(1, w - metrics.horizontalPadding);
+    const rowCount = packLegendRows(
+      metrics.itemWidths,
+      availableWidth,
+      metrics.itemGap,
+    ).length;
+    const desiredHeight = rowCount * metrics.rowHeight + metrics.verticalPadding;
+    return {
+      side,
+      reserveW: 0,
+      reserveH: Math.min(h * 0.3, desiredHeight),
+    };
   }
   return { side, reserveW: 0, reserveH: Math.max(18, h * 0.08) };
 }
@@ -384,6 +450,9 @@ export interface FrameParams {
   titleTopPadFrac?: number;
   titleBottomPadFrac?: number;
   legendSideReserveFrac: number;
+  /** Pre-measured automatic legend reserve. Canvas callers pass this so the
+   * pure frame uses the same measured bands the painter consumes. */
+  legendReserve?: ChartLegendReserve | null;
   pad?: ChartPad;
   radialGapFrac?: number;
   honorPlotAreaManualLayout?: boolean;
@@ -473,7 +542,9 @@ export function computeChartFrame(
   const title =
     params.titleBand ??
     chartTitleBand(chart, h, ptToPx, params.titleTopPadFrac ?? 0, params.titleBottomPadFrac ?? 0);
-  const legend = chartLegendReserve(chart, w, h, params.legendSideReserveFrac);
+  const legend = params.legendReserve !== undefined
+    ? params.legendReserve
+    : chartLegendReserve(chart, w, h, params.legendSideReserveFrac);
   const legendBands = chartLegendBands(legend);
   const axisTitles = chartAxisTitleBands(chart, w, h, ptToPx);
 
