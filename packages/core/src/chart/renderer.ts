@@ -3,7 +3,7 @@
 // scatter, waterfall). Ported from the xlsx implementation with pptx
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
-import type { ChartDataLabelOverride, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, ChartTextBox, ChartTrendline, SecondaryValueAxis } from '../types/chart';
+import type { ChartDataLabelOverride, ChartManualLayout, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, ChartTextBox, ChartTrendline, SecondaryValueAxis } from '../types/chart';
 import type { Fill } from '../types/common';
 import {
   AXIS_OUTER_TEXT_MARGIN_PT,
@@ -14,12 +14,15 @@ import {
   chartLegendBands,
   packLegendRows,
   chartAxisTitleBands,
+  axisTitleFontPx,
+  axisTitleRotationRad,
   chartManualOuterAxisInsets,
   categoryTickLabelGapPx,
   axisTitleMargin,
   resolveManualLayoutRect,
   valueTickLabelGapPx,
   type ChartLegendReserve,
+  type ChartAxisTitleSide,
 } from './layout.js';
 import {
   axisLengthNiceStep,
@@ -165,16 +168,14 @@ export function legendEntryColor(
   return chartColor(entryIndex, series[entryIndex]);
 }
 
-/** Draw an axis title at an explicit anchor in the outer gutter band (outside
- *  the tick labels), at its real font size/bold/color. The cat title is
- *  centered under the X axis; the val title is rotated -90° centered to the
- *  left of the Y axis. `anchorX`/`anchorY` are the band center the caller
- *  reserved via catTitleH/valTitleW, so the title never overlaps tick labels. */
+/** Draw an axis title at an explicit anchor in the outer gutter band. The
+ *  side-based compatibility rotation is resolved in one place, with authored
+ *  DrawingML body orientation remaining authoritative. */
 function drawAxisTitle(
   ctx: CanvasRenderingContext2D,
   text: string,
   anchorX: number, anchorY: number,
-  axis: 'cat' | 'val',
+  side: ChartAxisTitleSide,
   fontSizePx: number,
   bold: boolean,
   color: string,
@@ -184,20 +185,46 @@ function drawAxisTitle(
   maxPx: number,
   // Resolved CSS font-family (element face ?? theme heading ?? sans-serif).
   fontFamily = 'sans-serif',
+  authoredRotation?: number | null,
+  authoredVerticalMode?: ChartModel['catAxisTitleVerticalMode'],
+  manualLayout?: ChartManualLayout | null,
+  chartRect?: ChartRect,
 ): void {
   ctx.save();
   ctx.font = `${bold ? 'bold ' : ''}${fontSizePx}px ${fontFamily}`;
   ctx.fillStyle = color;
-  const label = elideToWidth(ctx, text, maxPx);
-  if (axis === 'cat') {
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(label, anchorX, anchorY);
-  } else {
-    ctx.translate(anchorX, anchorY);
-    ctx.rotate(-Math.PI / 2);
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(label, 0, 0);
+  // Automatic titles stay bounded to the axis run. An authored title layout
+  // is authoritative and keeps its complete text rather than being elided by
+  // the automatic plot-width estimate.
+  const label = manualLayout ? text : elideToWidth(ctx, text, maxPx);
+  let resolvedAnchorX = anchorX;
+  let resolvedAnchorY = anchorY;
+  if (manualLayout && chartRect) {
+    const textWidth = ctx.measureText(label).width;
+    const automatic = {
+      x: anchorX - textWidth / 2,
+      y: anchorY - fontSizePx / 2,
+      w: textWidth,
+      h: fontSizePx,
+    };
+    // CT_Title manual layout positions the title box, while Office keeps the
+    // box fitted to its text. Match the existing chart-title rule: x/y win,
+    // authored w/h do not stretch or shrink the text box.
+    const resolved = resolveManualLayoutRect(
+      { ...manualLayout, w: undefined, h: undefined },
+      chartRect,
+      automatic,
+    );
+    if (resolved) {
+      resolvedAnchorX = resolved.x + resolved.w / 2;
+      resolvedAnchorY = resolved.y + resolved.h / 2;
+    }
   }
+  ctx.translate(resolvedAnchorX, resolvedAnchorY);
+  const rotation = axisTitleRotationRad(side, authoredRotation, authoredVerticalMode);
+  if (rotation !== 0) ctx.rotate(rotation);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, 0, 0);
   ctx.restore();
 }
 
@@ -211,13 +238,14 @@ function axisTitleColor(hex: string | null | undefined): string {
  *  anchored in the reserved outer gutter bands so they sit OUTSIDE the tick
  *  labels. `catTitlePx`/`valTitlePx` are the title font sizes the caller used
  *  to size `catTitleH`/`valTitleW`; the anchor centers each title within its
- *  band. cat axis = bottom, val axis = left — the orientation each cartesian
- *  renderer already uses (horizontal bar keeps cat-bottom/val-left too).
+ *  band. Column/line/area/scatter use cat-bottom + val-left. Horizontal bars
+ *  use cat-left + val-bottom because their value axis runs horizontally.
  *  Axis titles default to BOLD — ECMA-376 Part 1 (ST_Style, chart-style
  *  defaults) states "Axis titles and chart titles are bold by default, while
- *  all other chart elements are normal" (same clause sets the default size to
- *  10pt). So an unspecified weight renders bold; only an explicit `b="0"`
- *  un-bolds. Consistent with drawChartTitle, which applies the same default. */
+ *  all other chart elements are normal". So an unspecified weight renders
+ *  bold; only an explicit `b="0"` un-bolds. The separate 10pt size fallback
+ *  is the product compatibility policy in #1228, not a normative OOXML size.
+ *  This remains consistent with drawChartTitle's bold resolution. */
 function drawAxisTitles(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -225,25 +253,53 @@ function drawAxisTitles(
   px0: number, py0: number, pw: number, ph: number,
   legLeftW: number, legBottomH: number,
   catTitlePx: number, valTitlePx: number,
+  horizontalValueAxis = false,
 ): void {
-  if (chart.valAxisTitle) {
-    const anchorX = x + legLeftW + axisTitleMargin(w) + valTitlePx / 2;
-    const anchorY = py0 + ph / 2;
-    // The val title is rotated -90°, so it runs along the plot HEIGHT.
+  const drawPrimaryTitle = (
+    text: string,
+    side: ChartAxisTitleSide,
+    fontSizePx: number,
+    bold: boolean,
+    color: string,
+    fontFamily: string,
+    authoredRotation: number | null | undefined,
+    authoredVerticalMode: ChartModel['catAxisTitleVerticalMode'],
+    manualLayout: ChartManualLayout | null | undefined,
+  ): void => {
+    if (side === 'left') {
+      drawAxisTitle(
+        ctx, text,
+        x + legLeftW + axisTitleMargin(w) + fontSizePx / 2,
+        py0 + ph / 2,
+        side, fontSizePx, bold, color, ph, fontFamily, authoredRotation,
+        authoredVerticalMode, manualLayout, { x, y, w, h },
+      );
+      return;
+    }
     drawAxisTitle(
-      ctx, chart.valAxisTitle, anchorX, anchorY, 'val',
+      ctx, text,
+      px0 + pw / 2,
+      y + h - legBottomH - axisTitleMargin(h) - fontSizePx / 2,
+      side, fontSizePx, bold, color, pw, fontFamily, authoredRotation,
+      authoredVerticalMode, manualLayout, { x, y, w, h },
+    );
+  };
+  if (chart.valAxisTitle) {
+    drawPrimaryTitle(
+      chart.valAxisTitle, horizontalValueAxis ? 'horizontal' : 'left',
       valTitlePx, chart.valAxisTitleFontBold ?? true, axisTitleColor(chart.valAxisTitleFontColor),
-      ph, chartFontFamily(chart, chart.valAxisTitleFontFace, 'major'),
+      chartFontFamily(chart, chart.valAxisTitleFontFace, 'major'), chart.valAxisTitleRotation,
+      chart.valAxisTitleVerticalMode,
+      chart.valAxisTitleManualLayout,
     );
   }
   if (chart.catAxisTitle) {
-    const anchorX = px0 + pw / 2;
-    const anchorY = y + h - legBottomH - axisTitleMargin(h) - catTitlePx / 2;
-    // The cat title runs horizontally along the plot WIDTH.
-    drawAxisTitle(
-      ctx, chart.catAxisTitle, anchorX, anchorY, 'cat',
+    drawPrimaryTitle(
+      chart.catAxisTitle, horizontalValueAxis ? 'left' : 'horizontal',
       catTitlePx, chart.catAxisTitleFontBold ?? true, axisTitleColor(chart.catAxisTitleFontColor),
-      pw, chartFontFamily(chart, chart.catAxisTitleFontFace, 'major'),
+      chartFontFamily(chart, chart.catAxisTitleFontFace, 'major'), chart.catAxisTitleRotation,
+      chart.catAxisTitleVerticalMode,
+      chart.catAxisTitleManualLayout,
     );
   }
 }
@@ -1441,8 +1497,9 @@ function computeSecondaryAxis(
  *  tick marks + labels, and rotated title. Its scale is INDEPENDENT of the
  *  primary axis (its own "nice" major unit; NOT aligned to the primary
  *  gridlines) — PowerPoint places these marks independently. Shared by the
- *  line and area families; the bar renderer keeps its own inline copy for now
- *  (its call sequence is byte-identical to this helper). Callers pass:
+ *  line and area families; the bar renderer keeps its rule/tick loop inline,
+ *  while all families share the title painter and its compatibility defaults.
+ *  Callers pass:
  *  - `secScale`   the resolved scale (from {@link computeSecondaryAxis}),
  *  - `toYSecondary` the value→pixel map (`secScale.makeToY(py0, ph)`),
  *  - `secFontPx` / `secLabelBandW` the tick-label font size + reserved gutter
@@ -1455,8 +1512,8 @@ function drawSecondaryValueAxis(
   sec: SecondaryValueAxis,
   secScale: SecondaryAxisScale,
   toYSecondary: (v: number) => number,
+  chartRect: ChartRect,
   px0: number, py0: number, pw: number, ph: number,
-  h: number,
   ptToPx: number,
   secFontPx: number,
   secLabelBandW: number,
@@ -1493,22 +1550,45 @@ function drawSecondaryValueAxis(
     }
   }
   if (sec.title) {
-    const tFontPx = sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05);
-    ctx.save();
-    ctx.fillStyle = sec.titleFontColor
-      ? `#${sec.titleFontColor}`
-      : (sec.fontColor ? `#${sec.fontColor}` : '#555');
-    const titleFamily = chartFontFamily(chart, sec.titleFontFace, 'major');
-    ctx.font = `${sec.titleFontBold ? 'bold ' : ''}${tFontPx}px ${titleFamily}`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    // Excel keeps both value-axis titles in the same bottom-to-top reading
-    // direction. Mirroring the right-axis placement must not mirror its text.
-    ctx.translate(px0 + pw + secLabelBandW + tFontPx * 0.6, py0 + ph / 2);
-    ctx.rotate(-Math.PI / 2);
-    ctx.fillText(sec.title, 0, 0);
-    ctx.restore();
+    drawSecondaryAxisTitle(
+      ctx, chart, sec, chartRect, px0, py0, pw, ph, secLabelBandW, ptToPx,
+    );
   }
+}
+
+/** Draw a right-side secondary value-axis title. Both the duplicated combo-bar
+ *  path and the shared line/area path use this helper, so the fixed 10pt
+ *  fallback and +90° reading direction cannot drift. */
+function drawSecondaryAxisTitle(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  sec: SecondaryValueAxis,
+  chartRect: ChartRect,
+  px0: number, py0: number, pw: number, ph: number,
+  secLabelBandW: number,
+  ptToPx: number,
+): void {
+  if (!sec.title) return;
+  const fontSizePx = axisTitleFontPx(sec.titleFontSizeHpt, ptToPx);
+  const color = sec.titleFontColor
+    ? `#${sec.titleFontColor}`
+    : (sec.fontColor ? `#${sec.fontColor}` : '#555');
+  drawAxisTitle(
+    ctx,
+    sec.title,
+    px0 + pw + secLabelBandW + fontSizePx * 0.6,
+    py0 + ph / 2,
+    'right',
+    fontSizePx,
+    sec.titleFontBold ?? true,
+    color,
+    ph,
+    chartFontFamily(chart, sec.titleFontFace, 'major'),
+    sec.titleRotation,
+    sec.titleVerticalMode,
+    sec.titleManualLayout,
+    chartRect,
+  );
 }
 
 function drawChartTitle(
@@ -1766,8 +1846,14 @@ function renderBarChart(
   const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
   const catTitlePx = axBands.catFontPx;
   const valTitlePx = axBands.valFontPx;
-  const catTitleH = axBands.catBandH;
-  const valTitleW = axBands.valBandW;
+  // Horizontal bars swap semantic axes: category title belongs in the left
+  // band, while the horizontal value-axis title belongs in the bottom band.
+  const catTitleH = isH
+    ? (chart.valAxisTitle ? valTitlePx + axisTitleMargin(h) + 4 : 0)
+    : axBands.catBandH;
+  const valTitleW = isH
+    ? (chart.catAxisTitle ? catTitlePx + axisTitleMargin(w) + 4 : 0)
+    : axBands.valBandW;
   // Value-axis scales are computed up-front (before `pad`) so the side gutters
   // can be sized to the actual tick-label widths instead of a fixed fraction of
   // the chart width — short numeric labels otherwise leave a big empty gap
@@ -1943,7 +2029,7 @@ function renderBarChart(
   }
   ctx.font = prevFont;
   const secTitleBandW = sec && sec.title
-    ? (sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05)) + 8
+    ? axisTitleFontPx(sec.titleFontSizeHpt, ptToPx) + 8
     : 0;
 
   const pad = {
@@ -2670,19 +2756,7 @@ function renderBarChart(
       }
     }
     if (sec.title) {
-      const tFontPx = sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05);
-      ctx.save();
-      ctx.fillStyle = sec.titleFontColor
-        ? `#${sec.titleFontColor}`
-        : (sec.fontColor ? `#${sec.fontColor}` : '#555');
-      ctx.font = `${sec.titleFontBold ? 'bold ' : ''}${tFontPx}px ${chartFontFamily(chart, sec.titleFontFace, 'major')}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      // Match the primary value-axis reading direction (bottom-to-top).
-      ctx.translate(px0 + pw + secLabelBandW + tFontPx * 0.6, py0 + ph / 2);
-      ctx.rotate(-Math.PI / 2);
-      ctx.fillText(sec.title, 0, 0);
-      ctx.restore();
+      drawSecondaryAxisTitle(ctx, chart, sec, r, px0, py0, pw, ph, secLabelBandW, ptToPx);
     }
   }
 
@@ -2695,7 +2769,10 @@ function renderBarChart(
     ctx, legendChart, leg, x, y, w, h, px0, py0, pw, ph,
     titleH + 2, ptToPx, legendPaints,
   );
-  drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
+  drawAxisTitles(
+    ctx, chart, x, y, w, h, px0, py0, pw, ph,
+    legLeftW, legBottomH, catTitlePx, valTitlePx, isH,
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2835,7 +2912,7 @@ function renderLineChart(
     ctx.font = prevFont;
   }
   const secTitleBandW = sec && sec.title
-    ? (sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05)) + 8
+    ? axisTitleFontPx(sec.titleFontSizeHpt, ptToPx) + 8
     : 0;
 
   const provisionalPlan = planValueAxis(chart, dataMin, dataMax, phEst / ptToPx, pct);
@@ -3143,7 +3220,7 @@ function renderLineChart(
   if (sec && secScale) {
     const primaryLabelColor = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
     drawSecondaryValueAxis(
-      ctx, chart, sec, secScale, toYSecondary, px0, py0, pw, ph, h, ptToPx,
+      ctx, chart, sec, secScale, toYSecondary, r, px0, py0, pw, ph, ptToPx,
       secFontPx, secLabelBandW, primaryLabelColor, chart.date1904,
     );
   }
@@ -3485,7 +3562,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     ctx.font = prevFont;
   }
   const secTitleBandW = sec && sec.title
-    ? (sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05)) + 8
+    ? axisTitleFontPx(sec.titleFontSizeHpt, ptToPx) + 8
     : 0;
 
   // Resolve the primary extent before frame placement so an authored
@@ -3946,7 +4023,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   if (sec && secScale) {
     const primaryLabelColor = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
     drawSecondaryValueAxis(
-      ctx, chart, sec, secScale, toYSecondary, px0, py0, pw, ph, h, ptToPx,
+      ctx, chart, sec, secScale, toYSecondary, r, px0, py0, pw, ph, ptToPx,
       secFontPx, secLabelBandW, primaryLabelColor, chart.date1904,
     );
   }

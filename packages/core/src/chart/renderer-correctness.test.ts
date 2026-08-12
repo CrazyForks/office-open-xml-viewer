@@ -2448,7 +2448,7 @@ describe('CH7 — line/area series honor a secondary value axis (§21.2.2.*)', (
     });
   }
 
-  it('paints the right-axis title bottom-to-top with its authored font', () => {
+  it('paints the right-axis title top-to-bottom with its authored font', () => {
     const rec = ringRecordingCtx();
     const model = comboModel('line', true);
     model.secondaryValAxis = {
@@ -2460,7 +2460,7 @@ describe('CH7 — line/area series honor a secondary value axis (§21.2.2.*)', (
     };
     renderChart(rec.ctx, model, RECT, 1);
 
-    expect(rec.rotates).toContain(-Math.PI / 2);
+    expect(rec.rotates).toContain(Math.PI / 2);
     const title = rec.fontTexts.find(text => text.text === 'Rate');
     expect(title?.font).toContain('9px');
     expect(title?.font).toContain('Aptos Narrow');

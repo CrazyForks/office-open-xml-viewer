@@ -514,12 +514,43 @@ export interface ChartModel {
   catAxisTitleFontBold?: boolean | null;
   /** `<c:catAx><c:title>` run-prop color (hex without '#'). null = default. */
   catAxisTitleFontColor?: string | null;
+  /** Authored `<c:catAx><c:title>` DrawingML `bodyPr@rot` in raw `ST_Angle`
+   *  units (60000ths of a degree). Applied independently from `vert`. */
+  catAxisTitleRotation?: number | null;
+  /** Authored DrawingML `bodyPr@vert`. Omission uses the side-based product
+   *  fallback; explicit modes remain distinguishable from horizontal text. */
+  catAxisTitleVerticalMode?:
+    | 'horz'
+    | 'vert'
+    | 'vert270'
+    | 'wordArtVert'
+    | 'eaVert'
+    | 'mongolianVert'
+    | 'wordArtVertRtl'
+    | null;
+  /** `<c:catAx><c:title><c:layout><c:manualLayout>`. */
+  catAxisTitleManualLayout?: ChartManualLayout | null;
   /** `<c:valAx><c:title>` run-prop font size (hpt). null = renderer default. */
   valAxisTitleFontSizeHpt?: number | null;
   /** `<c:valAx><c:title>` run-prop bold flag. null = not bold. */
   valAxisTitleFontBold?: boolean | null;
   /** `<c:valAx><c:title>` run-prop color (hex without '#'). null = default. */
   valAxisTitleFontColor?: string | null;
+  /** Authored `<c:valAx><c:title>` DrawingML `bodyPr@rot` in raw `ST_Angle`
+   *  units (60000ths of a degree). */
+  valAxisTitleRotation?: number | null;
+  /** Authored DrawingML `bodyPr@vert`. */
+  valAxisTitleVerticalMode?:
+    | 'horz'
+    | 'vert'
+    | 'vert270'
+    | 'wordArtVert'
+    | 'eaVert'
+    | 'mongolianVert'
+    | 'wordArtVertRtl'
+    | null;
+  /** `<c:valAx><c:title><c:layout><c:manualLayout>`. */
+  valAxisTitleManualLayout?: ChartManualLayout | null;
   // ── Chart text font faces (CH10) ─────────────────────────────────────────
   // Each is the `<a:latin typeface>` (ECMA-376 §20.1.4.2.24) resolved from the
   // element's `<c:txPr>`. When absent the renderer falls back to the theme
@@ -1027,6 +1058,20 @@ export interface SecondaryValueAxis {
   /** `<c:title>` run-prop color (hex without '#'). */
   titleFontColor?: string | null;
   titleFontFace?: string | null;
+  /** Authored `<c:title>` DrawingML `bodyPr@rot` in raw `ST_Angle` units. */
+  titleRotation?: number | null;
+  /** Authored `<c:title>` DrawingML `bodyPr@vert`. */
+  titleVerticalMode?:
+    | 'horz'
+    | 'vert'
+    | 'vert270'
+    | 'wordArtVert'
+    | 'eaVert'
+    | 'mongolianVert'
+    | 'wordArtVertRtl'
+    | null;
+  /** `<c:title><c:layout><c:manualLayout>` for this auxiliary axis. */
+  titleManualLayout?: ChartManualLayout | null;
 }
 
 /**

@@ -250,14 +250,76 @@ export function chartLegendBands(leg: ChartLegendReserve | null): ChartLegendBan
 
 // ─── Axis-title bands ────────────────────────────────────────────────────────
 
-/** Axis-title font size (px). Verbatim from renderer.ts `axisTitleFontPx`. */
+/** Product fallback for an axis title whose run/style omits `a:rPr@sz`.
+ *  OOXML does not define application auto-layout text metrics; the fixed 10pt
+ *  value is the intentionally small compatibility policy recorded in #1228. */
+export const AXIS_TITLE_FALLBACK_PT = 10;
+
+/** Axis-title font size (px). Authored/style size is authoritative; omission
+ *  is fixed at 10pt and therefore invariant across chart dimensions. */
 export function axisTitleFontPx(
   sizeHpt: number | null | undefined,
-  h: number,
   ptToPx: number,
 ): number {
-  if (sizeHpt) return (sizeHpt / 100) * ptToPx;
-  return Math.max(8, Math.min(10, h * 0.045));
+  // ST_TextFontSize is 100..400000 hundredths of a point. Keep non-conforming
+  // parser output and direct public-model inputs from creating negative or
+  // unbounded layout bands; invalid values use the same product fallback as
+  // omission. `ptToPx` is a host scale and is validated by the host renderer.
+  if (
+    typeof sizeHpt === 'number' &&
+    Number.isFinite(sizeHpt) &&
+    sizeHpt >= 100 &&
+    sizeHpt <= 400_000
+  ) {
+    return (sizeHpt / 100) * ptToPx;
+  }
+  return AXIS_TITLE_FALLBACK_PT * ptToPx;
+}
+
+export type ChartAxisTitleSide = 'left' | 'right' | 'horizontal';
+
+/** Resolve the title's paint rotation. DrawingML `ST_Angle` is expressed in
+ *  60000ths of a degree; any explicit `bodyPr@rot`/`bodyPr@vert` value has
+ *  priority. With no authoring, left reads bottom-to-top, right top-to-bottom,
+ *  and a top/bottom value axis stays horizontal. */
+export function axisTitleRotationRad(
+  side: ChartAxisTitleSide,
+  authoredRotation: number | null | undefined,
+  authoredVerticalMode?: ChartModel['catAxisTitleVerticalMode'],
+): number {
+  let authoredDegrees = 0;
+  let hasAuthoredOrientation = false;
+  if (authoredVerticalMode != null) {
+    hasAuthoredOrientation = true;
+    // Canvas cannot reproduce East-Asian upright-glyph or WordArt stacking in
+    // this single-line chart-title painter. Preserve those modes in the model
+    // and approximate their vertical flow explicitly instead of silently
+    // treating them as horizontal or applying the automatic side fallback.
+    switch (authoredVerticalMode) {
+      case 'horz':
+        break;
+      case 'vert270':
+        authoredDegrees -= 90;
+        break;
+      case 'vert':
+      case 'wordArtVert':
+      case 'eaVert':
+      case 'mongolianVert':
+      case 'wordArtVertRtl':
+        authoredDegrees += 90;
+        break;
+    }
+  }
+  if (authoredRotation != null && Number.isFinite(authoredRotation)) {
+    authoredDegrees += authoredRotation / 60_000;
+    hasAuthoredOrientation = true;
+  }
+  if (hasAuthoredOrientation) {
+    return authoredDegrees * Math.PI / 180;
+  }
+  if (side === 'left') return -Math.PI / 2;
+  if (side === 'right') return Math.PI / 2;
+  return 0;
 }
 
 /** Margin (px) between the chart's outer edge and an axis title. Verbatim from
@@ -275,8 +337,8 @@ export function chartAxisTitleBands(
   h: number,
   ptToPx: number,
 ): ChartAxisTitleBands {
-  const catFontPx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
-  const valFontPx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
+  const catFontPx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, ptToPx);
+  const valFontPx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, ptToPx);
   return {
     catFontPx,
     valFontPx,

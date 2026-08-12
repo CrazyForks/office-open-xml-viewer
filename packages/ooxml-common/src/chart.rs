@@ -233,12 +233,28 @@ pub struct ChartModel {
     pub cat_axis_title_font_bold: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_title_font_color: Option<String>,
+    /// Authored `<c:catAx><c:title>` `bodyPr@rot` in raw `ST_Angle` units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_title_rotation: Option<i32>,
+    /// Authored `<c:catAx><c:title>` `bodyPr@vert` mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_title_vertical_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_title_manual_layout: Option<ChartManualLayout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_axis_title_font_size_hpt: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_axis_title_font_bold: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_axis_title_font_color: Option<String>,
+    /// Authored `<c:valAx><c:title>` `bodyPr@rot` in raw `ST_Angle` units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_title_rotation: Option<i32>,
+    /// Authored `<c:valAx><c:title>` `bodyPr@vert` mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_title_vertical_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_title_manual_layout: Option<ChartManualLayout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chart_border_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -934,6 +950,12 @@ pub struct SecondaryValueAxis {
     pub title_font_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_font_face: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_rotation: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_vertical_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_manual_layout: Option<ChartManualLayout>,
 }
 
 /// One box-and-whisker series (chartEx `boxWhisker`, MS 2014 chartex ext).
@@ -1800,6 +1822,48 @@ pub fn extract_chart_title_text(node: Node) -> Option<String> {
     }
 }
 
+fn parse_text_font_size_hpt(value: &str) -> Option<i32> {
+    value
+        .parse::<i32>()
+        .ok()
+        .filter(|size| (100..=400_000).contains(size))
+}
+
+/// Title text-property nodes in DrawingML cascade order. The rich text body is
+/// direct authoring and precedes title-level `txPr`; within each scope an
+/// explicit run property precedes its default run property.
+fn title_text_property_nodes<'a, 'input>(title: Node<'a, 'input>) -> Vec<Node<'a, 'input>> {
+    let rich = child(title, "tx").and_then(|tx| child(tx, "rich"));
+    let tx_pr = child(title, "txPr");
+    let mut nodes = Vec::new();
+    for (scope, wanted) in [
+        (rich, "rPr"),
+        (rich, "defRPr"),
+        (tx_pr, "rPr"),
+        (tx_pr, "defRPr"),
+    ] {
+        if let Some(scope) = scope {
+            nodes.extend(
+                scope
+                    .descendants()
+                    .filter(|node| node.is_element() && node.tag_name().name() == wanted),
+            );
+        }
+    }
+    // Preserve compatibility with simplified producers/tests that place the
+    // DrawingML paragraph directly under `<c:title>` without the CT_Tx wrapper.
+    if nodes.is_empty() {
+        for wanted in ["rPr", "defRPr"] {
+            nodes.extend(
+                title
+                    .descendants()
+                    .filter(|node| node.is_element() && node.tag_name().name() == wanted),
+            );
+        }
+    }
+    nodes
+}
+
 /// First `<a:defRPr@sz>` / `<a:rPr@sz>` (hundredths of a point) inside `node`'s
 /// direct-child `<c:title>`. `None` when absent.
 pub fn extract_chart_title_size(node: Node) -> Option<i32> {
@@ -1954,12 +2018,50 @@ pub fn extract_chart_title_color(node: Node, resolver: &dyn ColorResolver) -> Op
     })
 }
 
-/// Axis title text + run props from a `<c:catAx>` / `<c:valAx>` node. Reuses
-/// the chart-title helpers (which scope to the node's direct-child `<c:title>`);
-/// run props are resolved only when title text is present, so an axis with no
-/// title yields all `None`. Returns `(text, size_hpt, bold, srgb_color)`.
+fn extract_axis_title_size(axis_node: Node) -> Option<i32> {
+    let title = child(axis_node, "title")?;
+    title_text_property_nodes(title)
+        .into_iter()
+        .find_map(|props| props.attribute("sz").and_then(parse_text_font_size_hpt))
+}
+
+fn extract_axis_title_bold(axis_node: Node) -> Option<bool> {
+    let title = child(axis_node, "title")?;
+    title_text_property_nodes(title)
+        .into_iter()
+        .find_map(|props| {
+            props
+                .attribute("b")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        })
+}
+
+fn extract_axis_title_srgb(axis_node: Node) -> Option<String> {
+    let title = child(axis_node, "title")?;
+    title_text_property_nodes(title)
+        .into_iter()
+        .find_map(|props| {
+            child(props, "solidFill")
+                .and_then(|fill| child(fill, "srgbClr"))
+                .and_then(|color| color.attribute("val"))
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn extract_axis_title_color(axis_node: Node, resolver: &dyn ColorResolver) -> Option<String> {
+    let title = child(axis_node, "title")?;
+    title_text_property_nodes(title)
+        .into_iter()
+        .find_map(|props| {
+            child(props, "solidFill").and_then(|fill| resolver.resolve_solid_fill(fill))
+        })
+}
+
+/// Axis title text + run props from a `<c:catAx>` / `<c:valAx>` node. Rich
+/// `rPr` wins over rich `defRPr`, then title-level `txPr`, independently for
+/// each property. Run props are resolved only when title text is present.
 ///
-/// NOTE: the color here is srgb-only (via [`extract_chart_title_srgb`]). Prefer
+/// NOTE: the color here is srgb-only. Prefer
 /// [`extract_axis_title_with_props_resolved`] when a `ColorResolver` is in hand
 /// so a `<a:schemeClr>` axis-title color resolves too; this srgb-only variant is
 /// kept for callers without a resolver.
@@ -1970,9 +2072,9 @@ pub fn extract_axis_title_with_props(
         None => (None, None, None, None),
         Some(text) => (
             Some(text),
-            extract_chart_title_size(axis_node),
-            extract_chart_title_bold(axis_node),
-            extract_chart_title_srgb(axis_node),
+            extract_axis_title_size(axis_node),
+            extract_axis_title_bold(axis_node),
+            extract_axis_title_srgb(axis_node),
         ),
     }
 }
@@ -1989,11 +2091,75 @@ pub fn extract_axis_title_with_props_resolved(
         None => (None, None, None, None),
         Some(text) => (
             Some(text),
-            extract_chart_title_size(axis_node),
-            extract_chart_title_bold(axis_node),
-            extract_chart_title_color(axis_node, resolver),
+            extract_axis_title_size(axis_node),
+            extract_axis_title_bold(axis_node),
+            extract_axis_title_color(axis_node, resolver),
         ),
     }
+}
+
+fn axis_title_body_properties<'a, 'input>(
+    axis_node: Node<'a, 'input>,
+) -> Option<(Option<Node<'a, 'input>>, Option<Node<'a, 'input>>)> {
+    let title = child(axis_node, "title")?;
+    let rich_body_pr = child(title, "tx")
+        .and_then(|tx| child(tx, "rich"))
+        .and_then(|rich| child(rich, "bodyPr"));
+    let txpr_body_pr = child(title, "txPr").and_then(|txpr| child(txpr, "bodyPr"));
+    Some((rich_body_pr, txpr_body_pr))
+}
+
+/// Authored DrawingML `bodyPr@rot` for an axis title in raw `ST_Angle` units.
+/// Rich-text body properties win over the title-level `txPr` fallback for this
+/// property only. `vert` is retained independently by
+/// [`extract_axis_title_vertical_mode`] because the two attributes describe
+/// different transforms and may legally coexist.
+pub fn extract_axis_title_rotation(axis_node: Node) -> Option<i32> {
+    let (rich_body_pr, txpr_body_pr) = axis_title_body_properties(axis_node)?;
+    rich_body_pr
+        .into_iter()
+        .chain(txpr_body_pr)
+        .find_map(|body_pr| {
+            body_pr
+                .attribute("rot")
+                .and_then(|value| value.parse::<i32>().ok())
+        })
+}
+
+/// Authored DrawingML `bodyPr@vert` for an axis title. Preserve every schema
+/// mode so the renderer can distinguish horizontal, rigid vertical,
+/// East-Asian/Mongolian vertical, and WordArt stacking. The current canvas
+/// painter explicitly approximates non-rigid vertical modes as vertical flow;
+/// retaining the token avoids silently treating them as horizontal.
+pub fn extract_axis_title_vertical_mode(axis_node: Node) -> Option<String> {
+    let (rich_body_pr, txpr_body_pr) = axis_title_body_properties(axis_node)?;
+    rich_body_pr
+        .into_iter()
+        .chain(txpr_body_pr)
+        .find_map(|body_pr| {
+            body_pr.attribute("vert").and_then(|vertical| {
+                matches!(
+                    vertical,
+                    "horz"
+                        | "vert"
+                        | "vert270"
+                        | "wordArtVert"
+                        | "eaVert"
+                        | "mongolianVert"
+                        | "wordArtVertRtl"
+                )
+                .then(|| vertical.to_string())
+            })
+        })
+}
+
+/// `<c|cx:axis><c|cx:title><c|cx:layout><c|cx:manualLayout>` using the same
+/// CT_ManualLayout resolver as chart/plot titles. Namespace-local names keep
+/// classic charts and ChartEx on one parser path.
+pub fn extract_axis_title_manual_layout(axis_node: Node) -> Option<ChartManualLayout> {
+    let title = child(axis_node, "title")?;
+    let layout = child(title, "layout")?;
+    extract_manual_layout(layout)
 }
 
 // ============================================================================
@@ -2014,6 +2180,14 @@ fn first_latin_typeface(container: Node) -> Option<String> {
     })
 }
 
+/// Resolve a title typeface property-by-property: an authored run face wins
+/// over any paragraph/title default regardless of document order.
+fn title_latin_typeface(container: Node) -> Option<String> {
+    title_text_property_nodes(container)
+        .into_iter()
+        .find_map(first_latin_typeface)
+}
+
 /// `<c:catAx|valAx><c:txPr>…<a:latin typeface>` — the axis tick-label font face.
 /// Scoped to the axis's `<c:txPr>` so an axis *title* face (under `<c:title>`)
 /// is not misread as the tick face. `None` when absent (renderer falls back to
@@ -2025,7 +2199,7 @@ pub fn extract_axis_tick_label_face(axis_node: Node) -> Option<String> {
 /// `<c:catAx|valAx><c:title>…<a:latin typeface>` — the axis-title font face.
 /// Scoped to the axis's direct-child `<c:title>`. `None` when absent.
 pub fn extract_axis_title_face(axis_node: Node) -> Option<String> {
-    first_latin_typeface(child(axis_node, "title")?)
+    title_latin_typeface(child(axis_node, "title")?)
 }
 
 /// First `<c:dLbls><c:txPr>…<a:latin typeface>` in the chart — the data-label
@@ -4040,20 +4214,44 @@ pub fn parse_chartex_part_with_references_and_style_parts(
     let val_axis_title = val_axis
         .and_then(|axis| child(axis, "title"))
         .and_then(chartex_text);
-    let cat_axis_title_font_size_hpt = cat_axis.and_then(extract_chart_title_size);
-    let cat_axis_title_font_bold = cat_axis.and_then(extract_chart_title_bold);
-    let cat_axis_title_font_color =
-        cat_axis.and_then(|axis| extract_chart_title_color(axis, resolver));
-    let cat_axis_title_font_face = cat_axis.and_then(extract_axis_title_face);
-    let val_axis_title_font_size_hpt = val_axis.and_then(extract_chart_title_size);
-    let val_axis_title_font_bold = val_axis.and_then(extract_chart_title_bold);
-    let val_axis_title_font_color =
-        val_axis.and_then(|axis| extract_chart_title_color(axis, resolver));
-    let val_axis_title_font_face = val_axis.and_then(extract_axis_title_face);
+    let inline_cat_title_size = cat_axis.and_then(extract_axis_title_size);
+    let inline_cat_title_bold = cat_axis.and_then(extract_axis_title_bold);
+    let inline_cat_title_color = cat_axis.and_then(|axis| extract_axis_title_color(axis, resolver));
+    let inline_cat_title_face = cat_axis.and_then(extract_axis_title_face);
+    let cat_axis_title_rotation = cat_axis.and_then(extract_axis_title_rotation);
+    let cat_axis_title_vertical_mode = cat_axis.and_then(extract_axis_title_vertical_mode);
+    let cat_axis_title_manual_layout = cat_axis.and_then(extract_axis_title_manual_layout);
+    let inline_val_title_size = val_axis.and_then(extract_axis_title_size);
+    let inline_val_title_bold = val_axis.and_then(extract_axis_title_bold);
+    let inline_val_title_color = val_axis.and_then(|axis| extract_axis_title_color(axis, resolver));
+    let inline_val_title_face = val_axis.and_then(extract_axis_title_face);
+    let val_axis_title_rotation = val_axis.and_then(extract_axis_title_rotation);
+    let val_axis_title_vertical_mode = val_axis.and_then(extract_axis_title_vertical_mode);
+    let val_axis_title_manual_layout = val_axis.and_then(extract_axis_title_manual_layout);
+    let (
+        raw_style_axis_title_size,
+        style_axis_title_bold,
+        style_axis_title_color,
+        style_axis_title_face,
+    ) = extract_chartex_style_text_props(style_element("axisTitle"), resolver);
+    let style_axis_title_size =
+        raw_style_axis_title_size.filter(|size| (100..=400_000).contains(size));
     let (style_cat_size, style_cat_bold, style_cat_color, style_cat_face) =
         extract_chartex_style_text_props(style_element("categoryAxis"), resolver);
     let (style_val_size, style_val_bold, style_val_color, style_val_face) =
         extract_chartex_style_text_props(style_element("valueAxis"), resolver);
+    // Axis-local title runs are authored values and win property-by-property;
+    // the associated Chart Style is only the omitted-property fallback.
+    let cat_axis_title_font_size_hpt = inline_cat_title_size.or(style_axis_title_size);
+    let cat_axis_title_font_bold = inline_cat_title_bold.or(style_axis_title_bold);
+    let cat_axis_title_font_color =
+        inline_cat_title_color.or_else(|| style_axis_title_color.clone());
+    let cat_axis_title_font_face = inline_cat_title_face.or_else(|| style_axis_title_face.clone());
+    let val_axis_title_font_size_hpt = inline_val_title_size.or(style_axis_title_size);
+    let val_axis_title_font_bold = inline_val_title_bold.or(style_axis_title_bold);
+    let val_axis_title_font_color =
+        inline_val_title_color.or_else(|| style_axis_title_color.clone());
+    let val_axis_title_font_face = inline_val_title_face.or_else(|| style_axis_title_face.clone());
     // MS-ODRAWXML 2.8.1.1 defines the associated chartStyle part as the
     // default formatting for every chart element. Excel applies the matching
     // categoryAxis/valueAxis entry to ChartEx tick labels; use the axis-local
@@ -4270,16 +4468,23 @@ pub fn parse_chartex_part_with_references_and_style_parts(
         bubble_scale: None,
         bubble_size_represents: None,
         show_negative_bubbles: None,
-        // chartEx (waterfall/treemap/etc.) has its own axis model and is not
-        // wired for axis titles or an explicit chartSpace border yet.
+        // chartEx (waterfall/treemap/etc.) has its own axis model. Axis-title
+        // text and orientation are shared with the classic renderer model;
+        // an explicit chartSpace border remains unwired here.
         cat_axis_title,
         val_axis_title,
         cat_axis_title_font_size_hpt,
         cat_axis_title_font_bold,
         cat_axis_title_font_color,
+        cat_axis_title_rotation,
+        cat_axis_title_vertical_mode,
+        cat_axis_title_manual_layout,
         val_axis_title_font_size_hpt,
         val_axis_title_font_bold,
         val_axis_title_font_color,
+        val_axis_title_rotation,
+        val_axis_title_vertical_mode,
+        val_axis_title_manual_layout,
         title_font_bold: chartex_title_font_bold,
         cat_axis_font_bold,
         val_axis_font_bold,
@@ -6606,6 +6811,9 @@ pub fn parse_chart_part_with_references(
             title_font_bold: title_bold,
             title_font_color: title_color,
             title_font_face: extract_axis_title_face(ax),
+            title_rotation: extract_axis_title_rotation(ax),
+            title_vertical_mode: extract_axis_title_vertical_mode(ax),
+            title_manual_layout: extract_axis_title_manual_layout(ax),
         }
     };
     let secondary_val_axis = secondary_val_ax.map(&parse_auxiliary_value_axis);
@@ -6668,11 +6876,17 @@ pub fn parse_chart_part_with_references(
     let mut cat_axis_title_bold: Option<bool> = None;
     let mut cat_axis_title_color: Option<String> = None;
     let mut cat_axis_title_face: Option<String> = None;
+    let mut cat_axis_title_rotation: Option<i32> = None;
+    let mut cat_axis_title_vertical_mode: Option<String> = None;
+    let mut cat_axis_title_manual_layout: Option<ChartManualLayout> = None;
     let mut val_axis_title: Option<String> = None;
     let mut val_axis_title_size: Option<i32> = None;
     let mut val_axis_title_bold: Option<bool> = None;
     let mut val_axis_title_color: Option<String> = None;
     let mut val_axis_title_face: Option<String> = None;
+    let mut val_axis_title_rotation: Option<i32> = None;
+    let mut val_axis_title_vertical_mode: Option<String> = None;
+    let mut val_axis_title_manual_layout: Option<ChartManualLayout> = None;
     for ax in plot_area
         .children()
         .filter(|n| n.is_element() && matches!(n.tag_name().name(), "catAx" | "dateAx" | "valAx"))
@@ -6697,6 +6911,9 @@ pub fn parse_chart_part_with_references(
                     cat_axis_title_bold = b;
                     cat_axis_title_color = col;
                     cat_axis_title_face = extract_axis_title_face(ax);
+                    cat_axis_title_rotation = extract_axis_title_rotation(ax);
+                    cat_axis_title_vertical_mode = extract_axis_title_vertical_mode(ax);
+                    cat_axis_title_manual_layout = extract_axis_title_manual_layout(ax);
                 }
             }
         } else if val_axis_title.is_none() {
@@ -6707,6 +6924,9 @@ pub fn parse_chart_part_with_references(
                 val_axis_title_bold = b;
                 val_axis_title_color = col;
                 val_axis_title_face = extract_axis_title_face(ax);
+                val_axis_title_rotation = extract_axis_title_rotation(ax);
+                val_axis_title_vertical_mode = extract_axis_title_vertical_mode(ax);
+                val_axis_title_manual_layout = extract_axis_title_manual_layout(ax);
             }
         }
     }
@@ -6958,9 +7178,15 @@ pub fn parse_chart_part_with_references(
         cat_axis_title_font_size_hpt: cat_axis_title_size,
         cat_axis_title_font_bold: cat_axis_title_bold,
         cat_axis_title_font_color: cat_axis_title_color,
+        cat_axis_title_rotation,
+        cat_axis_title_vertical_mode,
+        cat_axis_title_manual_layout,
         val_axis_title_font_size_hpt: val_axis_title_size,
         val_axis_title_font_bold: val_axis_title_bold,
         val_axis_title_font_color: val_axis_title_color,
+        val_axis_title_rotation,
+        val_axis_title_vertical_mode,
+        val_axis_title_manual_layout,
         title_font_bold,
         cat_axis_font_bold,
         val_axis_font_bold,
@@ -7199,9 +7425,15 @@ mod tests {
             cat_axis_title_font_size_hpt: None,
             cat_axis_title_font_bold: None,
             cat_axis_title_font_color: None,
+            cat_axis_title_rotation: None,
+            cat_axis_title_vertical_mode: None,
+            cat_axis_title_manual_layout: None,
             val_axis_title_font_size_hpt: None,
             val_axis_title_font_bold: None,
             val_axis_title_font_color: None,
+            val_axis_title_rotation: None,
+            val_axis_title_vertical_mode: None,
+            val_axis_title_manual_layout: None,
             chart_border_color: None,
             chart_border_width_emu: None,
             cat_axis_crosses: None,
@@ -7909,6 +8141,78 @@ mod tests {
         assert_eq!(size, Some(1000));
         assert_eq!(bold, Some(true));
         assert_eq!(color.as_deref(), Some("FF0000"));
+    }
+
+    #[test]
+    fn axis_title_run_properties_override_defaults_property_by_property() {
+        let xml = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:title><c:tx><c:rich><a:bodyPr/><a:p>
+              <a:pPr><a:defRPr sz="900" b="0"><a:solidFill><a:srgbClr val="111111"/></a:solidFill><a:latin typeface="Default Face"/></a:defRPr></a:pPr>
+              <a:r><a:rPr sz="1200" b="1"><a:solidFill><a:srgbClr val="222222"/></a:solidFill></a:rPr><a:t>Value</a:t></a:r>
+            </a:p></c:rich></c:tx></c:title>
+        </c:valAx>"#;
+        let d = root_of(xml);
+        let axis = d.root_element();
+        let (_, size, bold, color) = extract_axis_title_with_props(axis);
+        assert_eq!(size, Some(1200));
+        assert_eq!(bold, Some(true));
+        assert_eq!(color.as_deref(), Some("222222"));
+        // The run does not author a face, so that property alone cascades to
+        // defRPr while the other run-authored properties still win.
+        assert_eq!(
+            extract_axis_title_face(axis).as_deref(),
+            Some("Default Face")
+        );
+    }
+
+    #[test]
+    fn axis_title_size_rejects_values_outside_st_text_font_size() {
+        for size in ["NaN", "-1", "0", "99", "400001", "2147483647"] {
+            let xml = format!(
+                r#"<c:valAx xmlns:c="{C_NS}" xmlns:a="{A_NS}"><c:title><c:tx><c:rich><a:bodyPr/><a:p><a:r><a:rPr sz="{size}"/><a:t>Value</a:t></a:r></a:p></c:rich></c:tx></c:title></c:valAx>"#
+            );
+            let d = root_of(&xml);
+            assert_eq!(extract_axis_title_size(d.root_element()), None);
+        }
+        for size in ["100", "400000"] {
+            let xml = format!(
+                r#"<c:valAx xmlns:c="{C_NS}" xmlns:a="{A_NS}"><c:title><c:tx><c:rich><a:bodyPr/><a:p><a:r><a:rPr sz="{size}"/><a:t>Value</a:t></a:r></a:p></c:rich></c:tx></c:title></c:valAx>"#
+            );
+            let d = root_of(&xml);
+            assert_eq!(
+                extract_axis_title_size(d.root_element()),
+                size.parse::<i32>().ok()
+            );
+        }
+    }
+
+    #[test]
+    fn axis_title_rotation_and_vertical_mode_are_independent() {
+        let xml = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:title>
+              <c:tx><c:rich><a:bodyPr vert="vert270"/><a:p><a:r><a:t>Value</a:t></a:r></a:p></c:rich></c:tx>
+              <c:txPr><a:bodyPr rot="1800000"/><a:p/></c:txPr>
+            </c:title>
+        </c:valAx>"#;
+        let d = root_of(xml);
+        assert_eq!(
+            extract_axis_title_rotation(d.root_element()),
+            Some(1_800_000)
+        );
+        assert_eq!(
+            extract_axis_title_vertical_mode(d.root_element()).as_deref(),
+            Some("vert270")
+        );
+
+        let txpr_only = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:title><c:txPr><a:bodyPr vert="eaVert"/><a:p/></c:txPr></c:title>
+        </c:valAx>"#;
+        let txpr_doc = root_of(txpr_only);
+        assert_eq!(extract_axis_title_rotation(txpr_doc.root_element()), None);
+        assert_eq!(
+            extract_axis_title_vertical_mode(txpr_doc.root_element()).as_deref(),
+            Some("eaVert")
+        );
     }
 
     #[test]
@@ -8629,11 +8933,15 @@ mod tests {
                   <c:catAx>
                     <c:axId val="1"/>
                     <c:axPos val="b"/>
+                    <c:title><c:tx><c:rich><a:bodyPr vert="horz"/><a:p><a:r><a:t>Quarter</a:t></a:r></a:p></c:rich></c:tx></c:title>
                     <c:spPr><a:ln><a:solidFill><a:srgbClr val="808080"/></a:solidFill></a:ln></c:spPr>
                   </c:catAx>
                   <c:valAx>
                     <c:axId val="2"/>
                     <c:axPos val="l"/>
+                    <c:title><c:tx><c:rich><a:bodyPr rot="-1800000"/><a:p><a:r><a:t>Revenue</a:t></a:r></a:p></c:rich></c:tx>
+                      <c:layout><c:manualLayout><c:xMode val="edge"/><c:yMode val="edge"/><c:x val="0.2"/><c:y val="0.1"/></c:manualLayout></c:layout>
+                    </c:title>
                     <c:majorGridlines><c:spPr><a:ln w="3175"><a:solidFill><a:schemeClr val="accent3"/></a:solidFill></a:ln></c:spPr></c:majorGridlines>
                     <c:scaling><c:min val="0"/><c:max val="30"/></c:scaling>
                   </c:valAx>
@@ -8687,6 +8995,14 @@ mod tests {
         assert_eq!(m.chart_border_width_emu, Some(19050));
         assert!(!m.cat_axis_hidden);
         assert!(!m.val_axis_hidden);
+        assert_eq!(m.cat_axis_title_rotation, None);
+        assert_eq!(m.cat_axis_title_vertical_mode.as_deref(), Some("horz"));
+        assert_eq!(m.val_axis_title_rotation, Some(-1_800_000));
+        let val_title_layout = m
+            .val_axis_title_manual_layout
+            .expect("value-axis title manual layout");
+        assert_eq!(val_title_layout.x, 0.2);
+        assert_eq!(val_title_layout.y, 0.1);
     }
 
     /// A chart title may be a string reference cache rather than DrawingML
@@ -8828,7 +9144,9 @@ mod tests {
                   <c:minorTickMark val="cross"/>
                   <c:minorGridlines><c:spPr><a:ln w="12700"><a:solidFill><a:srgbClr val="123456"/></a:solidFill><a:prstDash val="dot"/></a:ln></c:spPr></c:minorGridlines>
                   <c:txPr><a:p><a:pPr><a:defRPr><a:latin typeface="Tick Face"/></a:defRPr></a:pPr></a:p></c:txPr>
-                  <c:title><c:tx><c:rich><a:p><a:r><a:rPr sz="900" b="0"><a:latin typeface="Title Face"/></a:rPr><a:t>Margin</a:t></a:r></a:p></c:rich></c:tx></c:title>
+                  <c:title><c:tx><c:rich><a:bodyPr vert="vert"/><a:p><a:r><a:rPr sz="900" b="0"><a:latin typeface="Title Face"/></a:rPr><a:t>Margin</a:t></a:r></a:p></c:rich></c:tx>
+                    <c:layout><c:manualLayout><c:x val="0.1"/><c:y val="0.2"/></c:manualLayout></c:layout>
+                  </c:title>
                 </c:valAx>
               </c:plotArea></c:chart>
             </c:chartSpace>"#
@@ -8867,6 +9185,12 @@ mod tests {
         assert_eq!(sec.title_font_face.as_deref(), Some("Title Face"));
         assert_eq!(sec.title_font_size_hpt, Some(900));
         assert_eq!(sec.title_font_bold, Some(false));
+        assert_eq!(sec.title_rotation, None);
+        assert_eq!(sec.title_vertical_mode.as_deref(), Some("vert"));
+        assert_eq!(
+            sec.title_manual_layout.as_ref().map(|layout| layout.x),
+            Some(0.1)
+        );
         // #738: an explicit `<c:majorUnit>` on the secondary axis (§21.2.2.103)
         // is threaded into the model (was silently dropped before).
         assert_eq!(sec.major_unit, Some(0.25));
@@ -9868,7 +10192,11 @@ mod tests {
                     </cx:series>
                   </cx:plotAreaRegion>
                   <cx:axis id="0"><cx:catScaling gapWidth="0.8"/></cx:axis>
-                  <cx:axis id="1" hidden="1"><cx:valScaling/></cx:axis>
+                  <cx:axis id="1" hidden="1"><cx:valScaling/>
+                    <cx:title><cx:tx><cx:rich><a:bodyPr rot="-1800000"/><a:p><a:r><a:t>Value</a:t></a:r></a:p></cx:rich></cx:tx>
+                      <cx:layout><cx:manualLayout><cx:xMode val="edge"/><cx:yMode val="edge"/><cx:x val="0.3"/><cx:y val="0.4"/></cx:manualLayout></cx:layout>
+                    </cx:title>
+                  </cx:axis>
                 </cx:plotArea>
               </cx:chart>
             </cx:chartSpace>"#
@@ -9921,11 +10249,65 @@ mod tests {
         // Hidden value axis, visible category axis.
         assert!(!m.cat_axis_hidden);
         assert!(m.val_axis_hidden);
+        assert_eq!(m.val_axis_title.as_deref(), Some("Value"));
+        assert_eq!(m.val_axis_title_rotation, Some(-1_800_000));
+        assert_eq!(
+            m.val_axis_title_manual_layout
+                .as_ref()
+                .map(|layout| layout.x),
+            Some(0.3)
+        );
         assert_eq!(m.chartex_connector_lines, Some(false));
         // Theme fallback faces threaded from the resolver (NIT-2: not a direct
         // `theme.get("+mj-lt")`).
         assert_eq!(m.theme_major_font_latin.as_deref(), Some("Calibri Light"));
         assert_eq!(m.theme_minor_font_latin.as_deref(), Some("Calibri"));
+    }
+
+    #[test]
+    fn parse_chartex_axis_title_runs_override_chart_style_property_by_property() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chart><cx:plotArea>
+                <cx:plotAreaRegion><cx:series layoutId="waterfall"/></cx:plotAreaRegion>
+                <cx:axis id="0"><cx:catScaling/><cx:title><cx:tx><cx:rich>
+                  <a:bodyPr/><a:p><a:r><a:t>Category</a:t></a:r></a:p>
+                </cx:rich></cx:tx></cx:title></cx:axis>
+                <cx:axis id="1"><cx:valScaling/><cx:title><cx:tx><cx:rich>
+                  <a:bodyPr/><a:p><a:pPr><a:defRPr><a:solidFill><a:srgbClr val="778899"/></a:solidFill></a:defRPr></a:pPr><a:r><a:rPr sz="1200" b="0"><a:latin typeface="Inline Val"/></a:rPr><a:t>Value</a:t></a:r></a:p>
+                </cx:rich></cx:tx></cx:title></cx:axis>
+              </cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let style = format!(
+            r#"<cs:chartStyle xmlns:cs="{CS_NS}" xmlns:a="{A_NS}">
+              <cs:axisTitle><cs:defRPr sz="1000" b="1"><a:solidFill><a:srgbClr val="445566"/></a:solidFill><a:latin typeface="Style Axis"/></cs:defRPr></cs:axisTitle>
+              <cs:categoryAxis><cs:defRPr sz="700" b="0"><a:latin typeface="Tick Cat"/></cs:defRPr></cs:categoryAxis>
+              <cs:valueAxis><cs:defRPr sz="800" b="0"><a:latin typeface="Tick Val"/></cs:defRPr></cs:valueAxis>
+            </cs:chartStyle>"#
+        );
+        let document = chart_space_of(&xml);
+        let model = parse_chartex_part(document.root_element(), &FixtureResolver, Some(&style))
+            .expect("ChartEx axis titles parse");
+
+        assert_eq!(model.cat_axis_title_font_size_hpt, Some(1000));
+        assert_eq!(model.cat_axis_title_font_bold, Some(true));
+        assert_eq!(model.cat_axis_title_font_color.as_deref(), Some("445566"));
+        assert_eq!(
+            model.cat_axis_title_font_face.as_deref(),
+            Some("Style Axis")
+        );
+        // Inline run and default-run properties win independently over style.
+        assert_eq!(model.val_axis_title_font_size_hpt, Some(1200));
+        assert_eq!(model.val_axis_title_font_bold, Some(false));
+        assert_eq!(model.val_axis_title_font_color.as_deref(), Some("778899"));
+        assert_eq!(
+            model.val_axis_title_font_face.as_deref(),
+            Some("Inline Val")
+        );
+        // Axis tick labels retain their separate category/value style roles.
+        assert_eq!(model.cat_axis_font_size_hpt, Some(700));
+        assert_eq!(model.val_axis_font_size_hpt, Some(800));
     }
 
     #[test]

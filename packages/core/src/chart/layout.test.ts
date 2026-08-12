@@ -13,11 +13,29 @@ import {
   chartLegendReserve,
   chartLegendBands,
   chartAxisTitleBands,
+  axisTitleFontPx,
+  axisTitleRotationRad,
   chartTitleFontPx,
   resolveManualLayoutRect,
   TITLE_TOP_PAD_FONT_FRAC,
   type FrameParams,
 } from './layout.js';
+
+describe('axis-title authored properties', () => {
+  it('uses the fixed fallback for non-finite and out-of-schema font sizes', () => {
+    for (const size of [Number.NEGATIVE_INFINITY, -100, 0, 99, 400_001, Number.POSITIVE_INFINITY, Number.NaN]) {
+      expect(axisTitleFontPx(size, 4 / 3)).toBeCloseTo(40 / 3);
+    }
+    expect(axisTitleFontPx(100, 4 / 3)).toBeCloseTo(4 / 3);
+    expect(axisTitleFontPx(400_000, 1)).toBe(4000);
+  });
+
+  it('composes rot with explicit rigid and non-rigid vertical modes', () => {
+    expect(axisTitleRotationRad('left', 1_800_000, 'vert270')).toBeCloseTo(-Math.PI / 3);
+    expect(axisTitleRotationRad('left', null, 'eaVert')).toBeCloseTo(Math.PI / 2);
+    expect(axisTitleRotationRad('right', null, 'horz')).toBe(0);
+  });
+});
 
 describe('resolveManualLayoutRect', () => {
   const chart = { x: 10, y: 20, w: 400, h: 200 };
@@ -210,16 +228,16 @@ describe('chartLegendReserve + bands', () => {
 describe('chartAxisTitleBands', () => {
   it('is zero on both sides without titles', () => {
     expect(chartAxisTitleBands(model({}), W, H, PTPX)).toEqual({
-      catFontPx: Math.max(8, Math.min(10, H * 0.045)),
-      valFontPx: Math.max(8, Math.min(10, H * 0.045)),
+      catFontPx: 10 * PTPX,
+      valFontPx: 10 * PTPX,
       catBandH: 0,
       valBandW: 0,
     });
   });
   it('reserves fontPx + margin + 4 on the titled side', () => {
     const b = chartAxisTitleBands(model({ catAxisTitle: 'C', valAxisTitle: 'V' }), W, H, PTPX);
-    const catF = Math.max(8, Math.min(10, H * 0.045));
-    const valF = Math.max(8, Math.min(10, H * 0.045));
+    const catF = 10 * PTPX;
+    const valF = 10 * PTPX;
     expect(b.catBandH).toBe(catF + Math.max(8, H * 0.02) + 4);
     expect(b.valBandW).toBe(valF + Math.max(8, W * 0.02) + 4);
   });
