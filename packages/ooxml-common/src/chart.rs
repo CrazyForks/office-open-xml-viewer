@@ -911,6 +911,15 @@ pub struct SecondaryValueAxis {
     /// `<c:valAx><c:minorTickMark val>` (§21.2.2.115). Omitted means none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minor_tick_mark: Option<String>,
+    /// `<c:valAx><c:minorGridlines>` presence and authored line paint.
+    #[serde(default)]
+    pub minor_gridlines: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minor_gridline_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minor_gridline_width_emu: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minor_gridline_dash: Option<String>,
     /// `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit major-unit step on
     /// this secondary axis, overriding the auto "nice" step. `None` ⇒ auto.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6570,6 +6579,8 @@ pub fn parse_chart_part_with_references(
         let (t, title_size, title_bold, title_color) =
             extract_axis_title_with_props_resolved(ax, color_resolver);
         let (line_color, line_width_emu, line_hidden) = extract_axis_line_style(ax, color_resolver);
+        let (minor_gridline_color, minor_gridline_width_emu, minor_gridline_dash) =
+            extract_minor_gridline_style(ax, color_resolver);
         SecondaryValueAxis {
             min,
             max,
@@ -6585,6 +6596,10 @@ pub fn parse_chart_part_with_references(
             line_hidden,
             major_tick_mark: extract_axis_tick_mark_or_default(ax, "majorTickMark"),
             minor_tick_mark: extract_axis_tick_mark(ax, "minorTickMark"),
+            minor_gridlines: axis_has_minor_gridlines(ax),
+            minor_gridline_color,
+            minor_gridline_width_emu,
+            minor_gridline_dash,
             major_unit: extract_axis_major_unit(ax),
             minor_unit: extract_axis_minor_unit(ax),
             title_font_size_hpt: title_size,
@@ -8811,6 +8826,7 @@ mod tests {
                   <c:majorUnit val="0.25"/>
                   <c:minorUnit val="0.05"/>
                   <c:minorTickMark val="cross"/>
+                  <c:minorGridlines><c:spPr><a:ln w="12700"><a:solidFill><a:srgbClr val="123456"/></a:solidFill><a:prstDash val="dot"/></a:ln></c:spPr></c:minorGridlines>
                   <c:txPr><a:p><a:pPr><a:defRPr><a:latin typeface="Tick Face"/></a:defRPr></a:pPr></a:p></c:txPr>
                   <c:title><c:tx><c:rich><a:p><a:r><a:rPr sz="900" b="0"><a:latin typeface="Title Face"/></a:rPr><a:t>Margin</a:t></a:r></a:p></c:rich></c:tx></c:title>
                 </c:valAx>
@@ -8843,6 +8859,10 @@ mod tests {
         assert!(!sec.hidden);
         assert_eq!(sec.font_face.as_deref(), Some("Tick Face"));
         assert_eq!(sec.minor_tick_mark.as_deref(), Some("cross"));
+        assert!(sec.minor_gridlines);
+        assert_eq!(sec.minor_gridline_color.as_deref(), Some("123456"));
+        assert_eq!(sec.minor_gridline_width_emu, Some(12700));
+        assert_eq!(sec.minor_gridline_dash.as_deref(), Some("dot"));
         assert_eq!(sec.minor_unit, Some(0.05));
         assert_eq!(sec.title_font_face.as_deref(), Some("Title Face"));
         assert_eq!(sec.title_font_size_hpt, Some(900));

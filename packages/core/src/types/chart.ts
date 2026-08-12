@@ -755,7 +755,8 @@ export interface ChartModel {
    */
   valAxisMajorUnit?: number | null;
   /** `<c:valAx><c:minorUnit val>` (§21.2.2.112) — explicit minor step. Drives
-   *  minor gridlines/ticks when present. null ⇒ no minor divisions. */
+   *  minor gridlines/ticks when present. When omitted but either feature is
+   *  requested, the renderer uses the automatic major unit divided by five. */
   valAxisMinorUnit?: number | null;
   /** Numeric horizontal-axis major step (scatter/bubble `<c:valAx>`). */
   catAxisMajorUnit?: number | null;
@@ -1004,6 +1005,11 @@ export interface SecondaryValueAxis {
   majorTickMark: string;
   /** `<c:minorTickMark>` — omitted means no minor ticks. */
   minorTickMark?: string | null;
+  /** `<c:minorGridlines>` independently requests plot-area lines. */
+  minorGridlines?: boolean;
+  minorGridlineColor?: string | null;
+  minorGridlineWidthEmu?: number | null;
+  minorGridlineDash?: string | null;
   /**
    * `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit distance between
    * major ticks/gridlines on THIS secondary axis, overriding the Excel-style
@@ -1011,7 +1017,8 @@ export interface SecondaryValueAxis {
    * {@link ChartModel.valAxisMajorUnit} on the primary axis.
    */
   majorUnit?: number | null;
-  /** `<c:valAx><c:minorUnit val>` explicit minor-tick step. */
+  /** `<c:valAx><c:minorUnit val>` explicit minor-tick step; omitted minor ticks
+   *  use this axis's automatic major unit divided by five. */
   minorUnit?: number | null;
   /** `<c:title>` run-prop font size (hpt). */
   titleFontSizeHpt?: number | null;
