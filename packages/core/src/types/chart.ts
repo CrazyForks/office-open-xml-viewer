@@ -339,6 +339,8 @@ export interface ChartExElementStyle {
   lineColors?: Array<string | null> | null;
   lineWidthEmu?: number | null;
   lineHidden?: boolean | null;
+  /** Linked Chart Style uses `NoStyle`, not an authored no-fill outline. */
+  lineNoStyle?: boolean | null;
   lineDash?: string | null;
   lineCap?: string | null;
   lineJoin?: string | null;
@@ -702,6 +704,10 @@ export interface ChartModel {
   /** `<c:valAx><c:minorUnit val>` (§21.2.2.112) — explicit minor step. Drives
    *  minor gridlines/ticks when present. null ⇒ no minor divisions. */
   valAxisMinorUnit?: number | null;
+  /** Numeric horizontal-axis major step (scatter/bubble `<c:valAx>`). */
+  catAxisMajorUnit?: number | null;
+  /** Numeric horizontal-axis minor step (scatter/bubble `<c:valAx>`). */
+  catAxisMinorUnit?: number | null;
   /**
    * `<c:valAx><c:scaling><c:logBase val>` (§21.2.2.98, `ST_LogBase` §21.2.3.25)
    * — logarithmic value-axis base (>= 2). When set, values map to pixels in log
@@ -910,6 +916,8 @@ export interface SecondaryValueAxis {
   fontColor?: string | null;
   /** `<c:txPr>` tick-label font size (hpt). */
   fontSizeHpt?: number | null;
+  /** `<c:txPr>…<a:latin typeface>` tick-label font face. */
+  fontFace?: string | null;
   /** `<c:spPr><a:ln><a:solidFill>` axis-line color (hex without '#'). */
   lineColor?: string | null;
   /** `<c:spPr><a:ln w>` axis-line width in EMU. */
@@ -919,6 +927,8 @@ export interface SecondaryValueAxis {
   lineHidden: boolean;
   /** `<c:majorTickMark>` — "cross" (default) | "out" | "in" | "none". */
   majorTickMark: string;
+  /** `<c:minorTickMark>` — omitted means no minor ticks. */
+  minorTickMark?: string | null;
   /**
    * `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit distance between
    * major ticks/gridlines on THIS secondary axis, overriding the Excel-style
@@ -926,12 +936,15 @@ export interface SecondaryValueAxis {
    * {@link ChartModel.valAxisMajorUnit} on the primary axis.
    */
   majorUnit?: number | null;
+  /** `<c:valAx><c:minorUnit val>` explicit minor-tick step. */
+  minorUnit?: number | null;
   /** `<c:title>` run-prop font size (hpt). */
   titleFontSizeHpt?: number | null;
   /** `<c:title>` run-prop bold flag. */
   titleFontBold?: boolean | null;
   /** `<c:title>` run-prop color (hex without '#'). */
   titleFontColor?: string | null;
+  titleFontFace?: string | null;
 }
 
 /**

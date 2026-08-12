@@ -91,6 +91,11 @@ pub struct ChartExElementStyle {
     pub line_width_emu: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_hidden: Option<bool>,
+    /// The linked Chart Style selected the `NoStyle` line recipe rather than
+    /// an authored `<a:noFill>`. Semantic chart marks may supply their default
+    /// outline in this case; an explicit no-fill must remain suppressed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_no_style: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_dash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -383,6 +388,12 @@ pub struct ChartModel {
     /// `<c:valAx><c:minorUnit val>` (§21.2.2.112) — explicit minor gridline step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_axis_minor_unit: Option<f64>,
+    /// Numeric horizontal-axis units for scatter/bubble, whose X axis is a
+    /// second `<c:valAx>` even though it occupies the category-axis slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_major_unit: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_minor_unit: Option<f64>,
     /// `<c:valAx><c:scaling><c:logBase val>` (§21.2.2.98) — logarithmic value
     /// axis base (>= 2). `None` = linear (byte-stable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -814,21 +825,30 @@ pub struct SecondaryValueAxis {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size_hpt: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_face: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_width_emu: Option<u32>,
     pub line_hidden: bool,
     pub major_tick_mark: String,
+    /// `<c:valAx><c:minorTickMark val>` (§21.2.2.115). Omitted means none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minor_tick_mark: Option<String>,
     /// `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit major-unit step on
     /// this secondary axis, overriding the auto "nice" step. `None` ⇒ auto.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub major_unit: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minor_unit: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_font_size_hpt: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_font_bold: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_font_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_font_face: Option<String>,
 }
 
 /// One box-and-whisker series (chartEx `boxWhisker`, MS 2014 chartex ext).
@@ -2568,10 +2588,13 @@ fn parse_chartex_element_style(
     let fill_recipe = fill_ref.and_then(|reference| chart_style_fill_ref_xml(reference, resolver));
     let fill_recipe_xml = fill_recipe.as_ref().and_then(|recipe| recipe.as_ref().ok());
     let fill_recipe_doc = fill_recipe_xml.and_then(|xml| roxmltree::Document::parse(xml).ok());
+    let local_sp_pr = child(style_node, "spPr");
     let line_recipe = line_ref.and_then(|reference| chart_style_line_ref_xml(reference, resolver));
+    let line_no_style = (matches!(line_recipe.as_ref(), Some(Err(())))
+        && local_sp_pr.and_then(|sp_pr| child(sp_pr, "ln")).is_none())
+    .then_some(true);
     let line_recipe_xml = line_recipe.as_ref().and_then(|recipe| recipe.as_ref().ok());
     let line_recipe_doc = line_recipe_xml.and_then(|xml| roxmltree::Document::parse(xml).ok());
-    let local_sp_pr = child(style_node, "spPr");
     let fill_component_count = local_sp_pr
         .and_then(chart_style_paint_component_count)
         .or_else(|| match fill_recipe.as_ref() {
@@ -2714,6 +2737,7 @@ fn parse_chartex_element_style(
         line_colors,
         line_width_emu,
         line_hidden,
+        line_no_style,
         line_dash,
         line_cap: first_line.and_then(|line| line.cap.clone()),
         line_join,
@@ -3209,7 +3233,7 @@ pub fn parse_chartex_part_with_references_and_style_parts(
         .as_ref()
         .map(|data| data.rows.as_slice())
         .or_else(|| chartex_sunburst.as_ref().map(|data| data.rows.as_slice()));
-    let categories: Vec<String> = hierarchy_rows
+    let mut categories: Vec<String> = hierarchy_rows
         .map(|rows| {
             rows.iter()
                 .map(|row| row.path.last().cloned().unwrap_or_default())
@@ -3233,7 +3257,45 @@ pub fn parse_chartex_part_with_references_and_style_parts(
             }
         })
         .unwrap_or_else(|| vec![None; pt_count]);
+    // ChartEx permits formula-only dimensions. Some producers leave the
+    // category formula dangling while Office still gives the flat cartesian
+    // layouts ordinal categories. Preserve that interoperable behavior only
+    // for layouts whose category axis is visibly ordinal; Pareto deliberately
+    // keeps its unlabeled horizontal axis.
+    if categories.is_empty()
+        && matches!(
+            chart_type.as_str(),
+            "waterfall" | "clusteredColumn" | "funnel"
+        )
+        && raw_values.iter().any(Option::is_some)
+    {
+        categories = (1..=raw_values.len())
+            .map(|index| index.to_string())
+            .collect();
+    }
     let source_number_format = chartex_number_format(root, &["size", "val"], references);
+
+    let series_name = series_node
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "txData")
+        .and_then(|tx_data| {
+            child(tx_data, "v")
+                .and_then(|value| value.text())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    child(tx_data, "f")
+                        .and_then(|formula| formula.text())
+                        .map(str::trim)
+                        .filter(|formula| !formula.is_empty())
+                        .and_then(|formula| references.resolve_strings(formula))
+                        .and_then(|values| {
+                            values.into_iter().find(|value| !value.trim().is_empty())
+                        })
+                })
+        })
+        .unwrap_or_default();
 
     // `<cx:subtotals><cx:idx val>` identifies only points explicitly marked as
     // totals. The first waterfall point starts at zero geometrically, but it is
@@ -3329,7 +3391,7 @@ pub fn parse_chartex_part_with_references_and_style_parts(
     }
 
     let mut series = vec![ChartSeries {
-        name: String::new(),
+        name: series_name,
         values: raw_values,
         color,
         fill_pattern: None,
@@ -3683,6 +3745,8 @@ pub fn parse_chartex_part_with_references_and_style_parts(
         val_axis_minor_gridlines: None,
         val_axis_major_unit,
         val_axis_minor_unit: None,
+        cat_axis_major_unit: None,
+        cat_axis_minor_unit: None,
         val_axis_log_base: None,
         val_axis_orientation: None,
         cat_axis_orientation: None,
@@ -5884,14 +5948,18 @@ pub fn parse_chart_part_with_references(
             font_color: extract_axis_tick_label_color(ax, color_resolver)
                 .or_else(|| chart_text_font_color.clone()),
             font_size_hpt: extract_axis_tick_label_size(ax).or(chart_text_font_size_hpt),
+            font_face: extract_axis_tick_label_face(ax),
             line_color,
             line_width_emu,
             line_hidden,
             major_tick_mark: extract_axis_tick_mark_or_default(ax, "majorTickMark"),
+            minor_tick_mark: extract_axis_tick_mark(ax, "minorTickMark"),
             major_unit: extract_axis_major_unit(ax),
+            minor_unit: extract_axis_minor_unit(ax),
             title_font_size_hpt: title_size,
             title_font_bold: title_bold,
             title_font_color: title_color,
+            title_font_face: extract_axis_title_face(ax),
         }
     };
     let secondary_val_axis = secondary_val_ax.map(&parse_auxiliary_value_axis);
@@ -6091,6 +6159,8 @@ pub fn parse_chart_part_with_references(
     let val_axis_minor_gridlines = val_ax.map(|ax| axis_has_minor_gridlines(ax));
     let val_axis_major_unit = val_ax.and_then(extract_axis_major_unit);
     let val_axis_minor_unit = val_ax.and_then(extract_axis_minor_unit);
+    let cat_axis_major_unit = cat_ax.and_then(extract_axis_major_unit);
+    let cat_axis_minor_unit = cat_ax.and_then(extract_axis_minor_unit);
     let val_axis_log_base = val_ax.and_then(extract_axis_log_base);
     let val_axis_orientation = val_ax.and_then(extract_axis_orientation);
     let cat_axis_orientation = cat_ax.and_then(extract_axis_orientation);
@@ -6276,6 +6346,8 @@ pub fn parse_chart_part_with_references(
         val_axis_minor_gridlines,
         val_axis_major_unit,
         val_axis_minor_unit,
+        cat_axis_major_unit,
+        cat_axis_minor_unit,
         val_axis_log_base,
         val_axis_orientation,
         cat_axis_orientation,
@@ -6498,6 +6570,8 @@ mod tests {
             val_axis_minor_gridlines: None,
             val_axis_major_unit: None,
             val_axis_minor_unit: None,
+            cat_axis_major_unit: None,
+            cat_axis_minor_unit: None,
             val_axis_log_base: None,
             val_axis_orientation: None,
             cat_axis_orientation: None,
@@ -8009,7 +8083,10 @@ mod tests {
                   <c:crosses val="max"/>
                   <c:scaling><c:min val="0"/><c:max val="1"/></c:scaling>
                   <c:majorUnit val="0.25"/>
-                  <c:title><c:tx><c:rich><a:p><a:r><a:t>Margin</a:t></a:r></a:p></c:rich></c:tx></c:title>
+                  <c:minorUnit val="0.05"/>
+                  <c:minorTickMark val="cross"/>
+                  <c:txPr><a:p><a:pPr><a:defRPr><a:latin typeface="Tick Face"/></a:defRPr></a:pPr></a:p></c:txPr>
+                  <c:title><c:tx><c:rich><a:p><a:r><a:rPr sz="900" b="0"><a:latin typeface="Title Face"/></a:rPr><a:t>Margin</a:t></a:r></a:p></c:rich></c:tx></c:title>
                 </c:valAx>
               </c:plotArea></c:chart>
             </c:chartSpace>"#
@@ -8038,6 +8115,12 @@ mod tests {
         assert_eq!(sec.max, Some(1.0));
         assert_eq!(sec.title.as_deref(), Some("Margin"));
         assert!(!sec.hidden);
+        assert_eq!(sec.font_face.as_deref(), Some("Tick Face"));
+        assert_eq!(sec.minor_tick_mark.as_deref(), Some("cross"));
+        assert_eq!(sec.minor_unit, Some(0.05));
+        assert_eq!(sec.title_font_face.as_deref(), Some("Title Face"));
+        assert_eq!(sec.title_font_size_hpt, Some(900));
+        assert_eq!(sec.title_font_bold, Some(false));
         // #738: an explicit `<c:majorUnit>` on the secondary axis (§21.2.2.103)
         // is threaded into the model (was silently dropped before).
         assert_eq!(sec.major_unit, Some(0.25));
@@ -8287,8 +8370,8 @@ mod tests {
                   </c:ser>
                   <c:axId val="1"/><c:axId val="2"/>
                 </c:scatterChart>
-                <c:valAx><c:axId val="1"/><c:crossAx val="2"/></c:valAx>
-                <c:valAx><c:axId val="2"/><c:crossAx val="1"/></c:valAx>
+                <c:valAx><c:axId val="1"/><c:axPos val="b"/><c:majorUnit val="0.5"/><c:minorUnit val="0.1"/><c:crossAx val="2"/></c:valAx>
+                <c:valAx><c:axId val="2"/><c:axPos val="l"/><c:crossAx val="1"/></c:valAx>
               </c:plotArea></c:chart>
             </c:chartSpace>"#
         );
@@ -8296,6 +8379,8 @@ mod tests {
             .expect("scatter chart parses");
         assert_eq!(m.chart_type, "scatter");
         assert_eq!(m.scatter_style.as_deref(), Some("lineMarker"));
+        assert_eq!(m.cat_axis_major_unit, Some(0.5));
+        assert_eq!(m.cat_axis_minor_unit, Some(0.1));
         // Series 0: explicit `<a:noFill/>` line → line_hidden set.
         assert_eq!(
             m.series[0].line_hidden,
@@ -9130,6 +9215,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_chartex_style_distinguishes_no_style_from_explicit_no_fill() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}"><cx:chart><cx:plotArea><cx:plotAreaRegion>
+              <cx:series layoutId="boxWhisker"/>
+            </cx:plotAreaRegion></cx:plotArea></cx:chart></cx:chartSpace>"#
+        );
+        let no_style = format!(
+            r#"<cs:chartStyle xmlns:cs="{CS_NS}" xmlns:a="{A_NS}">
+              <cs:dataPoint><cs:lnRef idx="0"><cs:styleClr val="auto"/></cs:lnRef></cs:dataPoint>
+            </cs:chartStyle>"#
+        );
+        let document = chart_space_of(&xml);
+        let model = parse_chartex_part(document.root_element(), &FixtureResolver, Some(&no_style))
+            .expect("NoStyle line parses");
+        let role = model.chartex_data_point_style.expect("dataPoint role");
+        assert_eq!(role.line_hidden, Some(true));
+        assert_eq!(role.line_no_style, Some(true));
+
+        let explicit_no_fill = no_style.replace(
+            "</cs:dataPoint>",
+            "<cs:spPr><a:ln><a:noFill/></a:ln></cs:spPr></cs:dataPoint>",
+        );
+        let model = parse_chartex_part(
+            document.root_element(),
+            &FixtureResolver,
+            Some(&explicit_no_fill),
+        )
+        .expect("explicit noFill line parses");
+        let role = model.chartex_data_point_style.expect("dataPoint role");
+        assert_eq!(role.line_hidden, Some(true));
+        assert_eq!(role.line_no_style, None);
+    }
+
+    #[test]
     fn parse_chartex_linked_color_style_and_role_specific_paints() {
         let xml = format!(
             r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
@@ -9651,6 +9770,54 @@ mod tests {
             vec![Some(50.0), Some(30.0), Some(20.0)]
         );
         assert_eq!(model.series[0].val_format_code.as_deref(), Some("#,##0"));
+    }
+
+    struct FormulaOnlyFlatResolver;
+
+    impl ChartReferenceResolver for FormulaOnlyFlatResolver {
+        fn resolve_strings(&mut self, formula: &str) -> Option<Vec<String>> {
+            (formula == "_xlchart.name").then(|| vec!["Authored series".to_string()])
+        }
+
+        fn resolve_numbers(&mut self, formula: &str) -> Option<Vec<Option<f64>>> {
+            (formula == "_xlchart.values").then(|| vec![Some(3.0), Some(2.0), Some(1.0)])
+        }
+    }
+
+    #[test]
+    fn parse_chartex_formula_only_flat_layouts_keep_series_name_and_ordinal_categories() {
+        for layout in ["waterfall", "clusteredColumn", "funnel", "paretoLine"] {
+            let xml = format!(
+                r#"<cx:chartSpace xmlns:cx="{CX_NS}">
+                  <cx:chartData><cx:data id="0">
+                    <cx:strDim type="cat"><cx:f>_xlchart.missing</cx:f></cx:strDim>
+                    <cx:numDim type="val"><cx:f>_xlchart.values</cx:f></cx:numDim>
+                  </cx:data></cx:chartData>
+                  <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                    <cx:series layoutId="{layout}"><cx:tx><cx:txData><cx:f>_xlchart.name</cx:f></cx:txData></cx:tx><cx:dataId val="0"/></cx:series>
+                  </cx:plotAreaRegion></cx:plotArea></cx:chart>
+                </cx:chartSpace>"#
+            );
+            let document = chart_space_of(&xml);
+            let mut references = FormulaOnlyFlatResolver;
+            let model = parse_chartex_part_with_references(
+                document.root_element(),
+                &FixtureResolver,
+                None,
+                &mut references,
+            )
+            .expect("formula-only flat ChartEx parses");
+            assert_eq!(model.series[0].name, "Authored series");
+            assert_eq!(
+                model.series[0].values,
+                vec![Some(3.0), Some(2.0), Some(1.0)]
+            );
+            if layout == "paretoLine" {
+                assert!(model.categories.is_empty());
+            } else {
+                assert_eq!(model.categories, vec!["1", "2", "3"]);
+            }
+        }
     }
 
     /// (c) A `<cx:chartSpace>` with no `<cx:series>` is not a chartEx chart —

@@ -1408,6 +1408,7 @@ describe('CH3 — labels are locale-independent (§18.8.30)', () => {
       series: [series({ name: 'W', values: [1234567, 0] })],
       subtotalIndices: [1],
       dataLabelFormatCode: '0',
+      showDataLabels: true,
     }), RECT, 1);
     // The 1234567 subtotal bar's label must be un-grouped ("1234567"), proving
     // it went through the §18.8.30 engine rather than toLocaleString().
@@ -1426,6 +1427,7 @@ describe('CH3 — labels are locale-independent (§18.8.30)', () => {
         valFormatCode: '_(* #,##0.0_);_(* \\(#,##0.0\\);_(* "-"??_);_(@_)',
       })],
       subtotalIndices: [2],
+      showDataLabels: true,
     }), RECT, 1);
     expect(rec.texts.some(t => t.text.includes('(0.2)'))).toBe(true);
     expect(rec.texts.every(t => !t.text.includes('△'))).toBe(true);
@@ -1466,6 +1468,7 @@ describe('CH3 — labels are locale-independent (§18.8.30)', () => {
       dataLabelFontSizeHpt: 900,
       dataLabelFontBold: false,
       dataLabelFontFace: 'Calibri',
+      showDataLabels: true,
       categories: [
         'EBITDA FY21',
         'Change in Revenues',
@@ -1513,6 +1516,43 @@ describe('CH3 — labels are locale-independent (§18.8.30)', () => {
     const connectors = rec.segs.filter(segment => segment.ss.toLowerCase() === '#0070c0');
     expect(connectors).toHaveLength(2);
     expect(connectors.every(segment => segment.lw === 2)).toBe(true);
+  });
+});
+
+describe('ChartEx flat layouts dispatch to semantic renderers', () => {
+  it.each(['clusteredColumn', 'funnel', 'paretoLine'])(
+    '%s does not fall back to the unsupported-chart label',
+    chartType => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: chartType === 'paretoLine' ? [] : ['1', '2', '3'],
+        series: [series({ name: 'Authored series', values: [3, 2, 1] })],
+        showLegend: true,
+        legendPos: 't',
+      }), RECT, 1);
+
+      expect(rec.texts.map(text => text.text)).not.toContain(`Chart: ${chartType}`);
+      if (chartType !== 'paretoLine') {
+        expect(rec.texts.map(text => text.text)).toContain('Authored series');
+      }
+    },
+  );
+
+  it('waterfall uses locale-neutral English semantic legend labels', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'waterfall',
+      categories: ['1', '2', '3'],
+      series: [series({ values: [3, -1, 2] })],
+      subtotalIndices: [2],
+      showLegend: true,
+      legendPos: 't',
+    }), RECT, 1);
+
+    expect(rec.texts.map(text => text.text)).toEqual(
+      expect.arrayContaining(['Increase', 'Decrease', 'Total']),
+    );
   });
 });
 
@@ -1753,6 +1793,24 @@ describe('CH7 — line/area series honor a secondary value axis (§21.2.2.*)', (
       expect(rec.texts.some(t => t.text === 'Rate')).toBe(false);
     });
   }
+
+  it('paints the right-axis title bottom-to-top with its authored font', () => {
+    const rec = ringRecordingCtx();
+    const model = comboModel('line', true);
+    model.secondaryValAxis = {
+      ...(model.secondaryValAxis as NonNullable<ChartModel['secondaryValAxis']>),
+      title: 'Rate',
+      titleFontFace: 'Aptos Narrow',
+      titleFontSizeHpt: 900,
+      titleFontBold: false,
+    };
+    renderChart(rec.ctx, model, RECT, 1);
+
+    expect(rec.rotates).toContain(-Math.PI / 2);
+    const title = rec.fontTexts.find(text => text.text === 'Rate');
+    expect(title?.font).toContain('9px');
+    expect(title?.font).toContain('Aptos Narrow');
+  });
 });
 
 // ─── CH9 — line/area marker detail, error bars, per-point labels, smooth,
@@ -3295,6 +3353,82 @@ describe('#738 — explicit majorUnit honored on every value axis (§21.2.2.103)
   });
 });
 
+describe('authored minor tick marks are painted between major ticks', () => {
+  const shortHorizontal = (segment: Seg): boolean =>
+    Math.abs(segment.y1 - segment.y0) < 0.01
+    && Math.abs(segment.x1 - segment.x0) > 0
+    && Math.abs(segment.x1 - segment.x0) <= 12;
+  const shortVertical = (segment: Seg): boolean =>
+    Math.abs(segment.x1 - segment.x0) < 0.01
+    && Math.abs(segment.y1 - segment.y0) > 0
+    && Math.abs(segment.y1 - segment.y0) <= 12;
+
+  it('draws primary value-axis minor ticks for a line chart', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C'],
+      series: [series({ values: [10, 50, 90] })],
+      valMin: 0,
+      valMax: 100,
+      valAxisMajorUnit: 20,
+      valAxisMinorUnit: 5,
+      valAxisMajorTickMark: 'none',
+      valAxisMinorTickMark: 'cross',
+    }), RECT, 1);
+
+    expect(rec.segs.filter(segment => shortHorizontal(segment) && segment.x0 < RECT.w / 2).length)
+      .toBeGreaterThanOrEqual(15);
+  });
+
+  it('draws minor ticks on the independent secondary value axis', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C'],
+      series: [
+        series({ values: [1, 2, 3] }),
+        series({ values: [10, 50, 90], useSecondaryAxis: true }),
+      ],
+      secondaryValAxis: {
+        min: 0,
+        max: 100,
+        title: null,
+        hidden: false,
+        majorTickMark: 'none',
+        minorTickMark: 'cross',
+        lineHidden: false,
+        majorUnit: 20,
+        minorUnit: 5,
+      },
+    }), RECT, 1);
+
+    expect(rec.segs.filter(segment => shortHorizontal(segment) && segment.x0 > RECT.w / 2).length)
+      .toBeGreaterThanOrEqual(15);
+  });
+
+  it('draws both numeric X- and Y-axis minor ticks for scatter', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'scatter',
+      series: [series({ values: [10, 50, 90], categories: ['10', '50', '90'] })],
+      valMin: 0,
+      valMax: 100,
+      valAxisMajorUnit: 20,
+      valAxisMinorUnit: 5,
+      catAxisMajorUnit: 20,
+      catAxisMinorUnit: 5,
+      valAxisMajorTickMark: 'none',
+      catAxisMajorTickMark: 'none',
+      valAxisMinorTickMark: 'cross',
+      catAxisMinorTickMark: 'cross',
+    }), RECT, 1);
+
+    expect(rec.segs.filter(shortHorizontal).length).toBeGreaterThanOrEqual(15);
+    expect(rec.segs.filter(shortVertical).length).toBeGreaterThanOrEqual(15);
+  });
+});
+
 /** Recording context that counts rotate() calls and captures fillText, for the
  *  category-label rotation / tickLblPos tests. */
 function rotateRecordingCtx(): { ctx: CanvasRenderingContext2D; rotates: number[]; texts: string[] } {
@@ -4199,6 +4333,49 @@ describe('CH15 — chartEx box-and-whisker', () => {
     expect(lineRole.every(segment => segment.lw === 2)).toBe(true);
   });
 
+  it('overlays multiple series at one category using the full category width', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexBox: {
+        categories: ['A'],
+        series: [
+          {
+            name: 'S1', color: '5B9BD5', valuesByCategory: [[1, 2, 3, 4]],
+            meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false,
+            quartileMethod: 'inclusive',
+          },
+          {
+            name: 'S2', color: 'ED7D31', valuesByCategory: [[2, 3, 4, 5]],
+            meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false,
+            quartileMethod: 'inclusive',
+          },
+        ],
+      },
+    }), RECT, 1);
+
+    expect(rec.rects).toHaveLength(2);
+    expect(rec.rects[0].x).toBeCloseTo(rec.rects[1].x, 5);
+    expect(rec.rects[0].w).toBeCloseTo(rec.rects[1].w, 5);
+  });
+
+  it('uses the box/whisker semantic outline for Chart Style NoStyle only', () => {
+    const noStyle = segRecordingCtx();
+    renderChart(noStyle.ctx, boxModel({
+      chartexDataPointStyle: { lineHidden: true, lineNoStyle: true },
+      chartexDataPointLineStyle: { lineHidden: true, lineNoStyle: true },
+      chartexDataPointMarkerStyle: { lineHidden: true, lineNoStyle: true },
+    }), RECT, 1);
+    expect(noStyle.segs.some(segment => segment.ss.toLowerCase() === '#ed7d31')).toBe(true);
+
+    const explicitNoFill = segRecordingCtx();
+    renderChart(explicitNoFill.ctx, boxModel({
+      chartexDataPointStyle: { lineHidden: true },
+      chartexDataPointLineStyle: { lineHidden: true },
+      chartexDataPointMarkerStyle: { lineHidden: true },
+    }), RECT, 1);
+    expect(explicitNoFill.segs.some(segment => segment.ss.toLowerCase() === '#ed7d31')).toBe(false);
+  });
+
   it('lets an explicit series line override a hidden mean-line style', () => {
     const rec = segRecordingCtx();
     renderChart(rec.ctx, boxModel({
@@ -4406,6 +4583,15 @@ describe('CH15 — chartEx sunburst', () => {
     expect(sweeps.length).toBeGreaterThanOrEqual(2);
     expect(sweeps[0] / sweeps[1]).toBeCloseTo(2, 1);
   });
+
+  it('draws an authored top legend outside the rings', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel({ showLegend: true, legendPos: 't' }), RECT, 1);
+    const legendLabels = rec.fontTexts
+      .filter(text => text.fill !== '#ffffff')
+      .map(text => text.text);
+    expect(legendLabels).toEqual(expect.arrayContaining(['Branch A', 'Branch B']));
+  });
 });
 
 // CH15 — chartEx treemap. The parser supplies the same root→leaf rows as
@@ -4443,6 +4629,29 @@ describe('CH15 — chartEx treemap', () => {
     const fills = rec.rects.map(r => r.fs.toUpperCase());
     expect(fills).toContain('#5B9BD5');
     expect(fills).toContain('#ED7D31');
+  });
+
+  it('keeps repeated terminal labels as distinct tiles and legend entries', () => {
+    const rec = recordingCtx();
+    const model = baseModel({
+      chartType: 'treemap',
+      chartexAccents: ['5B9BD5', 'ED7D31', 'A5A5A5'],
+      chartexTreemap: {
+        parentLabelLayout: 'none',
+        rows: [
+          { path: ['Repeat'], size: 3 },
+          { path: ['Repeat'], size: 2 },
+          { path: ['Repeat'], size: 1 },
+        ],
+      },
+      showLegend: true,
+      legendPos: 't',
+    });
+    renderChart(rec.ctx, model, RECT, 1);
+
+    const tiles = rec.rects.filter(rect => rect.w > 20 && rect.h > 20);
+    expect(tiles).toHaveLength(3);
+    expect(rec.texts.filter(text => text.text === 'Repeat').length).toBeGreaterThanOrEqual(6);
   });
 
   it('does not paint padded parent frames for overlapping parent labels', () => {

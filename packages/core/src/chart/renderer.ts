@@ -636,6 +636,29 @@ function drawAxisTick(
   ctx.lineWidth = prevW;
 }
 
+/** Visit authored minor-unit positions between adjacent major ticks. OOXML does
+ * not define the application's automatic minor unit, so an omitted
+ * `<c:minorUnit>` deliberately produces no guessed positions. */
+function forEachMinorTick(
+  min: number,
+  max: number,
+  majorStep: number,
+  minorUnit: number | null | undefined,
+  visit: (value: number) => void,
+): void {
+  const step = minorUnit != null && isFinite(minorUnit) && minorUnit > 0 && minorUnit < majorStep
+    ? minorUnit
+    : 0;
+  if (!(step > 0) || !(majorStep > 0)) return;
+  const epsilon = Math.abs(majorStep) * 1e-8;
+  const firstMajor = Math.ceil((min - epsilon) / majorStep) * majorStep;
+  for (let major = firstMajor; major < max - epsilon; major += majorStep) {
+    for (let value = major + step; value < major + majorStep - epsilon; value += step) {
+      if (value > min + epsilon && value < max - epsilon) visit(value);
+    }
+  }
+}
+
 /** Stroke one horizontal value-axis gridline spanning the plot width at `gy`.
  *  Extracted from the identical stroke the column-bar, line and area renderers
  *  each emitted inline. `isZero` is the caller's "this is the value-0 line"
@@ -1093,6 +1116,7 @@ function computeSecondaryAxis(
  *    none (the primary value-axis label color). */
 function drawSecondaryValueAxis(
   ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
   sec: SecondaryValueAxis,
   secScale: SecondaryAxisScale,
   toYSecondary: (v: number) => number,
@@ -1111,7 +1135,7 @@ function drawSecondaryValueAxis(
     ctx.beginPath(); ctx.moveTo(axX, py0); ctx.lineTo(axX, py0 + ph); ctx.stroke();
   }
   if (!sec.hidden) {
-    ctx.font = `${secFontPx}px sans-serif`;
+    ctx.font = `${secFontPx}px ${chartFontFamily(chart, sec.fontFace, 'minor')}`;
     ctx.fillStyle = sec.fontColor ? `#${sec.fontColor}` : primaryLabelColor;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
@@ -1124,6 +1148,11 @@ function drawSecondaryValueAxis(
       drawAxisTick(ctx, sec.majorTickMark, 'val', axX, gy, secLineColor, secLineW, true, sec.lineHidden);
       ctx.fillText(formatChartValWithCode(sval, sec.formatCode ?? null, date1904), axX + 14, gy);
     }
+    if (sec.minorTickMark && sec.minorTickMark !== 'none') {
+      forEachMinorTick(secScale.min, secScale.max, secScale.step, sec.minorUnit, value => {
+        drawAxisTick(ctx, sec.minorTickMark, 'val', axX, toYSecondary(value), secLineColor, secLineW, true, sec.lineHidden);
+      });
+    }
   }
   if (sec.title) {
     const tFontPx = sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05);
@@ -1131,12 +1160,14 @@ function drawSecondaryValueAxis(
     ctx.fillStyle = sec.titleFontColor
       ? `#${sec.titleFontColor}`
       : (sec.fontColor ? `#${sec.fontColor}` : '#555');
-    ctx.font = `${sec.titleFontBold ? 'bold ' : ''}${tFontPx}px sans-serif`;
+    const titleFamily = chartFontFamily(chart, sec.titleFontFace, 'major');
+    ctx.font = `${sec.titleFontBold ? 'bold ' : ''}${tFontPx}px ${titleFamily}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    // Right-axis title reads top-to-bottom (rotate +90), placed past the labels.
+    // Excel keeps both value-axis titles in the same bottom-to-top reading
+    // direction. Mirroring the right-axis placement must not mirror its text.
     ctx.translate(px0 + pw + secLabelBandW + tFontPx * 0.6, py0 + ph / 2);
-    ctx.rotate(Math.PI / 2);
+    ctx.rotate(-Math.PI / 2);
     ctx.fillText(sec.title, 0, 0);
     ctx.restore();
   }
@@ -1780,6 +1811,15 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         }
       }
     }
+    if (!chart.valAxisHidden && chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
+      forEachMinorTick(axMin, axMax, step, chart.valAxisMinorUnit, value => {
+        if (!isH) {
+          drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', px0, valY(value), valLineColor, valLineW, false, chart.valAxisLineHidden);
+        } else {
+          drawAxisTick(ctx, chart.valAxisMinorTickMark, 'cat', py0 + ph, valX(value), valLineColor, valLineW, false, chart.valAxisLineHidden);
+        }
+      });
+    }
     // Category ticks sit at band BOUNDARIES with crossBetween="between" (the
     // bar/column default) — the dividers between Q1|Q2|Q3|Q4 (n+1 ticks) — and
     // at category centers under "midCat".
@@ -2114,7 +2154,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     const { color: secLineColor, width: secLineW } = resolveAxisLine(sec.lineColor, sec.lineWidthEmu, ptToPx);
     if (!sec.lineHidden) strokeAxis(axX, py0, axX, py0 + ph, secLineColor, secLineW);
     if (!sec.hidden) {
-      ctx.font = `${secFontPx}px sans-serif`;
+      ctx.font = `${secFontPx}px ${chartFontFamily(chart, sec.fontFace, 'minor')}`;
       ctx.fillStyle = sec.fontColor ? `#${sec.fontColor}` : valLabelColor;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
@@ -2126,6 +2166,11 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         drawAxisTick(ctx, sec.majorTickMark, 'val', axX, gy, secLineColor, secLineW, true, sec.lineHidden);
         ctx.fillText(formatChartValWithCode(sval, sec.formatCode ?? null, chart.date1904), axX + 14, gy);
       }
+      if (sec.minorTickMark && sec.minorTickMark !== 'none') {
+        forEachMinorTick(sMin, sMax, sStep, sec.minorUnit, value => {
+          drawAxisTick(ctx, sec.minorTickMark, 'val', axX, toYSecondary(value), secLineColor, secLineW, true, sec.lineHidden);
+        });
+      }
     }
     if (sec.title) {
       const tFontPx = sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05);
@@ -2133,12 +2178,12 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       ctx.fillStyle = sec.titleFontColor
         ? `#${sec.titleFontColor}`
         : (sec.fontColor ? `#${sec.fontColor}` : '#555');
-      ctx.font = `${sec.titleFontBold ? 'bold ' : ''}${tFontPx}px sans-serif`;
+      ctx.font = `${sec.titleFontBold ? 'bold ' : ''}${tFontPx}px ${chartFontFamily(chart, sec.titleFontFace, 'major')}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      // Right-axis title reads top-to-bottom (rotate +90), placed past the labels.
+      // Match the primary value-axis reading direction (bottom-to-top).
       ctx.translate(px0 + pw + secLabelBandW + tFontPx * 0.6, py0 + ph / 2);
-      ctx.rotate(Math.PI / 2);
+      ctx.rotate(-Math.PI / 2);
       ctx.fillText(sec.title, 0, 0);
       ctx.restore();
     }
@@ -2402,6 +2447,11 @@ function renderLineChart(
         ctx.fillText(formatPrimaryValueAxisTick(chart, v, pct), px0 - gap, gy);
       }
     }
+    if (chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
+      forEachMinorTick(plan.min, plan.max, plan.step, chart.valAxisMinorUnit, value => {
+        drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', px0, toY(value), primaryValTickColor, primaryValTickWidth, false, chart.valAxisLineHidden);
+      });
+    }
   }
 
   // Category-axis MAJOR gridlines (`<c:catAx><c:majorGridlines>`, §21.2.2.100):
@@ -2582,7 +2632,7 @@ function renderLineChart(
   if (sec && secScale) {
     const primaryLabelColor = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
     drawSecondaryValueAxis(
-      ctx, sec, secScale, toYSecondary, px0, py0, pw, ph, h, ptToPx,
+      ctx, chart, sec, secScale, toYSecondary, px0, py0, pw, ph, h, ptToPx,
       secFontPx, secLabelBandW, primaryLabelColor, chart.date1904,
     );
   }
@@ -3316,6 +3366,12 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
         : 6;
       ctx.fillText(formatPrimaryValueAxisTick(chart, v, pct), px0 - gap, gy);
     }
+    if (chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
+      const minorUnit = valueAxisUnitInRendererSpace(chart.valAxisMinorUnit, pct);
+      forEachMinorTick(0, axMax, step, minorUnit, value => {
+        drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', px0, toY(value), valLineColor, valLineW, false, chart.valAxisLineHidden);
+      });
+    }
   }
   // Category-axis baseline + value-axis rule. Office treats
   // `<c:*Ax><c:spPr><a:ln><a:noFill>` as suppressing the rule and tick marks
@@ -3378,7 +3434,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   if (sec && secScale) {
     const primaryLabelColor = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
     drawSecondaryValueAxis(
-      ctx, sec, secScale, toYSecondary, px0, py0, pw, ph, h, ptToPx,
+      ctx, chart, sec, secScale, toYSecondary, px0, py0, pw, ph, h, ptToPx,
       secFontPx, secLabelBandW, primaryLabelColor, chart.date1904,
     );
   }
@@ -4650,7 +4706,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
 
   const toX = (v: number) => px0 + ((v - xMin) / (xMax - xMin)) * pw;
   const toY = (v: number) => py0 + ph - ((v - yMin) / (yMax - yMin)) * ph;
-  const xStep = niceStep(xMax - xMin);
+  const xStep = chart.catAxisMajorUnit ?? niceStep(xMax - xMin);
 
   // Each scatter axis is a numeric value axis. Its crossing coordinate comes
   // from the opposite axis's scale (§21.2.2.31 / §21.2.2.32): autoZero uses
@@ -4711,6 +4767,12 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       // equivalent to undefined here (drawAxisTick treats both as a hairline).
       const yAxisLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : undefined;
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', yAxisX, gy, yAxisLineColor, axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx), false, chart.valAxisLineHidden);
+    }
+    if (chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
+      const yAxisLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : undefined;
+      forEachMinorTick(yMin, yMax, yAxisStep, chart.valAxisMinorUnit, value => {
+        drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', yAxisX, toY(value), yAxisLineColor, axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx), false, chart.valAxisLineHidden);
+      });
     }
   }
 
@@ -4782,6 +4844,12 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       }
       const xAxisLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : undefined;
       drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', xAxisY, gx, xAxisLineColor, axisLineWidthPx(chart.catAxisLineWidthEmu, ptToPx), false, chart.catAxisLineHidden);
+    }
+    if (chart.catAxisMinorTickMark && chart.catAxisMinorTickMark !== 'none') {
+      const xAxisLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : undefined;
+      forEachMinorTick(xMin, xMax, xStep, chart.catAxisMinorUnit, value => {
+        drawAxisTick(ctx, chart.catAxisMinorTickMark, 'cat', xAxisY, toX(value), xAxisLineColor, axisLineWidthPx(chart.catAxisLineWidthEmu, ptToPx), false, chart.catAxisLineHidden);
+      });
     }
   }
 
@@ -5587,11 +5655,13 @@ function renderWaterfallChart(
     ? 0
     : maxCategoryLines * (catFontPx + 2) + 4;
 
+  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   const pad = {
-    t: titleBand.bandH + valFontPx / 2 + 2,
-    r: w * 0.02,
-    b: axBands.catBandH + categoryLabelBandH,
-    l: axBands.valBandW + (chart.valAxisHidden ? w * 0.02 : valLabelBandW),
+    t: titleBand.bandH + legTopH + valFontPx / 2 + 2,
+    r: legRightW + w * 0.02,
+    b: legBottomH + axBands.catBandH + categoryLabelBandH,
+    l: legLeftW + axBands.valBandW + (chart.valAxisHidden ? w * 0.02 : valLabelBandW),
   };
   const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleBand,
@@ -5741,33 +5811,34 @@ function renderWaterfallChart(
     }
 
     const rawVal = vals[i] ?? 0;
-    // Locale-independent §18.8.30 formatting, honoring the authored negative
-    // section as-is. Excel accounting formats commonly render negatives in
-    // parentheses; the renderer must not replace that syntax with a triangle.
-    const labelFormat = chart.dataLabelFormatCode ?? chart.series[0]?.valFormatCode ?? null;
-    const labelText = formatChartValWithCode(rawVal, labelFormat, chart.date1904);
-    // Per-data-point label colour from chartEx `<cx:dataLabel idx>` (parsed
-    // into series.dataLabelColors). Falls back to chart.dataLabelFontColor,
-    // then to neutral grey. PowerPoint paints negative-bar labels in
-    // accent1 (red) for sample-2's waterfall.
-    const perPointColor = chart.series[0]?.dataLabelColors?.[i] ?? null;
-    const labelColor = perPointColor
-      ? `#${perPointColor}`
-      : chart.dataLabelFontColor
-        ? `#${chart.dataLabelFontColor}`
-        : '#595959';
-    ctx.fillStyle = labelColor;
-    const dataLabelFontPx = axisLabelPx(chart.dataLabelFontSizeHpt, h, ptToPx);
-    ctx.font = `${chart.dataLabelFontBold ? 'bold ' : ''}${dataLabelFontPx}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
-    ctx.textAlign = 'center';
-    // Negative bars: label sits BELOW the bar (`outEnd` for a negative value
-    // points downward in chartEx). Positive bars and subtotals: label ABOVE.
-    if (rawVal < 0) {
-      ctx.textBaseline = 'top';
-      ctx.fillText(labelText, bx + barW / 2, yBot + 3);
-    } else {
-      ctx.textBaseline = 'bottom';
-      ctx.fillText(labelText, bx + barW / 2, yTop - 3);
+    if (chart.showDataLabels) {
+      // Locale-independent §18.8.30 formatting, honoring the authored negative
+      // section as-is. Excel accounting formats commonly render negatives in
+      // parentheses; the renderer must not replace that syntax with a triangle.
+      const labelFormat = chart.dataLabelFormatCode ?? chart.series[0]?.valFormatCode ?? null;
+      const labelText = formatChartValWithCode(rawVal, labelFormat, chart.date1904);
+      // Per-data-point label colour from chartEx `<cx:dataLabel idx>` (parsed
+      // into series.dataLabelColors). Falls back to chart.dataLabelFontColor,
+      // then to neutral grey.
+      const perPointColor = chart.series[0]?.dataLabelColors?.[i] ?? null;
+      const labelColor = perPointColor
+        ? `#${perPointColor}`
+        : chart.dataLabelFontColor
+          ? `#${chart.dataLabelFontColor}`
+          : '#595959';
+      ctx.fillStyle = labelColor;
+      const dataLabelFontPx = axisLabelPx(chart.dataLabelFontSizeHpt, h, ptToPx);
+      ctx.font = `${chart.dataLabelFontBold ? 'bold ' : ''}${dataLabelFontPx}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
+      ctx.textAlign = 'center';
+      // Negative bars: label sits below the bar; positive bars and subtotals
+      // place it above the bar.
+      if (rawVal < 0) {
+        ctx.textBaseline = 'top';
+        ctx.fillText(labelText, bx + barW / 2, yBot + 3);
+      } else {
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(labelText, bx + barW / 2, yTop - 3);
+      }
     }
   });
 
@@ -5777,7 +5848,7 @@ function renderWaterfallChart(
   // Category (transaction) labels below the bars → category-axis face.
   ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${catFontPx}px ${catFont}`;
   const labelY = py0 + ph + 4;
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < n && !chart.catAxisHidden; i++) {
     const ccx = px0 + gapW * i + gapW / 2;
     const lines = wrapMeasuredText(
       ctx,
@@ -5800,13 +5871,116 @@ function renderWaterfallChart(
     py0,
     pw,
     ph,
-    0,
-    0,
+    legLeftW,
+    legBottomH,
     axBands.catFontPx,
     axBands.valFontPx,
   );
 
+  const legendChart: ChartModel = {
+    ...chart,
+    chartType: 'clusteredBar',
+    series: [
+      { name: 'Increase', values: [], color: colorPos.slice(1) },
+      { name: 'Decrease', values: [], color: colorNeg.slice(1) },
+      { name: 'Total', values: [], color: colorSub.slice(1) },
+    ],
+  };
+  drawLegendForLayout(
+    ctx, legendChart, leg, x, y, w, h, px0, py0, pw, ph,
+    titleBand.bandH + 2, ptToPx, [paintPos, paintNeg, paintSub], shapeRotationDeg,
+  );
+
   ctx.restore();
+}
+
+/** ChartEx `funnel`: one centered horizontal bar per ordinal category. */
+function renderFunnelChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+  shapeRotationDeg: number,
+): void {
+  const values = chart.series[0]?.values ?? [];
+  const n = Math.min(chart.categories.length, values.length);
+  if (n === 0) return;
+  const max = Math.max(0, ...values.slice(0, n).map(value => value ?? 0));
+  if (!(max > 0)) return;
+  const { x, y, w, h } = r;
+  const titleBand = cartesianTitleBand(chart, h, ptToPx);
+  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
+  const catFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
+  ctx.save();
+  ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${catFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+  const labelW = chart.catAxisHidden
+    ? 0
+    : Math.max(...chart.categories.slice(0, n).map(label => ctx.measureText(label).width), 0) + 10;
+  const pad = {
+    t: titleBand.bandH + legTopH + 2,
+    r: legRightW + w * 0.02,
+    b: legBottomH + h * 0.02,
+    l: legLeftW + labelW + w * 0.02,
+  };
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, { titleBand, legendSideReserveFrac: 0.22, pad });
+  drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, frame.title.fontPx);
+  const { px0, py0, pw, ph } = frame.plotRect;
+  const rowH = ph / n;
+  const barH = rowH / (1 + (chart.barGapWidth ?? 50) / 100);
+  const color = `#${chart.series[0]?.color ?? chartExDataPointFill(chart, 0, 1)}`;
+  const paint = chart.series[0]?.color
+    ? { fillType: 'solid', color: chart.series[0].color } as Fill
+    : chartExDataPointPaint(chart, 0, 1);
+  for (let index = 0; index < n; index++) {
+    const value = Math.max(0, values[index] ?? 0);
+    const barW = pw * value / max;
+    const bx = px0 + (pw - barW) / 2;
+    const by = py0 + rowH * index + (rowH - barH) / 2;
+    if (!chart.chartexDataPointStyle?.fillHidden) {
+      ctx.fillStyle = chartExFillStyle(ctx, paint, bx, by, barW, barH, color, shapeRotationDeg);
+      ctx.fillRect(bx, by, barW, barH);
+    }
+    if (!chart.catAxisHidden) {
+      ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#595959';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(chart.categories[index], px0 - 6, by + barH / 2);
+    }
+  }
+  if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
+    const line = resolveAxisLine(chart.catAxisLineColor, chart.catAxisLineWidthEmu, ptToPx);
+    ctx.strokeStyle = line.color;
+    ctx.lineWidth = line.width;
+    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+  }
+  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleBand.bandH + 2, ptToPx, [paint], shapeRotationDeg);
+  ctx.restore();
+}
+
+/** ChartEx Pareto line: cumulative share of the source values. */
+function renderParetoLineChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+): void {
+  const source = chart.series[0];
+  if (!source) return;
+  const raw = source.values.map(value => Math.max(0, value ?? 0));
+  const total = raw.reduce((sum, value) => sum + value, 0);
+  if (!(total > 0)) return;
+  let sum = 0;
+  const cumulative = raw.map(value => (sum += value) / total);
+  renderLineChart(ctx, {
+    ...chart,
+    chartType: 'line',
+    categories: cumulative.map((_value, index) => String(index + 1)),
+    series: [{ ...source, values: cumulative, showMarker: false }],
+    catAxisHidden: true,
+    showLegend: false,
+    valMin: 0,
+  }, r, ptToPx);
 }
 
 // ─── chartEx: box-and-whisker (CH15, MS 2014 chartex ext) ────────────────────
@@ -5965,18 +6139,8 @@ function renderBoxWhiskerChart(
   const cats = box.categories;
   const nCat = cats.length;
   const nSer = box.series.length;
-  const oneBoxPerSeries = nCat === nSer && cats.every((_category, categoryIndex) => {
-    const populatedSeries = box.series
-      .map((series, seriesIndex) => ({
-        seriesIndex,
-        populated: (series.valuesByCategory[categoryIndex]?.length ?? 0) > 0,
-      }))
-      .filter(entry => entry.populated);
-    return populatedSeries.length === 1 && populatedSeries[0].seriesIndex === categoryIndex;
-  });
 
-  // Excel's auto value axis (nice-rounded min/max/step). For the sample data
-  // (−78..128) this yields −100..150 step 50, matching PowerPoint.
+  // Excel's automatic value axis uses nice-rounded bounds and steps.
   const { min: axisMin, max: axisMax, step } = valueAxisScale(
     dataMin, dataMax, chart.valMin, chart.valMax, ph / ptToPx, chart.valAxisMajorUnit,
   );
@@ -6030,10 +6194,9 @@ function renderBoxWhiskerChart(
     ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
   }
 
-  // Category slots; each slot holds `nSer` boxes side by side. `<cx:catScaling
-  // gapWidth>` widens the inter-category gap (parser normalizes the fraction to
-  // the legacy percent, default 150%). The boxes fill the slot minus that gap,
-  // split evenly with a thin inter-box gutter.
+  // Category slots place every series at the same category coordinate. ChartEx
+  // box/whisker series are overlays, not clustered legacy bars; their boxes
+  // therefore share the full authored category width.
   // ChartEx places categorical box/whisker data points at interior category
   // positions, leaving one category interval between each plot edge and the
   // first/last point. `gapWidth` controls the box-vs-gap width inside that
@@ -6041,8 +6204,6 @@ function renderBoxWhiskerChart(
   const slotW = pw / (nCat + 1);
   const gapWidthPct = chart.barGapWidth ?? 150;
   const groupW = slotW / (1 + gapWidthPct / 100);
-  const boxGutter = groupW * 0.06;
-  const clusteredBoxW = (groupW - boxGutter * (nSer - 1)) / nSer;
   const paletteOf = (si: number): string => {
     const fill = box.series[si].color ?? chartExDataPointFill(chart, si, nSer);
     return `#${fill}`;
@@ -6056,8 +6217,8 @@ function renderBoxWhiskerChart(
   const boxGeometry = (ci: number, si: number): { bx: number; boxW: number; cx: number } => {
     const categoryCenterX = px0 + slotW * (ci + 1);
     const slotLeft = categoryCenterX - groupW / 2;
-    const boxW = oneBoxPerSeries ? groupW : clusteredBoxW;
-    const bx = oneBoxPerSeries ? slotLeft : slotLeft + si * (boxW + boxGutter);
+    const boxW = groupW;
+    const bx = slotLeft;
     return { bx, boxW, cx: bx + boxW / 2 };
   };
 
@@ -6117,9 +6278,17 @@ function renderBoxWhiskerChart(
       const markerEdge = chartExStyleColor(chart, markerStyle, 'line', si, nSer);
       const applySeriesLine = (style: ChartExStyle | null | undefined, fallback: string): boolean => {
         const visible = applyChartExLineStyle(ctx, chart, style, si, nSer, fallback, ptToPx);
+        // Chart Style `NoStyle` means that this role supplies no decorative
+        // override. Box/whisker's semantic outline still exists. This is
+        // distinct from an authored `<a:noFill>`, which remains suppressed.
+        if (!visible && style?.lineNoStyle) {
+          ctx.strokeStyle = fallback;
+          ctx.lineWidth = 1;
+          ctx.setLineDash([]);
+        }
         if (s.lineColor) ctx.strokeStyle = edge;
         if (s.lineWidthEmu) ctx.lineWidth = edgeWidth;
-        return visible || s.lineColor != null;
+        return visible || style?.lineNoStyle === true || s.lineColor != null;
       };
       const yQ1 = yOf(stats.q1);
       const yQ3 = yOf(stats.q3);
@@ -6310,7 +6479,10 @@ interface SunburstNode {
  * sizes beneath it). Children keep first-seen (source) order so the ring sweep
  * order matches PowerPoint.
  */
-function buildSunburstTree(rows: { path: string[]; size: number }[]): SunburstNode {
+function buildSunburstTree(
+  rows: { path: string[]; size: number }[],
+  preserveTerminalDuplicates = false,
+): SunburstNode {
   const root: SunburstNode = {
     label: '', value: 0, depth: -1, children: [], branchIndex: -1, labelIndex: -1, a0: 0, a1: 0,
   };
@@ -6326,7 +6498,8 @@ function buildSunburstTree(rows: { path: string[]; size: number }[]): SunburstNo
         index = new Map();
         childIndexes.set(node, index);
       }
-      let child = index.get(label);
+      const preserveNode = preserveTerminalDuplicates && d === row.path.length - 1;
+      let child = preserveNode ? undefined : index.get(label);
       if (!child) {
         child = {
           label,
@@ -6340,7 +6513,7 @@ function buildSunburstTree(rows: { path: string[]; size: number }[]): SunburstNo
           a0: 0, a1: 0,
         };
         node.children.push(child);
-        index.set(label, child);
+        if (!preserveNode) index.set(label, child);
       }
       child.value += row.size;
       node = child;
@@ -6403,9 +6576,8 @@ function renderSunburstChart(
   if (!sb || sb.rows.length === 0) return;
   const { x, y, w, h } = r;
 
-  // Radial frame (title band on top, no legend — Office draws sunburst without
-  // one). Reuse the pie frame params so the geometry matches the other radial
-  // charts.
+  // Reuse the radial frame so an authored top legend reserves space above the
+  // rings instead of being painted over the circle.
   const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleTopPadFrac: 0.035,
     titleBottomPadFrac: 0.035,
@@ -6572,6 +6744,33 @@ function renderSunburstChart(
     }
   }
   ctx.restore();
+
+  const legendChart: ChartModel = {
+    ...chart,
+    chartType: 'clusteredBar',
+    series: root.children.map((node, index) => ({
+      name: node.label,
+      values: [],
+      color: chartExDataPointFill(chart, index, root.children.length),
+    })),
+  };
+  drawLegendForLayout(
+    ctx,
+    legendChart,
+    frame.legend,
+    x,
+    y,
+    w,
+    h,
+    px0,
+    py0,
+    pw,
+    ph,
+    frame.title.bandH + 2,
+    ptToPx,
+    root.children.map((_, index) => branchPaint(index)),
+    shapeRotationDeg,
+  );
 }
 
 // ─── chartEx: treemap (CH15, MS 2014 chartex ext) ───────────────────────────
@@ -6676,7 +6875,9 @@ function renderTreemapChart(
     radialGapFrac: 0.015,
   });
   drawChartTitleForLayout(ctx, chart, r.x, r.y, r.w, r.h, r.y + frame.title.topPad, frame.title.fontPx);
-  const root = buildSunburstTree(treemap.rows);
+  // A treemap data point remains a distinct tile even when its terminal label
+  // repeats. Only parent path components are grouping keys.
+  const root = buildSunburstTree(treemap.rows, true);
   if (root.value <= 0 || root.children.length === 0) return;
 
   const fontFamily = chartFontFamily(chart, chart.dataLabelFontFace, 'minor');
@@ -6836,6 +7037,33 @@ function renderTreemapChart(
     paint(tile.node, tile.rect);
   }
   ctx.restore();
+
+  const legendChart: ChartModel = {
+    ...chart,
+    chartType: 'clusteredBar',
+    series: root.children.map((node, index) => ({
+      name: node.label,
+      values: [],
+      color: chartExDataPointFill(chart, index, root.children.length),
+    })),
+  };
+  drawLegendForLayout(
+    ctx,
+    legendChart,
+    frame.legend,
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    px0,
+    py0,
+    pw,
+    ph,
+    frame.title.bandH + 2,
+    ptToPx,
+    root.children.map(node => chartExDataPointPaint(chart, node.branchIndex, root.children.length)),
+    shapeRotationDeg,
+  );
 }
 
 /** Render text shapes from the chart's related Chart Drawing part.
@@ -7073,6 +7301,12 @@ export function renderChart(
         renderScatterChart(ctx, chart, rect, ptToPx); break;
       case 'waterfall':
         renderWaterfallChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
+      case 'clusteredColumn':
+        renderBarChart(ctx, { ...chart, chartType: 'clusteredBar' }, rect, ptToPx); break;
+      case 'funnel':
+        renderFunnelChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
+      case 'paretoLine':
+        renderParetoLineChart(ctx, chart, rect, ptToPx); break;
       case 'stock':
         renderStockChart(ctx, chart, rect, ptToPx); break;
       case 'boxWhisker':
