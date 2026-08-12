@@ -351,6 +351,166 @@ describe('bar chart authored layout and fills', () => {
     expect(rec.strokeRects.filter(rect => rect.ss === '#595959' && rect.lw === 1)).toHaveLength(2);
   });
 
+  it('wraps a measured top legend into centered in-bounds rows without changing authored text style', () => {
+    const names = Array.from({ length: 12 }, (_, index) =>
+      `Series ${String(index + 1).padStart(2, '0')} alpha`
+    );
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A'],
+      series: names.map((name, index) => series({ name, values: [index + 1] })),
+      showLegend: true,
+      legendPos: 't',
+      legendFontSizeHpt: 1200,
+      legendFontBold: true,
+      legendFontFace: 'Legend Face',
+    }), RECT, 1);
+
+    const labels = rec.texts.filter(text => text.text.startsWith('Series '));
+    expect(labels.map(label => label.text)).toEqual(names);
+    expect(new Set(labels.map(label => Math.round(label.y))).size).toBeGreaterThan(1);
+    expect(labels.every(label =>
+      label.x >= RECT.x
+      && label.x + (label.width ?? 0) <= RECT.x + RECT.w
+      && label.y >= RECT.y
+      && label.y <= RECT.y + RECT.h
+    )).toBe(true);
+    expect(labels.every(label =>
+      label.font?.includes('bold 12px') && label.font.includes('Legend Face')
+    )).toBe(true);
+  });
+
+  it('uses the painted top-legend content width when reserving wrapped rows', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A'],
+      series: [
+        series({ name: 'AAAAA', values: [1] }),
+        series({ name: 'BBBBB', values: [2] }),
+      ],
+      showLegend: true,
+      legendPos: 't',
+      legendFontSizeHpt: 1000,
+    }), { x: 0, y: 0, w: 106, h: 200 }, 1);
+
+    // At this width the two entries fit inside w - 4 but not the actual
+    // w - 8 content rectangle, so both rows must be reserved and painted.
+    const labels = rec.texts.filter(text => text.text === 'AAAAA' || text.text === 'BBBBB');
+    expect(labels.map(label => label.text)).toEqual(['AAAAA', 'BBBBB']);
+    expect(labels[1].y).toBeGreaterThan(labels[0].y);
+  });
+
+  it('keeps a long category-driven side legend to complete, non-overlapping rows inside the chart', () => {
+    const categories = Array.from({ length: 20 }, (_, index) =>
+      `Category ${String(index + 1).padStart(2, '0')} with a deliberately long label`
+    );
+    const rect = { x: 0, y: 0, w: 320, h: 180 };
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories,
+      series: [series({ values: categories.map((_, index) => index + 1) })],
+      showLegend: true,
+      legendPos: 'r',
+      legendFontSizeHpt: 1000,
+    }), rect, 1);
+
+    const labels = rec.texts.filter(text => text.text.startsWith('Category '));
+    expect(labels.length).toBeGreaterThan(0);
+    expect(labels.length).toBeLessThan(categories.length);
+    const ys = labels.map(label => label.y);
+    expect(ys.every((value, index) => index === 0 || value - ys[index - 1] >= 13.9)).toBe(true);
+    expect(labels.every(label =>
+      label.x >= rect.x
+      && label.x + (label.width ?? 0) <= rect.x + rect.w
+      && label.y >= rect.y
+      && label.y <= rect.y + rect.h
+    )).toBe(true);
+    expect(labels.every(label => label.text.endsWith('…'))).toBe(true);
+  });
+
+  it('uses chart categories when an empty pie-series category cache would under-measure top rows', () => {
+    const categories = ['Category Alpha', 'Category Beta'];
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories,
+      series: [series({ values: [1, 2], categories: [] })],
+      showLegend: true,
+      legendPos: 't',
+      legendFontSizeHpt: 1000,
+    }), { x: 0, y: 0, w: 200, h: 200 }, 1);
+
+    const labels = rec.texts.filter(text => categories.includes(text.text));
+    expect(labels.map(label => label.text)).toEqual(categories);
+    expect(labels[1].y).toBeGreaterThan(labels[0].y);
+  });
+
+  it('measures side-legend width from fallback chart categories before elision', () => {
+    const categories = ['Category Alpha Long', 'Category Beta Long'];
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'doughnut',
+      categories,
+      series: [series({ values: [1, 2], categories: [] })],
+      showLegend: true,
+      legendPos: 'r',
+      legendFontSizeHpt: 1000,
+    }), RECT, 1);
+
+    const labels = rec.texts
+      .map(text => text.text)
+      .filter(text => text.startsWith('Category '));
+    expect(labels).toEqual(categories);
+  });
+
+  it('does not paint an automatic side-legend key outside a very narrow chart', () => {
+    const rect = { x: 0, y: 0, w: 20, h: 200 };
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['A'],
+      series: [series({ values: [1] })],
+      showLegend: true,
+      legendPos: 'r',
+    }), rect, 1);
+
+    expect(rec.rects.every(item =>
+      item.x >= rect.x
+      && item.x + item.w <= rect.x + rect.w
+      && item.y >= rect.y
+      && item.y + item.h <= rect.y + rect.h
+    )).toBe(true);
+  });
+
+  it('keeps a valid manual legend rectangle authoritative over automatic side packing', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A'],
+      series: ['Manual A', 'Manual B', 'Manual C'].map((name, index) =>
+        series({ name, values: [index + 1] })
+      ),
+      showLegend: true,
+      legendPos: 'r',
+      legendManualLayout: {
+        xMode: 'edge', yMode: 'edge', wMode: 'factor', hMode: 'factor',
+        x: 0.1, y: 0.1, w: 0.5, h: 0.15,
+      },
+    }), RECT, 1);
+
+    const labels = rec.texts.filter(text => text.text.startsWith('Manual '));
+    expect(labels).toHaveLength(3);
+    expect(labels.every(label =>
+      label.x >= RECT.w * 0.1
+      && label.x + (label.width ?? 0) <= RECT.w * 0.6
+      && label.y >= RECT.h * 0.1
+      && label.y <= RECT.h * 0.25
+    )).toBe(true);
+  });
+
   it('renders scatter-series markers and labels over a reversed horizontal category axis', () => {
     const rec = recordingCtx();
     const hiddenAxis = {
@@ -1571,6 +1731,35 @@ describe('CH3 — labels are locale-independent (§18.8.30)', () => {
 });
 
 describe('ChartEx flat layouts dispatch to semantic renderers', () => {
+  it('measures the same semantic ChartEx column legend that it paints', () => {
+    const renderPlot = (extraSeries: ChartSeries[]): RectCall => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'clusteredColumn',
+        categories: ['A'],
+        series: [
+          series({ name: 'Bar', values: [1] }),
+          ...extraSeries,
+        ],
+        showLegend: true,
+        legendPos: 't',
+        plotAreaBg: 'ABCDEF',
+        chartexDataPointStyle: { fillColors: ['4472C4'] },
+      }), { x: 0, y: 0, w: 240, h: 200 }, 1);
+      return rec.rects.find(rect => rect.fs.toUpperCase() === '#ABCDEF') as RectCall;
+    };
+
+    const semanticOnly = renderPlot([]);
+    const withNonLegendLine = renderPlot([
+      series({
+        name: 'A line series name that must not participate in the ChartEx column legend reserve',
+        values: [1],
+        seriesType: 'line',
+      }),
+    ]);
+    expect(withNonLegendLine).toEqual(semanticOnly);
+  });
+
   it('resolves clustered-column automatic style colors by series, not category', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -2002,6 +2191,23 @@ describe('ChartEx flat layouts dispatch to semantic renderers', () => {
     }), RECT, 1);
     expect(rec.texts.map(text => text.text)).toContain('Missing');
     expect(rec.texts.map(text => text.text)).not.toContain('0');
+  });
+
+  it('measures the same semantic waterfall entries that it paints', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'waterfall',
+      categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [3, -1, 2] })],
+      subtotalIndices: [2],
+      showLegend: true,
+      legendPos: 't',
+    }), { x: 0, y: 0, w: 150, h: 200 }, 1);
+
+    const semanticLabels = rec.texts
+      .map(text => text.text)
+      .filter(text => ['Increase', 'Decrease', 'Total'].includes(text));
+    expect(semanticLabels).toEqual(['Increase', 'Decrease', 'Total']);
   });
 });
 

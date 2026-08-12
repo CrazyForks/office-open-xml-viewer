@@ -12,6 +12,7 @@ import {
   catAxisLabelBandH,
   chartLegendReserve,
   chartLegendBands,
+  packLegendRows,
   chartAxisTitleBands,
   chartManualOuterAxisInsets,
   categoryTickLabelGapPx,
@@ -438,10 +439,9 @@ function buildLegendEntries(
   }));
 }
 
-/** Resolved legend text styling (CH10). All optional so the default (no
- *  `<c:legend><c:txPr>`) reproduces the historical `sans-serif` / `#333`
- *  legend byte-for-byte. `fontFamily` already carries the theme-body fallback;
- *  `sizePx` overrides the proportional size only when the file set one. */
+/** Resolved legend text styling (CH10). `fontFamily` already carries the
+ *  theme-body fallback; `sizePx` overrides the shared automatic 10pt size only
+ *  when the file authored one. */
 interface LegendTextStyle {
   fontFamily: string;
   color: string;
@@ -455,6 +455,61 @@ const DEFAULT_LEGEND_STYLE: LegendTextStyle = {
   bold: false,
   sizePx: null,
 };
+
+const LEGEND_SWATCH_TEXT_GAP = 4;
+const LEGEND_ITEM_GAP = 12;
+const LEGEND_ROW_EXTRA_PX = 4;
+const LEGEND_HORIZONTAL_INSET = 4;
+const LEGEND_HORIZONTAL_PADDING = LEGEND_HORIZONTAL_INSET * 2;
+const LEGEND_VERTICAL_PADDING = 4;
+const LEGEND_SIDE_PADDING = 8;
+
+function legendFontSizePx(style: LegendTextStyle, ptToPx: number): number {
+  return style.sizePx ?? 10 * ptToPx;
+}
+
+function legendSwatchWidths(entries: readonly LegendEntry[], fontSize: number): number[] {
+  return entries.map(entry =>
+    entry.swatchStyle === 'line' ? fontSize * 1.6 : Math.min(10, fontSize)
+  );
+}
+
+/** Resolve the shared automatic legend reserve from real Canvas text metrics. */
+function measuredLegendReserve(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  w: number,
+  h: number,
+  sideReserveFrac: number,
+  ptToPx: number,
+): ChartLegendReserve | null {
+  if (!chart.showLegend) return null;
+  const style = legendTextStyle(chart, ptToPx);
+  const entries = buildLegendEntries(
+    chart.series,
+    chart.chartType,
+    chart.scatterStyle,
+    chartVariesColorsByPoint(chart),
+    chart.categories,
+  );
+  const fontSize = legendFontSizePx(style, ptToPx);
+  const swatches = legendSwatchWidths(entries, fontSize);
+  ctx.save();
+  ctx.font = `${style.bold ? 'bold ' : ''}${fontSize}px ${style.fontFamily}`;
+  const itemWidths = entries.map((entry, index) =>
+    swatches[index] + LEGEND_SWATCH_TEXT_GAP + ctx.measureText(entry.label).width
+  );
+  ctx.restore();
+  const pos = chart.legendPos ?? 'r';
+  const horizontal = pos === 't' || pos === 'b';
+  return chartLegendReserve(chart, w, h, sideReserveFrac, {
+    itemWidths,
+    rowHeight: fontSize + LEGEND_ROW_EXTRA_PX,
+    itemGap: LEGEND_ITEM_GAP,
+    horizontalPadding: horizontal ? LEGEND_HORIZONTAL_PADDING : LEGEND_SIDE_PADDING,
+    verticalPadding: LEGEND_VERTICAL_PADDING,
+  });
+}
 
 function drawLegend(
   ctx: CanvasRenderingContext2D,
@@ -470,7 +525,7 @@ function drawLegend(
   fillPaints: ReadonlyArray<Fill | null | undefined> = [],
   shapeRotationDeg = 0,
 ): void {
-  const gap = 4;
+  const gap = LEGEND_SWATCH_TEXT_GAP;
   const entries = buildLegendEntries(
     series,
     chartType,
@@ -480,52 +535,66 @@ function drawLegend(
     fillPaints,
   );
   const boldPrefix = style.bold ? 'bold ' : '';
+  const fontSize = legendFontSizePx(style, ptToPx);
+  ctx.font = `${boldPrefix}${fontSize}px ${style.fontFamily}`;
+  ctx.textBaseline = 'middle';
+  const rowH = fontSize + LEGEND_ROW_EXTRA_PX;
+  const swatches = legendSwatchWidths(entries, fontSize);
+  const itemWidths = entries.map((entry, index) =>
+    swatches[index] + gap + ctx.measureText(entry.label).width
+  );
   if (orient === 'horizontal') {
-    // Excel lays a bottom/top legend as a single horizontal row, centered.
-    const fontSize = style.sizePx ?? Math.max(9, Math.min(12, lh * 0.7));
-    ctx.font = `${boldPrefix}${fontSize}px ${style.fontFamily}`;
-    ctx.textBaseline = 'middle';
-    const itemGap = 12;
-    const swatches = entries.map(entry => entry.swatchStyle === 'line' ? fontSize * 1.6 : Math.min(10, fontSize));
-    // Cap each entry's text at the full legend strip (minus its own swatch+gap)
-    // so only a single name that would span the *entire* strip is elided — the
-    // width-based replacement for the old slice(0, 30) runaway guard. Normal
-    // multi-entry labels are left intact (a shorter sibling does not shrink a
-    // longer one's budget); as before, entries whose combined width exceeds the
-    // strip simply center-overflow rather than being clipped. Elide once and
-    // reuse for both the width calc and the draw so the two never disagree.
-    const nEntries = Math.max(1, entries.length);
-    const maxTextPx = lw - Math.max(...swatches, 0) - gap;
-    const labels = entries.map((e) => elideToWidth(ctx, e.label, maxTextPx));
-    const itemWidths = labels.map((l, i) => swatches[i] + gap + ctx.measureText(l).width);
-    const total = itemWidths.reduce((a, b) => a + b, 0) + itemGap * (nEntries - 1);
-    let rx = lx + (lw - total) / 2;
-    const ry = ly + lh / 2;
-    for (let i = 0; i < entries.length; i++) {
-      const sw = swatches[i];
-      drawLegendSwatch(
-        ctx, entries[i].swatchStyle, entries[i].color,
-        rx, ry - fontSize / 2, sw, fontSize,
-        entries[i].marker, entries[i].fillPaint,
-        entries[i].outlineColor, entries[i].outlineWidthEmu, ptToPx, shapeRotationDeg,
-      );
-      ctx.fillStyle = style.color; ctx.textAlign = 'left';
-      ctx.fillText(labels[i], rx + sw + gap, ry);
-      rx += itemWidths[i] + itemGap;
+    const rows = packLegendRows(itemWidths, lw, LEGEND_ITEM_GAP);
+    const visibleRows = rows.slice(
+      0,
+      Math.max(0, Math.floor((lh - LEGEND_VERTICAL_PADDING) / rowH)),
+    );
+    const top = ly + LEGEND_VERTICAL_PADDING / 2;
+    for (let rowIndex = 0; rowIndex < visibleRows.length; rowIndex++) {
+      const row = visibleRows[rowIndex];
+      const widths = row.map(index => Math.min(lw, itemWidths[index]));
+      const total = widths.reduce((sum, width) => sum + width, 0)
+        + LEGEND_ITEM_GAP * Math.max(0, row.length - 1);
+      let rx = lx + Math.max(0, (lw - total) / 2);
+      const ry = top + rowIndex * rowH + rowH / 2;
+      for (let item = 0; item < row.length; item++) {
+        const index = row[item];
+        const sw = swatches[index];
+        const effectiveWidth = widths[item];
+        if (effectiveWidth < sw) {
+          rx += effectiveWidth + LEGEND_ITEM_GAP;
+          continue;
+        }
+        const maxTextPx = Math.max(0, effectiveWidth - sw - gap);
+        const label = elideToWidth(ctx, entries[index].label, maxTextPx);
+        drawLegendSwatch(
+          ctx, entries[index].swatchStyle, entries[index].color,
+          rx, ry - fontSize / 2, sw, fontSize,
+          entries[index].marker, entries[index].fillPaint,
+          entries[index].outlineColor, entries[index].outlineWidthEmu,
+          ptToPx, shapeRotationDeg,
+        );
+        ctx.fillStyle = style.color;
+        ctx.textAlign = 'left';
+        ctx.fillText(label, rx + sw + gap, ry);
+        rx += effectiveWidth + LEGEND_ITEM_GAP;
+      }
     }
     return;
   }
-  const fontSize = style.sizePx ?? Math.max(9, Math.min(12, lh / (entries.length + 1)));
-  ctx.font = `${boldPrefix}${fontSize}px ${style.fontFamily}`;
-  ctx.textBaseline = 'middle';
-  const rowH = fontSize + 4;
-  const swatches = entries.map(entry => entry.swatchStyle === 'line' ? fontSize * 1.6 : Math.min(10, fontSize));
   // Vertical legend: each label runs from just after the swatch to the right
   // edge of the reserved legend column, so cap it at that remaining width.
   const maxTextPx = lw - Math.max(...swatches, 0) - gap;
-  let ry = ly + (lh - rowH * entries.length) / 2;
-  for (let i = 0; i < entries.length; i++) {
+  const visibleCount = Math.min(entries.length, Math.max(0, Math.floor(lh / rowH)));
+  let ry = visibleCount === entries.length
+    ? ly + (lh - rowH * visibleCount) / 2
+    : ly;
+  for (let i = 0; i < visibleCount; i++) {
     const sw = swatches[i];
+    if (lw < sw) {
+      ry += rowH;
+      continue;
+    }
     drawLegendSwatch(
       ctx, entries[i].swatchStyle, entries[i].color,
       lx, ry, sw, fontSize,
@@ -539,8 +608,8 @@ function drawLegend(
 }
 
 /** Build the resolved legend text style for a chart (CH10). Absent legend
- *  `<c:txPr>` fields fall back to the historical defaults, keeping legends
- *  byte-stable for files that style nothing. */
+ *  `<c:txPr>` fields use the theme minor face when available and the shared
+ *  automatic defaults otherwise. */
 function legendTextStyle(chart: ChartModel, ptToPx: number): LegendTextStyle {
   const face = resolveThemeFontRef(chart, chart.legendFontFace) ?? chart.themeMinorFontLatin;
   return {
@@ -564,7 +633,7 @@ function drawLegendForLayout(
   chart: ChartModel,
   leg: LegendLayout | null,
   x: number, y: number, w: number, h: number,
-  px0: number, py0: number, pw: number, ph: number,
+  _px0: number, py0: number, _pw: number, ph: number,
   topBand: number,
   ptToPx: number,
   fillPaints: ReadonlyArray<Fill | null | undefined> = [],
@@ -575,13 +644,33 @@ function drawLegendForLayout(
   // §21.2.2.227 varyColors single-series bar: the legend lists one entry per
   // data point (colored like each bar), so the legend and the plot fill agree.
   const varyByPoint = chartVariesColorsByPoint(chart);
+  const sideInset = Math.min(
+    LEGEND_SIDE_PADDING / 2,
+    Math.max(0, leg.reserveW) / 2,
+  );
+  const sideContentWidth = Math.max(0, leg.reserveW - sideInset * 2);
   const defaultBox = leg.side === 'r'
-    ? { x: x + w - leg.reserveW + 4, y: py0, w: leg.reserveW - 8, h: ph }
+    ? {
+        x: x + w - leg.reserveW + sideInset,
+        y: py0,
+        w: sideContentWidth,
+        h: ph,
+      }
     : leg.side === 'l'
-      ? { x: x + 4, y: py0, w: leg.reserveW - 8, h: ph }
+      ? { x: x + sideInset, y: py0, w: sideContentWidth, h: ph }
       : leg.side === 't'
-        ? { x: px0, y: y + topBand, w: pw, h: leg.reserveH }
-        : { x: px0, y: y + h - leg.reserveH, w: pw, h: leg.reserveH };
+        ? {
+            x: x + LEGEND_HORIZONTAL_INSET,
+            y: y + topBand,
+            w: Math.max(0, w - LEGEND_HORIZONTAL_PADDING),
+            h: leg.reserveH,
+          }
+        : {
+            x: x + LEGEND_HORIZONTAL_INSET,
+            y: y + h - leg.reserveH,
+            w: Math.max(0, w - LEGEND_HORIZONTAL_PADDING),
+            h: leg.reserveH,
+          };
   const defaultOrientation = leg.side === 't' || leg.side === 'b' ? 'horizontal' : 'vertical';
   // `<c:legend><c:manualLayout>` (§21.2.2.31) wins over the side-based
   // rectangle. The shared resolver applies all four factor/edge modes relative
@@ -1450,6 +1539,45 @@ function renderBarChart(
   const isChartExColumn = chart.chartexDataPointStyle != null
     || chart.chartexColorPalette != null
     || barSeries.some(series => series.chartexStyle != null);
+  const legendChart: ChartModel = isChartExColumn
+    ? {
+      ...chart,
+      series: barSeries.map((series, index) => {
+        const styleIndex = barStyleIndices[index];
+        const linkedStyle = chart.chartexDataPointStyle;
+        const localStyle = series.chartexStyle;
+        const localHasLine = localStyle?.lineHidden != null
+          || localStyle?.lineColors?.some(Boolean)
+          || localStyle?.lineWidthEmu != null
+          || localStyle?.lineDash != null;
+        const useLocalLine = localHasLine && !(localStyle?.lineHidden && localStyle.lineNoStyle);
+        const useLegacyLine = !useLocalLine && (
+          series.lineHidden != null || series.lineColor != null || series.lineWidthEmu != null
+        );
+        const effectiveLineStyle = useLocalLine
+          ? localStyle
+          : useLegacyLine ? null : linkedStyle;
+        return {
+          ...series,
+          color: series.color
+            ?? chartExDataPointFill(chart, styleIndex, barSeries.length, localStyle),
+          lineHidden: useLocalLine
+            ? localStyle?.lineHidden === true
+            : useLegacyLine
+              ? series.lineHidden
+              : effectiveLineStyle?.lineHidden ?? false,
+          lineColor: useLegacyLine
+            ? series.lineColor
+            : chartExStyleColor(
+              chart, effectiveLineStyle, 'line', styleIndex, barSeries.length,
+            ),
+          lineWidthEmu: useLegacyLine
+            ? series.lineWidthEmu
+            : effectiveLineStyle?.lineWidthEmu ?? null,
+        };
+      }),
+    }
+    : chart;
 
   // Honor the XML-specified title font size when present; otherwise fall back
   // to the proportional heuristic. Reserve the title band based on the actual
@@ -1466,7 +1594,7 @@ function renderBarChart(
   // same way the line/area families do.
   const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxLabelFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
-  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const leg = measuredLegendReserve(ctx, legendChart, w, h, 0.22, ptToPx);
   const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   // Axis-title bands sized from the *actual* title font (honoring XML @sz, e.g.
   // sample-30's 18pt) plus a small gap, so big titles get a wide enough gutter
@@ -1714,6 +1842,7 @@ function renderBarChart(
     // `frame.title` (if read) matches the reserved band instead of a stale frac.
     titleBand,
     legendSideReserveFrac: 0.22,
+    legendReserve: leg,
     pad,
     honorPlotAreaManualLayout: true,
     manualOuterInsets,
@@ -2388,45 +2517,6 @@ function renderBarChart(
     }
   }
 
-  const legendChart = isChartExColumn
-    ? {
-      ...chart,
-      series: barSeries.map((series, index) => {
-        const styleIndex = barStyleIndices[index];
-        const linkedStyle = chart.chartexDataPointStyle;
-        const localStyle = series.chartexStyle;
-        const localHasLine = localStyle?.lineHidden != null
-          || localStyle?.lineColors?.some(Boolean)
-          || localStyle?.lineWidthEmu != null
-          || localStyle?.lineDash != null;
-        const useLocalLine = localHasLine && !(localStyle?.lineHidden && localStyle.lineNoStyle);
-        const useLegacyLine = !useLocalLine && (
-          series.lineHidden != null || series.lineColor != null || series.lineWidthEmu != null
-        );
-        const effectiveLineStyle = useLocalLine
-          ? localStyle
-          : useLegacyLine ? null : linkedStyle;
-        return {
-          ...series,
-          color: series.color
-            ?? chartExDataPointFill(chart, styleIndex, barSeries.length, localStyle),
-          lineHidden: useLocalLine
-            ? localStyle?.lineHidden === true
-            : useLegacyLine
-              ? series.lineHidden
-              : effectiveLineStyle?.lineHidden ?? false,
-          lineColor: useLegacyLine
-            ? series.lineColor
-            : chartExStyleColor(
-              chart, effectiveLineStyle, 'line', styleIndex, barSeries.length,
-            ),
-          lineWidthEmu: useLegacyLine
-            ? series.lineWidthEmu
-            : effectiveLineStyle?.lineWidthEmu ?? null,
-        };
-      }),
-    }
-    : chart;
   const legendPaints = isChartExColumn
     ? barSeries.map((series, index) => chartExDataPointPaint(
       chart, barStyleIndices[index], barSeries.length, series.chartexStyle, series.color,
@@ -2535,7 +2625,7 @@ function renderLineChart(
   const titleFontPx = titleBand.fontPx;
   const titleTopPad = titleBand.topPad;
   const titleH = titleBand.bandH;
-  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const leg = measuredLegendReserve(ctx, chart, w, h, 0.22, ptToPx);
   const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
@@ -2631,6 +2721,7 @@ function renderLineChart(
   const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleBand,
     legendSideReserveFrac: 0.22,
+    legendReserve: leg,
     pad,
     honorPlotAreaManualLayout: true,
     manualOuterInsets,
@@ -2937,7 +3028,7 @@ function renderStockChart(
   const titleFontPx = titleBand.fontPx;
   const titleTopPad = titleBand.topPad;
   const titleH = titleBand.bandH;
-  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const leg = measuredLegendReserve(ctx, chart, w, h, 0.22, ptToPx);
   const { legRightW, legLeftW, legBottomH, legTopH } = chartLegendBands(leg);
   const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
@@ -2962,6 +3053,7 @@ function renderStockChart(
   const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleBand,
     legendSideReserveFrac: 0.22,
+    legendReserve: leg,
     pad,
     honorPlotAreaManualLayout: true,
   });
@@ -3195,7 +3287,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const titleH = titleBand.bandH;
   const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
-  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const leg = measuredLegendReserve(ctx, chart, w, h, 0.22, ptToPx);
   const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
   const catTitlePx = axBands.catFontPx;
@@ -3320,6 +3412,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleBand,
     legendSideReserveFrac: 0.22,
+    legendReserve: leg,
     pad,
     honorPlotAreaManualLayout: true,
     manualOuterInsets,
@@ -3721,15 +3814,21 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const vals = s.values.map(v => Math.abs(v ?? 0));
   const total = vals.reduce((a, b) => a + b, 0);
   if (total === 0) return;
+  const legendChart: ChartModel = {
+    ...chart,
+    series: [{ ...s, categories: cats }],
+  };
 
   // Shared frame (radial form). Pie uses title pads 0.035 / 0.035; its legend
   // labels categories (one row per slice) so it reserves a wider 0.28 side band
   // (vs the default 0.22). The h*0.02 gap below the title/legend before centring
   // is the shared radial gap. Params keep pixels unchanged.
+  const pieLeg = measuredLegendReserve(ctx, legendChart, w, h, 0.28, ptToPx);
   const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleTopPadFrac: 0.035,
     titleBottomPadFrac: 0.035,
     legendSideReserveFrac: 0.28,
+    legendReserve: pieLeg,
     radialGapFrac: 0.02,
     honorPlotAreaManualLayout: true,
   });
@@ -3737,7 +3836,6 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const titleH = frame.title.bandH;
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, titleFontPx);
 
-  const pieLeg = frame.legend;
   const { px0: plotLeft, py0: plotTop, pw, ph } = frame.plotRect;
   const cx2 = frame.center.cx;
   const cy2 = frame.center.cy;
@@ -3854,9 +3952,8 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     // category labels attached). The previous pseudo-series collapsed all
     // swatches to one color because it folded the series-level fill (`s.color`)
     // into every entry while the slices used the per-index palette.
-    const legendSeries: ChartSeries[] = [{ ...s, categories: cats }];
     drawLegendForLayout(
-      ctx, { ...chart, series: legendSeries } as ChartModel, pieLeg,
+      ctx, legendChart, pieLeg,
       x, y, w, h, plotLeft, plotTop, pw, ph, titleH + 2,
       ptToPx,
     );
@@ -4459,13 +4556,14 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   // Shared frame (radial form). Radar uses title pads 0.035 / 0.035 and the
   // default 0.22 side-legend reserve (unlike pie's 0.28). Params keep pixels
   // unchanged.
+  const leg = measuredLegendReserve(ctx, chart, w, h, 0.22, ptToPx);
   const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleTopPadFrac: 0.035,
     titleBottomPadFrac: 0.035,
     legendSideReserveFrac: 0.22,
+    legendReserve: leg,
     radialGapFrac: 0.02,
   });
-  const leg = frame.legend;
   const titleFontPx = frame.title.fontPx;
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, titleFontPx);
 
@@ -4852,7 +4950,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const titleTopPad = titleBand.topPad;
   const xAxLabelFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const yAxLabelFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
-  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const leg = measuredLegendReserve(ctx, chart, w, h, 0.22, ptToPx);
   const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
   const catTitlePx = axBands.catFontPx;
@@ -4877,6 +4975,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleBand,
     legendSideReserveFrac: 0.22,
+    legendReserve: leg,
     pad,
     honorPlotAreaManualLayout: true,
   });
@@ -6194,7 +6293,24 @@ function renderWaterfallChart(
     ? 0
     : maxCategoryLines * (catFontPx + 2) + 4;
 
-  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const series = chart.series[0];
+  const localStyle = series?.chartexStyle;
+  const colorPos = `#${series?.color ?? chartExDataPointFill(chart, 0, 3, localStyle)}`;
+  const colorNeg = `#${chartExDataPointFill(chart, 1, 3, localStyle)}`;
+  const colorSub = `#${chartExDataPointFill(chart, 2, 3, localStyle)}`;
+  const paintPos = chartExDataPointPaint(chart, 0, 3, localStyle, series?.color);
+  const paintNeg = chartExDataPointPaint(chart, 1, 3, localStyle);
+  const paintSub = chartExDataPointPaint(chart, 2, 3, localStyle);
+  const legendChart: ChartModel = {
+    ...chart,
+    chartType: 'clusteredBar',
+    series: [
+      { name: 'Increase', values: [], color: colorPos.slice(1) },
+      { name: 'Decrease', values: [], color: colorNeg.slice(1) },
+      { name: 'Total', values: [], color: colorSub.slice(1) },
+    ],
+  };
+  const leg = measuredLegendReserve(ctx, legendChart, w, h, 0.22, ptToPx);
   const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   const pad = {
     t: titleBand.bandH + legTopH + valFontPx / 2 + 2,
@@ -6205,6 +6321,7 @@ function renderWaterfallChart(
   const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleBand,
     legendSideReserveFrac: 0,
+    legendReserve: leg,
     pad,
   });
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, frame.title.fontPx);
@@ -6290,15 +6407,6 @@ function renderWaterfallChart(
     ctx.lineWidth = catAxisLine.width;
     ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
   }
-
-  const series = chart.series[0];
-  const localStyle = series?.chartexStyle;
-  const colorPos = `#${series?.color ?? chartExDataPointFill(chart, 0, 3, localStyle)}`;
-  const colorNeg = `#${chartExDataPointFill(chart, 1, 3, localStyle)}`;
-  const colorSub = `#${chartExDataPointFill(chart, 2, 3, localStyle)}`;
-  const paintPos = chartExDataPointPaint(chart, 0, 3, localStyle, series?.color);
-  const paintNeg = chartExDataPointPaint(chart, 1, 3, localStyle);
-  const paintSub = chartExDataPointPaint(chart, 2, 3, localStyle);
 
   // ECMA-376 / chartEx §17.18.34 ST_GapAmount: gapWidth is the gap between
   // adjacent categories expressed as a percentage of the bar width
@@ -6427,15 +6535,6 @@ function renderWaterfallChart(
     axBands.valFontPx,
   );
 
-  const legendChart: ChartModel = {
-    ...chart,
-    chartType: 'clusteredBar',
-    series: [
-      { name: 'Increase', values: [], color: colorPos.slice(1) },
-      { name: 'Decrease', values: [], color: colorNeg.slice(1) },
-      { name: 'Total', values: [], color: colorSub.slice(1) },
-    ],
-  };
   drawLegendForLayout(
     ctx, legendChart, leg, x, y, w, h, px0, py0, pw, ph,
     titleBand.bandH + 2, ptToPx, [paintPos, paintNeg, paintSub], shapeRotationDeg,
@@ -6465,7 +6564,7 @@ function renderFunnelChart(
   if (!(max > 0)) return;
   const { x, y, w, h } = r;
   const titleBand = cartesianTitleBand(chart, h, ptToPx);
-  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const leg = measuredLegendReserve(ctx, chart, w, h, 0.22, ptToPx);
   const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   const catFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   ctx.save();
@@ -6483,7 +6582,12 @@ function renderFunnelChart(
     b: legBottomH + h * 0.02,
     l: legLeftW + labelW + w * 0.02,
   };
-  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, { titleBand, legendSideReserveFrac: 0.22, pad });
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleBand,
+    legendSideReserveFrac: 0.22,
+    legendReserve: leg,
+    pad,
+  });
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, frame.title.fontPx);
   const { px0, py0, pw, ph } = frame.plotRect;
   const rowH = ph / n;
@@ -6765,7 +6869,21 @@ function renderBoxWhiskerChart(
   const catAxFontPx0 = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxFontPx0 = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
-  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const nSer = box.series.length;
+  const boxStyleIndices = box.series.map((series, index) =>
+    chartExSeriesFormatIndex(series, index)
+  );
+  const legendChart: ChartModel = {
+    ...chart,
+    series: box.series.map((series, index) => ({
+      name: series.name,
+      values: [],
+      color: series.color ?? chartExDataPointFill(
+        chart, boxStyleIndices[index], nSer, series.chartexStyle,
+      ),
+    })),
+  };
+  const leg = measuredLegendReserve(ctx, legendChart, w, h, 0.22, ptToPx);
   const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   const pad = {
     t: titleBand.bandH + legTopH + valAxFontPx0 / 2 + 2,
@@ -6776,16 +6894,13 @@ function renderBoxWhiskerChart(
   const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleBand,
     legendSideReserveFrac: 0.22,
+    legendReserve: leg,
     pad,
   });
   const { px0, py0, pw, ph } = frame.plotRect;
 
   const cats = box.categories;
   const nCat = cats.length;
-  const nSer = box.series.length;
-  const boxStyleIndices = box.series.map((series, index) =>
-    chartExSeriesFormatIndex(series, index)
-  );
 
   // Excel's automatic value axis uses nice-rounded bounds and steps.
   const axisScale = valueAxisScale(
@@ -7146,16 +7261,6 @@ function renderBoxWhiskerChart(
     axBands.valFontPx,
   );
 
-  const legendChart: ChartModel = {
-    ...chart,
-    series: box.series.map((series, index) => ({
-      name: series.name,
-      values: [],
-      color: series.color ?? chartExDataPointFill(
-        chart, boxStyleIndices[index], nSer, series.chartexStyle,
-      ),
-    })),
-  };
   drawLegendForLayout(
     ctx,
     legendChart,
@@ -7339,10 +7444,12 @@ function renderSunburstChart(
   };
   // Reuse the radial frame so an authored top legend reserves space above the
   // rings instead of being painted over the circle.
+  const leg = measuredLegendReserve(ctx, legendChart, w, h, 0.22, ptToPx);
   const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleTopPadFrac: 0.035,
     titleBottomPadFrac: 0.035,
     legendSideReserveFrac: 0,
+    legendReserve: leg,
     radialGapFrac: 0.02,
   });
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, frame.title.fontPx);
@@ -7653,10 +7760,12 @@ function renderTreemapChart(
       color: chartExDataPointFill(chart, index, root.children.length, series?.chartexStyle),
     })),
   };
+  const leg = measuredLegendReserve(ctx, legendChart, r.w, r.h, 0.22, ptToPx);
   const frame = computeChartFrame(chart, r.x, r.y, r.w, r.h, ptToPx, {
     titleTopPadFrac: 0.035,
     titleBottomPadFrac: 0.035,
     legendSideReserveFrac: 0,
+    legendReserve: leg,
     radialGapFrac: 0.015,
   });
   drawChartTitleForLayout(ctx, chart, r.x, r.y, r.w, r.h, r.y + frame.title.topPad, frame.title.fontPx);
