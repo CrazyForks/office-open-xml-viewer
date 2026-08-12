@@ -412,8 +412,9 @@ export interface TextRunData {
    */
   caps?: 'none' | 'small' | 'all';
   /**
-   * Inter-character spacing in 100ths of a point — ECMA-376 §21.1.2.3.5
-   * (rPr @spc). Positive values add space, negative values tighten.
+   * Inter-character spacing in points. Positive values add space; negative
+   * values tighten. DrawingML stores `rPr@spc` in 100ths of a point, and the
+   * PPTX parser converts that encoded value to points.
    */
   letterSpacing?: number;
   /** Set for OOXML field runs (e.g. "slidenum"). When set, renderer replaces text with field value. */
