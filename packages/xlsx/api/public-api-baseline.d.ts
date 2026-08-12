@@ -1298,6 +1298,11 @@ export interface Worksheet {
     name: string;
     rows: Row[];
     colWidths: Record<number, number>;
+    colWidthRanges?: Array<{
+        min: number;
+        max: number;
+        width: number;
+    }>;
     rowHeights: Record<number, number>;
     colOutlineLevels?: Record<number, number>;
     colCollapsed?: Record<number, boolean>;
