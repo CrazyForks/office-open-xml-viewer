@@ -5942,6 +5942,7 @@ function applyChartExSeriesLineStyle(
   count: number,
   fallbackColor: string,
   ptToPx: number,
+  options: { linkedNoStyleFallback?: boolean } = {},
 ): boolean {
   const local = series?.chartexStyle;
   const localHasLine = local?.lineHidden != null
@@ -5957,6 +5958,9 @@ function applyChartExSeriesLineStyle(
     || series?.lineColor != null
     || series?.lineWidthEmu != null;
   if (!hasLegacyLocalLine) {
+    if (style?.lineNoStyle && options.linkedNoStyleFallback) {
+      return applyChartExLineStyle(ctx, chart, null, index, count, fallbackColor, ptToPx);
+    }
     return applyChartExLineStyle(ctx, chart, style, index, count, fallbackColor, ptToPx);
   }
   if (series?.lineHidden) return false;
@@ -7012,12 +7016,16 @@ function renderBoxWhiskerChart(
 
 // ─── chartEx: sunburst (CH15, MS 2014 chartex ext) ───────────────────────────
 
-/** A node in the sunburst ring tree. `value` is the sum of descendant leaf
- *  sizes (or the node's own size when it is a leaf). `a0`/`a1` are its angular
- *  span (radians, canvas convention) once laid out; `depth` is its ring index
- *  (0 = innermost / root). */
+/** A node in the shared hierarchy tree. `layoutWeight` is the overflow-safe
+ *  aggregate used for treemap areas and sunburst angles; `value` is the finite,
+ *  saturating aggregate exposed to data-label formatting. `a0`/`a1` are the
+ *  sunburst span (radians, canvas convention) once laid out; `depth` is its
+ *  ring index (0 = innermost / root). */
 interface SunburstNode {
   label: string;
+  /** Finite, overflow-safe relative weight used only for geometry. */
+  layoutWeight: number;
+  /** Sanitized display value. Sums saturate when JavaScript cannot represent them. */
   value: number;
   depth: number;
   children: SunburstNode[];
@@ -7043,12 +7051,27 @@ function buildSunburstTree(
   preserveTerminalDuplicates = false,
 ): SunburstNode {
   const root: SunburstNode = {
-    label: '', value: 0, depth: -1, children: [], branchIndex: -1, labelIndex: -1, a0: 0, a1: 0,
+    label: '', layoutWeight: 0, value: 0, depth: -1, children: [], branchIndex: -1, labelIndex: -1, a0: 0, a1: 0,
   };
+  const maxRowValue = rows.reduce((max, row) => (
+    Number.isFinite(row.size) && row.size > max ? row.size : max
+  ), 0);
+  const safeSum = (left: number, right: number): number => (
+    left > Number.MAX_VALUE - right ? Number.MAX_VALUE : left + right
+  );
   // Construction-only indexes keep sibling interning O(1) per path segment;
   // the WeakMap dies with this function and does not pollute the paint model.
   const childIndexes = new WeakMap<SunburstNode, Map<string, SunburstNode>>();
   for (const row of rows) {
+    // ChartEx leaves without a finite positive size remain part of the authored
+    // hierarchy/order, but they do not contribute layout weight. Normalizing at
+    // the shared tree boundary keeps treemap parent areas and sunburst parent
+    // spans consistent; filtering only at either painter would leave ancestors
+    // with contaminated aggregate values.
+    const rowValue = Number.isFinite(row.size) && row.size > 0 ? row.size : 0;
+    // Dividing every positive row by the same maximum preserves all layout
+    // ratios while bounding every later ancestor sum by the source row count.
+    const rowWeight = maxRowValue > 0 ? rowValue / maxRowValue : 0;
     let node = root;
     for (let d = 0; d < row.path.length; d++) {
       const label = row.path[d];
@@ -7062,6 +7085,7 @@ function buildSunburstTree(
       if (!child) {
         child = {
           label,
+          layoutWeight: 0,
           value: 0,
           depth: d,
           children: [],
@@ -7074,11 +7098,13 @@ function buildSunburstTree(
         node.children.push(child);
         if (!preserveNode) index.set(label, child);
       }
-      child.value += row.size;
+      child.layoutWeight += rowWeight;
+      child.value = safeSum(child.value, rowValue);
       node = child;
     }
   }
-  root.value = root.children.reduce((s, c) => s + c.value, 0);
+  root.layoutWeight = root.children.reduce((sum, child) => sum + child.layoutWeight, 0);
+  root.value = root.children.reduce((sum, child) => safeSum(sum, child.value), 0);
   let nextLabelIndex = 0;
   const assignLabelIndices = (node: SunburstNode): void => {
     for (const child of node.children) {
@@ -7091,13 +7117,14 @@ function buildSunburstTree(
 }
 
 /** Assign angular spans top-down: each node partitions its `[a0, a1)` range
- *  across its children proportional to their value, in child (source) order. */
+ *  across its children proportional to their layout weight, in child (source)
+ *  order. */
 function layoutSunburstAngles(node: SunburstNode): void {
-  const total = node.children.reduce((s, c) => s + c.value, 0);
+  const total = node.children.reduce((sum, child) => sum + child.layoutWeight, 0);
   if (total <= 0) return;
   let a = node.a0;
   for (const child of node.children) {
-    const sweep = ((node.a1 - node.a0) * child.value) / total;
+    const sweep = ((node.a1 - node.a0) * child.layoutWeight) / total;
     child.a0 = a;
     child.a1 = a + sweep;
     a = child.a1;
@@ -7135,7 +7162,7 @@ function renderSunburstChart(
   if (!sb || sb.rows.length === 0) return;
   const { x, y, w, h } = r;
   const root = buildSunburstTree(sb.rows);
-  if (root.value <= 0 || root.children.length === 0) return;
+  if (root.layoutWeight <= 0 || root.children.length === 0) return;
   const series = chart.series[0];
   const legendPaints = root.children.map((_, index) =>
     chartExDataPointPaint(chart, index, root.children.length, series?.chartexStyle, series?.color)
@@ -7354,11 +7381,15 @@ interface TreemapRect { x: number; y: number; w: number; h: number }
 interface TreemapTile { node: SunburstNode; rect: TreemapRect }
 
 /** Standard squarified-treemap layout. Areas are exactly proportional to node
- * values; descending stable order keeps the aspect ratios useful without any
- * document-specific tuning. */
+ * layout weights; descending stable order keeps the aspect ratios useful
+ * without any document-specific tuning. */
 function layoutTreemapTiles(nodes: SunburstNode[], rect: TreemapRect): TreemapTile[] {
   const positive = nodes
-    .map((node, index) => ({ node, index, value: Math.max(0, node.value) }))
+    .map((node, index) => ({
+      node,
+      index,
+      value: node.layoutWeight,
+    }))
     .filter(entry => entry.value > 0)
     .sort((a, b) => b.value - a.value || a.index - b.index);
   const total = positive.reduce((sum, entry) => sum + entry.value, 0);
@@ -7445,7 +7476,7 @@ function renderTreemapChart(
   // A treemap data point remains a distinct tile even when its terminal label
   // repeats. Only parent path components are grouping keys.
   const root = buildSunburstTree(treemap.rows, true);
-  if (root.value <= 0 || root.children.length === 0) return;
+  if (root.layoutWeight <= 0 || root.children.length === 0) return;
   const series = chart.series[0];
   const legendPaints = root.children.map(node =>
     chartExDataPointPaint(
@@ -7479,6 +7510,12 @@ function renderTreemapChart(
   const labelOverrides = new Map(
     (chart.series[0]?.dataLabelOverrides ?? []).map(override => [override.idx, override]),
   );
+  // With no direct or linked line recipe, use a one-CSS-pixel separator derived
+  // from the chart background. `applyChartExSeriesLineStyle` still resolves
+  // direct series formatting and the linked data-point role before this fallback.
+  const automaticSeparator = chart.chartBg
+    ? (chart.chartBg.startsWith('#') ? chart.chartBg : `#${chart.chartBg}`)
+    : '#ffffff';
 
   const paint = (node: SunburstNode, tile: TreemapRect): void => {
     if (tile.w < 0.5 || tile.h < 0.5) return;
@@ -7569,8 +7606,9 @@ function renderTreemapChart(
       chart.series[0],
       node.branchIndex,
       root.children.length,
-      '#ffffff',
+      automaticSeparator,
       ptToPx,
+      { linkedNoStyleFallback: true },
     );
     if (hasAuthoredOutline) {
       // ChartEx outlines are centered on the tile boundary. An inset stroke
@@ -7589,12 +7627,20 @@ function renderTreemapChart(
     if (tile.w <= fontPx * 1.2 || tile.h <= fontPx * 1.2) return;
     ctx.font = `${leafLabel.fontBold ? 'bold ' : ''}${fontPx}px ${fontFamily}`;
     ctx.fillStyle = leafLabel.fontColor ? `#${leafLabel.fontColor}` : nodeLabelColor;
-    const lines = leafLabel.text
-      .split(/\r?\n/)
-      .flatMap(line => wrapMeasuredText(ctx, line, Math.max(1, tile.w - 8)));
     const lineH = fontPx * 1.1;
     const position = leafLabel.position ?? 'ctr';
-    const maxLines = Math.max(0, Math.floor((tile.h - 6) / lineH));
+    const inset = position === 'inEnd' ? 4 : fontPx * 0.5;
+    const availableWidth = tile.w - inset * 2;
+    const availableHeight = tile.h - inset * 2;
+    if (availableWidth <= 0 || availableHeight <= 0) return;
+    const lines = leafLabel.text
+      .split(/\r?\n/)
+      .flatMap(line => wrapMeasuredText(ctx, line, availableWidth))
+      // `wrapMeasuredText` deliberately emits one over-wide glyph to guarantee
+      // progress. A treemap label must instead omit a line that cannot fit
+      // completely inside the tile's content box.
+      .filter(line => ctx.measureText(line).width <= availableWidth + 1e-6);
+    const maxLines = Math.max(0, Math.floor(availableHeight / lineH));
     ctx.save();
     ctx.beginPath();
     ctx.rect(tile.x, tile.y, tile.w, tile.h);
@@ -7603,9 +7649,9 @@ function renderTreemapChart(
       ctx.textAlign = 'left';
       ctx.textBaseline = 'bottom';
       const visibleLines = lines.slice(Math.max(0, lines.length - maxLines));
-      const lastY = tile.y + tile.h - 4;
+      const lastY = tile.y + tile.h - inset;
       visibleLines.forEach((line, index) => {
-        if (line) ctx.fillText(line, tile.x + 4, lastY - (visibleLines.length - 1 - index) * lineH);
+        if (line) ctx.fillText(line, tile.x + inset, lastY - (visibleLines.length - 1 - index) * lineH);
       });
     } else {
       ctx.textAlign = 'center';

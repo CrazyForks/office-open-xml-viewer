@@ -5207,6 +5207,70 @@ describe('CH15 — chartEx sunburst', () => {
     expect(sweeps[0] / sweeps[1]).toBeCloseTo(2, 1);
   });
 
+  it('ignores non-positive and non-finite hierarchy weights without changing source order', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel({
+      chartexSunburst: {
+        rows: [
+          { path: ['First', 'Positive'], size: 10 },
+          { path: ['First', 'Negative'], size: -100 },
+          { path: ['First', 'NaN'], size: Number.NaN },
+          { path: ['Second', 'Positive'], size: 10 },
+          { path: ['Second', 'Infinity'], size: Number.POSITIVE_INFINITY },
+          { path: ['Third', 'Zero'], size: 0 },
+        ],
+      },
+    }), RECT, 1);
+
+    const innerOuterR = [...new Set(rec.arcs.map(arc => Math.round(arc.r)))]
+      .sort((a, b) => a - b)[1];
+    const branchArcs = rec.arcs.filter(arc => Math.round(arc.r) === innerOuterR && !arc.ccw);
+    const sweeps = branchArcs.map(arc => arc.a1 - arc.a0);
+    expect(sweeps).toHaveLength(2);
+    expect(sweeps[0]).toBeCloseTo(Math.PI, 5);
+    expect(sweeps[1]).toBeCloseTo(Math.PI, 5);
+    expect(branchArcs[0].a0).toBeCloseTo(-Math.PI / 2, 5);
+    expect(branchArcs[1].a0).toBeCloseTo(branchArcs[0].a1, 5);
+  });
+
+  it('keeps proportional finite angles when positive hierarchy sums exceed Number.MAX_VALUE', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel({
+      chartexSunburst: {
+        rows: [
+          { path: ['First', 'A'], size: Number.MAX_VALUE },
+          { path: ['First', 'B'], size: Number.MAX_VALUE },
+          { path: ['Second', 'C'], size: Number.MAX_VALUE },
+        ],
+      },
+    }), RECT, 1);
+
+    const innerOuterR = [...new Set(rec.arcs.map(arc => Math.round(arc.r)))]
+      .sort((a, b) => a - b)[1];
+    const branchArcs = rec.arcs.filter(arc => Math.round(arc.r) === innerOuterR && !arc.ccw);
+    expect(branchArcs).toHaveLength(2);
+    expect(branchArcs.every(arc => Number.isFinite(arc.a0) && Number.isFinite(arc.a1))).toBe(true);
+    expect(branchArcs[0].a1 - branchArcs[0].a0).toBeCloseTo((Math.PI * 4) / 3, 5);
+    expect(branchArcs[1].a1 - branchArcs[1].a0).toBeCloseTo((Math.PI * 2) / 3, 5);
+  });
+
+  it('paints no sunburst geometry when every hierarchy weight normalizes to zero', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel({
+      chartexSunburst: {
+        rows: [
+          { path: ['Zero'], size: 0 },
+          { path: ['Negative'], size: -1 },
+          { path: ['NaN'], size: Number.NaN },
+          { path: ['Infinity'], size: Number.POSITIVE_INFINITY },
+        ],
+      },
+    }), RECT, 1);
+
+    expect(rec.arcs).toHaveLength(0);
+    expect(rec.fills).toHaveLength(0);
+  });
+
   it('draws an authored top legend outside the rings', () => {
     const rec = ringRecordingCtx();
     renderChart(rec.ctx, sunburstModel({ showLegend: true, legendPos: 't' }), RECT, 1);
@@ -5294,6 +5358,173 @@ describe('CH15 — chartEx treemap', () => {
     expect(rec.texts.filter(text => text.text === 'Repeat').length).toBeGreaterThanOrEqual(6);
   });
 
+  it('normalizes hierarchy weights before allocating proportional parent areas', () => {
+    const rec = recordingCtx();
+    const model = baseModel({
+      chartType: 'treemap',
+      chartexAccents: ['5B9BD5', 'ED7D31', 'A5A5A5'],
+      chartexTreemap: {
+        parentLabelLayout: 'none',
+        rows: [
+          { path: ['A', 'positive'], size: 10 },
+          { path: ['A', 'negative'], size: -100 },
+          { path: ['A', 'invalid'], size: Number.NaN },
+          { path: ['B', 'positive'], size: 10 },
+          { path: ['B', 'infinite'], size: Number.POSITIVE_INFINITY },
+          { path: ['C', 'zero'], size: 0 },
+        ],
+      },
+      series: [series({})],
+    });
+    renderChart(rec.ctx, model, RECT, 1);
+
+    const areaByFill = new Map<string, number>();
+    for (const tile of rec.rects) {
+      areaByFill.set(tile.fs, (areaByFill.get(tile.fs) ?? 0) + tile.w * tile.h);
+    }
+    expect([...areaByFill.keys()]).toEqual(['#5B9BD5', '#ED7D31']);
+    expect(areaByFill.get('#5B9BD5')).toBeCloseTo(areaByFill.get('#ED7D31') ?? 0, 5);
+  });
+
+  it('keeps squarified tiles proportional, contained, non-overlapping, and deterministic', () => {
+    const model = baseModel({
+      chartType: 'treemap',
+      chartexAccents: ['5B9BD5', 'ED7D31', 'A5A5A5'],
+      chartexTreemap: {
+        parentLabelLayout: 'none',
+        rows: [
+          { path: ['Large', '1000'], size: 1000 },
+          { path: ['Small', '1'], size: 1 },
+          { path: ['Zero', '0'], size: 0 },
+        ],
+      },
+      series: [series({})],
+    });
+    const bounds = { x: 0, y: 0, w: 2200, h: 1200 };
+    const first = recordingCtx();
+    const second = recordingCtx();
+    renderChart(first.ctx, model, bounds, 1);
+    renderChart(second.ctx, model, bounds, 1);
+
+    expect(first.rects).toEqual(second.rects);
+    expect(first.rects).toHaveLength(2);
+    const [large, small] = first.rects.sort((a, b) => b.w * b.h - a.w * a.h);
+    expect((large.w * large.h) / (small.w * small.h)).toBeCloseTo(1000, 5);
+
+    const minX = Math.min(...first.rects.map(tile => tile.x));
+    const minY = Math.min(...first.rects.map(tile => tile.y));
+    const maxX = Math.max(...first.rects.map(tile => tile.x + tile.w));
+    const maxY = Math.max(...first.rects.map(tile => tile.y + tile.h));
+    const unionArea = (maxX - minX) * (maxY - minY);
+    const tileArea = first.rects.reduce((sum, tile) => sum + tile.w * tile.h, 0);
+    expect(tileArea).toBeCloseTo(unionArea, 5);
+    for (let i = 0; i < first.rects.length; i++) {
+      const a = first.rects[i];
+      expect(a.x).toBeGreaterThanOrEqual(minX);
+      expect(a.y).toBeGreaterThanOrEqual(minY);
+      expect(a.x + a.w).toBeLessThanOrEqual(maxX);
+      expect(a.y + a.h).toBeLessThanOrEqual(maxY);
+      for (let j = i + 1; j < first.rects.length; j++) {
+        const b = first.rects[j];
+        const overlapW = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+        const overlapH = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+        expect(overlapW * overlapH).toBeCloseTo(0, 8);
+      }
+    }
+  });
+
+  it('preserves a 10:1 aggregate-weight ratio between top-level parents', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'treemap',
+      chartexAccents: ['5B9BD5', 'ED7D31'],
+      chartexTreemap: {
+        parentLabelLayout: 'none',
+        rows: [
+          { path: ['Ten', 'A'], size: 6 },
+          { path: ['Ten', 'B'], size: 4 },
+          { path: ['One', 'C'], size: 1 },
+        ],
+      },
+      series: [series({})],
+    }), RECT, 1);
+    const area = (color: string): number => rec.rects
+      .filter(tile => tile.fs === color)
+      .reduce((sum, tile) => sum + tile.w * tile.h, 0);
+    expect(area('#5B9BD5') / area('#ED7D31')).toBeCloseTo(10, 5);
+  });
+
+  it('keeps deep aggregate areas finite when positive sums exceed Number.MAX_VALUE', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'treemap',
+      chartexAccents: ['5B9BD5', 'ED7D31'],
+      chartexTreemap: {
+        parentLabelLayout: 'none',
+        rows: [
+          { path: ['First', 'Deep', 'A'], size: Number.MAX_VALUE },
+          { path: ['First', 'Deep', 'B'], size: Number.MAX_VALUE },
+          { path: ['Second', 'C'], size: Number.MAX_VALUE },
+        ],
+      },
+      series: [series({})],
+    }), RECT, 1);
+
+    expect(rec.rects).toHaveLength(3);
+    expect(rec.rects.every(tile => [tile.x, tile.y, tile.w, tile.h].every(Number.isFinite))).toBe(true);
+    const area = (color: string): number => rec.rects
+      .filter(tile => tile.fs === color)
+      .reduce((sum, tile) => sum + tile.w * tile.h, 0);
+    expect(area('#5B9BD5') / area('#ED7D31')).toBeCloseTo(2, 5);
+  });
+
+  it('keeps an overflowing aggregate display label finite', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'treemap',
+      chartexAccents: ['5B9BD5'],
+      chartexTreemap: {
+        parentLabelLayout: 'overlapping',
+        rows: [
+          { path: ['Aggregate', 'A'], size: Number.MAX_VALUE },
+          { path: ['Aggregate', 'B'], size: Number.MAX_VALUE },
+        ],
+      },
+      series: [series({
+        seriesDataLabels: {
+          showVal: true,
+          showCatName: false,
+          showSerName: false,
+          showPercent: false,
+        },
+      })],
+    }), RECT, 1);
+
+    const parentValues = rec.texts
+      .filter(text => text.baseline === 'top')
+      .map(text => Number(text.text));
+    expect(parentValues).toEqual([Number.MAX_VALUE]);
+    expect(parentValues.every(Number.isFinite)).toBe(true);
+  });
+
+  it('keeps equal-weight top-level tiles in first-seen source order', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'treemap',
+      chartexAccents: ['5B9BD5', 'ED7D31', 'A5A5A5'],
+      chartexTreemap: {
+        parentLabelLayout: 'none',
+        rows: [
+          { path: ['First'], size: 1 },
+          { path: ['Second'], size: 1 },
+          { path: ['Third'], size: 1 },
+        ],
+      },
+      series: [series({})],
+    }), RECT, 1);
+
+    expect(rec.rects.map(tile => tile.fs)).toEqual(['#5B9BD5', '#ED7D31', '#A5A5A5']);
+  });
 
   it('does not paint padded parent frames for overlapping parent labels', () => {
     const rec = recordingCtx();
@@ -5354,6 +5585,46 @@ describe('CH15 — chartEx treemap', () => {
         lw: 1.5,
       });
     });
+  });
+
+  it('uses a one-CSS-pixel chart-background separator when no line is authored', () => {
+    const rec = recordingCtx();
+    const model = treemapModel();
+    model.chartBg = '112233';
+    model.chartexTreemap!.parentLabelLayout = 'overlapping';
+    model.chartexDataPointStyle = null;
+    model.series[0].lineColor = null;
+    model.series[0].lineWidthEmu = null;
+    model.series[0].lineHidden = null;
+    renderChart(rec.ctx, model, RECT, 1);
+
+    const tiles = rec.rects.filter(rect => rect.fs !== '#112233');
+    expect(rec.strokeRects).toHaveLength(tiles.length);
+    expect(rec.strokeRects.every(stroke => stroke.ss === '#112233' && stroke.lw === 1)).toBe(true);
+  });
+
+  it('uses the automatic separator when the linked Chart Style line is NoStyle', () => {
+    const rec = recordingCtx();
+    const model = treemapModel();
+    model.chartBg = '112233';
+    model.chartexTreemap!.parentLabelLayout = 'overlapping';
+    model.chartexDataPointStyle = { lineHidden: true, lineNoStyle: true };
+    renderChart(rec.ctx, model, RECT, 1);
+
+    const tiles = rec.rects.filter(rect => rect.fs !== '#112233');
+    expect(rec.strokeRects).toHaveLength(tiles.length);
+    expect(rec.strokeRects.every(stroke => stroke.ss === '#112233' && stroke.lw === 1)).toBe(true);
+  });
+
+  it('keeps a direct series noFill authoritative over the automatic separator', () => {
+    const rec = recordingCtx();
+    const model = treemapModel();
+    model.chartexTreemap!.parentLabelLayout = 'overlapping';
+    model.chartexDataPointStyle = { lineHidden: true, lineNoStyle: true };
+    model.series[0].chartexStyle = { lineHidden: true };
+    renderChart(rec.ctx, model, RECT, 1);
+
+    expect(rec.strokeRects).toHaveLength(0);
   });
 
   it('uses the per-accent ChartEx outline after phClr substitution', () => {
@@ -5461,6 +5732,40 @@ describe('CH15 — chartEx treemap', () => {
     expect(rec.clips).toEqual(expect.arrayContaining([
       expect.objectContaining({ x: tile.x, y: tile.y, w: tile.w, h: tile.h }),
     ]));
+  });
+
+  it('keeps omitted-position leaf labels inside a font-relative 0.5em inset', () => {
+    const rec = recordingCtx();
+    const model = baseModel({
+      chartType: 'treemap',
+      chartexAccents: ['5B9BD5'],
+      chartexTreemap: {
+        parentLabelLayout: 'none',
+        rows: [{ path: ['Group', 'ABCDEFGHIJKL'], size: 1 }],
+      },
+      series: [series({
+        values: [1],
+        seriesDataLabels: {
+          showVal: false,
+          showCatName: true,
+          showSerName: false,
+          showPercent: false,
+          fontSizeHpt: 2000,
+        },
+      })],
+    });
+    renderChart(rec.ctx, model, { x: 0, y: 0, w: 90, h: 90 }, 1);
+
+    const tile = rec.strokeRects[0];
+    const labels = rec.texts.filter(text => text.baseline === 'middle');
+    expect(labels.length).toBeGreaterThan(0);
+    for (const label of labels) {
+      const fontPx = Number.parseFloat(/(\d+(?:\.\d+)?)px/.exec(label.font ?? '')?.[1] ?? '0');
+      expect(label.x - (label.width ?? 0) / 2).toBeGreaterThanOrEqual(tile.x + fontPx * 0.5 - 1e-6);
+      expect(label.x + (label.width ?? 0) / 2).toBeLessThanOrEqual(tile.x + tile.w - fontPx * 0.5 + 1e-6);
+      expect(label.y).toBeGreaterThanOrEqual(tile.y + fontPx * 0.5 - 1e-6);
+      expect(label.y).toBeLessThanOrEqual(tile.y + tile.h - fontPx * 0.5 + 1e-6);
+    }
   });
 
   it('clips boundary-centered tile strokes to the plot rectangle', () => {
