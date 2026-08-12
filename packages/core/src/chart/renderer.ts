@@ -6,14 +6,18 @@
 import type { ChartDataLabelOverride, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, ChartTextBox, SecondaryValueAxis } from '../types/chart';
 import type { Fill } from '../types/common';
 import {
+  AXIS_OUTER_TEXT_MARGIN_PT,
   computeChartFrame,
   cartesianTitleBand,
   catAxisLabelBandH,
   chartLegendReserve,
   chartLegendBands,
   chartAxisTitleBands,
+  chartManualOuterAxisInsets,
+  categoryTickLabelGapPx,
   axisTitleMargin,
   resolveManualLayoutRect,
+  valueTickLabelGapPx,
   type ChartLegendReserve,
 } from './layout.js';
 import { niceStep, valueAxisScale, axisFraction, logAxisScale, fitTrendline } from './axis-scale.js';
@@ -21,7 +25,12 @@ import { axisLineWidthPx, resolveAxisLine, resolveGridline, isCrossBetween } fro
 import { formatChartVal, formatChartValWithCode, formatCategoryLabel } from './chart-number-format.js';
 import { elideToWidth } from './text-elide.js';
 import { hexToRgba, resolveFill } from '../shape/paint.js';
-import { EMU_PER_PT, PT_TO_PX } from '../units.js';
+import {
+  DEFAULT_TEXT_INSET_LR_EMU,
+  DEFAULT_TEXT_INSET_TB_EMU,
+  EMU_PER_PT,
+  PT_TO_PX,
+} from '../units.js';
 
 // ─── Palette + helpers ──────────────────────────────────────────────────────
 
@@ -896,18 +905,6 @@ function axisLabelPx(sizeHpt: number | null | undefined, h: number, ptToPx: numb
   return Math.max(8, h * 0.045);
 }
 
-/** Office's default clearances between an axis rule and its tick-label text.
- * PDF vector output consistently places a 12pt category label 10pt below the
- * rule and a value label's right edge 12pt left of the rule. Keep the spacing
- * proportional to the authored font so zoom and non-default sizes scale. */
-function categoryTickLabelGapPx(fontPx: number): number {
-  return fontPx * (5 / 6);
-}
-
-function valueTickLabelGapPx(fontPx: number): number {
-  return fontPx;
-}
-
 /** Wrap text against the active canvas font without discarding characters.
  * Words are kept intact when possible; a single over-wide token is split at
  * measured character boundaries. Used by chart families whose category-label
@@ -1455,6 +1452,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const prevFont = ctx.font;
   // Primary value-axis label band (column charts only; horizontal bars keep a
   // wider left band for the category labels).
+  let valLabelTextW = 0;
   let valLabelBandW = 0;
   if (!isH && !chart.valAxisHidden) {
     // Measure with the same face the value-axis ticks draw with (below), so the
@@ -1467,7 +1465,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       const label = formatPrimaryValueAxisTick(chart, val, pct);
       wmax = Math.max(wmax, ctx.measureText(label).width);
     }
-    valLabelBandW = wmax + 16; // ~12px tick+gap to the axis + ~4px to the title
+    valLabelTextW = wmax;
+    valLabelBandW = valLabelTextW + 16; // ~12px tick+gap to the axis + ~4px to the title
   }
   let horizontalCategoryLabelBandW = 0;
   if (
@@ -1530,12 +1529,23 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         b: chart.valAxisHidden ? 0 : measuredValTickFontPx + catTitleH,
         l: chart.catAxisHidden ? 0 : horizontalCategoryLabelBandW + valTitleW,
       }
-    : {
-        t: chart.valAxisHidden ? 0 : measuredValTickFontPx / 2,
-        r: secLabelBandW + secTitleBandW,
-        b: chart.catAxisHidden ? 0 : catAxisLabelBandH(catAxFontPx) + catTitleH,
-        l: chart.valAxisHidden ? 0 : valLabelBandW + valTitleW,
-      };
+    : chartManualOuterAxisInsets({
+        valAxisHidden: chart.valAxisHidden,
+        catAxisHidden: chart.catAxisHidden,
+        valLabelWidth: valLabelTextW,
+        valLabelFontPx: measuredValTickFontPx,
+        catLabelFontPx: catAxFontPx,
+        valLabelGapPx: chart.valAxisFontSizeHpt != null
+          ? valueTickLabelGapPx(measuredValTickFontPx)
+          : 12,
+        catLabelGapPx: chart.catAxisFontSizeHpt != null
+          ? categoryTickLabelGapPx(catAxFontPx)
+          : 3,
+        outerTextMarginPx: AXIS_OUTER_TEXT_MARGIN_PT * ptToPx,
+        valTitleBandW: valTitleW,
+        catTitleBandH: catTitleH,
+        secondaryBandW: secLabelBandW + secTitleBandW,
+      });
 
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + titleTopPad, titleFontPx);
 
@@ -2284,10 +2294,6 @@ function renderLineChart(
     }
     ctx.font = previousFont;
   }
-  const primaryLabelGap = chart.valAxisFontSizeHpt != null
-    ? valueTickLabelGapPx(valAxFontPx)
-    : 6;
-
   // Pad based on actual label metrics rather than magic percents so an explicit
   // <c:txPr sz="1000"> (10pt) correctly compresses the plot area.
   const pad = {
@@ -2297,12 +2303,23 @@ function renderLineChart(
     l: valAxFontPx * 2.2 + 10 + valTitleW + legLeftW,
   };
 
-  const manualOuterInsets = {
-    t: chart.valAxisHidden ? 0 : valAxFontPx / 2,
-    r: secLabelBandW + secTitleBandW,
-    b: chart.catAxisHidden ? 0 : catAxisLabelBandH(catAxFontPx) + catTitleH,
-    l: chart.valAxisHidden ? 0 : primaryLabelWidth + primaryLabelGap + valTitleW,
-  };
+  const manualOuterInsets = chartManualOuterAxisInsets({
+    valAxisHidden: chart.valAxisHidden,
+    catAxisHidden: chart.catAxisHidden,
+    valLabelWidth: primaryLabelWidth,
+    valLabelFontPx: valAxFontPx,
+    catLabelFontPx: catAxFontPx,
+    valLabelGapPx: chart.valAxisFontSizeHpt != null
+      ? valueTickLabelGapPx(valAxFontPx)
+      : 6,
+    catLabelGapPx: chart.catAxisFontSizeHpt != null
+      ? categoryTickLabelGapPx(catAxFontPx)
+      : 5,
+    outerTextMarginPx: AXIS_OUTER_TEXT_MARGIN_PT * ptToPx,
+    valTitleBandW: valTitleW,
+    catTitleBandH: catTitleH,
+    secondaryBandW: secLabelBandW + secTitleBandW,
+  });
 
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + titleTopPad, titleFontPx);
 
@@ -2953,17 +2970,23 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     }
     ctx.font = prevFont;
   }
-  const primaryLabelGap = chart.valAxisFontSizeHpt != null
-    ? valueTickLabelGapPx(manualValTickFontPx)
-    : 6;
-  const manualOuterInsets = {
-    t: chart.valAxisHidden ? 0 : manualValTickFontPx / 2,
-    r: secLabelBandW + secTitleBandW,
-    b: chart.catAxisHidden
-      ? 0
-      : catAxFontPx + (chart.catAxisFontSizeHpt != null ? categoryTickLabelGapPx(catAxFontPx) : 3) + catTitleH,
-    l: chart.valAxisHidden ? 0 : primaryLabelWidth + primaryLabelGap + valTitleW,
-  };
+  const manualOuterInsets = chartManualOuterAxisInsets({
+    valAxisHidden: chart.valAxisHidden,
+    catAxisHidden: chart.catAxisHidden,
+    valLabelWidth: primaryLabelWidth,
+    valLabelFontPx: manualValTickFontPx,
+    catLabelFontPx: catAxFontPx,
+    valLabelGapPx: chart.valAxisFontSizeHpt != null
+      ? valueTickLabelGapPx(manualValTickFontPx)
+      : 6,
+    catLabelGapPx: chart.catAxisFontSizeHpt != null
+      ? categoryTickLabelGapPx(catAxFontPx)
+      : 3,
+    outerTextMarginPx: AXIS_OUTER_TEXT_MARGIN_PT * ptToPx,
+    valTitleBandW: valTitleW,
+    catTitleBandH: catTitleH,
+    secondaryBandW: secLabelBandW + secTitleBandW,
+  });
 
   const pad = {
     t: padT,
@@ -6822,6 +6845,13 @@ function drawChartTextBoxes(
     const bw = box.w * rect.w;
     const bh = box.h * rect.h;
     if (!(bw > 0 && bh > 0)) continue;
+    const contentX = bx + ((box.lIns ?? DEFAULT_TEXT_INSET_LR_EMU) / EMU_PER_PT) * ptToPx;
+    const contentY0 = by + ((box.tIns ?? DEFAULT_TEXT_INSET_TB_EMU) / EMU_PER_PT) * ptToPx;
+    const contentRight = bx + bw - ((box.rIns ?? DEFAULT_TEXT_INSET_LR_EMU) / EMU_PER_PT) * ptToPx;
+    const contentBottom = by + bh - ((box.bIns ?? DEFAULT_TEXT_INSET_TB_EMU) / EMU_PER_PT) * ptToPx;
+    const contentW = contentRight - contentX;
+    const contentH = contentBottom - contentY0;
+    if (!(contentW > 0 && contentH > 0)) continue;
 
     type MeasuredTextRun = {
       run: ChartTextBox['paragraphs'][number]['runs'][number];
@@ -6860,7 +6890,7 @@ function drawChartTextBoxes(
         return { run, text: run.text, fontPx, font, width: ctx.measureText(run.text).width };
       });
       const paragraphWidth = measuredRuns.reduce((sum, run) => sum + run.width, 0);
-      if (box.wrap === 'none' || paragraphWidth <= bw) {
+      if (box.wrap === 'none' || paragraphWidth <= contentW) {
         return [makeLine(paragraph, measuredRuns)];
       }
 
@@ -6880,7 +6910,7 @@ function drawChartTextBoxes(
           const whitespace = /^\s+$/.test(token);
           ctx.font = measured.font;
           const tokenWidth = ctx.measureText(token).width;
-          if (current.length && currentWidth + tokenWidth > bw) {
+          if (current.length && currentWidth + tokenWidth > contentW) {
             flush();
           }
           // A wrapped line does not begin with the inter-word whitespace that
@@ -6895,10 +6925,10 @@ function drawChartTextBoxes(
     });
     const textHeight = lines.reduce((sum, line) => sum + line.height, 0);
     const contentY = box.verticalAnchor === 'b'
-      ? by + bh - textHeight
+      ? contentBottom - textHeight
       : box.verticalAnchor === 'ctr'
-        ? by + (bh - textHeight) / 2
-        : by;
+        ? contentY0 + (contentH - textHeight) / 2
+        : contentY0;
 
     ctx.save();
     ctx.beginPath();
@@ -6910,10 +6940,10 @@ function drawChartTextBoxes(
     for (const metric of lines) {
       const align = metric.paragraph.align;
       let runX = align === 'ctr'
-        ? bx + (bw - metric.width) / 2
+        ? contentX + (contentW - metric.width) / 2
         : align === 'r'
-          ? bx + bw - metric.width
-          : bx;
+          ? contentRight - metric.width
+          : contentX;
       for (const measured of metric.runs) {
         ctx.font = measured.font;
         ctx.fillStyle = measured.run.color ? `#${measured.run.color}` : '#000000';

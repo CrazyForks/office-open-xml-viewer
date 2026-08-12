@@ -182,6 +182,49 @@ describe('chart-space background', () => {
 });
 
 describe('chart drawing user-shape text boxes', () => {
+  it('applies DrawingML default text insets inside chart user shapes', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      categories: ['A'],
+      series: [series({ values: [1] })],
+      chartTextBoxes: [{
+        x: 0,
+        y: 0,
+        w: 1,
+        h: 0.2,
+        paragraphs: [{ runs: [{ text: 'Title', fontSizeHpt: 1000 }] }],
+      }],
+    }), RECT, 1);
+
+    const title = rec.texts.find(text => text.text === 'Title');
+    expect(title?.x).toBeCloseTo(7.2, 6);
+    expect(title?.y).toBeCloseTo(3.6 + 9, 6);
+  });
+
+  it('honors explicit asymmetric DrawingML text insets and the content-box alignment', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      categories: ['A'],
+      series: [series({ values: [1] })],
+      chartTextBoxes: [{
+        x: 0.1,
+        y: 0.1,
+        w: 0.5,
+        h: 0.2,
+        lIns: 12700,
+        tIns: 25400,
+        rIns: 38100,
+        bIns: 50800,
+        paragraphs: [{ align: 'r', runs: [{ text: 'Right', fontSizeHpt: 1000 }] }],
+      }],
+    }), RECT, 1);
+
+    const text = rec.texts.find(item => item.text === 'Right');
+    const contentRight = RECT.w * 0.6 - 3;
+    expect((text?.x ?? 0) + (text?.width ?? 0)).toBeCloseTo(contentRight, 6);
+    expect(text?.y).toBeCloseTo(RECT.h * 0.1 + 2 + 9, 6);
+  });
+
   it('draws relative paragraphs with authored run formatting above the chart', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -1064,7 +1107,7 @@ describe('CH4 — stackedAreaPct normalizes like the line/bar percentStacked con
     // CT_LayoutTarget defaults to `outer`: its left edge includes the value
     // labels, while the inner data rectangle begins after their measured width
     // and authored-font gap. The label must not be pushed outside chart space.
-    expect(tickLeft).toBeCloseTo(outerX, 5);
+    expect(tickLeft).toBeCloseTo(outerX + 1.5, 5);
     const plotBg = rec.rects.find(rect => rect.fs === '#ABCDEF');
     expect(plotBg?.x).toBeGreaterThan(outerX);
   });
@@ -1165,7 +1208,7 @@ describe('ECMA-376 §21.2.2.89 — omitted layoutTarget defaults to outer', () =
     const topTick = rec.texts.find(text => text.text === '$1,400');
     expect(topTick).toBeDefined();
     const tickLeft = (topTick?.x ?? 0) - (topTick?.width ?? 0);
-    expect(tickLeft).toBeCloseTo(7, 5);
+    expect(tickLeft).toBeCloseTo(8.5, 5);
     expect(rec.rects.find(rect => rect.fs === '#ABCDEF')?.x).toBeGreaterThan(7);
   });
 
@@ -1186,6 +1229,26 @@ describe('ECMA-376 §21.2.2.89 — omitted layoutTarget defaults to outer', () =
     expect(plot?.x).toBeCloseTo(7, 5);
     expect(plot?.h).toBeLessThan(0.68 * 420);
     expect(rec.texts.find(text => text.text === 'A')?.y).toBeGreaterThan((plot?.y ?? 0) + (plot?.h ?? 0));
+  });
+
+  it('uses the same measured axis-label insets for line and area geometry', () => {
+    const plots = (chartType: 'line' | 'area') => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['2016', '2017'],
+        series: [series({ values: [20, 40] })],
+        valMax: 40,
+        valAxisMajorUnit: 10,
+        valAxisFontSizeHpt: 1000,
+        catAxisFontSizeHpt: 1000,
+        plotAreaBg: 'ABCDEF',
+        plotAreaManualLayout: outer,
+      }), { x: 0, y: 0, w: 700, h: 420 }, 1);
+      return rec.rects.find(rect => rect.fs === '#ABCDEF');
+    };
+
+    expect(plots('line')).toEqual(plots('area'));
   });
 });
 

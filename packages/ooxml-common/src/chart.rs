@@ -32,6 +32,8 @@
 use roxmltree::Node;
 use serde::{Deserialize, Serialize};
 
+use crate::text::{parse_body_pr, BodyPrDefaults};
+
 /// Resource ceiling for the expanded Chart Colors total set. Typical Office
 /// parts contain 6 base colors × at most 9 variations; this bound prevents an
 /// adversarial colors×variations product from amplifying a bounded XML tree.
@@ -516,6 +518,15 @@ pub struct ChartTextBox {
     /// disables wrapping in the renderer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap: Option<String>,
+    /// `<a:bodyPr lIns>` — left text inset in EMU. The parser resolves the
+    /// ECMA-376 §21.1.2.1.1 default when the attribute is omitted.
+    pub l_ins: i64,
+    /// `<a:bodyPr tIns>` — top text inset in EMU.
+    pub t_ins: i64,
+    /// `<a:bodyPr rIns>` — right text inset in EMU.
+    pub r_ins: i64,
+    /// `<a:bodyPr bIns>` — bottom text inset in EMU.
+    pub b_ins: i64,
 }
 
 /// Pattern-only chart-series fill descriptor matching TS `PatternFill`.
@@ -1294,6 +1305,16 @@ pub fn parse_chart_user_shapes(root: Node, resolver: &dyn ColorResolver) -> Vec<
             let wrap = body_pr
                 .and_then(|body| body.attribute("wrap"))
                 .map(str::to_string);
+            let body_defaults = BodyPrDefaults::spec();
+            let parsed_body = body_pr.map(|body| parse_body_pr(body, &body_defaults));
+            let (l_ins, t_ins, r_ins, b_ins) = parsed_body
+                .map(|body| (body.l_ins, body.t_ins, body.r_ins, body.b_ins))
+                .unwrap_or((
+                    body_defaults.l_ins,
+                    body_defaults.t_ins,
+                    body_defaults.r_ins,
+                    body_defaults.b_ins,
+                ));
             let paragraphs = text_body
                 .children()
                 .filter(|node| node.is_element() && node.tag_name().name() == "p")
@@ -1327,6 +1348,10 @@ pub fn parse_chart_user_shapes(root: Node, resolver: &dyn ColorResolver) -> Vec<
                 paragraphs,
                 vertical_anchor,
                 wrap,
+                l_ins,
+                t_ins,
+                r_ins,
+                b_ins,
             })
         })
         .collect()
@@ -6724,7 +6749,7 @@ mod tests {
                   <cdr:nvSpPr><cdr:cNvPr id="1" name="TitleBox"/><cdr:cNvSpPr txBox="1"/></cdr:nvSpPr>
                   <cdr:spPr/>
                   <cdr:txBody>
-                    <a:bodyPr anchor="b" wrap="square"/><a:lstStyle/>
+                    <a:bodyPr anchor="b" wrap="square" lIns="12700" tIns="25400" rIns="38100" bIns="50800"/><a:lstStyle/>
                     <a:p>
                       <a:pPr algn="ctr"><a:defRPr sz="1200"><a:latin typeface="Lato"/></a:defRPr></a:pPr>
                       <a:r><a:rPr sz="2000" b="1"><a:solidFill><a:srgbClr val="1696d2"/></a:solidFill></a:rPr><a:t>Authored </a:t></a:r>
@@ -6745,6 +6770,10 @@ mod tests {
         assert_eq!(boxes[0].h, 0.11);
         assert_eq!(boxes[0].vertical_anchor.as_deref(), Some("b"));
         assert_eq!(boxes[0].wrap.as_deref(), Some("square"));
+        assert_eq!(boxes[0].l_ins, 12700);
+        assert_eq!(boxes[0].t_ins, 25400);
+        assert_eq!(boxes[0].r_ins, 38100);
+        assert_eq!(boxes[0].b_ins, 50800);
         assert_eq!(boxes[0].paragraphs[0].align.as_deref(), Some("ctr"));
         assert_eq!(boxes[0].paragraphs[0].runs[0].text, "Authored ");
         assert_eq!(boxes[0].paragraphs[0].runs[0].font_size_hpt, Some(2000));
@@ -6759,6 +6788,29 @@ mod tests {
             boxes[0].paragraphs[0].runs[1].font_face.as_deref(),
             Some("Lato")
         );
+    }
+
+    #[test]
+    fn parse_chart_user_shapes_applies_drawingml_text_inset_defaults() {
+        let doc = roxmltree::Document::parse(
+            r#"<c:userShapes xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+                 xmlns:cdr="http://schemas.openxmlformats.org/drawingml/2006/chartDrawing"
+                 xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <cdr:relSizeAnchor>
+                <cdr:from><cdr:x>0</cdr:x><cdr:y>0</cdr:y></cdr:from>
+                <cdr:to><cdr:x>1</cdr:x><cdr:y>0.1</cdr:y></cdr:to>
+                <cdr:sp><cdr:txBody><a:bodyPr/><a:p><a:r><a:t>Title</a:t></a:r></a:p></cdr:txBody></cdr:sp>
+              </cdr:relSizeAnchor>
+            </c:userShapes>"#,
+        )
+        .unwrap();
+
+        let boxes = parse_chart_user_shapes(doc.root_element(), &StubResolver);
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].l_ins, crate::text::DEFAULT_INS_LR_EMU);
+        assert_eq!(boxes[0].r_ins, crate::text::DEFAULT_INS_LR_EMU);
+        assert_eq!(boxes[0].t_ins, crate::text::DEFAULT_INS_TB_EMU);
+        assert_eq!(boxes[0].b_ins, crate::text::DEFAULT_INS_TB_EMU);
     }
 
     #[test]

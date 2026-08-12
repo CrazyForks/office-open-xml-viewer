@@ -432,6 +432,10 @@ export interface ChartTextBox {
     paragraphs: ChartTextParagraph[];
     verticalAnchor?: 't' | 'ctr' | 'b' | 'just' | 'dist' | string | null;
     wrap?: 'none' | 'square' | string | null;
+    lIns?: number;
+    tIns?: number;
+    rIns?: number;
+    bIns?: number;
 }
 export interface ChartTextParagraph {
     runs: ChartTextRun[];

@@ -817,6 +817,12 @@ export interface ChartTextBox {
   verticalAnchor?: 't' | 'ctr' | 'b' | 'just' | 'dist' | string | null;
   /** DrawingML `<a:bodyPr wrap>`; absent uses the application-default square wrap. */
   wrap?: 'none' | 'square' | string | null;
+  /** DrawingML text-body insets in EMU. Omitted wire values use the
+   * ECMA-376 defaults: lIns/rIns=91440, tIns/bIns=45720. */
+  lIns?: number;
+  tIns?: number;
+  rIns?: number;
+  bIns?: number;
 }
 
 /**
