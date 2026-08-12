@@ -2823,6 +2823,11 @@ moveTo 152.417,123.7286
 lineTo 240.923,123.7286
 stroke ss=#ccc lw=0.8 dash=
 restore
+set fillStyle=#595959
+set textAlign=center
+set textBaseline=bottom
+fillText "100" 122.915,120.7286 fs=#595959 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#5B9BD5
 fillRect 240.923,53.5071,59.004,70.2214 fs=#5B9BD5
 save
 set lineWidth=1
@@ -2833,6 +2838,8 @@ moveTo 299.927,53.5071
 lineTo 388.433,53.5071
 stroke ss=#ccc lw=0.8 dash=
 restore
+set fillStyle=#595959
+fillText "30" 270.425,50.5071 fs=#595959 font=16.2px sans-serif al=center bl=bottom
 set fillStyle=#ED7D31
 fillRect 388.433,53.5071,59.004,46.8143 fs=#ED7D31
 save
@@ -2844,11 +2851,15 @@ moveTo 447.437,100.3214
 lineTo 535.943,100.3214
 stroke ss=#ccc lw=0.8 dash=
 restore
+set fillStyle=#595959
+set textBaseline=top
+fillText "-20" 417.935,103.3214 fs=#595959 font=16.2px sans-serif al=center bl=top
 set fillStyle=#A5A5A5
 fillRect 535.943,100.3214,59.004,257.4786 fs=#A5A5A5
-set textAlign=center
-set textBaseline=top
 set fillStyle=#595959
+set textBaseline=bottom
+fillText "110" 565.445,97.3214 fs=#595959 font=16.2px sans-serif al=center bl=bottom
+set textBaseline=top
 fillText "Start" 122.915,361.8 fs=#595959 font=16.2px sans-serif al=center bl=top
 fillText "Q1" 270.425,361.8 fs=#595959 font=16.2px sans-serif al=center bl=top
 fillText "Q2" 417.935,361.8 fs=#595959 font=16.2px sans-serif al=center bl=top
@@ -2877,6 +2888,11 @@ moveTo 132.32,123.7286
 lineTo 224.48,123.7286
 stroke ss=#ccc lw=0.8 dash=
 restore
+set fillStyle=#595959
+set textAlign=center
+set textBaseline=bottom
+fillText "100" 101.6,120.7286 fs=#595959 font=16.2px sans-serif al=center bl=bottom
+set fillStyle=#5B9BD5
 fillRect 224.48,53.5071,61.44,70.2214 fs=#5B9BD5
 save
 set lineWidth=1
@@ -2887,6 +2903,8 @@ moveTo 285.92,53.5071
 lineTo 378.08,53.5071
 stroke ss=#ccc lw=0.8 dash=
 restore
+set fillStyle=#595959
+fillText "30" 255.2,50.5071 fs=#595959 font=16.2px sans-serif al=center bl=bottom
 set fillStyle=#ED7D31
 fillRect 378.08,53.5071,61.44,46.8143 fs=#ED7D31
 save
@@ -2898,11 +2916,15 @@ moveTo 439.52,100.3214
 lineTo 531.68,100.3214
 stroke ss=#ccc lw=0.8 dash=
 restore
+set fillStyle=#595959
+set textBaseline=top
+fillText "-20" 408.8,103.3214 fs=#595959 font=16.2px sans-serif al=center bl=top
 set fillStyle=#A5A5A5
 fillRect 531.68,100.3214,61.44,257.4786 fs=#A5A5A5
-set textAlign=center
-set textBaseline=top
 set fillStyle=#595959
+set textBaseline=bottom
+fillText "110" 562.4,97.3214 fs=#595959 font=16.2px sans-serif al=center bl=bottom
+set textBaseline=top
 fillText "Start" 101.6,361.8 fs=#595959 font=16.2px sans-serif al=center bl=top
 fillText "Q1" 255.2,361.8 fs=#595959 font=16.2px sans-serif al=center bl=top
 fillText "Q2" 408.8,361.8 fs=#595959 font=16.2px sans-serif al=center bl=top

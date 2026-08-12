@@ -5811,34 +5811,32 @@ function renderWaterfallChart(
     }
 
     const rawVal = vals[i] ?? 0;
-    if (chart.showDataLabels) {
-      // Locale-independent §18.8.30 formatting, honoring the authored negative
-      // section as-is. Excel accounting formats commonly render negatives in
-      // parentheses; the renderer must not replace that syntax with a triangle.
-      const labelFormat = chart.dataLabelFormatCode ?? chart.series[0]?.valFormatCode ?? null;
-      const labelText = formatChartValWithCode(rawVal, labelFormat, chart.date1904);
-      // Per-data-point label colour from chartEx `<cx:dataLabel idx>` (parsed
-      // into series.dataLabelColors). Falls back to chart.dataLabelFontColor,
-      // then to neutral grey.
-      const perPointColor = chart.series[0]?.dataLabelColors?.[i] ?? null;
-      const labelColor = perPointColor
-        ? `#${perPointColor}`
-        : chart.dataLabelFontColor
-          ? `#${chart.dataLabelFontColor}`
-          : '#595959';
-      ctx.fillStyle = labelColor;
-      const dataLabelFontPx = axisLabelPx(chart.dataLabelFontSizeHpt, h, ptToPx);
-      ctx.font = `${chart.dataLabelFontBold ? 'bold ' : ''}${dataLabelFontPx}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
-      ctx.textAlign = 'center';
-      // Negative bars: label sits below the bar; positive bars and subtotals
-      // place it above the bar.
-      if (rawVal < 0) {
-        ctx.textBaseline = 'top';
-        ctx.fillText(labelText, bx + barW / 2, yBot + 3);
-      } else {
-        ctx.textBaseline = 'bottom';
-        ctx.fillText(labelText, bx + barW / 2, yTop - 3);
-      }
+    // Locale-independent §18.8.30 formatting, honoring the authored negative
+    // section as-is. Excel accounting formats commonly render negatives in
+    // parentheses; the renderer must not replace that syntax with a triangle.
+    const labelFormat = chart.dataLabelFormatCode ?? chart.series[0]?.valFormatCode ?? null;
+    const labelText = formatChartValWithCode(rawVal, labelFormat, chart.date1904);
+    // Per-data-point label colour from chartEx `<cx:dataLabel idx>` (parsed
+    // into series.dataLabelColors). Falls back to chart.dataLabelFontColor,
+    // then to neutral grey.
+    const perPointColor = chart.series[0]?.dataLabelColors?.[i] ?? null;
+    const labelColor = perPointColor
+      ? `#${perPointColor}`
+      : chart.dataLabelFontColor
+        ? `#${chart.dataLabelFontColor}`
+        : '#595959';
+    ctx.fillStyle = labelColor;
+    const dataLabelFontPx = axisLabelPx(chart.dataLabelFontSizeHpt, h, ptToPx);
+    ctx.font = `${chart.dataLabelFontBold ? 'bold ' : ''}${dataLabelFontPx}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
+    ctx.textAlign = 'center';
+    // Negative bars: label sits below the bar; positive bars and subtotals
+    // place it above the bar.
+    if (rawVal < 0) {
+      ctx.textBaseline = 'top';
+      ctx.fillText(labelText, bx + barW / 2, yBot + 3);
+    } else {
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(labelText, bx + barW / 2, yTop - 3);
     }
   });
 
