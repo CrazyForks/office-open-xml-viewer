@@ -3271,15 +3271,17 @@ fn parse_data_point_shape(point: Node, resolver: &dyn ColorResolver) -> DataPoin
     )
 }
 
+type ChartexSeriesLabels = (
+    Option<Vec<Option<String>>>,
+    Option<Vec<ChartDataLabelOverride>>,
+    Option<ChartSeriesDataLabels>,
+);
+
 fn parse_chartex_series_labels(
     series: Node,
     value_count: usize,
     resolver: &dyn ColorResolver,
-) -> (
-    Option<Vec<Option<String>>>,
-    Option<Vec<ChartDataLabelOverride>>,
-    Option<ChartSeriesDataLabels>,
-) {
+) -> ChartexSeriesLabels {
     let Some(labels) = child(series, "dataLabels") else {
         return (None, None, None);
     };
