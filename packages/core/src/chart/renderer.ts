@@ -314,7 +314,9 @@ function drawLegendSwatch(
   color: string,
   x: number, y: number, w: number, h: number,
   marker: LegendMarker | null = null,
-  fillPaint: Fill | null = null,
+  /** undefined = no structured override (use `color`); null = authored
+   * noFill; Fill = authored/resolved swatch paint. */
+  fillPaint: Fill | null | undefined = undefined,
   outlineColor: string | null = null,
   outlineWidthEmu: number | null = null,
   ptToPx = 1,
@@ -346,12 +348,14 @@ function drawLegendSwatch(
       drawMarker(ctx, x + w / 2, y + h / 2, marker.symbol, h * 0.58, marker.fill, marker.line, 1);
     }
   } else {
-    if (fillPaint) {
-      ctx.fillStyle = fillPaint.fillType === 'solid'
-        ? (fillPaint.color.startsWith('#') ? fillPaint.color : `#${fillPaint.color}`)
-        : (resolveFill(fillPaint, ctx, x, y, w, h, shapeRotationDeg) ?? color);
+    if (fillPaint !== null) {
+      if (fillPaint) {
+        ctx.fillStyle = fillPaint.fillType === 'solid'
+          ? (fillPaint.color.startsWith('#') ? fillPaint.color : `#${fillPaint.color}`)
+          : (resolveFill(fillPaint, ctx, x, y, w, h, shapeRotationDeg) ?? color);
+      }
+      ctx.fillRect(x, y, w, h);
     }
-    ctx.fillRect(x, y, w, h);
     if (outlineColor) {
       const outlineWidth = axisLineWidthPx(outlineWidthEmu, ptToPx);
       ctx.save();
@@ -377,7 +381,7 @@ interface LegendEntry {
   color: string;
   marker: LegendMarker | null;
   swatchStyle: LegendSwatchStyle;
-  fillPaint: Fill | null;
+  fillPaint: Fill | null | undefined;
   outlineColor: string | null;
   outlineWidthEmu: number | null;
 }
@@ -405,7 +409,7 @@ function buildLegendEntries(
       color: legendEntryColor(chartType, series, i, varyByPoint),
       marker: null, // pie/doughnut/varyColors keys are always filled swatches.
       swatchStyle: legendSwatchStyle(chartType),
-      fillPaint: fillPaints[i] ?? null,
+      fillPaint: i < fillPaints.length ? fillPaints[i] : undefined,
       outlineColor: null,
       outlineWidthEmu: null,
     }));
@@ -417,7 +421,7 @@ function buildLegendEntries(
     // A combo chart has multiple chart groups under one plotArea. The legend
     // key describes the individual series' group, not the first/primary group.
     swatchStyle: legendSwatchStyle(s.seriesType ?? chartType),
-    fillPaint: fillPaints[i] ?? s.fillPattern ?? null,
+    fillPaint: i < fillPaints.length ? fillPaints[i] : (s.fillPattern ?? undefined),
     outlineColor: s.lineHidden === true ? null : (s.lineColor ?? null),
     outlineWidthEmu: s.lineWidthEmu ?? null,
   }));
@@ -526,13 +530,15 @@ function drawLegend(
 /** Build the resolved legend text style for a chart (CH10). Absent legend
  *  `<c:txPr>` fields fall back to the historical defaults, keeping legends
  *  byte-stable for files that style nothing. */
-function legendTextStyle(chart: ChartModel): LegendTextStyle {
+function legendTextStyle(chart: ChartModel, ptToPx: number): LegendTextStyle {
   const face = resolveThemeFontRef(chart, chart.legendFontFace) ?? chart.themeMinorFontLatin;
   return {
     fontFamily: face ? `"${face}", Calibri, Arial, sans-serif` : 'sans-serif',
     color: chart.legendFontColor ? `#${chart.legendFontColor}` : '#333',
     bold: chart.legendFontBold ?? false,
-    sizePx: chart.legendFontSizeHpt != null ? chart.legendFontSizeHpt / 100 : null,
+    sizePx: chart.legendFontSizeHpt != null
+      ? (chart.legendFontSizeHpt / 100) * ptToPx
+      : null,
   };
 }
 
@@ -554,7 +560,7 @@ function drawLegendForLayout(
   shapeRotationDeg = 0,
 ): void {
   if (!leg) return;
-  const legStyle = legendTextStyle(chart);
+  const legStyle = legendTextStyle(chart, ptToPx);
   // §21.2.2.227 varyColors single-series bar: the legend lists one entry per
   // data point (colored like each bar), so the legend and the plot fill agree.
   const varyByPoint = chartVariesColorsByPoint(chart);
@@ -639,6 +645,42 @@ function drawAxisTick(
 /** Visit authored minor-unit positions between adjacent major ticks. OOXML does
  * not define the application's automatic minor unit, so an omitted
  * `<c:minorUnit>` deliberately produces no guessed positions. */
+const MAX_AXIS_TICKS = 10_000;
+
+function minorAxisValues(
+  min: number,
+  max: number,
+  majorStep: number,
+  minorUnit: number | null | undefined,
+): number[] {
+  const step = minorUnit != null && isFinite(minorUnit) && minorUnit > 0
+    ? minorUnit
+    : 0;
+  if (!(step > 0) || !(majorStep > 0)) return [];
+  const epsilon = Math.max(Math.abs(majorStep), Math.abs(step)) * 1e-8;
+  const values: number[] = [];
+  // Axis units advance from the authored/derived scale minimum. Anchoring at
+  // numeric zero shifts every minor division when an explicit non-zero min is
+  // present and can also double-paint a major position.
+  let iterations = 0;
+  for (let value = min + step;
+    value < max - epsilon && iterations < MAX_AXIS_TICKS;
+    iterations += 1) {
+    // IEEE-754 addition can stop progressing for a positive but sub-ULP unit.
+    // Reject that authored scale instead of hanging the renderer. The count
+    // cap also bounds hostile documents whose unit requests millions of marks.
+    if (!(value > min) || !isFinite(value)) break;
+    // A position shared with a major tick is already painted by the major
+    // layer; do not double-stroke it when the two authored units coincide.
+    const majorMultiple = (value - min) / majorStep;
+    if (Math.abs(majorMultiple - Math.round(majorMultiple)) > 1e-8) values.push(value);
+    const next = value + step;
+    if (!(next > value)) break;
+    value = next;
+  }
+  return values;
+}
+
 function forEachMinorTick(
   min: number,
   max: number,
@@ -646,17 +688,7 @@ function forEachMinorTick(
   minorUnit: number | null | undefined,
   visit: (value: number) => void,
 ): void {
-  const step = minorUnit != null && isFinite(minorUnit) && minorUnit > 0 && minorUnit < majorStep
-    ? minorUnit
-    : 0;
-  if (!(step > 0) || !(majorStep > 0)) return;
-  const epsilon = Math.abs(majorStep) * 1e-8;
-  const firstMajor = Math.ceil((min - epsilon) / majorStep) * majorStep;
-  for (let major = firstMajor; major < max - epsilon; major += majorStep) {
-    for (let value = major + step; value < major + majorStep - epsilon; value += step) {
-      if (value > min + epsilon && value < max - epsilon) visit(value);
-    }
-  }
+  for (const value of minorAxisValues(min, max, majorStep, minorUnit)) visit(value);
 }
 
 /** Stroke one horizontal value-axis gridline spanning the plot width at `gy`.
@@ -680,7 +712,7 @@ function strokeValueGridlineH(
   pw: number,
   gy: number,
   isZero: boolean,
-  grid?: { color: string; width: number; explicit: boolean },
+  grid?: { color: string; width: number; explicit: boolean; dash: number[] },
 ): void {
   if (grid && grid.explicit) {
     ctx.strokeStyle = grid.color;
@@ -689,15 +721,20 @@ function strokeValueGridlineH(
     ctx.strokeStyle = isZero ? '#aaa' : grid?.color ?? '#e0e0e0';
     ctx.lineWidth = isZero ? 1 : grid?.width ?? 0.5;
   }
+  const authoredDash = grid?.dash ?? [];
+  const previousDash = authoredDash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
+  if (authoredDash.length > 0) ctx.setLineDash(authoredDash);
   ctx.beginPath();
   ctx.moveTo(px0, gy);
   ctx.lineTo(px0 + pw, gy);
   ctx.stroke();
+  if (authoredDash.length > 0) ctx.setLineDash(previousDash);
 }
 
 /** Resolve the value-axis MAJOR gridline stroke for `chart` at the current
- *  display scale. `explicit` is true when the file pinned a gridline color via
- *  `<c:valAx><c:majorGridlines><c:spPr><a:ln><a:solidFill>` — that flag tells
+ *  display scale. `explicit` is true when the file pinned any line property
+ *  (color, width, or dash) under `<c:valAx><c:majorGridlines><c:spPr><a:ln>`;
+ *  that flag tells
  *  `strokeValueGridlineH` to stroke every gridline in the resolved color
  *  uniformly (no `#aaa` zero-line emphasis), matching PowerPoint. With no
  *  explicit color the resolved `{ color: '#e0e0e0', width: 0.5 }` reproduces the
@@ -705,9 +742,33 @@ function strokeValueGridlineH(
 function valGridStroke(
   chart: ChartModel,
   ptToPx: number,
-): { color: string; width: number; explicit: boolean } {
+): { color: string; width: number; explicit: boolean; dash: number[] } {
   const { color, width } = resolveGridline(chart.valAxisGridlineColor, chart.valAxisGridlineWidthEmu, ptToPx);
-  return { color, width, explicit: chart.valAxisGridlineColor != null };
+  return {
+    color,
+    width,
+    explicit: chart.valAxisGridlineColor != null
+      || chart.valAxisGridlineWidthEmu != null
+      || chart.valAxisGridlineDash != null,
+    dash: dashPatternForPreset(chart.valAxisGridlineDash ?? undefined),
+  };
+}
+
+function valMinorGridStroke(
+  chart: ChartModel,
+  ptToPx: number,
+): { color: string; width: number; explicit: boolean; dash: number[] } {
+  const { color, width } = resolveGridline(
+    chart.valAxisMinorGridlineColor,
+    chart.valAxisMinorGridlineWidthEmu,
+    ptToPx,
+  );
+  return {
+    color,
+    width,
+    explicit: chart.valAxisMinorGridlineColor != null,
+    dash: dashPatternForPreset(chart.valAxisMinorGridlineDash ?? undefined),
+  };
 }
 
 /** Whether to draw CATEGORY-axis MAJOR gridlines (`<c:catAx><c:majorGridlines>`,
@@ -723,8 +784,22 @@ function drawCatMajorGridlines(chart: ChartModel): boolean {
  *  ⇒ the same faint `#e0e0e0`/0.5 px default as the value axis. Category
  *  gridlines have no zero-line emphasis (there is no "zero category"), so a
  *  single resolved stroke suffices. */
-function catGridStroke(chart: ChartModel, ptToPx: number): { color: string; width: number } {
-  return resolveGridline(chart.catAxisGridlineColor, chart.catAxisGridlineWidthEmu, ptToPx);
+function catGridStroke(chart: ChartModel, ptToPx: number): { color: string; width: number; dash: number[] } {
+  return {
+    ...resolveGridline(chart.catAxisGridlineColor, chart.catAxisGridlineWidthEmu, ptToPx),
+    dash: dashPatternForPreset(chart.catAxisGridlineDash ?? undefined),
+  };
+}
+
+function catMinorGridStroke(chart: ChartModel, ptToPx: number): { color: string; width: number; dash: number[] } {
+  return {
+    ...resolveGridline(
+      chart.catAxisMinorGridlineColor,
+      chart.catAxisMinorGridlineWidthEmu,
+      ptToPx,
+    ),
+    dash: dashPatternForPreset(chart.catAxisMinorGridlineDash ?? undefined),
+  };
 }
 
 /** The plot-fraction positions (0..1 across the category extent) of the CATEGORY
@@ -851,15 +926,11 @@ function planValueAxis(
   for (let si = 0; si <= steps; si++) majorLines.push(min + si * step);
   // Minor gridlines (ECMA-376 §21.2.2.109/§21.2.2.112): only when the file both
   // declares `<c:minorGridlines>` AND a positive `<c:minorUnit>`; the minor lines
-  // between the majors are the interior multiples of the minor unit.
+  // are the positive-unit positions measured from the scale minimum. The
+  // schema only requires a positive value; it does not require minor < major.
   const minorLines: number[] = [];
   const mu = valueAxisUnitInRendererSpace(chart.valAxisMinorUnit, percentStacked);
-  if (chart.valAxisMinorGridlines && mu != null && isFinite(mu) && mu > 0 && mu < step) {
-    for (let v = min + mu; v < max - 1e-9; v += mu) {
-      // Skip values that coincide with a major line.
-      if (Math.abs((v - min) / step - Math.round((v - min) / step)) > 1e-6) minorLines.push(v);
-    }
-  }
+  if (chart.valAxisMinorGridlines) minorLines.push(...minorAxisValues(min, max, step, mu));
   return {
     min, max, step, majorLines, minorLines,
     frac: (v: number) => (reversed ? 1 - (v - min) / range : (v - min) / range),
@@ -895,6 +966,7 @@ function drawSeriesTrendlines(
   if (xs.length < 2) return;
   const prevDash = ctx.getLineDash ? ctx.getLineDash() : [];
   for (const tl of tls) {
+    if (tl.lineHidden) continue;
     const fit = fitTrendline(xs, ys, tl.trendlineType, {
       period: tl.period, intercept: tl.intercept,
     });
@@ -911,16 +983,18 @@ function drawSeriesTrendlines(
     }
     ctx.strokeStyle = tl.lineColor ? `#${tl.lineColor}` : seriesColor;
     ctx.lineWidth = tl.lineWidthEmu ? axisLineWidthPx(tl.lineWidthEmu, ptToPx) : 1.5;
-    // `<c:trendline><c:spPr><a:ln>` without an authored dash is a solid line.
-    // Dash presets can be added to ChartTrendline when the parser retains one;
-    // never invent a dashed style for an otherwise solid DrawingML line.
-    ctx.setLineDash([]);
+    // DrawingML line presets are authored paint; omission means solid.
+    ctx.setLineDash(dashPatternForPreset(tl.lineDash ?? undefined));
     ctx.beginPath();
     for (let i = 0; i < fxs.length; i++) {
       const px = toX(fxs[i]); const py = toY(fys[i]);
       if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
     }
     ctx.stroke();
+
+    // `<c:dispEq>` / `<c:dispRSqr>` control a trendline-label object whose
+    // omitted layout is application-defined. Do not invent an anchor here;
+    // authored label layout is tracked separately from rendering the line.
   }
   ctx.setLineDash(prevDash);
 }
@@ -1344,6 +1418,18 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // series (see {@link chartVariesColorsByPoint}), so combo/multi-series bars
   // are byte-identical.
   const varyByPoint = chartVariesColorsByPoint(chart);
+  const pointOverrides = barSeries.map(series =>
+    new Map((series.dataPointOverrides ?? []).map(point => [point.idx, point])),
+  );
+  const labelOverrides = barSeries.map(series =>
+    new Map((series.dataLabelOverrides ?? []).map(label => [label.idx, label])),
+  );
+  const barStyleIndices = barSeries.map((series, index) =>
+    chartExSeriesFormatIndex(series, index)
+  );
+  const isChartExColumn = chart.chartexDataPointStyle != null
+    || chart.chartexColorPalette != null
+    || barSeries.some(series => series.chartexStyle != null);
 
   // Honor the XML-specified title font size when present; otherwise fall back
   // to the proportional heuristic. Reserve the title band based on the actual
@@ -1538,7 +1624,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const secFontPx = sec?.fontSizeHpt ? (sec.fontSizeHpt / 100) * ptToPx : secTickFontPx;
   let secLabelBandW = 0;
   if (sec && !sec.hidden) {
-    ctx.font = `${secFontPx}px sans-serif`;
+    ctx.font = `${secFontPx}px ${chartFontFamily(chart, sec.fontFace, 'minor')}`;
     let wmax = 0;
     const sSteps = Math.round((sMax - sMin) / sStep);
     for (let si = 0; si <= sSteps; si++) {
@@ -1692,13 +1778,17 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
 
   if (!chart.valAxisHidden) {
     // Minor gridlines (under the majors) when the file declares them.
+    const minorGrid = valMinorGridStroke(chart, ptToPx);
     for (const val of plan.minorLines) {
       if (!isH) {
-        strokeValueGridlineH(ctx, px0, pw, valY(val), false, grid);
+        strokeValueGridlineH(ctx, px0, pw, valY(val), false, minorGrid);
       } else {
         const gx = valX(val);
-        ctx.strokeStyle = grid.color; ctx.lineWidth = grid.width;
+        ctx.strokeStyle = minorGrid.color; ctx.lineWidth = minorGrid.width;
+        const previousDash = minorGrid.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
+        if (minorGrid.dash.length > 0) ctx.setLineDash(minorGrid.dash);
         ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
+        if (minorGrid.dash.length > 0) ctx.setLineDash(previousDash);
       }
     }
     const drawMajorGrid = drawValMajorGridlines(chart);
@@ -1725,7 +1815,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
           // matching PowerPoint; otherwise keep the `#aaa`/1 px baseline rule.
           ctx.strokeStyle = grid.explicit ? grid.color : isZero ? '#aaa' : grid.color;
           ctx.lineWidth = grid.explicit ? grid.width : isZero ? 1 : grid.width;
+          const previousDash = grid.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
+          if (grid.dash.length > 0) ctx.setLineDash(grid.dash);
           ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
+          if (grid.dash.length > 0) ctx.setLineDash(previousDash);
         }
         if (drawLabels) {
           ctx.textAlign = 'center';
@@ -1749,6 +1842,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     const cg = catGridStroke(chart, ptToPx);
     ctx.strokeStyle = cg.color;
     ctx.lineWidth = cg.width;
+    const previousDash = cg.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
+    if (cg.dash.length > 0) ctx.setLineDash(cg.dash);
     for (const frac of catGridlineFractions(chart, n)) {
       ctx.beginPath();
       if (!isH) {
@@ -1760,6 +1855,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       }
       ctx.stroke();
     }
+    if (cg.dash.length > 0) ctx.setLineDash(previousDash);
   }
 
   // Axis rules. The CATEGORY axis runs along the bars' baseline — bottom
@@ -1885,10 +1981,58 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       // A `<c:dPt>` fill is an explicit point override regardless of the
       // chart-group `varyColors` flag (§21.2.2.52). varyColors only controls
       // the fallback palette for points without an override.
-      const pointOverride = s.dataPointColors?.[ci];
-      const color = pointOverride
-        ? `#${pointOverride}`
+      const pointOverride = pointOverrides[si].get(ci);
+      const pointColor = pointOverride?.color ?? s.dataPointColors?.[ci];
+      const color = pointColor
+        ? `#${pointColor}`
         : varyByPoint ? pieSliceColor(ci, s) : chartColor(si, s);
+      const pointPaint = pointOverride?.fillHidden
+        ? null
+        : pointOverride?.color
+          ? { fillType: 'solid' as const, color: pointOverride.color }
+          : isChartExColumn
+            // MS-ODRAWXML §2.8.4.5: styleClr="auto" uses the relative
+            // index of the styled element. A clustered-column dataPoint style
+            // colors a series, so every point in that series resolves with
+            // the series index; CT_DataPoint direct formatting above remains
+            // point-local and wins.
+            ? chartExDataPointPaint(
+              chart, barStyleIndices[si], barSeries.length, s.chartexStyle, s.color,
+            )
+            : undefined;
+      const applyPointOutline = (): boolean => {
+        const hasPointLine = pointOverride?.lineHidden != null
+          || pointOverride?.lineColor != null
+          || pointOverride?.lineWidthEmu != null
+          || pointOverride?.lineDash != null;
+        if (hasPointLine) {
+          if (pointOverride?.lineHidden) return false;
+          const fallback = chartExStyleColor(
+            chart, chart.chartexDataPointStyle, 'line', barStyleIndices[si], barSeries.length,
+          )
+            ?? s.lineColor
+            ?? color;
+          ctx.strokeStyle = `#${pointOverride?.lineColor ?? fallback.replace(/^#/, '')}`;
+          ctx.lineWidth = pointOverride?.lineWidthEmu != null
+            ? axisLineWidthPx(pointOverride.lineWidthEmu, ptToPx)
+            : s.lineWidthEmu != null
+              ? axisLineWidthPx(s.lineWidthEmu, ptToPx)
+              : 1;
+          ctx.setLineDash(dashPatternForPreset(pointOverride?.lineDash));
+          return true;
+        }
+        if (isChartExColumn) {
+          return applyChartExSeriesLineStyle(
+            ctx, chart, chart.chartexDataPointStyle, s,
+            barStyleIndices[si], barSeries.length, color, ptToPx,
+          );
+        }
+        if (!s.lineColor || s.lineHidden) return false;
+        ctx.strokeStyle = `#${s.lineColor}`;
+        ctx.lineWidth = axisLineWidthPx(s.lineWidthEmu, ptToPx);
+        ctx.setLineDash([]);
+        return true;
+      };
 
       if (!isH) {
         const bx = stacked
@@ -1902,14 +2046,16 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         const by = clamp(Math.min(y0, y1), py0, py0 + ph);
         const barBottom = clamp(Math.max(y0, y1), py0, py0 + ph);
         const barH = Math.max(0, barBottom - by);
-        ctx.fillStyle = s.fillPattern
-          ? (resolveFill(s.fillPattern, ctx, bx, by, barW, barH) ?? color)
-          : color;
-        ctx.fillRect(bx, by, barW, barH);
-        if (s.lineColor && !s.lineHidden && barW > 0 && barH > 0) {
-          const outlineW = axisLineWidthPx(s.lineWidthEmu, ptToPx);
-          ctx.strokeStyle = `#${s.lineColor}`;
-          ctx.lineWidth = outlineW;
+        if (pointPaint !== null) {
+          ctx.fillStyle = pointPaint
+            ? chartExFillStyle(ctx, pointPaint, bx, by, barW, barH, color)
+            : s.fillPattern
+              ? (resolveFill(s.fillPattern, ctx, bx, by, barW, barH) ?? color)
+              : color;
+          ctx.fillRect(bx, by, barW, barH);
+        }
+        if (barW > 0 && barH > 0 && applyPointOutline()) {
+          const outlineW = ctx.lineWidth;
           ctx.strokeRect(
             bx + outlineW / 2,
             by + outlineW / 2,
@@ -1918,24 +2064,27 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
           );
         }
         const seriesLabels = s.seriesDataLabels;
-        if ((chart.showDataLabels || seriesLabels?.showVal === true) && sv !== 0) {
+        const label = resolveChartExLabel(
+          chart, s, ci, s.categories?.[ci] ?? cats[ci] ?? '', sv,
+          { visible: chart.showDataLabels, showVal: chart.showDataLabels, showCatName: false },
+          labelOverrides[si],
+        );
+        if (label) {
           // ECMA-376 §21.2.2.30 / §21.1.2.3.2 — data label font size comes from
           // `<c:dLbls><c:txPr>...<a:defRPr@sz>` (hundredths of a point). When
           // the file specifies one we honor it; otherwise the proportional
           // heuristic keeps small bars readable.
-          const sizeHpt = seriesLabels?.fontSizeHpt ?? chart.dataLabelFontSizeHpt;
+          const sizeHpt = label.fontSizeHpt ?? chart.dataLabelFontSizeHpt;
           const lsz = sizeHpt
             ? (sizeHpt / 100) * ptToPx
             : Math.max(7, Math.min(11, barW * 0.6));
-          const bold = seriesLabels?.fontBold ?? true;
+          const authoredLabel = labelOverrides[si].get(ci);
+          const bold = label.fontBold
+            || (seriesLabels?.fontBold == null && authoredLabel?.fontBold == null);
           ctx.font = `${bold ? 'bold ' : ''}${lsz}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
-          const text = pct
+          const text = pct && authoredLabel?.text == null
             ? `${Math.round(sv)}%`
-            : formatChartValWithCode(
-                sv,
-                seriesLabels?.formatCode ?? chart.dataLabelFormatCode ?? s.valFormatCode ?? null,
-                chart.date1904,
-              );
+            : label.text;
           // drawBarDataLabel takes (bx, by, barL=length, barW=thickness). For
           // a vertical column bar, "length" is the bar's height and
           // "thickness" is its horizontal width — pass them in that order.
@@ -1947,8 +2096,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
             ctx, text,
             bx, by, barH, barW,
             'vertical',
-            seriesLabels?.position ?? chart.dataLabelPosition ?? (stacked ? 'ctr' : null),
-            seriesLabels?.fontColor ?? s.labelColor ?? chart.dataLabelFontColor ?? null,
+            label.position ?? chart.dataLabelPosition ?? (stacked ? 'ctr' : null),
+            s.dataLabelColors?.[ci] ?? label.fontColor ?? s.labelColor ?? chart.dataLabelFontColor ?? null,
             negative,
           );
         }
@@ -1965,14 +2114,16 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         const bx = clamp(Math.min(x0, x1), px0, px0 + pw);
         const barRight = clamp(Math.max(x0, x1), px0, px0 + pw);
         const barL = Math.max(0, barRight - bx);
-        ctx.fillStyle = s.fillPattern
-          ? (resolveFill(s.fillPattern, ctx, bx, by, barL, barW) ?? color)
-          : color;
-        ctx.fillRect(bx, by, barL, barW);
-        if (s.lineColor && !s.lineHidden && barL > 0 && barW > 0) {
-          const outlineW = axisLineWidthPx(s.lineWidthEmu, ptToPx);
-          ctx.strokeStyle = `#${s.lineColor}`;
-          ctx.lineWidth = outlineW;
+        if (pointPaint !== null) {
+          ctx.fillStyle = pointPaint
+            ? chartExFillStyle(ctx, pointPaint, bx, by, barL, barW, color)
+            : s.fillPattern
+              ? (resolveFill(s.fillPattern, ctx, bx, by, barL, barW) ?? color)
+              : color;
+          ctx.fillRect(bx, by, barL, barW);
+        }
+        if (barL > 0 && barW > 0 && applyPointOutline()) {
+          const outlineW = ctx.lineWidth;
           ctx.strokeRect(
             bx + outlineW / 2,
             by + outlineW / 2,
@@ -1981,26 +2132,29 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
           );
         }
         const seriesLabels = s.seriesDataLabels;
-        if ((chart.showDataLabels || seriesLabels?.showVal === true) && sv !== 0) {
-          const sizeHpt = seriesLabels?.fontSizeHpt ?? chart.dataLabelFontSizeHpt;
+        const label = resolveChartExLabel(
+          chart, s, ci, s.categories?.[ci] ?? cats[ci] ?? '', sv,
+          { visible: chart.showDataLabels, showVal: chart.showDataLabels, showCatName: false },
+          labelOverrides[si],
+        );
+        if (label) {
+          const sizeHpt = label.fontSizeHpt ?? chart.dataLabelFontSizeHpt;
           const lsz = sizeHpt
             ? (sizeHpt / 100) * ptToPx
             : Math.max(7, Math.min(11, barW * 0.6));
-          const bold = seriesLabels?.fontBold ?? true;
+          const authoredLabel = labelOverrides[si].get(ci);
+          const bold = label.fontBold
+            || (seriesLabels?.fontBold == null && authoredLabel?.fontBold == null);
           ctx.font = `${bold ? 'bold ' : ''}${lsz}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
-          const text = pct
+          const text = pct && authoredLabel?.text == null
             ? `${Math.round(sv)}%`
-            : formatChartValWithCode(
-                sv,
-                seriesLabels?.formatCode ?? chart.dataLabelFormatCode ?? s.valFormatCode ?? null,
-                chart.date1904,
-              );
+            : label.text;
           drawBarDataLabel(
             ctx, text,
             bx, by, barL, barW,
             'horizontal',
-            seriesLabels?.position ?? chart.dataLabelPosition ?? (stacked ? 'ctr' : null),
-            seriesLabels?.fontColor ?? s.labelColor ?? chart.dataLabelFontColor ?? null,
+            label.position ?? chart.dataLabelPosition ?? (stacked ? 'ctr' : null),
+            s.dataLabelColors?.[ci] ?? label.fontColor ?? s.labelColor ?? chart.dataLabelFontColor ?? null,
             negative,
           );
         }
@@ -2189,7 +2343,54 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     }
   }
 
-  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2, ptToPx);
+  const legendChart = isChartExColumn
+    ? {
+      ...chart,
+      series: barSeries.map((series, index) => {
+        const styleIndex = barStyleIndices[index];
+        const linkedStyle = chart.chartexDataPointStyle;
+        const localStyle = series.chartexStyle;
+        const localHasLine = localStyle?.lineHidden != null
+          || localStyle?.lineColors?.some(Boolean)
+          || localStyle?.lineWidthEmu != null
+          || localStyle?.lineDash != null;
+        const useLocalLine = localHasLine && !(localStyle?.lineHidden && localStyle.lineNoStyle);
+        const useLegacyLine = !useLocalLine && (
+          series.lineHidden != null || series.lineColor != null || series.lineWidthEmu != null
+        );
+        const effectiveLineStyle = useLocalLine
+          ? localStyle
+          : useLegacyLine ? null : linkedStyle;
+        return {
+          ...series,
+          color: series.color
+            ?? chartExDataPointFill(chart, styleIndex, barSeries.length, localStyle),
+          lineHidden: useLocalLine
+            ? localStyle?.lineHidden === true
+            : useLegacyLine
+              ? series.lineHidden
+              : effectiveLineStyle?.lineHidden ?? false,
+          lineColor: useLegacyLine
+            ? series.lineColor
+            : chartExStyleColor(
+              chart, effectiveLineStyle, 'line', styleIndex, barSeries.length,
+            ),
+          lineWidthEmu: useLegacyLine
+            ? series.lineWidthEmu
+            : effectiveLineStyle?.lineWidthEmu ?? null,
+        };
+      }),
+    }
+    : chart;
+  const legendPaints = isChartExColumn
+    ? barSeries.map((series, index) => chartExDataPointPaint(
+      chart, barStyleIndices[index], barSeries.length, series.chartexStyle, series.color,
+    ))
+    : [];
+  drawLegendForLayout(
+    ctx, legendChart, leg, x, y, w, h, px0, py0, pw, ph,
+    titleH + 2, ptToPx, legendPaints,
+  );
   drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
 }
 
@@ -2322,7 +2523,7 @@ function renderLineChart(
   let secLabelBandW = 0;
   if (sec && secScale && !sec.hidden) {
     const prevFont = ctx.font;
-    ctx.font = `${secFontPx}px sans-serif`;
+    ctx.font = `${secFontPx}px ${chartFontFamily(chart, sec.fontFace, 'minor')}`;
     let wmax = 0;
     const sSteps = Math.round((secScale.max - secScale.min) / secScale.step);
     for (let si = 0; si <= sSteps; si++) {
@@ -2429,9 +2630,10 @@ function renderLineChart(
     ctx.textBaseline = 'middle';
     // Resolved gridline stroke (`<c:majorGridlines><c:spPr><a:ln>` or default).
     const grid = valGridStroke(chart, ptToPx);
+    const minorGrid = valMinorGridStroke(chart, ptToPx);
     // Minor gridlines first (under the majors), then major gridlines + ticks +
     // labels. Minor lines are only populated when the file declares them.
-    for (const v of plan.minorLines) strokeValueGridlineH(ctx, px0, pw, toY(v), false, grid);
+    for (const v of plan.minorLines) strokeValueGridlineH(ctx, px0, pw, toY(v), false, minorGrid);
     const drawMajorGrid = drawValMajorGridlines(chart);
     const drawLabels = chart.valAxisTickLabelPos !== 'none';
     for (const v of plan.majorLines) {
@@ -2462,10 +2664,13 @@ function renderLineChart(
     const cg = catGridStroke(chart, ptToPx);
     ctx.strokeStyle = cg.color;
     ctx.lineWidth = cg.width;
+    const previousDash = cg.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
+    if (cg.dash.length > 0) ctx.setLineDash(cg.dash);
     for (const frac of catGridlineFractions(chart, n)) {
       const gx = px0 + frac * pw;
       ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
     }
+    if (cg.dash.length > 0) ctx.setLineDash(previousDash);
   }
 
   // Axis lines: bottom (category) + left (value). Both default to visible
@@ -2759,7 +2964,8 @@ function renderStockChart(
     ctx.font = `${valAxFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
     ctx.textBaseline = 'middle';
     const grid = valGridStroke(chart, ptToPx);
-    for (const v of plan.minorLines) strokeValueGridlineH(ctx, px0, pw, toY(v), false, grid);
+    const minorGrid = valMinorGridStroke(chart, ptToPx);
+    for (const v of plan.minorLines) strokeValueGridlineH(ctx, px0, pw, toY(v), false, minorGrid);
     const drawMajorGrid = drawValMajorGridlines(chart);
     const drawLabels = chart.valAxisTickLabelPos !== 'none';
     for (const v of plan.majorLines) {
@@ -2772,6 +2978,12 @@ function renderStockChart(
         ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
       }
     }
+    forEachMinorTick(plan.min, plan.max, plan.step, chart.valAxisMinorUnit, v => {
+      drawAxisTick(
+        ctx, chart.valAxisMinorTickMark, 'val', px0, toY(v),
+        undefined, undefined, false, chart.valAxisLineHidden,
+      );
+    });
   }
 
   // Axis rules (bottom = category, left = value).
@@ -2960,7 +3172,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   let secLabelBandW = 0;
   if (sec && secScale && !sec.hidden) {
     const prevFont = ctx.font;
-    ctx.font = `${secFontPx}px sans-serif`;
+    ctx.font = `${secFontPx}px ${chartFontFamily(chart, sec.fontFace, 'minor')}`;
     let wmax = 0;
     const sSteps = Math.round((secScale.max - secScale.min) / secScale.step);
     for (let si = 0; si <= sSteps; si++) {
@@ -3122,19 +3334,16 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // by default (`drawValMajorGridlines`); `<c:minorGridlines>` only when declared.
   if (!chart.valAxisHidden) {
     const grid = valGridStroke(chart, ptToPx);
+    const minorGrid = valMinorGridStroke(chart, ptToPx);
     // Minor gridlines (`<c:valAx><c:minorGridlines>`, §21.2.2.129) drawn first,
     // UNDER the majors and the series, only when the file declares them AND a
-    // positive `<c:minorUnit>` smaller than the major step. Interior multiples of
-    // the minor unit that don't coincide with a major line — same computation as
-    // planValueAxis (renderer.ts ~686-696) used by bar/line/stock, with the area
-    // axis anchored at min = 0. Fixes #883 (area previously ignored minor lines).
+    // positive `<c:minorUnit>`. Positions are generated by the same scale-min
+    // based helper used by the other value-axis renderers.
     const mu = valueAxisUnitInRendererSpace(chart.valAxisMinorUnit, pct);
-    if (chart.valAxisMinorGridlines && mu != null && isFinite(mu) && mu > 0 && mu < step) {
-      for (let v = mu; v < axMax - 1e-9; v += mu) {
-        if (Math.abs(v / step - Math.round(v / step)) > 1e-6) {
-          strokeValueGridlineH(ctx, px0, pw, toY(v), false, grid);
-        }
-      }
+    if (chart.valAxisMinorGridlines) {
+      forEachMinorTick(0, axMax, step, mu, v => {
+        strokeValueGridlineH(ctx, px0, pw, toY(v), false, minorGrid);
+      });
     }
     if (drawValMajorGridlines(chart)) {
       const steps = Math.round(axMax / step);
@@ -3151,10 +3360,13 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     const cg = catGridStroke(chart, ptToPx);
     ctx.strokeStyle = cg.color;
     ctx.lineWidth = cg.width;
+    const previousDash = cg.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
+    if (cg.dash.length > 0) ctx.setLineDash(cg.dash);
     for (const frac of catGridlineFractions(chart, n)) {
       const gx = px0 + frac * pw;
       ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
     }
+    if (cg.dash.length > 0) ctx.setLineDash(previousDash);
   }
 
   // Draw the series area fills ON TOP of the gridlines laid down above.
@@ -4740,13 +4952,22 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       ? valueTickLabelGapPx(yTickFontPx)
       : 4;
     ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${yTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+    if (chart.valAxisMinorGridlines) {
+      const minorGrid = valMinorGridStroke(chart, ptToPx);
+      forEachMinorTick(yMin, yMax, yAxisStep, chart.valAxisMinorUnit, value => {
+        strokeValueGridlineH(ctx, px0, pw, toY(value), false, minorGrid);
+      });
+    }
     const ySteps = Math.round((yMax - yMin) / yAxisStep) + 1;
     for (let si = 0; si < ySteps; si++) {
       const v = yMin + si * yAxisStep; if (v > yMax + yAxisStep * 0.01) break;
       const gy = toY(v);
       ctx.strokeStyle = grid.color; ctx.lineWidth = grid.width;
       if (drawValMajorGridlines(chart)) {
+        const previousDash = grid.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
+        if (grid.dash.length > 0) ctx.setLineDash(grid.dash);
         ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+        if (grid.dash.length > 0) ctx.setLineDash(previousDash);
       }
       if (chart.valAxisTickLabelPos !== 'none') {
         ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
@@ -4784,12 +5005,27 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     const xSteps = Math.round((xMax - xMin) / xStep) + 1;
     ctx.strokeStyle = xGrid.color;
     ctx.lineWidth = xGrid.width;
+    const previousDash = xGrid.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
+    if (xGrid.dash.length > 0) ctx.setLineDash(xGrid.dash);
     for (let si = 0; si < xSteps; si++) {
       const v = xMin + si * xStep;
       if (v > xMax + xStep * 0.01) break;
       const gx = toX(v);
       ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
     }
+    if (xGrid.dash.length > 0) ctx.setLineDash(previousDash);
+  }
+  if (!chart.catAxisHidden && chart.catAxisMinorGridlines && xStep > 0) {
+    const xGrid = catMinorGridStroke(chart, ptToPx);
+    const previousDash = xGrid.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
+    ctx.strokeStyle = xGrid.color;
+    ctx.lineWidth = xGrid.width;
+    if (xGrid.dash.length > 0) ctx.setLineDash(xGrid.dash);
+    forEachMinorTick(xMin, xMax, xStep, chart.catAxisMinorUnit, value => {
+      const gx = toX(value);
+      ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
+    });
+    if (xGrid.dash.length > 0) ctx.setLineDash(previousDash);
   }
 
   // X-axis line (the timeline ruler in Gantt-style scatter charts depends
@@ -5473,6 +5709,77 @@ function drawCategoryDataLabels(
 
 type ChartExStyle = NonNullable<ChartModel['chartexDataPointStyle']>;
 
+interface ResolvedChartExLabel {
+  text: string;
+  position?: string;
+  fontColor?: string;
+  fontSizeHpt?: number;
+  fontBold: boolean;
+}
+
+/** Effective CT_Series formatting index. The shared parser preserves authored
+ * `formatIdx` and resolves omission to the original document-order index so a
+ * hidden series cannot renumber the visible series' linked Chart Style. */
+function chartExSeriesFormatIndex(
+  series: Pick<ChartSeries, 'chartexFormatIdx'> | null | undefined,
+  fallbackIndex: number,
+): number {
+  return series?.chartexFormatIdx ?? fallbackIndex;
+}
+
+/** Resolve CT_DataLabels + indexed CT_DataLabel/dataLabelHidden without
+ * renderer-specific precedence. Defaults describe the semantic label layer of
+ * the chart type (waterfall values remain visible when no dataLabels element
+ * exists); authored visibility always overrides those defaults. */
+function resolveChartExLabel(
+  chart: ChartModel,
+  series: ChartSeries | null | undefined,
+  index: number,
+  category: string,
+  value: number,
+  defaults: { visible: boolean; showVal: boolean; showCatName: boolean; showSerName?: boolean },
+  overrideLookup?: ReadonlyMap<number, NonNullable<ChartSeries['dataLabelOverrides']>[number]>,
+): ResolvedChartExLabel | null {
+  if (!series) return null;
+  const definition = series.seriesDataLabels;
+  const override = overrideLookup?.get(index)
+    ?? series.dataLabelOverrides?.find(item => item.idx === index);
+  if (override?.deleted) return null;
+  if (!definition && !override && !defaults.visible) return null;
+  const showVal = override?.showVal ?? definition?.showVal ?? defaults.showVal;
+  const showCatName = override?.showCatName ?? definition?.showCatName ?? defaults.showCatName;
+  const showSerName = override?.showSerName
+    ?? definition?.showSerName
+    ?? defaults.showSerName
+    ?? false;
+  let text = override?.text ?? '';
+  if (!text) {
+    const parts: string[] = [];
+    if (showCatName && category) parts.push(category);
+    if (showSerName && series.name) parts.push(series.name);
+    if (showVal) {
+      parts.push(formatChartValWithCode(
+        value,
+        override?.formatCode
+          ?? definition?.formatCode
+          ?? chart.dataLabelFormatCode
+          ?? series.valFormatCode
+          ?? null,
+        chart.date1904,
+      ));
+    }
+    text = parts.join(override?.separator ?? definition?.separator ?? ' ');
+  }
+  if (!text) return null;
+  return {
+    text,
+    position: override?.position ?? definition?.position,
+    fontColor: override?.fontColor ?? definition?.fontColor,
+    fontSizeHpt: override?.fontSizeHpt ?? definition?.fontSizeHpt,
+    fontBold: override?.fontBold ?? definition?.fontBold ?? false,
+  };
+}
+
 function chartExStyleColor(
   _chart: ChartModel,
   style: ChartExStyle | null | undefined,
@@ -5511,13 +5818,23 @@ function chartExPaletteColor(
   return colors[within ? 0 : colorIndex % colors.length] ?? null;
 }
 
-function chartExDataPointFill(chart: ChartModel, index: number, count: number): string {
-  return chartExStyleColor(chart, chart.chartexDataPointStyle, 'fill', index, count)
-    ?? (chart.chartexColorPalette
+function chartExSemanticFill(chart: ChartModel, index: number, count: number): string {
+  return (chart.chartexColorPalette
       ? chartExPaletteColor(chart, chart.chartexColorPalette, index, count)
       : null)
     ?? chart.chartexAccents?.[index % (chart.chartexAccents.length || 1)]
     ?? CHARTEX_DEFAULT_PALETTE[index % CHARTEX_DEFAULT_PALETTE.length];
+}
+
+function chartExDataPointFill(
+  chart: ChartModel,
+  index: number,
+  count: number,
+  localStyle?: ChartExStyle | null,
+): string {
+  return chartExStyleColor(chart, localStyle, 'fill', index, count)
+    ?? chartExStyleColor(chart, chart.chartexDataPointStyle, 'fill', index, count)
+    ?? chartExSemanticFill(chart, index, count);
 }
 
 function chartExStyleFillPaint(
@@ -5529,9 +5846,45 @@ function chartExStyleFillPaint(
   return paints[(style?.fillColorIndex ?? index) % paints.length] ?? null;
 }
 
-function chartExDataPointPaint(chart: ChartModel, index: number, count: number): Fill {
-  return chartExStyleFillPaint(chart.chartexDataPointStyle, index)
-    ?? { fillType: 'solid', color: chartExDataPointFill(chart, index, count) };
+/** Resolve one ChartEx style paint layer. `undefined` means this layer supplied
+ * no paint, while `null` records an explicit no-fill for consumers whose own
+ * shape is governed by that layer. */
+function chartExStylePaintDecision(
+  chart: ChartModel,
+  style: ChartExStyle | null | undefined,
+  index: number,
+  count: number,
+): Fill | null | undefined {
+  if (!style) return undefined;
+  if (style.fillHidden) return style.fillNoStyle ? undefined : null;
+  const paint = chartExStyleFillPaint(style, index);
+  if (paint) return paint;
+  const color = chartExStyleColor(chart, style, 'fill', index, count);
+  return color ? { fillType: 'solid', color } : undefined;
+}
+
+function chartExDataPointPaint(
+  chart: ChartModel,
+  index: number,
+  count: number,
+  localStyle?: ChartExStyle | null,
+  legacyColor?: string | null,
+  linkedStyle: ChartExStyle | null | undefined = chart.chartexDataPointStyle,
+): Fill | null {
+  // CT_Series.spPr formats the series shape; ChartEx semantic data points
+  // (waterfall roles, box bodies, hierarchy nodes) still obtain their own
+  // paint from the dataPoint Chart Style. A conventional series-level
+  // `<a:noFill>` therefore does not erase every point. Positive local series
+  // fills remain direct formatting and do override the linked recipe.
+  const local = localStyle?.fillHidden
+    ? undefined
+    : chartExStylePaintDecision(chart, localStyle, index, count);
+  if (local !== undefined) return local;
+  if (localStyle && legacyColor) return { fillType: 'solid', color: legacyColor };
+  const linked = chartExStylePaintDecision(chart, linkedStyle, index, count);
+  if (linked !== undefined) return linked;
+  if (legacyColor) return { fillType: 'solid', color: legacyColor };
+  return { fillType: 'solid', color: chartExSemanticFill(chart, index, count) };
 }
 
 function chartExFillStyle(
@@ -5576,6 +5929,68 @@ function applyChartExLineStyle(
   return true;
 }
 
+/** Apply CT_Series local shape properties before the linked Chart Style.
+ *  [MS-ODRAWXML] 2.24.3.77 makes `<cx:series><cx:spPr>` the series' own
+ *  OfficeArt formatting, so an authored line (including `noFill`) overrides
+ *  the default data-point recipe instead of being merged underneath it. */
+function applyChartExSeriesLineStyle(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  style: ChartExStyle | null | undefined,
+  series: Pick<ChartSeries, 'chartexStyle' | 'lineHidden' | 'lineColor' | 'lineWidthEmu'> | null | undefined,
+  index: number,
+  count: number,
+  fallbackColor: string,
+  ptToPx: number,
+): boolean {
+  const local = series?.chartexStyle;
+  const localHasLine = local?.lineHidden != null
+    || local?.lineColors?.some(Boolean)
+    || local?.lineWidthEmu != null
+    || local?.lineDash != null
+    || local?.lineCap != null
+    || local?.lineJoin != null;
+  if (localHasLine && !(local?.lineHidden && local.lineNoStyle)) {
+    return applyChartExLineStyle(ctx, chart, local, index, count, fallbackColor, ptToPx);
+  }
+  const hasLegacyLocalLine = series?.lineHidden != null
+    || series?.lineColor != null
+    || series?.lineWidthEmu != null;
+  if (!hasLegacyLocalLine) {
+    return applyChartExLineStyle(ctx, chart, style, index, count, fallbackColor, ptToPx);
+  }
+  if (series?.lineHidden) return false;
+  const color = series?.lineColor ?? fallbackColor;
+  ctx.strokeStyle = color.startsWith('#') ? color : `#${color}`;
+  ctx.lineWidth = series?.lineWidthEmu != null
+    ? axisLineWidthPx(series.lineWidthEmu, ptToPx)
+    : 1;
+  ctx.setLineDash([]);
+  ctx.lineCap = 'butt';
+  ctx.lineJoin = 'miter';
+  return true;
+}
+
+// The parser may preserve up to the OOXML cache ceiling, but expanding every
+// point into several synchronous Canvas calls can monopolize the UI thread.
+// Refuse an oversized paint atomically instead of drawing a misleading prefix.
+// This is an availability boundary, not an automatic chart-layout heuristic.
+const MAX_CANVAS_CHART_POINTS = 10_000;
+
+function rejectOversizedCanvasChart(
+  ctx: CanvasRenderingContext2D,
+  rect: ChartRect,
+  pointCount: number,
+): boolean {
+  if (pointCount <= MAX_CANVAS_CHART_POINTS) return false;
+  ctx.fillStyle = '#888';
+  ctx.font = '12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('(too many data points)', rect.x + rect.w / 2, rect.y + rect.h / 2);
+  return true;
+}
+
 function renderWaterfallChart(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -5586,30 +6001,38 @@ function renderWaterfallChart(
   const { x, y, w, h } = r;
   const vals = chart.series[0]?.values ?? [];
   const cats = chart.categories;
-  const n = cats.length;
+  // ChartEx numeric and string dimensions are independent. Preserve the union
+  // of their point indexes: a missing category removes only its label, while a
+  // missing numeric point retains an empty category slot.
+  const n = Math.max(vals.length, cats.length);
   if (n === 0) return;
+  if (rejectOversizedCanvasChart(ctx, r, n)) return;
 
   const subSet = new Set(chart.subtotalIndices);
   let running = 0;
   const bars: Array<{ start: number; end: number; isSub: boolean; isPos: boolean }> = [];
+  let rawMax = Number.NEGATIVE_INFINITY;
+  let rawMin = 0;
   for (let i = 0; i < n; i++) {
     const v = vals[i] ?? 0;
     const isSub = subSet.has(i);
     if (isSub) {
-      bars.push({ start: 0, end: v, isSub: true, isPos: true });
+      const bar = { start: 0, end: v, isSub: true, isPos: true };
+      bars.push(bar);
+      rawMax = Math.max(rawMax, bar.start, bar.end);
+      rawMin = Math.min(rawMin, bar.start, bar.end);
       running = v;
     } else {
       const start = v >= 0 ? running : running + v;
       const end   = v >= 0 ? running + v : running;
-      bars.push({ start, end, isSub: false, isPos: v >= 0 });
+      const bar = { start, end, isSub: false, isPos: v >= 0 };
+      bars.push(bar);
+      rawMax = Math.max(rawMax, bar.start, bar.end);
+      rawMin = Math.min(rawMin, bar.start, bar.end);
       running += v;
     }
   }
 
-  const allEnds = bars.map(b => b.end);
-  const allStarts = bars.map(b => b.start);
-  const rawMax = Math.max(...allEnds, ...allStarts);
-  const rawMin = Math.min(...allStarts, 0);
   if (rawMax <= rawMin) return;
 
   const titleBand = cartesianTitleBand(chart, h, ptToPx);
@@ -5643,15 +6066,18 @@ function renderWaterfallChart(
   );
   const estimatedSlotW = estimatedPlotW / n;
   ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${catFontPx}px ${catFont}`;
-  const wrappedCategories = cats.map(category =>
+  const wrappedCategories = cats.slice(0, n).map(category =>
     wrapMeasuredText(
       ctx,
       formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904),
       Math.max(1, estimatedSlotW - 8),
     )
   );
-  const maxCategoryLines = Math.max(1, ...wrappedCategories.map(lines => lines.length));
-  const categoryLabelBandH = chart.catAxisHidden
+  let maxCategoryLines = 0;
+  for (const lines of wrappedCategories) {
+    if (lines.some(Boolean)) maxCategoryLines = Math.max(maxCategoryLines, lines.length);
+  }
+  const categoryLabelBandH = chart.catAxisHidden || maxCategoryLines === 0
     ? 0
     : maxCategoryLines * (catFontPx + 2) + 4;
 
@@ -5683,11 +6109,7 @@ function renderWaterfallChart(
     chart.catAxisLineWidthEmu,
     ptToPx,
   );
-  const valGridline = resolveGridline(
-    chart.valAxisGridlineColor,
-    chart.valAxisGridlineWidthEmu,
-    ptToPx,
-  );
+  const valGridline = valGridStroke(chart, ptToPx);
 
   // ECMA-376 / chartEx §axis@hidden: when the value axis is hidden, skip the
   // value-axis gridlines, tick labels and the left segment of the L-frame.
@@ -5698,12 +6120,19 @@ function renderWaterfallChart(
     ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#595959';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
+    const minorGridline = valMinorGridStroke(chart, ptToPx);
+    for (const value of plan.minorLines) {
+      strokeValueGridlineH(ctx, px0, pw, yOf(value), false, minorGridline);
+    }
     for (const value of plan.majorLines) {
       const gy = yOf(value);
       if (drawValMajorGridlines(chart)) {
         ctx.strokeStyle = valGridline.color;
         ctx.lineWidth = valGridline.width;
+        const previousDash = valGridline.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
+        if (valGridline.dash.length > 0) ctx.setLineDash(valGridline.dash);
         ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+        if (valGridline.dash.length > 0) ctx.setLineDash(previousDash);
       }
       // Locale-independent §18.8.30 formatting (honoring `<c:valAx><c:numFmt>`),
       // matching the other renderers — `toLocaleString()` grouped by the
@@ -5725,6 +6154,12 @@ function renderWaterfallChart(
         chart.valAxisLineHidden,
       );
     }
+    forEachMinorTick(plan.min, plan.max, plan.step, chart.valAxisMinorUnit, value => {
+      drawAxisTick(
+        ctx, chart.valAxisMinorTickMark, 'val', px0, yOf(value),
+        valAxisLine.color, valAxisLine.width, false, chart.valAxisLineHidden,
+      );
+    });
   }
 
   // L-frame: vertical (value-axis) rule + horizontal (category-axis) baseline.
@@ -5743,21 +6178,23 @@ function renderWaterfallChart(
     ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
   }
 
-  const colorPos = `#${chart.series[0]?.color ?? chartExDataPointFill(chart, 0, 3)}`;
-  const colorNeg = `#${chartExDataPointFill(chart, 1, 3)}`;
-  const colorSub = `#${chartExDataPointFill(chart, 2, 3)}`;
-  const paintPos: Fill = chart.series[0]?.color
-    ? { fillType: 'solid', color: chart.series[0].color }
-    : chartExDataPointPaint(chart, 0, 3);
-  const paintNeg = chartExDataPointPaint(chart, 1, 3);
-  const paintSub = chartExDataPointPaint(chart, 2, 3);
+  const series = chart.series[0];
+  const localStyle = series?.chartexStyle;
+  const colorPos = `#${series?.color ?? chartExDataPointFill(chart, 0, 3, localStyle)}`;
+  const colorNeg = `#${chartExDataPointFill(chart, 1, 3, localStyle)}`;
+  const colorSub = `#${chartExDataPointFill(chart, 2, 3, localStyle)}`;
+  const paintPos = chartExDataPointPaint(chart, 0, 3, localStyle, series?.color);
+  const paintNeg = chartExDataPointPaint(chart, 1, 3, localStyle);
+  const paintSub = chartExDataPointPaint(chart, 2, 3, localStyle);
 
   // ECMA-376 / chartEx §17.18.34 ST_GapAmount: gapWidth is the gap between
   // adjacent categories expressed as a percentage of the bar width
   // (legacy `<c:gapWidth val>`) or as a fraction (chartEx
   // `<cx:catScaling gapWidth>`, normalised to the same percent form by the
-  // parser). The bar then occupies `catGap / (1 + gapWidth/100)`. Default
-  // 150% per the spec when neither attribute is present.
+  // parser). The bar then occupies `catGap / (1 + gapWidth/100)`. The existing
+  // 150% fallback is retained for byte compatibility when ChartEx requests
+  // automatic spacing; reproducing Office's automatic choice is tracked
+  // separately and is not tuned in this change.
   const gapW = pw / n;
   const gapWidthPct = chart.barGapWidth ?? 150;
   const barW = gapW / (1 + gapWidthPct / 100);
@@ -5768,34 +6205,36 @@ function renderWaterfallChart(
     const yBot = Math.max(yOf(bar.start), yOf(bar.end));
     const bh = Math.max(1, yBot - yTop);
 
-    if (!chart.chartexDataPointStyle?.fillHidden) {
-      const paint = bar.isSub ? paintSub : bar.isPos ? paintPos : paintNeg;
-      const fallback = bar.isSub ? colorSub : bar.isPos ? colorPos : colorNeg;
+    const paint = bar.isSub ? paintSub : bar.isPos ? paintPos : paintNeg;
+    const fallback = bar.isSub ? colorSub : bar.isPos ? colorPos : colorNeg;
+    if (paint) {
       ctx.fillStyle = chartExFillStyle(ctx, paint, bx, yTop, barW, bh, fallback, shapeRotationDeg);
       ctx.fillRect(bx, yTop, barW, bh);
     }
     const accentIndex = bar.isSub ? 2 : bar.isPos ? 0 : 1;
     const lineColor = chartExStyleColor(chart, chart.chartexDataPointStyle, 'line', accentIndex, 3);
-    if (lineColor && applyChartExLineStyle(
+    if (applyChartExSeriesLineStyle(
       ctx,
       chart,
       chart.chartexDataPointStyle,
+      series,
       accentIndex,
       3,
-      lineColor,
+      lineColor ? `#${lineColor}` : fallback,
       ptToPx,
     )) {
       ctx.strokeRect(bx, yTop, barW, bh);
     }
 
-    if (i < n - 1) {
+    if (i < n - 1 && chart.chartexConnectorLines !== false) {
       const nextBx = px0 + gapW * (i + 1) + (gapW - barW) / 2;
       const connY = bar.isPos ? yTop : yBot;
       ctx.save();
-      if (applyChartExLineStyle(
+      if (applyChartExSeriesLineStyle(
         ctx,
         chart,
         chart.chartexDataPointLineStyle,
+        series,
         accentIndex,
         3,
         '#ccc',
@@ -5811,32 +6250,34 @@ function renderWaterfallChart(
     }
 
     const rawVal = vals[i] ?? 0;
-    // Locale-independent §18.8.30 formatting, honoring the authored negative
-    // section as-is. Excel accounting formats commonly render negatives in
-    // parentheses; the renderer must not replace that syntax with a triangle.
-    const labelFormat = chart.dataLabelFormatCode ?? chart.series[0]?.valFormatCode ?? null;
-    const labelText = formatChartValWithCode(rawVal, labelFormat, chart.date1904);
-    // Per-data-point label colour from chartEx `<cx:dataLabel idx>` (parsed
-    // into series.dataLabelColors). Falls back to chart.dataLabelFontColor,
-    // then to neutral grey.
-    const perPointColor = chart.series[0]?.dataLabelColors?.[i] ?? null;
-    const labelColor = perPointColor
-      ? `#${perPointColor}`
-      : chart.dataLabelFontColor
-        ? `#${chart.dataLabelFontColor}`
-        : '#595959';
-    ctx.fillStyle = labelColor;
-    const dataLabelFontPx = axisLabelPx(chart.dataLabelFontSizeHpt, h, ptToPx);
-    ctx.font = `${chart.dataLabelFontBold ? 'bold ' : ''}${dataLabelFontPx}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
-    ctx.textAlign = 'center';
-    // Negative bars: label sits below the bar; positive bars and subtotals
-    // place it above the bar.
-    if (rawVal < 0) {
-      ctx.textBaseline = 'top';
-      ctx.fillText(labelText, bx + barW / 2, yBot + 3);
-    } else {
-      ctx.textBaseline = 'bottom';
-      ctx.fillText(labelText, bx + barW / 2, yTop - 3);
+    const label = resolveChartExLabel(
+      chart, series, i, cats[i] ?? '', rawVal,
+      { visible: true, showVal: true, showCatName: false },
+    );
+    if (label) {
+      const perPointColor = series?.dataLabelColors?.[i] ?? label.fontColor ?? null;
+      ctx.fillStyle = perPointColor
+        ? `#${perPointColor}`
+        : chart.dataLabelFontColor
+          ? `#${chart.dataLabelFontColor}`
+          : '#595959';
+      const dataLabelFontPx = label.fontSizeHpt
+        ? (label.fontSizeHpt / 100) * ptToPx
+        : axisLabelPx(chart.dataLabelFontSizeHpt, h, ptToPx);
+      ctx.font = `${label.fontBold || chart.dataLabelFontBold ? 'bold ' : ''}${dataLabelFontPx}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
+      ctx.textAlign = 'center';
+      // Negative bars: label sits below the bar; positive bars and subtotals
+      // place it above the bar unless an authored position requests center.
+      if (label.position === 'ctr') {
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label.text, bx + barW / 2, (yTop + yBot) / 2);
+      } else if (rawVal < 0) {
+        ctx.textBaseline = 'top';
+        ctx.fillText(label.text, bx + barW / 2, yBot + 3);
+      } else {
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(label.text, bx + barW / 2, yTop - 3);
+      }
     }
   });
 
@@ -5848,13 +6289,9 @@ function renderWaterfallChart(
   const labelY = py0 + ph + 4;
   for (let i = 0; i < n && !chart.catAxisHidden; i++) {
     const ccx = px0 + gapW * i + gapW / 2;
-    const lines = wrapMeasuredText(
-      ctx,
-      formatCategoryLabel(cats[i], chart.catAxisFormatCode, chart.date1904),
-      Math.max(1, gapW - 8),
-    );
+    const lines = wrappedCategories[i] ?? [];
     lines.forEach((line, lineIndex) =>
-      ctx.fillText(line, ccx, labelY + lineIndex * (catFontPx + 2))
+      line && ctx.fillText(line, ccx, labelY + lineIndex * (catFontPx + 2))
     );
   }
 
@@ -5901,9 +6338,15 @@ function renderFunnelChart(
   shapeRotationDeg: number,
 ): void {
   const values = chart.series[0]?.values ?? [];
-  const n = Math.min(chart.categories.length, values.length);
+  // ChartEx dimensions carry independent indexed points. Preserve category-only
+  // slots as empty bars and numeric-only slots as unlabeled bars.
+  const n = Math.max(values.length, chart.categories.length);
   if (n === 0) return;
-  const max = Math.max(0, ...values.slice(0, n).map(value => value ?? 0));
+  if (rejectOversizedCanvasChart(ctx, r, n)) return;
+  let max = 0;
+  for (let index = 0; index < n; index++) {
+    max = Math.max(max, values[index] ?? 0);
+  }
   if (!(max > 0)) return;
   const { x, y, w, h } = r;
   const titleBand = cartesianTitleBand(chart, h, ptToPx);
@@ -5912,9 +6355,13 @@ function renderFunnelChart(
   const catFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   ctx.save();
   ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${catFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
-  const labelW = chart.catAxisHidden
-    ? 0
-    : Math.max(...chart.categories.slice(0, n).map(label => ctx.measureText(label).width), 0) + 10;
+  let labelW = 0;
+  if (!chart.catAxisHidden) {
+    for (let index = 0; index < Math.min(n, chart.categories.length); index++) {
+      labelW = Math.max(labelW, ctx.measureText(chart.categories[index]).width);
+    }
+    if (chart.categories.length > 0) labelW += 10;
+  }
   const pad = {
     t: titleBand.bandH + legTopH + 2,
     r: legRightW + w * 0.02,
@@ -5925,25 +6372,48 @@ function renderFunnelChart(
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, frame.title.fontPx);
   const { px0, py0, pw, ph } = frame.plotRect;
   const rowH = ph / n;
-  const barH = rowH / (1 + (chart.barGapWidth ?? 50) / 100);
-  const color = `#${chart.series[0]?.color ?? chartExDataPointFill(chart, 0, 1)}`;
-  const paint = chart.series[0]?.color
-    ? { fillType: 'solid', color: chart.series[0].color } as Fill
-    : chartExDataPointPaint(chart, 0, 1);
+  // Apply only an authored ChartEx gap. CT_CategoryAxisScaling does not define
+  // an omitted-value default; matching application auto-spacing is #1227.
+  const barH = chart.barGapWidth == null
+    ? rowH
+    : rowH / (1 + chart.barGapWidth / 100);
+  const series = chart.series[0];
+  const color = `#${series?.color ?? chartExDataPointFill(chart, 0, 1, series?.chartexStyle)}`;
+  const paint = chartExDataPointPaint(chart, 0, 1, series?.chartexStyle, series?.color);
   for (let index = 0; index < n; index++) {
     const value = Math.max(0, values[index] ?? 0);
     const barW = pw * value / max;
     const bx = px0 + (pw - barW) / 2;
     const by = py0 + rowH * index + (rowH - barH) / 2;
-    if (!chart.chartexDataPointStyle?.fillHidden) {
+    if (paint) {
       ctx.fillStyle = chartExFillStyle(ctx, paint, bx, by, barW, barH, color, shapeRotationDeg);
       ctx.fillRect(bx, by, barW, barH);
     }
-    if (!chart.catAxisHidden) {
+    if (applyChartExSeriesLineStyle(
+      ctx, chart, chart.chartexDataPointStyle, series, 0, 1, color, ptToPx,
+    )) {
+      ctx.strokeRect(bx, by, barW, barH);
+    }
+    const category = chart.categories[index];
+    if (!chart.catAxisHidden && category != null) {
       ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#595959';
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
-      ctx.fillText(chart.categories[index], px0 - 6, by + barH / 2);
+      ctx.fillText(category, px0 - 6, by + barH / 2);
+    }
+    const label = resolveChartExLabel(
+      chart, series, index, category ?? '', value,
+      { visible: false, showVal: false, showCatName: false },
+    );
+    if (label) {
+      const fontPx = label.fontSizeHpt
+        ? (label.fontSizeHpt / 100) * ptToPx
+        : axisLabelPx(chart.dataLabelFontSizeHpt, h, ptToPx);
+      ctx.font = `${label.fontBold ? 'bold ' : ''}${fontPx}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
+      ctx.fillStyle = label.fontColor ? `#${label.fontColor}` : '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label.text, bx + barW / 2, by + barH / 2);
     }
   }
   if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
@@ -5975,7 +6445,10 @@ function renderParetoLineChart(
     chartType: 'line',
     categories: cumulative.map((_value, index) => String(index + 1)),
     series: [{ ...source, values: cumulative, showMarker: false }],
-    catAxisHidden: true,
+    // Pareto's ordinal category labels are suppressed, but its authored
+    // category-axis rule remains visible. Keep those two concerns separate.
+    catAxisHidden: false,
+    catAxisTickLabelPos: 'none',
     showLegend: false,
     valMin: 0,
   }, r, ptToPx);
@@ -6137,6 +6610,9 @@ function renderBoxWhiskerChart(
   const cats = box.categories;
   const nCat = cats.length;
   const nSer = box.series.length;
+  const boxStyleIndices = box.series.map((series, index) =>
+    chartExSeriesFormatIndex(series, index)
+  );
 
   // Excel's automatic value axis uses nice-rounded bounds and steps.
   const { min: axisMin, max: axisMax, step } = valueAxisScale(
@@ -6146,11 +6622,7 @@ function renderBoxWhiskerChart(
   const yOf = (v: number): number => py0 + ph * (1 - (v - axisMin) / span);
 
   const valAxisLine = resolveAxisLine(chart.valAxisLineColor, chart.valAxisLineWidthEmu, ptToPx);
-  const valGridline = resolveGridline(
-    chart.valAxisGridlineColor,
-    chart.valAxisGridlineWidthEmu,
-    ptToPx,
-  );
+  const valGridline = valGridStroke(chart, ptToPx);
 
   // Value-axis gridlines + labels (unless the value axis is hidden).
   ctx.save();
@@ -6158,12 +6630,21 @@ function renderBoxWhiskerChart(
     ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${valFontPx}px ${font}`;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
+    if (chart.valAxisMinorGridlines) {
+      const minorGridline = valMinorGridStroke(chart, ptToPx);
+      forEachMinorTick(axisMin, axisMax, step, chart.valAxisMinorUnit, value => {
+        strokeValueGridlineH(ctx, px0, pw, yOf(value), false, minorGridline);
+      });
+    }
     for (let v = axisMin; v <= axisMax + 1e-6; v += step) {
       const gy = yOf(v);
       if (chart.valAxisMajorGridlines !== false) {
         ctx.strokeStyle = valGridline.color;
         ctx.lineWidth = valGridline.width;
+        const previousDash = valGridline.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
+        if (valGridline.dash.length > 0) ctx.setLineDash(valGridline.dash);
         ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+        if (valGridline.dash.length > 0) ctx.setLineDash(previousDash);
       }
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#595959';
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 4, gy);
@@ -6179,6 +6660,12 @@ function renderBoxWhiskerChart(
         chart.valAxisLineHidden,
       );
     }
+    forEachMinorTick(axisMin, axisMax, step, chart.valAxisMinorUnit, value => {
+      drawAxisTick(
+        ctx, chart.valAxisMinorTickMark, 'val', px0, yOf(value),
+        valAxisLine.color, valAxisLine.width, false, chart.valAxisLineHidden,
+      );
+    });
     if (!chart.valAxisLineHidden) {
       ctx.strokeStyle = valAxisLine.color;
       ctx.lineWidth = valAxisLine.width;
@@ -6192,31 +6679,47 @@ function renderBoxWhiskerChart(
     ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
   }
 
-  // Category slots place every series at the same category coordinate. ChartEx
-  // box/whisker series are overlays, not clustered legacy bars; their boxes
-  // therefore share the full authored category width.
   // ChartEx places categorical box/whisker data points at interior category
   // positions, leaving one category interval between each plot edge and the
-  // first/last point. `gapWidth` controls the box-vs-gap width inside that
-  // interval; it does not consume the two outer category intervals.
+  // first/last point. Multiple populated series split the category group so
+  // their boxes remain individually visible. `gapWidth` controls the
+  // group-vs-gap width inside that interval.
   const slotW = pw / (nCat + 1);
   const gapWidthPct = chart.barGapWidth ?? 150;
   const groupW = slotW / (1 + gapWidthPct / 100);
   const paletteOf = (si: number): string => {
-    const fill = box.series[si].color ?? chartExDataPointFill(chart, si, nSer);
+    const fill = box.series[si].color
+      ?? chartExDataPointFill(
+        chart, boxStyleIndices[si], nSer, box.series[si].chartexStyle,
+      );
     return `#${fill}`;
   };
-  const paintOf = (si: number): Fill => box.series[si].color
-    ? { fillType: 'solid', color: box.series[si].color as string }
-    : chartExDataPointPaint(chart, si, nSer);
+  const paintOf = (si: number): Fill | null => chartExDataPointPaint(
+    chart,
+    boxStyleIndices[si],
+    nSer,
+    box.series[si].chartexStyle,
+    box.series[si].color,
+  );
   const statsBySeries = box.series.map(series => series.valuesByCategory.map(values => (
     computeBoxStats(values, series.quartileMethod)
   )));
+  const populatedSeriesByCategory = cats.map((_category, categoryIndex) =>
+    box.series
+      .map((series, seriesIndex) => ({
+        seriesIndex,
+        populated: (series.valuesByCategory[categoryIndex]?.length ?? 0) > 0,
+      }))
+      .filter(entry => entry.populated)
+      .map(entry => entry.seriesIndex)
+  );
   const boxGeometry = (ci: number, si: number): { bx: number; boxW: number; cx: number } => {
     const categoryCenterX = px0 + slotW * (ci + 1);
     const slotLeft = categoryCenterX - groupW / 2;
-    const boxW = groupW;
-    const bx = slotLeft;
+    const populated = populatedSeriesByCategory[ci];
+    const activeIndex = Math.max(0, populated.indexOf(si));
+    const boxW = groupW / Math.max(1, populated.length);
+    const bx = slotLeft + activeIndex * boxW;
     return { bx, boxW, cx: bx + boxW / 2 };
   };
 
@@ -6228,7 +6731,9 @@ function renderBoxWhiskerChart(
     const lineStyle = chart.chartexDataPointLineStyle ?? chart.chartexDataPointStyle;
     const fallback = series.lineColor ? `#${series.lineColor}` : paletteOf(si);
     ctx.save();
-    const styleLineVisible = applyChartExLineStyle(ctx, chart, lineStyle, si, nSer, fallback, ptToPx);
+    const styleLineVisible = applyChartExSeriesLineStyle(
+      ctx, chart, lineStyle, series, boxStyleIndices[si], nSer, fallback, ptToPx,
+    );
     if (styleLineVisible || series.lineColor != null) {
       if (series.lineColor) ctx.strokeStyle = fallback;
       if (series.lineWidthEmu) ctx.lineWidth = axisLineWidthPx(series.lineWidthEmu, ptToPx);
@@ -6263,30 +6768,44 @@ function renderBoxWhiskerChart(
       const pointStyle = chart.chartexDataPointStyle;
       const lineStyle = chart.chartexDataPointLineStyle ?? pointStyle;
       const markerStyle = chart.chartexDataPointMarkerStyle ?? pointStyle;
-      const styleLine = chartExStyleColor(chart, pointStyle, 'line', si, nSer);
+      const styleIndex = boxStyleIndices[si];
+      const styleLine = chartExStyleColor(chart, pointStyle, 'line', styleIndex, nSer);
       const edge = s.lineColor ? `#${s.lineColor}` : styleLine ? `#${styleLine}` : fill;
       const edgeWidth = s.lineWidthEmu
         ? axisLineWidthPx(s.lineWidthEmu, ptToPx)
         : pointStyle?.lineWidthEmu != null
           ? axisLineWidthPx(pointStyle.lineWidthEmu, ptToPx)
           : 1;
-      const lineEdge = chartExStyleColor(chart, lineStyle, 'line', si, nSer);
-      const markerFill = chartExStyleColor(chart, markerStyle, 'fill', si, nSer);
-      const markerFillPaint = chartExStyleFillPaint(markerStyle, si) ?? fillPaint;
-      const markerEdge = chartExStyleColor(chart, markerStyle, 'line', si, nSer);
+      const lineEdge = chartExStyleColor(chart, lineStyle, 'line', styleIndex, nSer);
+      const markerFill = chartExStyleColor(chart, markerStyle, 'fill', styleIndex, nSer);
+      const markerFillPaint = chartExDataPointPaint(
+        chart, styleIndex, nSer, s.chartexStyle, s.color, markerStyle,
+      );
+      const markerEdge = chartExStyleColor(chart, markerStyle, 'line', styleIndex, nSer);
       const applySeriesLine = (style: ChartExStyle | null | undefined, fallback: string): boolean => {
-        const visible = applyChartExLineStyle(ctx, chart, style, si, nSer, fallback, ptToPx);
+        const local = s.chartexStyle;
+        const hasLocalLine = local?.lineHidden != null
+          || local?.lineColors?.some(Boolean)
+          || local?.lineWidthEmu != null
+          || local?.lineDash != null
+          || local?.lineCap != null
+          || local?.lineJoin != null;
+        const visible = applyChartExSeriesLineStyle(
+          ctx, chart, style, s, styleIndex, nSer, fallback, ptToPx,
+        );
         // Chart Style `NoStyle` means that this role supplies no decorative
         // override. Box/whisker's semantic outline still exists. This is
         // distinct from an authored `<a:noFill>`, which remains suppressed.
-        if (!visible && style?.lineNoStyle) {
+        const semanticNoStyleFallback = style?.lineNoStyle === true
+          && !hasLocalLine && s.lineColor == null && s.lineWidthEmu == null;
+        if (!visible && semanticNoStyleFallback) {
           ctx.strokeStyle = fallback;
           ctx.lineWidth = 1;
           ctx.setLineDash([]);
         }
         if (s.lineColor) ctx.strokeStyle = edge;
         if (s.lineWidthEmu) ctx.lineWidth = edgeWidth;
-        return visible || style?.lineNoStyle === true || s.lineColor != null;
+        return visible || semanticNoStyleFallback || s.lineColor != null;
       };
       const yQ1 = yOf(stats.q1);
       const yQ3 = yOf(stats.q3);
@@ -6305,7 +6824,7 @@ function renderBoxWhiskerChart(
       }
 
       // IQR box: solid accent fill + a thin accent×0.8 edge.
-      if (!pointStyle?.fillHidden) {
+      if (fillPaint) {
         ctx.fillStyle = chartExFillStyle(
           ctx,
           fillPaint,
@@ -6336,24 +6855,44 @@ function renderBoxWhiskerChart(
       // Interior sample points. Excel overlays the raw non-outlier values on
       // the box/whiskers when cx:visibility@nonoutliers is enabled.
       if (s.showNonoutliers) {
-        const pR = Math.max(1.25, boxW * 0.045);
-        const markerLineVisible = applySeriesLine(markerStyle, markerEdge ?? edge);
+        const pR = chart.chartexMarkerSizePt != null
+          ? (chart.chartexMarkerSizePt * ptToPx) / 2
+          : Math.max(1.25, boxW * 0.045);
+        const pointSymbol = chart.chartexMarkerSymbol ?? 'circle';
         for (const point of stats.inner) {
+          if (pointSymbol === 'none') continue;
+          const markerLineVisible = applySeriesLine(markerStyle, markerEdge ?? edge);
           const pointY = yOf(point);
-          ctx.fillStyle = chartExFillStyle(
-            ctx,
-            markerFillPaint,
-            cx - pR,
-            pointY - pR,
-            pR * 2,
-            pR * 2,
-            markerFill ? `#${markerFill}` : fill,
-            shapeRotationDeg,
-          );
-          ctx.beginPath();
-          ctx.arc(cx, pointY, pR, 0, Math.PI * 2);
-          if (!markerStyle?.fillHidden) ctx.fill();
-          if (markerLineVisible) ctx.stroke();
+          if (markerFillPaint) {
+            ctx.fillStyle = chartExFillStyle(
+              ctx,
+              markerFillPaint,
+              cx - pR,
+              pointY - pR,
+              pR * 2,
+              pR * 2,
+              markerFill ? `#${markerFill}` : fill,
+              shapeRotationDeg,
+            );
+          }
+          if (pointSymbol === 'circle') {
+            ctx.beginPath();
+            ctx.arc(cx, pointY, pR, 0, Math.PI * 2);
+            if (markerFillPaint) ctx.fill();
+            if (markerLineVisible) ctx.stroke();
+          } else {
+            drawMarker(
+              ctx,
+              cx,
+              pointY,
+              pointSymbol,
+              chart.chartexMarkerSizePt ?? (pR * 2) / ptToPx,
+              markerFillPaint ? (markerFill ? `#${markerFill}` : fill) : 'transparent',
+              markerLineVisible ? (markerEdge ? `#${markerEdge}` : edge) : null,
+              ptToPx,
+              ctx.lineWidth,
+            );
+          }
         }
       }
 
@@ -6371,23 +6910,43 @@ function renderBoxWhiskerChart(
 
       // Outlier dots.
       if (s.showOutliers) {
-        const markerLineVisible = applySeriesLine(markerStyle, markerEdge ?? edge);
-        const oR = Math.max(1.5, boxW * 0.06);
+        const pointSymbol = chart.chartexMarkerSymbol ?? 'circle';
+        const oR = chart.chartexMarkerSizePt != null
+          ? (chart.chartexMarkerSizePt * ptToPx) / 2
+          : Math.max(1.5, boxW * 0.06);
         for (const o of stats.outliers) {
+          if (pointSymbol === 'none') continue;
+          const markerLineVisible = applySeriesLine(markerStyle, markerEdge ?? edge);
           const outlierY = yOf(o);
-          ctx.fillStyle = chartExFillStyle(
-            ctx,
-            markerFillPaint,
-            cx - oR,
-            outlierY - oR,
-            oR * 2,
-            oR * 2,
-            markerFill ? `#${markerFill}` : fill,
-            shapeRotationDeg,
-          );
-          ctx.beginPath(); ctx.arc(cx, outlierY, oR, 0, Math.PI * 2);
-          if (!markerStyle?.fillHidden) ctx.fill();
-          if (markerLineVisible) ctx.stroke();
+          if (markerFillPaint) {
+            ctx.fillStyle = chartExFillStyle(
+              ctx,
+              markerFillPaint,
+              cx - oR,
+              outlierY - oR,
+              oR * 2,
+              oR * 2,
+              markerFill ? `#${markerFill}` : fill,
+              shapeRotationDeg,
+            );
+          }
+          if (pointSymbol === 'circle') {
+            ctx.beginPath(); ctx.arc(cx, outlierY, oR, 0, Math.PI * 2);
+            if (markerFillPaint) ctx.fill();
+            if (markerLineVisible) ctx.stroke();
+          } else {
+            drawMarker(
+              ctx,
+              cx,
+              outlierY,
+              pointSymbol,
+              chart.chartexMarkerSizePt ?? (oR * 2) / ptToPx,
+              markerFillPaint ? (markerFill ? `#${markerFill}` : fill) : 'transparent',
+              markerLineVisible ? (markerEdge ? `#${markerEdge}` : edge) : null,
+              ptToPx,
+              ctx.lineWidth,
+            );
+          }
         }
       }
     }
@@ -6427,7 +6986,9 @@ function renderBoxWhiskerChart(
     series: box.series.map((series, index) => ({
       name: series.name,
       values: [],
-      color: series.color ?? chartExDataPointFill(chart, index, nSer),
+      color: series.color ?? chartExDataPointFill(
+        chart, boxStyleIndices[index], nSer, series.chartexStyle,
+      ),
     })),
   };
   drawLegendForLayout(
@@ -6573,7 +7134,21 @@ function renderSunburstChart(
   const sb = chart.chartexSunburst;
   if (!sb || sb.rows.length === 0) return;
   const { x, y, w, h } = r;
-
+  const root = buildSunburstTree(sb.rows);
+  if (root.value <= 0 || root.children.length === 0) return;
+  const series = chart.series[0];
+  const legendPaints = root.children.map((_, index) =>
+    chartExDataPointPaint(chart, index, root.children.length, series?.chartexStyle, series?.color)
+  );
+  const legendChart: ChartModel = {
+    ...chart,
+    chartType: 'clusteredBar',
+    series: root.children.map((node, index) => ({
+      name: node.label,
+      values: [],
+      color: chartExDataPointFill(chart, index, root.children.length, series?.chartexStyle),
+    })),
+  };
   // Reuse the radial frame so an authored top legend reserves space above the
   // rings instead of being painted over the circle.
   const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
@@ -6588,18 +7163,11 @@ function renderSunburstChart(
   const cy = py0 + ph / 2;
   const outerR = Math.min(pw, ph) * 0.46;
 
-  const root = buildSunburstTree(sb.rows);
-  if (root.value <= 0 || root.children.length === 0) return;
   // Full circle from 12 o'clock (−90°), clockwise (canvas angles grow CW), each
   // parent partitioning its range across its children in source (first-seen)
   // order. This is the natural spec-consistent reading of the `<cx:lvl>` point
-  // order. NB: Excel's own sunburst places the branches AFTER the first in a
-  // different rotational order (for sample-24 the observed clockwise order is
-  // Branch 1, 3, 2 rather than 1, 2, 3) — an undocumented runtime layout choice.
-  // Matching it exactly would require reverse-engineering that ordering, which
-  // the project's spec-first policy forbids without a documented rule, so the
-  // rings/hierarchy/proportions/colors match while the branch *placement* order
-  // is the straightforward source order.
+  // order. The extension does not specify an alternative automatic reordering,
+  // so the renderer does not infer one from labels or values.
   root.a0 = -Math.PI / 2;
   root.a1 = -Math.PI / 2 + Math.PI * 2;
   layoutSunburstAngles(root);
@@ -6612,17 +7180,23 @@ function renderSunburstChart(
   const ringBand = (outerR - innerR) / ringCount;
 
   const branchColor = (bi: number): string => {
-    const hex = chartExDataPointFill(chart, bi, root.children.length);
+    const hex = chartExDataPointFill(chart, bi, root.children.length, series?.chartexStyle);
     return `#${hex}`;
   };
-  const branchPaint = (bi: number): Fill => chartExDataPointPaint(
+  const branchPaint = (bi: number): Fill | null => chartExDataPointPaint(
     chart,
     bi,
     root.children.length,
+    series?.chartexStyle,
+    series?.color,
   );
 
+  const labelDef = series?.seriesDataLabels;
   const labelFont = chartFontFamily(chart, chart.dataLabelFontFace, 'minor');
-  const labelPx = Math.max(7, Math.min(13, outerR * 0.075));
+  const labelPx = labelDef?.fontSizeHpt
+    ? (labelDef.fontSizeHpt / 100) * ptToPx
+    : Math.max(7, Math.min(13, outerR * 0.075));
+  const labelColor = labelDef?.fontColor ? `#${labelDef.fontColor}` : '#ffffff';
 
   // Draw every non-root node as a ring segment, deepest-last so borders read on
   // top. Iterate breadth-first by depth.
@@ -6644,10 +7218,11 @@ function renderSunburstChart(
       ctx.arc(cx, cy, rOuter, node.a0, node.a1);
       ctx.arc(cx, cy, rInner, node.a1, node.a0, true);
       ctx.closePath();
-      if (!chart.chartexDataPointStyle?.fillHidden) {
+      const nodePaint = branchPaint(node.branchIndex);
+      if (nodePaint) {
         ctx.fillStyle = chartExFillStyle(
           ctx,
-          branchPaint(node.branchIndex),
+          nodePaint,
           cx - rOuter,
           cy - rOuter,
           rOuter * 2,
@@ -6657,10 +7232,11 @@ function renderSunburstChart(
         );
         ctx.fill();
       }
-      if (applyChartExLineStyle(
+      if (applyChartExSeriesLineStyle(
         ctx,
         chart,
         chart.chartexDataPointStyle,
+        chart.series[0],
         node.branchIndex,
         root.children.length,
         '#ffffff',
@@ -6668,6 +7244,17 @@ function renderSunburstChart(
       )) {
         ctx.stroke();
       }
+
+      const label = resolveChartExLabel(
+        chart, series, node.labelIndex, node.label, node.value,
+        { visible: false, showVal: false, showCatName: false },
+      );
+      if (!label) continue;
+      const labelText = label.text;
+      const nodeLabelPx = label.fontSizeHpt
+        ? (label.fontSizeHpt / 100) * ptToPx
+        : labelPx;
+      const nodeLabelColor = label.fontColor ? `#${label.fontColor}` : labelColor;
 
       // Excel's sunburst category labels run along the radius (not around the
       // circumference). Center the text at the wedge mid-radius and wrap it to
@@ -6679,7 +7266,7 @@ function renderSunburstChart(
       // Tangential arc length at the mid radius.
       const arcLen = sweep * midR;
       // Skip labels that plainly cannot fit even one glyph.
-      if (radialRoom < labelPx * 0.9 && arcLen < labelPx * 0.9) continue;
+      if (radialRoom < nodeLabelPx * 0.9 && arcLen < nodeLabelPx * 0.9) continue;
 
       ctx.save();
       ctx.translate(cx + Math.cos(midA) * midR, cy + Math.sin(midA) * midR);
@@ -6689,13 +7276,13 @@ function renderSunburstChart(
       const deg = ((rot * 180) / Math.PI) % 360;
       if (deg > 90 || deg < -90) rot += Math.PI;
       ctx.rotate(rot);
-      ctx.font = `${labelPx}px ${labelFont}`;
-      ctx.fillStyle = '#ffffff';
+      ctx.font = `${label.fontBold ? 'bold ' : ''}${nodeLabelPx}px ${labelFont}`;
+      ctx.fillStyle = nodeLabelColor;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       // The rotated frame's x-axis is radial: width is the ring band and the
       // available line stack is the wedge's tangential arc length.
-      const words = node.label.split(/\s+/).filter(Boolean);
+      const words = labelText.split(/\s+/).filter(Boolean);
       const maxLineW = radialRoom - 2;
       const lines: string[] = [];
       let cur = '';
@@ -6713,9 +7300,8 @@ function renderSunburstChart(
           cur = word;
           continue;
         }
-        // Narrow outer rings legitimately split a long category name inside
-        // the word (Excel's sample renders "Califor" / "nia"). Retain every
-        // character instead of eliding the label.
+        // Narrow outer rings may require a break inside a long category name.
+        // Retain every character instead of eliding the label.
         let chunk = '';
         for (const char of word) {
           const next = chunk + char;
@@ -6730,7 +7316,7 @@ function renderSunburstChart(
       }
       if (cur) lines.push(cur);
       // Cap the number of lines to what the tangential arc holds.
-      const lineH = labelPx * 1.05;
+      const lineH = nodeLabelPx * 1.05;
       const maxLines = Math.max(1, Math.floor(arcLen / lineH));
       const shown = lines.slice(0, maxLines).map(l => elideToWidth(ctx, l, maxLineW));
       const totalH = shown.length * lineH;
@@ -6743,15 +7329,6 @@ function renderSunburstChart(
   }
   ctx.restore();
 
-  const legendChart: ChartModel = {
-    ...chart,
-    chartType: 'clusteredBar',
-    series: root.children.map((node, index) => ({
-      name: node.label,
-      values: [],
-      color: chartExDataPointFill(chart, index, root.children.length),
-    })),
-  };
   drawLegendForLayout(
     ctx,
     legendChart,
@@ -6766,7 +7343,7 @@ function renderSunburstChart(
     ph,
     frame.title.bandH + 2,
     ptToPx,
-    root.children.map((_, index) => branchPaint(index)),
+    legendPaints,
     shapeRotationDeg,
   );
 }
@@ -6865,7 +7442,25 @@ function renderTreemapChart(
 ): void {
   const treemap = chart.chartexTreemap;
   if (!treemap || treemap.rows.length === 0) return;
-
+  // A treemap data point remains a distinct tile even when its terminal label
+  // repeats. Only parent path components are grouping keys.
+  const root = buildSunburstTree(treemap.rows, true);
+  if (root.value <= 0 || root.children.length === 0) return;
+  const series = chart.series[0];
+  const legendPaints = root.children.map(node =>
+    chartExDataPointPaint(
+      chart, node.branchIndex, root.children.length, series?.chartexStyle, series?.color,
+    )
+  );
+  const legendChart: ChartModel = {
+    ...chart,
+    chartType: 'clusteredBar',
+    series: root.children.map((node, index) => ({
+      name: node.label,
+      values: [],
+      color: chartExDataPointFill(chart, index, root.children.length, series?.chartexStyle),
+    })),
+  };
   const frame = computeChartFrame(chart, r.x, r.y, r.w, r.h, ptToPx, {
     titleTopPadFrac: 0.035,
     titleBottomPadFrac: 0.035,
@@ -6873,10 +7468,6 @@ function renderTreemapChart(
     radialGapFrac: 0.015,
   });
   drawChartTitleForLayout(ctx, chart, r.x, r.y, r.w, r.h, r.y + frame.title.topPad, frame.title.fontPx);
-  // A treemap data point remains a distinct tile even when its terminal label
-  // repeats. Only parent path components are grouping keys.
-  const root = buildSunburstTree(treemap.rows, true);
-  if (root.value <= 0 || root.children.length === 0) return;
 
   const fontFamily = chartFontFamily(chart, chart.dataLabelFontFace, 'minor');
   const parentMode = treemap.parentLabelLayout ?? 'overlapping';
@@ -6891,11 +7482,15 @@ function renderTreemapChart(
 
   const paint = (node: SunburstNode, tile: TreemapRect): void => {
     if (tile.w < 0.5 || tile.h < 0.5) return;
-    const base = chartExDataPointFill(chart, node.branchIndex, root.children.length);
+    const base = chartExDataPointFill(
+      chart, node.branchIndex, root.children.length, series?.chartexStyle,
+    );
     // Every descendant of a top-level branch uses that branch's exact accent.
     // Hierarchy depth does not tint or whiten ChartEx treemap data points.
     const color = `#${base}`;
-    const fillPaint = chartExDataPointPaint(chart, node.branchIndex, root.children.length);
+    const fillPaint = chartExDataPointPaint(
+      chart, node.branchIndex, root.children.length, series?.chartexStyle, series?.color,
+    );
     const labelOverride = labelOverrides.get(node.labelIndex);
     const nodeLabelColor = labelOverride?.fontColor ? `#${labelOverride.fontColor}` : labelColor;
     const nodeLabelFontPx = labelOverride?.fontSizeHpt
@@ -6904,11 +7499,14 @@ function renderTreemapChart(
     const nodeLabelBold = labelOverride?.fontBold ?? labelDef?.fontBold ?? false;
 
     if (node.children.length > 0) {
-      // Office vector output across a three-level hierarchy boundary set shows
-      // `overlapping` captions only for top-level branches. Intermediate nodes
-      // still partition their children but do not place another caption at the
-      // same tile origin. `banner` remains separate because it reserves a band.
-      const showParent = parentMode !== 'none'
+      // `overlapping` captions belong to the top-level branch entries exposed
+      // by the legend; intermediate nodes still partition their descendants.
+      // `banner` remains separate because it reserves a band at each parent.
+      const parentLabel = resolveChartExLabel(
+        chart, series, node.labelIndex, node.label, node.value,
+        { visible: parentMode !== 'none', showVal: false, showCatName: true },
+      );
+      const showParent = parentLabel != null
         && (parentMode !== 'overlapping' || node.depth === 0);
       const fontPx = nodeLabelFontPx;
       const bannerH = parentMode === 'banner' && showParent
@@ -6919,7 +7517,7 @@ function renderTreemapChart(
       // create an additional painted parent rectangle; doing so here produced
       // a hairline frame around each branch. Banner mode alone reserves and
       // paints a caption band.
-      if (bannerH > 0 && !chart.chartexDataPointStyle?.fillHidden) {
+      if (bannerH > 0 && fillPaint) {
         ctx.fillStyle = chartExFillStyle(
           ctx,
           fillPaint,
@@ -6945,13 +7543,13 @@ function renderTreemapChart(
         ctx.fillStyle = nodeLabelColor;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
-        const shown = elideToWidth(ctx, labelOverride?.text || node.label, tile.w - 8);
+        const shown = elideToWidth(ctx, parentLabel?.text ?? '', tile.w - 8);
         if (shown) ctx.fillText(shown, tile.x + 4, tile.y + 3);
       }
       return;
     }
 
-    if (!chart.chartexDataPointStyle?.fillHidden) {
+    if (fillPaint) {
       ctx.fillStyle = chartExFillStyle(
         ctx,
         fillPaint,
@@ -6964,43 +7562,38 @@ function renderTreemapChart(
       );
       ctx.fillRect(tile.x, tile.y, tile.w, tile.h);
     }
-    if (applyChartExLineStyle(
+    const hasAuthoredOutline = applyChartExSeriesLineStyle(
       ctx,
       chart,
       chart.chartexDataPointStyle,
+      chart.series[0],
       node.branchIndex,
       root.children.length,
       '#ffffff',
       ptToPx,
-    )) {
+    );
+    if (hasAuthoredOutline) {
       // ChartEx outlines are centered on the tile boundary. An inset stroke
       // creates a second visible outer frame that Excel does not paint.
       ctx.strokeRect(tile.x, tile.y, tile.w, tile.h);
     }
 
-    const fontPx = nodeLabelFontPx;
+    const leafLabel = resolveChartExLabel(
+      chart, series, node.labelIndex, node.label, node.value,
+      { visible: false, showVal: false, showCatName: false },
+    );
+    if (!leafLabel) return;
+    const fontPx = leafLabel.fontSizeHpt
+      ? (leafLabel.fontSizeHpt / 100) * ptToPx
+      : nodeLabelFontPx;
     if (tile.w <= fontPx * 1.2 || tile.h <= fontPx * 1.2) return;
-    ctx.font = `${nodeLabelBold ? 'bold ' : ''}${fontPx}px ${fontFamily}`;
-    ctx.fillStyle = nodeLabelColor;
-    const parts: string[] = [];
-    if (labelOverride?.text) {
-      parts.push(labelOverride.text);
-    } else {
-      if (labelDef?.showCatName ?? true) parts.push(node.label);
-      if (labelDef?.showVal) {
-        parts.push(formatChartValWithCode(
-          node.value,
-          labelDef.formatCode ?? chart.series[0]?.valFormatCode ?? null,
-          chart.date1904,
-        ));
-      }
-    }
-    const lines = parts
-      .join(labelDef?.separator ?? ' ')
+    ctx.font = `${leafLabel.fontBold ? 'bold ' : ''}${fontPx}px ${fontFamily}`;
+    ctx.fillStyle = leafLabel.fontColor ? `#${leafLabel.fontColor}` : nodeLabelColor;
+    const lines = leafLabel.text
       .split(/\r?\n/)
       .flatMap(line => wrapMeasuredText(ctx, line, Math.max(1, tile.w - 8)));
     const lineH = fontPx * 1.1;
-    const position = labelDef?.position ?? 'ctr';
+    const position = leafLabel.position ?? 'ctr';
     const maxLines = Math.max(0, Math.floor((tile.h - 6) / lineH));
     ctx.save();
     ctx.beginPath();
@@ -7036,15 +7629,6 @@ function renderTreemapChart(
   }
   ctx.restore();
 
-  const legendChart: ChartModel = {
-    ...chart,
-    chartType: 'clusteredBar',
-    series: root.children.map((node, index) => ({
-      name: node.label,
-      values: [],
-      color: chartExDataPointFill(chart, index, root.children.length),
-    })),
-  };
   drawLegendForLayout(
     ctx,
     legendChart,
@@ -7059,7 +7643,7 @@ function renderTreemapChart(
     ph,
     frame.title.bandH + 2,
     ptToPx,
-    root.children.map(node => chartExDataPointPaint(chart, node.branchIndex, root.children.length)),
+    legendPaints,
     shapeRotationDeg,
   );
 }
@@ -7270,6 +7854,23 @@ export function renderChart(
       ctx.fillText('(no data)', x + w / 2, y + h / 2);
       drawChartTextBoxes(ctx, chart, rect, ptToPx);
       return;
+    }
+
+    if (chart.chartType === 'clusteredColumn') {
+      let primitiveCount = 0;
+      for (const series of chart.series) {
+        const points = Math.max(
+          chart.categories.length,
+          series.values.length,
+          series.categories?.length ?? 0,
+        );
+        primitiveCount += points;
+        if (!Number.isSafeInteger(primitiveCount) || primitiveCount > MAX_CANVAS_CHART_POINTS) break;
+      }
+      if (rejectOversizedCanvasChart(ctx, rect, primitiveCount)) {
+        drawChartTextBoxes(ctx, chart, rect, ptToPx);
+        return;
+      }
     }
 
     switch (chart.chartType) {

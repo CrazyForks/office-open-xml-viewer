@@ -1517,9 +1517,160 @@ describe('CH3 — labels are locale-independent (§18.8.30)', () => {
     expect(connectors).toHaveLength(2);
     expect(connectors.every(segment => segment.lw === 2)).toBe(true);
   });
+
+  it('keeps semantic data-point fills when the ChartEx series shape has noFill', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'waterfall',
+      categories: ['Start', 'Drop', 'End'],
+      series: [series({
+        name: 'W',
+        values: [10, -2, 8],
+        chartexStyle: { fillHidden: true, lineColors: ['4472C4'] },
+      })],
+      subtotalIndices: [2],
+      chartexDataPointStyle: { fillColors: ['5B9BD5', 'ED7D31', 'A5A5A5'] },
+    }), RECT, 1);
+
+    expect(rec.rects.map(rect => rect.fs.toUpperCase())).toEqual([
+      '#5B9BD5', '#ED7D31', '#A5A5A5',
+    ]);
+  });
+
+  it('suppresses waterfall connectors when CT_SeriesElementVisibilities says false', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'waterfall',
+      categories: ['Start', 'Change', 'End'],
+      series: [series({ name: 'W', values: [10, -2, 8] })],
+      subtotalIndices: [2],
+      chartexConnectorLines: false,
+      chartexDataPointLineStyle: { lineColors: ['0070C0'], lineWidthEmu: 25400 },
+    }), RECT, 1);
+    expect(rec.segs.filter(segment => segment.ss.toLowerCase() === '#0070c0')).toHaveLength(0);
+  });
+
+  it('draws authored waterfall minor ticks', () => {
+    const count = (minorTick: ChartModel['valAxisMinorTickMark']): number => {
+      const rec = segRecordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'waterfall', categories: ['Start', 'End'],
+        series: [series({ values: [3, 23] })], subtotalIndices: [1],
+        valMin: 3, valMax: 23, valAxisMajorUnit: 10, valAxisMinorUnit: 4,
+        valAxisMajorGridlines: false, valAxisMinorGridlines: false,
+        valAxisMajorTickMark: 'none', valAxisMinorTickMark: minorTick,
+      }), RECT, 1);
+      return rec.segs.filter(segment =>
+        Math.abs(segment.y1 - segment.y0) < 0.01
+        && Math.abs(segment.x1 - segment.x0) > 0
+        && Math.abs(segment.x1 - segment.x0) <= 12
+      ).length;
+    };
+    expect(count('cross') - count('none')).toBe(4);
+  });
 });
 
 describe('ChartEx flat layouts dispatch to semantic renderers', () => {
+  it('resolves clustered-column automatic style colors by series, not category', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredColumn', categories: ['A', 'B', 'C'],
+      showLegend: true,
+      legendPos: 'r',
+      series: [series({
+        name: 'Histogram', values: [3, 2, 1], chartexFormatIdx: 2,
+      })],
+      chartexDataPointStyle: { fillColors: ['1F6A85', 'ED7D31', '70AD47'] },
+    }), RECT, 1);
+
+    expect(rec.rects.map(rect => rect.fs.toUpperCase())).toEqual([
+      '#70AD47', '#70AD47', '#70AD47', '#70AD47',
+    ]);
+  });
+
+  it('keeps non-contiguous ChartEx series format colors aligned with legend swatches', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredColumn', categories: ['A', 'B'],
+      showLegend: true,
+      legendPos: 'r',
+      series: [
+        series({ name: 'First', values: [3, 2], chartexFormatIdx: 0 }),
+        series({ name: 'Third format', values: [1, 4], chartexFormatIdx: 2 }),
+      ],
+      chartexDataPointStyle: { fillColors: ['1F6A85', 'ED7D31', '70AD47'] },
+    }), RECT, 1);
+
+    const colors = rec.rects.map(rect => rect.fs.toUpperCase());
+    expect(colors.filter(color => color === '#1F6A85')).toHaveLength(3);
+    expect(colors.filter(color => color === '#70AD47')).toHaveLength(3);
+    expect(colors).not.toContain('#ED7D31');
+  });
+
+  it('keeps an explicit ChartEx data-point noFill transparent in the legend', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredColumn', categories: ['A', 'B'],
+      showLegend: true,
+      legendPos: 'r',
+      series: [series({ name: 'Transparent', values: [3, 2] })],
+      chartexDataPointStyle: {
+        fillHidden: true,
+        fillNoStyle: false,
+        lineColors: ['1F6A85'],
+      },
+    }), RECT, 1);
+
+    expect(rec.rects).toHaveLength(0);
+    expect(rec.strokeRects).toHaveLength(3);
+  });
+
+  it('applies clustered-column point paint and indexed series labels', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredColumn', categories: ['A', 'B'],
+      series: [
+        series({ name: 'First', values: [1, 2] }),
+        series({
+          name: 'Second', values: [3, 4],
+          dataPointOverrides: [
+            { idx: 0, color: '112233', fillHidden: false, lineColor: '778899', lineWidthEmu: 25400, lineDash: 'dash', lineHidden: false },
+            { idx: 1, fillHidden: true, lineHidden: true },
+          ],
+          dataLabelColors: ['445566', null],
+          seriesDataLabels: {
+            showVal: true, showCatName: false, showSerName: false, showPercent: false,
+            formatCode: '0.0', position: 'outEnd',
+          },
+          dataLabelOverrides: [
+            { idx: 0, text: '', formatCode: '0.00', fontColor: '445566' },
+            { idx: 1, text: '', deleted: true },
+          ],
+        }),
+      ],
+      chartexDataPointStyle: { fillColors: ['5B9BD5'], lineColors: ['FFFFFF'] },
+    }), RECT, 1);
+
+    expect(rec.rects.filter(rect => rect.fs.toUpperCase() === '#112233')).toHaveLength(1);
+    expect(rec.rects).toHaveLength(3);
+    expect(rec.strokeRects.some(rect => rect.ss.toUpperCase() === '#778899')).toBe(true);
+    expect(rec.texts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: '3.00', fillStyle: '#445566' }),
+    ]));
+    expect(rec.texts.map(text => text.text)).not.toContain('4.0');
+  });
+
+  it('bounds clustered-column primitives across multiple visible series', () => {
+    const rec = recordingCtx();
+    const values = Array.from({ length: 6_000 }, () => 1);
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredColumn', categories: [],
+      series: [series({ values }), series({ values })],
+    }), RECT, 1);
+    expect(rec.rects).toHaveLength(0);
+    expect(rec.texts.map(text => text.text)).toContain('(too many data points)');
+  });
+
   it.each(['clusteredColumn', 'funnel', 'paretoLine'])(
     '%s does not fall back to the unsupported-chart label',
     chartType => {
@@ -1538,6 +1689,77 @@ describe('ChartEx flat layouts dispatch to semantic renderers', () => {
       }
     },
   );
+
+  it.each(['waterfall', 'funnel'])(
+    '%s renders every numeric data point when the optional category dimension is unavailable',
+    chartType => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: [],
+        series: [series({ values: [3, 2, 1] })],
+      }), RECT, 1);
+
+      expect(rec.rects).toHaveLength(3);
+    },
+  );
+
+  it.each(['waterfall', 'funnel'])(
+    '%s preserves category-only point slots when the string dimension is longer',
+    chartType => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C'],
+        series: [series({ values: [3] })],
+      }), RECT, 1);
+
+      expect(rec.rects).toHaveLength(3);
+      expect(rec.texts.map(text => text.text)).toEqual(
+        expect.arrayContaining(['A', 'B', 'C']),
+      );
+    },
+  );
+
+  it.each(['waterfall', 'funnel', 'clusteredColumn'])(
+    '%s handles a large numeric dimension without variadic-argument overflow',
+    chartType => {
+      const values = Array.from({ length: 150_000 }, (_, index) => (index % 5) + 1);
+      const rec = recordingCtx();
+      expect(() => renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: [],
+        catAxisHidden: true,
+        valAxisHidden: true,
+        series: [series({
+          values,
+          seriesDataLabels: {
+            showVal: false,
+            showCatName: false,
+            showSerName: false,
+            showPercent: false,
+          },
+        })],
+      }), { x: 0, y: 0, w: 320, h: 180 }, 1)).not.toThrow();
+      expect(rec.rects).toHaveLength(0);
+      expect(rec.texts.map(text => text.text)).toContain('(too many data points)');
+    },
+  );
+
+  it('keeps the Pareto category-axis rule while suppressing ordinal labels', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'paretoLine',
+      categories: [],
+      series: [series({ values: [3, 2, 1] })],
+      catAxisLineColor: 'C00000',
+      catAxisMajorTickMark: 'none',
+    }), RECT, 1);
+
+    expect(rec.segs.some(segment =>
+      segment.ss.toLowerCase() === '#c00000' && segment.y0 === segment.y1
+    )).toBe(true);
+  });
 
   it('waterfall uses locale-neutral English semantic legend labels', () => {
     const rec = recordingCtx();
@@ -1836,6 +2058,7 @@ function markerRecordingCtx(): {
   ctx: CanvasRenderingContext2D;
   arcs: ArcCall[];
   fillRects: FillRectCall[];
+  fillCalls: number;
   beziers: number;
   texts: TextCall[];
   segments: Array<Array<{ x: number; y: number }>>;
@@ -1846,6 +2069,7 @@ function markerRecordingCtx(): {
   const segments: Array<Array<{ x: number; y: number }>> = [];
   let current: Array<{ x: number; y: number }> | null = null;
   let beziers = 0;
+  let fillCalls = 0;
   const state: Record<string, unknown> = {
     font: '10px sans-serif',
     fillStyle: '#000',
@@ -1885,6 +2109,8 @@ function markerRecordingCtx(): {
           return (x: number, y: number, rad: number) => { arcs.push({ x, y, r: rad }); push(x, y); };
         case 'fillRect':
           return (x: number, y: number, w: number, h: number) => fillRects.push({ x, y, w, h });
+        case 'fill':
+          return () => { fillCalls += 1; };
         case 'bezierCurveTo':
           return () => { beziers += 1; };
         case 'fillText':
@@ -1903,6 +2129,7 @@ function markerRecordingCtx(): {
     ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D,
     arcs, fillRects, texts, segments,
     get beziers() { return beziers; },
+    get fillCalls() { return fillCalls; },
   } as never;
 }
 
@@ -2629,6 +2856,7 @@ interface RingRecorded {
   fills: string[];
   fontTexts: FontText[];
   rotates: number[];
+  strokes: Array<{ strokeStyle: string; lineWidth: number }>;
 }
 
 /** Recording context that also captures arc() (radius + angles) and, for each
@@ -2640,6 +2868,7 @@ function ringRecordingCtx(): RingRecorded {
   const fills: string[] = [];
   const fontTexts: FontText[] = [];
   const rotates: number[] = [];
+  const strokes: RingRecorded['strokes'] = [];
   const state: Record<string, unknown> = {
     font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
@@ -2670,8 +2899,13 @@ function ringRecordingCtx(): RingRecorded {
         case 'createLinearGradient':
         case 'createRadialGradient':
           return () => ({ addColorStop() {} });
+        case 'stroke':
+          return () => strokes.push({
+            strokeStyle: String(state.strokeStyle),
+            lineWidth: Number(state.lineWidth),
+          });
         case 'save': case 'restore': case 'beginPath': case 'closePath':
-        case 'stroke': case 'moveTo': case 'lineTo': case 'bezierCurveTo':
+        case 'moveTo': case 'lineTo': case 'bezierCurveTo':
         case 'quadraticCurveTo': case 'rect': case 'fillRect': case 'strokeRect':
         case 'clearRect': case 'strokeText': case 'setLineDash':
         case 'translate': return () => undefined;
@@ -2685,7 +2919,14 @@ function ringRecordingCtx(): RingRecorded {
     },
     set(_t, prop: string, value) { state[prop] = value; return true; },
   };
-  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, arcs, fills, fontTexts, rotates };
+  return {
+    ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D,
+    arcs,
+    fills,
+    fontTexts,
+    rotates,
+    strokes,
+  };
 }
 
 /** Outer/inner ring radii for a pie/doughnut: the outer radius is the largest
@@ -3381,6 +3622,111 @@ describe('authored minor tick marks are painted between major ticks', () => {
       .toBeGreaterThanOrEqual(15);
   });
 
+  it('accepts a positive authored minor unit larger than the major unit', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C'],
+      series: [series({ values: [10, 50, 90] })],
+      valMin: 0,
+      valMax: 100,
+      valAxisMajorUnit: 20,
+      valAxisMinorUnit: 30,
+      valAxisMajorTickMark: 'none',
+      valAxisMinorTickMark: 'cross',
+    }), RECT, 1);
+
+    // 30 and 90 are minor positions; 60 coincides with a major tick and is
+    // intentionally not double-painted.
+    expect(rec.segs.filter(segment => shortHorizontal(segment) && segment.x0 < RECT.w / 2))
+      .toHaveLength(2);
+  });
+
+  it('anchors minor gridlines and ticks at a non-zero scale minimum', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C'],
+      series: [series({ values: [3, 13, 23] })],
+      valMin: 3,
+      valMax: 23,
+      valAxisMajorUnit: 10,
+      valAxisMinorUnit: 4,
+      valAxisMajorGridlines: false,
+      valAxisMinorGridlines: true,
+      valAxisMinorGridlineColor: '123456',
+      valAxisMajorTickMark: 'none',
+      valAxisMinorTickMark: 'cross',
+    }), RECT, 1);
+
+    const minorGridYs = rec.segs
+      .filter(segment => segment.ss === '#123456' && Math.abs(segment.x1 - segment.x0) > 50)
+      .map(segment => segment.y0);
+    expect(minorGridYs).toHaveLength(4);
+    const minorTicks = rec.segs.filter(segment =>
+      shortHorizontal(segment)
+      && minorGridYs.some(y => Math.abs(y - segment.y0) < 1e-6)
+    );
+    expect(minorTicks).toHaveLength(4);
+  });
+
+  it('bounds hostile or non-progressing minor units', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B'],
+      series: [series({ values: [1, 2] })],
+      valMin: 1, valMax: 2, valAxisMajorUnit: 0.5,
+      valAxisMinorUnit: Number.MIN_VALUE,
+      valAxisMajorGridlines: false, valAxisMinorGridlines: true,
+      valAxisMajorTickMark: 'none', valAxisMinorTickMark: 'cross',
+    }), RECT, 1);
+    expect(rec.segs.length).toBeLessThan(100);
+
+    const bounded = segRecordingCtx();
+    renderChart(bounded.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B'],
+      series: [series({ values: [0, 1] })],
+      valMin: 0, valMax: 1, valAxisMajorUnit: 0.5,
+      valAxisMinorUnit: 1e-12,
+      valAxisMajorGridlines: false, valAxisMinorGridlines: true,
+      valAxisMajorTickMark: 'none', valAxisMinorTickMark: 'none',
+    }), RECT, 1);
+    expect(bounded.segs.length).toBeLessThanOrEqual(10_100);
+  });
+
+  it('draws a minor gridline when the positive minor unit exceeds the major unit', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B'],
+      series: [series({ values: [3, 23] })],
+      valMin: 3, valMax: 23,
+      valAxisMajorUnit: 10, valAxisMinorUnit: 12,
+      valAxisMajorGridlines: false,
+      valAxisMinorGridlines: true,
+      valAxisMinorGridlineColor: '123456',
+    }), RECT, 1);
+    expect(rec.segs.filter(segment =>
+      segment.ss === '#123456' && Math.abs(segment.x1 - segment.x0) > 50
+    )).toHaveLength(1);
+  });
+
+  it('preserves an authored major-gridline width without a solidFill color', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B'],
+      series: [series({ values: [0, 20] })],
+      valMin: 0, valMax: 20, valAxisMajorUnit: 10,
+      valAxisMajorGridlines: true,
+      valAxisGridlineWidthEmu: 25400,
+      valAxisGridlineDash: 'dash',
+    }), RECT, 1);
+    const gridlines = rec.segs.filter(segment =>
+      Math.abs(segment.x1 - segment.x0) > 50 && segment.ss === '#e0e0e0'
+    );
+    expect(gridlines).toHaveLength(3);
+    expect(gridlines.every(segment => segment.lw === 2)).toBe(true);
+  });
+
   it('draws minor ticks on the independent secondary value axis', () => {
     const rec = segRecordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -3609,6 +3955,53 @@ describe('CH6-follow — series trendlines (commit 3)', () => {
     expect(withTrend.segs.some(s => s.dashed)).toBe(false);
   });
 
+  it('honors the trendline DrawingML dash preset', () => {
+    const rec = dashSegRecordingCtx();
+    renderChart(rec.ctx, lineWithTrend({
+      trendLines: [{ trendlineType: 'linear', lineDash: 'dash' }],
+    }), RECT, 1);
+    expect(rec.segs.some(segment => segment.dashed)).toBe(true);
+  });
+
+  it('suppresses a trendline with an authored DrawingML noFill line', () => {
+    const without = dashSegRecordingCtx();
+    renderChart(without.ctx, lineWithTrend({}), RECT, 1);
+    const hidden = dashSegRecordingCtx();
+    renderChart(hidden.ctx, lineWithTrend({
+      trendLines: [{ trendlineType: 'linear', lineHidden: true }],
+    }), RECT, 1);
+    expect(hidden.segs).toEqual(without.segs);
+  });
+
+  it('applies the authored major-gridline dash without leaking it to other strokes', () => {
+    const rec = dashSegRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C', 'D'],
+      series: [series({ name: 'S', values: [1, 3, 5, 7] })],
+      valAxisGridlineDash: 'dash',
+    }), RECT, 1);
+    expect(rec.segs.some(segment => segment.dashed)).toBe(true);
+    expect(rec.segs.some(segment => !segment.dashed)).toBe(true);
+  });
+
+  it('applies minor-gridline paint independently from the major gridlines', () => {
+    const rec = dashSegRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C', 'D'],
+      series: [series({ name: 'S', values: [0, 2, 4, 6] })],
+      valMin: 0,
+      valMax: 6,
+      valAxisMajorUnit: 2,
+      valAxisMinorUnit: 1,
+      valAxisMinorGridlines: true,
+      valAxisMinorGridlineDash: 'dot',
+    }), RECT, 1);
+    expect(rec.segs.some(segment => segment.dashed)).toBe(true);
+    expect(rec.segs.some(segment => !segment.dashed)).toBe(true);
+  });
+
   it('a movingAvg trendline without prstDash draws an additional solid line', () => {
     const noTrend = dashSegRecordingCtx();
     renderChart(noTrend.ctx, lineWithTrend({}), RECT, 1);
@@ -3708,6 +4101,23 @@ describe('CH13 — stock chart (high/low/close)', () => {
     // stockHiLowLineColor omitted → renderer default '#595959'.
     renderChart(rec.ctx, stockModel({ stockHiLowLineColor: null }), RECT, 1);
     expect(hiLoLines(rec.segs).length).toBe(3);
+  });
+
+  it('draws authored stock-chart minor ticks', () => {
+    const count = (minorTick: ChartModel['valAxisMinorTickMark']): number => {
+      const rec = segRecordingCtx();
+      renderChart(rec.ctx, stockModel({
+        valMin: 3, valMax: 23, valAxisMajorUnit: 10, valAxisMinorUnit: 4,
+        valAxisMajorGridlines: false, valAxisMinorGridlines: false,
+        valAxisMajorTickMark: 'none', valAxisMinorTickMark: minorTick,
+      }), RECT, 1);
+      return rec.segs.filter(segment =>
+        Math.abs(segment.y1 - segment.y0) < 0.01
+        && Math.abs(segment.x1 - segment.x0) > 0
+        && Math.abs(segment.x1 - segment.x0) <= 12
+      ).length;
+    };
+    expect(count('cross') - count('none')).toBe(4);
   });
 });
 
@@ -4148,6 +4558,138 @@ describe('CH15 — chartEx box-and-whisker', () => {
     expect(rec.arcs.length).toBe(CAT1_ORANGE.length);
   });
 
+  it('fills box-and-whisker sample points when the marker role uses Chart Style NoStyle', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexDataPointMarkerStyle: {
+        fillHidden: true,
+        fillNoStyle: true,
+        lineHidden: true,
+        lineNoStyle: true,
+      },
+      chartexBox: {
+        categories: ['Category 1'],
+        series: [{
+          name: 'S1', color: 'ED7D31', valuesByCategory: [CAT1_ORANGE],
+          meanMarker: false, meanLine: false, showOutliers: true, showNonoutliers: true,
+          quartileMethod: 'exclusive',
+        }],
+      },
+    }), RECT, 1);
+
+    expect(rec.arcs).toHaveLength(CAT1_ORANGE.length);
+    expect(rec.fillCalls).toBe(CAT1_ORANGE.length);
+  });
+
+  it('keeps box-and-whisker sample points transparent for an explicit marker noFill', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexDataPointMarkerStyle: { fillHidden: true, lineHidden: true },
+      chartexBox: {
+        categories: ['Category 1'],
+        series: [{
+          name: 'S1', color: 'ED7D31', valuesByCategory: [CAT1_ORANGE],
+          meanMarker: false, meanLine: false, showOutliers: true, showNonoutliers: true,
+          quartileMethod: 'exclusive',
+        }],
+      },
+    }), RECT, 1);
+
+    expect(rec.arcs).toHaveLength(CAT1_ORANGE.length);
+    expect(rec.fillCalls).toBe(0);
+  });
+
+  it('does not draw box sample points when the Chart Style marker symbol is none', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexMarkerSymbol: 'none',
+      chartexBox: {
+        categories: ['Category 1'],
+        series: [{
+          name: 'S1', color: 'ED7D31', valuesByCategory: [CAT1_ORANGE],
+          meanMarker: false, meanLine: false, showOutliers: true, showNonoutliers: true,
+          quartileMethod: 'exclusive',
+        }],
+      },
+    }), RECT, 1);
+    expect(rec.arcs).toHaveLength(0);
+  });
+
+  it('keeps a series-local noFill line suppressed over Chart Style NoStyle', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexDataPointStyle: { lineHidden: true, lineNoStyle: true },
+      chartexDataPointLineStyle: { lineHidden: true, lineNoStyle: true },
+      chartexDataPointMarkerStyle: { lineHidden: true, lineNoStyle: true },
+      valAxisHidden: true,
+      catAxisHidden: true,
+      chartexBox: {
+        categories: ['Category 1'],
+        series: [{
+          name: 'S1', color: 'ED7D31', valuesByCategory: [CAT1_ORANGE],
+          meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false,
+          quartileMethod: 'exclusive', chartexStyle: { lineHidden: true },
+        }],
+      },
+    }), RECT, 1);
+    expect(rec.segs).toHaveLength(0);
+  });
+
+  it('draws authored box-and-whisker minor ticks', () => {
+    const count = (minorTick: ChartModel['valAxisMinorTickMark']): number => {
+      const rec = segRecordingCtx();
+      renderChart(rec.ctx, boxModel({
+        valMin: 3, valMax: 23, valAxisMajorUnit: 10, valAxisMinorUnit: 4,
+        valAxisMajorGridlines: false, valAxisMinorGridlines: false,
+        valAxisMajorTickMark: 'none', valAxisMinorTickMark: minorTick,
+      }), RECT, 1);
+      return rec.segs.filter(segment =>
+        Math.abs(segment.y1 - segment.y0) < 0.01
+        && Math.abs(segment.x1 - segment.x0) > 0
+        && Math.abs(segment.x1 - segment.x0) <= 12
+      ).length;
+    };
+    expect(count('cross') - count('none')).toBe(4);
+  });
+
+  it('uses the Chart Style marker size in points for box sample dots', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexMarkerSizePt: 6,
+      chartexBox: {
+        categories: ['Category 1'],
+        series: [{
+          name: 'S1', color: 'ED7D31', valuesByCategory: [[1, 2, 3]],
+          meanMarker: false, meanLine: false, showOutliers: true, showNonoutliers: true,
+          quartileMethod: 'exclusive',
+        }],
+      },
+    }), RECT, 2);
+
+    expect(rec.arcs).toHaveLength(3);
+    expect(rec.arcs.every(arc => arc.r === 6)).toBe(true);
+  });
+
+  it('uses the authored Chart Style marker symbol for box sample points', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexMarkerSizePt: 6,
+      chartexMarkerSymbol: 'square',
+      chartexBox: {
+        categories: ['Category 1'],
+        series: [{
+          name: 'S1', color: 'ED7D31', valuesByCategory: [[1, 2, 3]],
+          meanMarker: false, meanLine: false, showOutliers: true, showNonoutliers: true,
+          quartileMethod: 'exclusive',
+        }],
+      },
+    }), RECT, 1);
+
+    expect(rec.arcs).toHaveLength(0);
+    // One IQR box plus three square raw-point markers.
+    expect(rec.fillRects.length).toBeGreaterThanOrEqual(4);
+  });
+
   it('uses median-of-halves quartiles for inclusive and exclusive methods', () => {
     const values = [1, 2, 3, 4, 100];
     const exclusive = markerRecordingCtx();
@@ -4333,7 +4875,7 @@ describe('CH15 — chartEx box-and-whisker', () => {
     expect(lineRole.every(segment => segment.lw === 2)).toBe(true);
   });
 
-  it('overlays multiple series at one category using the full category width', () => {
+  it('partitions one category among its populated box-and-whisker series', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, boxModel({
       chartexBox: {
@@ -4354,8 +4896,33 @@ describe('CH15 — chartEx box-and-whisker', () => {
     }), RECT, 1);
 
     expect(rec.rects).toHaveLength(2);
-    expect(rec.rects[0].x).toBeCloseTo(rec.rects[1].x, 5);
+    expect(rec.rects[0].x + rec.rects[0].w).toBeCloseTo(rec.rects[1].x, 5);
     expect(rec.rects[0].w).toBeCloseTo(rec.rects[1].w, 5);
+  });
+
+  it('uses the full category width when only one series has data in that category', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexBox: {
+        categories: ['A', 'B'],
+        series: [
+          {
+            name: 'S1', color: '5B9BD5', valuesByCategory: [[1, 2, 3, 4], []],
+            meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false,
+            quartileMethod: 'inclusive',
+          },
+          {
+            name: 'S2', color: 'ED7D31', valuesByCategory: [[], [2, 3, 4, 5]],
+            meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: false,
+            quartileMethod: 'inclusive',
+          },
+        ],
+      },
+    }), RECT, 1);
+
+    expect(rec.rects).toHaveLength(2);
+    expect(rec.rects[0].w).toBeCloseTo(rec.rects[1].w, 5);
+    expect(rec.rects[0].w).toBeGreaterThan(50);
   });
 
   it('uses the box/whisker semantic outline for Chart Style NoStyle only', () => {
@@ -4553,7 +5120,17 @@ describe('CH15 — chartEx sunburst', () => {
 
   it('draws white segment labels for the branch/stem/leaf names', () => {
     const rec = ringRecordingCtx();
-    renderChart(rec.ctx, sunburstModel(), RECT, 1);
+    renderChart(rec.ctx, sunburstModel({
+      series: [series({
+        values: [],
+        seriesDataLabels: {
+          showVal: false,
+          showCatName: true,
+          showSerName: false,
+          showPercent: false,
+        },
+      })],
+    }), RECT, 1);
     const whiteLabels = rec.fontTexts.filter(t => t.fill === '#ffffff').map(t => t.text);
     // Labels are word-wrapped, so assert on the first word of each name.
     const joined = whiteLabels.join('').replace(/\s/g, '');
@@ -4562,9 +5139,55 @@ describe('CH15 — chartEx sunburst', () => {
     expect(joined).toContain('Leaf');
   });
 
-  it('orients category labels radially instead of tangentially', () => {
+  it('does not invent ring labels when the ChartEx series omits dataLabels', () => {
     const rec = ringRecordingCtx();
     renderChart(rec.ctx, sunburstModel(), RECT, 1);
+    expect(rec.fontTexts.map(text => text.text)).not.toEqual(
+      expect.arrayContaining(['Branch', 'Stem', 'Leaf']),
+    );
+  });
+
+  it('applies the authored ChartEx series outline ahead of the linked Chart Style', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel({
+      chartexDataPointStyle: { lineHidden: true },
+      series: [series({
+        values: [],
+        lineColor: 'FFFFFF',
+        lineWidthEmu: 12700,
+        lineHidden: false,
+      })],
+    }), RECT, 4 / 3);
+
+    expect(rec.strokes.length).toBeGreaterThan(0);
+    expect(rec.strokes.every(stroke =>
+      stroke.strokeStyle === '#FFFFFF' && Math.abs(stroke.lineWidth - 4 / 3) < 1e-6
+    )).toBe(true);
+  });
+
+  it('honors explicit ChartEx series noFill over a visible linked outline', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel({
+      chartexDataPointStyle: { lineColors: ['FFFFFF'], lineWidthEmu: 12700 },
+      series: [series({ values: [], lineHidden: true })],
+    }), RECT, 4 / 3);
+
+    expect(rec.strokes).toHaveLength(0);
+  });
+
+  it('orients category labels radially instead of tangentially', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel({
+      series: [series({
+        values: [],
+        seriesDataLabels: {
+          showVal: false,
+          showCatName: true,
+          showSerName: false,
+          showPercent: false,
+        },
+      })],
+    }), RECT, 1);
     // Branch A owns 2/3 of the circle. Starting at -90°, its midpoint is 30°.
     // Radial text rotates by that midpoint; the former tangential layout used
     // 120° (midpoint + 90°).
@@ -4592,6 +5215,7 @@ describe('CH15 — chartEx sunburst', () => {
       .map(text => text.text);
     expect(legendLabels).toEqual(expect.arrayContaining(['Branch A', 'Branch B']));
   });
+
 });
 
 // CH15 — chartEx treemap. The parser supplies the same root→leaf rows as
@@ -4601,6 +5225,14 @@ describe('CH15 — chartEx treemap', () => {
     return baseModel({
       chartType: 'treemap',
       title: 'regions',
+      series: [series({
+        seriesDataLabels: {
+          showVal: false,
+          showCatName: true,
+          showSerName: false,
+          showPercent: false,
+        },
+      })],
       chartexAccents: ['5B9BD5', 'ED7D31', 'A5A5A5', 'FFC000', '4472C4', '70AD47'],
       chartexTreemap: {
         parentLabelLayout: 'banner',
@@ -4646,6 +5278,14 @@ describe('CH15 — chartEx treemap', () => {
       },
       showLegend: true,
       legendPos: 't',
+      series: [series({
+        seriesDataLabels: {
+          showVal: false,
+          showCatName: true,
+          showSerName: false,
+          showPercent: false,
+        },
+      })],
     });
     renderChart(rec.ctx, model, RECT, 1);
 
@@ -4653,6 +5293,7 @@ describe('CH15 — chartEx treemap', () => {
     expect(tiles).toHaveLength(3);
     expect(rec.texts.filter(text => text.text === 'Repeat').length).toBeGreaterThanOrEqual(6);
   });
+
 
   it('does not paint padded parent frames for overlapping parent labels', () => {
     const rec = recordingCtx();
@@ -4838,7 +5479,7 @@ describe('CH15 — chartEx treemap', () => {
     expect((plotClip as { h: number }).h).toBeCloseTo(maxY - minY, 5);
   });
 
-  it('honors ChartEx label visibility, separator, and inEnd placement', () => {
+  it('honors ChartEx label visibility, separator, and authored inEnd placement', () => {
     const rec = recordingCtx();
     const model = treemapModel();
     model.series = [series({
@@ -4883,6 +5524,15 @@ describe('CH15 — chartEx treemap', () => {
     expect(custom.map(text => text.text)).toEqual(expect.arrayContaining(['Custom East', '20']));
     expect(custom.every(text => text.fillStyle === '#222222')).toBe(true);
     expect(rec.texts.map(text => text.text)).not.toContain('East');
+  });
+
+  it('honors dataLabelHidden for treemap parent nodes', () => {
+    const rec = recordingCtx();
+    const model = treemapModel();
+    model.series[0].dataLabelOverrides = [{ idx: 0, text: '', deleted: true }];
+    renderChart(rec.ctx, model, RECT, 1);
+    expect(rec.texts.map(text => text.text)).not.toContain('Americas');
+    expect(rec.texts.map(text => text.text)).toContain('Asia');
   });
 });
 

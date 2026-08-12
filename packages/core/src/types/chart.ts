@@ -10,6 +10,10 @@ import type { GradientFill, PatternFill, SolidFill } from './common';
 
 export interface ChartSeries {
   name: string;
+  /** Effective ChartEx `CT_Series@formatIdx` used to select linked Chart Style
+   * formatting. When the attribute is omitted the parser stores the series'
+   * original document-order index, before hidden series are removed. */
+  chartexFormatIdx?: number | null;
   /** Hex without '#'. null = fall back to palette. */
   color: string | null;
   /**
@@ -18,6 +22,10 @@ export interface ChartSeries {
    * solid/fallback series colour.
    */
   fillPattern?: PatternFill | null;
+  /** ChartEx `<cx:series><cx:spPr>` local shape paint. Positive fill/line
+   * properties override linked style roles; series noFill remains distinct
+   * from a data-point noFill. */
+  chartexStyle?: ChartExElementStyle | null;
   /** `<c:ser><c:spPr><a:ln><a:solidFill>` series outline/stroke color (hex,
    * no '#'). For bar/column charts this is the border around each bar. */
   lineColor?: string | null;
@@ -189,12 +197,26 @@ export interface ChartTrendline {
   lineColor?: string | null;
   /** `<c:spPr><a:ln w>` trendline width in EMU. */
   lineWidthEmu?: number | null;
+  /** `<c:spPr><a:ln><a:prstDash val>` DrawingML dash preset. */
+  lineDash?: string | null;
+  /** `<c:spPr><a:ln><a:noFill/>` — suppress the trendline stroke. */
+  lineHidden?: boolean | null;
 }
 
 export interface ChartDataPointOverride {
   idx: number;
   /** Resolved fill hex (no `#`). */
   color?: string;
+  /** Direct point `<a:noFill/>`; suppresses series/style fill fallback. */
+  fillHidden?: boolean;
+  /** Direct point outline color (no `#`). */
+  lineColor?: string;
+  /** Direct point outline width in EMU. */
+  lineWidthEmu?: number;
+  /** Direct point DrawingML preset dash. */
+  lineDash?: string;
+  /** Direct point `<a:ln><a:noFill/>`; suppresses outline fallback. */
+  lineHidden?: boolean;
   markerSymbol?: string;
   markerSize?: number;
   markerFill?: string;
@@ -223,6 +245,10 @@ export interface ChartDataLabelOverride {
   fontSizeHpt?: number;
   /** `<a:defRPr b="1">` inside the per-idx rich text. */
   fontBold?: boolean;
+  /** Per-point number format; undefined inherits the series default. */
+  formatCode?: string;
+  /** Per-point component separator; undefined inherits the series default. */
+  separator?: string;
   /** Per-point callout box (`<c:dLbl><c:spPr>`, ECMA-376 §21.2.2.47/§21.2.2.197):
    *  overrides the series-default box for this one slice. */
   labelBox?: ChartLabelBox;
@@ -335,6 +361,8 @@ export interface ChartExElementStyle {
   /** Per-color-style-index fills after `phClr` substitution and transforms. */
   fillColors?: Array<string | null> | null;
   fillHidden?: boolean | null;
+  /** Linked Chart Style uses `NoStyle`, not an authored no-fill paint. */
+  fillNoStyle?: boolean | null;
   /** Per-color-style-index outlines after `phClr` substitution/transforms. */
   lineColors?: Array<string | null> | null;
   lineWidthEmu?: number | null;
@@ -684,6 +712,8 @@ export interface ChartModel {
    * hairline stays visible). null/absent ⇒ the renderer's 0.5 px default.
    */
   valAxisGridlineWidthEmu?: number | null;
+  /** `<c:valAx><c:majorGridlines>...<a:prstDash val>` dash preset. */
+  valAxisGridlineDash?: string | null;
   /**
    * `<c:catAx><c:majorGridlines><c:spPr><a:ln><a:solidFill>` resolved gridline
    * color (hex without `#`). Only meaningful when {@link catAxisMajorGridlines}
@@ -692,9 +722,21 @@ export interface ChartModel {
   catAxisGridlineColor?: string | null;
   /** `<c:catAx><c:majorGridlines><c:spPr><a:ln w>` gridline width in EMU. */
   catAxisGridlineWidthEmu?: number | null;
+  /** `<c:catAx><c:majorGridlines>...<a:prstDash val>` dash preset. */
+  catAxisGridlineDash?: string | null;
   /** `<c:valAx><c:minorGridlines>` presence (§21.2.2.109). Only drawn when a
    *  minor step is resolvable (see {@link valAxisMinorUnit}). */
   valAxisMinorGridlines?: boolean | null;
+  /** Authored value-axis minor-gridline paint. */
+  valAxisMinorGridlineColor?: string | null;
+  valAxisMinorGridlineWidthEmu?: number | null;
+  valAxisMinorGridlineDash?: string | null;
+  /** `<c:catAx|valAx><c:minorGridlines>` on the horizontal/scatter axis. */
+  catAxisMinorGridlines?: boolean | null;
+  /** Authored horizontal-axis minor-gridline paint. */
+  catAxisMinorGridlineColor?: string | null;
+  catAxisMinorGridlineWidthEmu?: number | null;
+  catAxisMinorGridlineDash?: string | null;
   /**
    * `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit distance between major
    * gridlines/ticks, overriding the Excel-style auto "nice" step. null/undefined
@@ -797,6 +839,12 @@ export interface ChartModel {
   chartexDataPointLineStyle?: ChartExElementStyle | null;
   /** Effective `<cs:dataPointMarker>` style for raw/outlier/mean markers. */
   chartexDataPointMarkerStyle?: ChartExElementStyle | null;
+  /** Chart Style `dataPointMarkerLayout@size`, in points (2..72). */
+  chartexMarkerSizePt?: number | null;
+  /** Chart Style `dataPointMarkerLayout@symbol`. */
+  chartexMarkerSymbol?: string | null;
+  /** `<cx:series><cx:layoutPr><cx:visibility connectorLines>` for waterfall. */
+  chartexConnectorLines?: boolean | null;
 }
 
 /** A formatted DrawingML run inside a chart-relative text box. */
@@ -841,6 +889,9 @@ export interface ChartTextBox {
 export interface ChartexBoxSeries {
   /** Series display name (`<cx:tx><cx:v>`). */
   name: string;
+  /** Effective ChartEx `CT_Series@formatIdx`; omitted authoring resolves to
+   * the original document-order series index. */
+  chartexFormatIdx?: number | null;
   /** Explicit `<cx:series><cx:spPr>` fill (hex, no '#'). null = resolve the
    *  Chart Style / linked Chart Colors, then fall back to the theme palette. */
   color?: string | null;
@@ -848,6 +899,8 @@ export interface ChartexBoxSeries {
   lineColor?: string | null;
   /** Explicit series outline width from `<a:ln@w>` (EMU). */
   lineWidthEmu?: number | null;
+  /** Lossless ChartEx series-local `<cx:spPr>` paint. */
+  chartexStyle?: ChartExElementStyle | null;
   /** Raw sample values grouped by category (outer = category index parallel to
    *  {@link ChartexBoxWhisker.categories}, inner = the points in that group). */
   valuesByCategory: number[][];

@@ -7,6 +7,7 @@ import {
   axisFraction,
   logAxisScale,
   fitTrendline,
+  linearTrendlineStats,
 } from './axis-scale.js';
 
 describe('niceStep', () => {
@@ -185,6 +186,20 @@ describe('logAxisScale (power-of-base bounds + gridline exponents)', () => {
 });
 
 describe('fitTrendline', () => {
+  it('reports the fitted coefficients and R² used by equation labels', () => {
+    const stats = linearTrendlineStats([0, 1, 2, 3], [1, 3, 5, 7]);
+    expect(stats?.slope).toBeCloseTo(2, 9);
+    expect(stats?.intercept).toBeCloseTo(1, 9);
+    expect(stats?.rSquared).toBeCloseTo(1, 9);
+  });
+
+  it('computes R² from the authored forced-intercept fit', () => {
+    const stats = linearTrendlineStats([0, 1, 2, 3], [1, 2, 2, 5], 0);
+    expect(stats?.slope).toBeCloseTo(1.5, 9);
+    expect(stats?.intercept).toBe(0);
+    expect(stats?.rSquared).toBeLessThan(1);
+  });
+
   it('linear least squares recovers a perfect line', () => {
     // y = 2x + 1 at x = 0,1,2,3
     const t = fitTrendline([0, 1, 2, 3], [1, 3, 5, 7], 'linear');
