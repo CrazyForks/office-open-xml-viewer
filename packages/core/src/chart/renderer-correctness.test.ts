@@ -6329,11 +6329,34 @@ describe('CH15 — chartEx box-and-whisker', () => {
     expect(outlineSegments.every(segment => segment.lw === 2)).toBe(true);
   });
 
-  it('sizes the title from titleFontSizeHpt (chartStyle part) rather than an area-proportional guess', () => {
-    // With titleFontSizeHpt=1400 (14pt, Word's default modern chartStyle) at
-    // scale 1 the title renders at 14px — far below the Math.max(10, h*0.085) ≈
-    // 30.6px the fallback would produce for this 360px-tall rect. Capture the
-    // font active at each fillText so we can read the title's px size.
+  it('uses the same 14pt omitted-title fallback for classic and ChartEx charts', () => {
+    const cases: Array<{ title: string; chart: ChartModel }> = [
+      {
+        title: 'classic title',
+        chart: baseModel({
+          chartType: 'line',
+          title: 'classic title',
+          titleFontSizeHpt: null,
+          categories: ['A', 'B'],
+          series: [series({ values: [1, 2] })],
+        }),
+      },
+      {
+        title: 'ChartEx title',
+        chart: boxModel({ title: 'ChartEx title', titleFontSizeHpt: null }),
+      },
+    ];
+
+    for (const { title, chart } of cases) {
+      const rec = ringRecordingCtx();
+      renderChart(rec.ctx, chart, RECT, 1);
+      expect(rec.fontTexts.find(text => text.text === title)?.font).toContain('14px');
+    }
+  });
+
+  it('uses the parser-resolved linked Chart Style title size', () => {
+    // With titleFontSizeHpt=1400 (14pt) at scale 1 the title renders at 14px.
+    // Capture the font active at each fillText so we can read the title's size.
     const drawn: Array<{ text: string; px: number }> = [];
     const state: Record<string, unknown> = {
       font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
@@ -6357,8 +6380,7 @@ describe('CH15 — chartEx box-and-whisker', () => {
     renderChart(ctx, boxModel({ title: 'the box title', titleFontSizeHpt: 1400 }), RECT, 1);
     const titleDraw = drawn.find(d => d.text === 'the box title');
     expect(titleDraw).toBeDefined();
-    // 1400 hpt → 14pt → 14px at scale 1. Assert it honored the size (14, not the
-    // ~30.6px area-proportional fallback).
+    // 1400 hpt → 14pt → 14px at scale 1.
     expect(titleDraw?.px).toBeCloseTo(14, 5);
   });
 });

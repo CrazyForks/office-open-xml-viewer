@@ -1924,10 +1924,9 @@ pub const CHART_COLOR_STYLE_REL_TYPE_SUFFIX: &str = "relationships/chartColorSty
 /// A chartEx part almost never inlines the title size on its own `<cx:title>`;
 /// instead the size lives in the sibling `styleN.xml` reached via the chart
 /// part's `.../2011/relationships/chartStyle` relationship. Word's default
-/// modern chart style writes `<cs:title><cs:defRPr sz="1400">` (14pt), so
-/// without reading it a chartEx title would fall back to an area-proportional
-/// guess that is visibly too large. `None` when `style_xml` is absent, malformed,
-/// or declares no `<cs:title>` size.
+/// modern chart style writes `<cs:title><cs:defRPr sz="1400">` (14pt). `None`
+/// when `style_xml` is absent, malformed, or declares no `<cs:title>` size; the
+/// renderer then uses its shared deterministic fallback.
 pub fn extract_chartex_style_title_size(style_xml: &str) -> Option<i32> {
     let doc = crate::depth::parse_guarded(style_xml).ok()?;
     let title = doc
@@ -11701,7 +11700,7 @@ mod tests {
     /// A chartEx title with no inline `sz` falls back to the chartStyle part's
     /// `<cs:title>` size; an inline `sz` on the `<cx:title>` rich text wins over
     /// the style part; and with no style part at all the size is `None` (the
-    /// renderer's area-proportional fallback).
+    /// renderer's shared deterministic fallback).
     #[test]
     fn parse_chartex_part_title_size_resolves_from_style_part() {
         let chart_xml = |title_rpr: &str| {
